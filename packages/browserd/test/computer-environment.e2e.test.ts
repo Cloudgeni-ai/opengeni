@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -403,7 +403,6 @@ test.skipIf(!enabled)(
   "hosts one exact headed BrowserSession inside its linked Linux ComputerSession",
   async () => {
     const rootDirectory = await mkdtemp("/tmp/og-linked-browser-computer-");
-    const socketDirectory = await mkdtemp("/tmp/ogls-");
     const computerReference = {
       computerSessionId: "33333333-3333-4333-8333-333333333333",
       controllerGeneration: "computer-controller",
@@ -420,7 +419,6 @@ test.skipIf(!enabled)(
     });
     const browser = await BrowserSupervisor.open({
       rootDirectory: join(rootDirectory, "browser"),
-      socketRootDirectory: socketDirectory,
       maxSessions: 1,
     });
     try {
@@ -488,43 +486,6 @@ test.skipIf(!enabled)(
       await browser.close();
       await computer.close();
       await rm(rootDirectory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
-    }
-  },
-  60_000,
-);
-
-test.skipIf(!enabled)(
-  "reaps the exact agent-browser daemon after Chromium launch fails",
-  async () => {
-    const rootDirectory = await mkdtemp("/tmp/og-browser-failure-");
-    const socketDirectory = await mkdtemp("/tmp/ogfs-");
-    const longTemporaryDirectory = join(rootDirectory, "t".repeat(96));
-    await mkdir(longTemporaryDirectory, { recursive: true });
-    const browser = await BrowserSupervisor.open({
-      rootDirectory: join(rootDirectory, "browser"),
-      socketRootDirectory: socketDirectory,
-      maxSessions: 1,
-    });
-    try {
-      await expect(
-        browser.createSession({
-          browserSessionId: "55555555-5555-4555-8555-555555555555",
-          controllerGeneration: "browser-controller-failure",
-          headed: true,
-          browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
-          linkedComputer: {
-            computerSessionId: "66666666-6666-4666-8666-666666666666",
-            controllerGeneration: "computer-controller-failure",
-          },
-          launchEnvironment: { TMPDIR: longTemporaryDirectory },
-        }),
-      ).rejects.toBeDefined();
-      expect(await filesEndingWith(socketDirectory, ".pid")).toEqual([]);
-    } finally {
-      await browser.close();
-      await rm(rootDirectory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
   60_000,
@@ -700,20 +661,6 @@ function flattenSemantic(
 
 function digest(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-async function filesEndingWith(root: string, suffix: string): Promise<string[]> {
-  const matches: string[] = [];
-  const pending = [root];
-  while (pending.length > 0) {
-    const directory = pending.pop()!;
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) pending.push(path);
-      else if (entry.isFile() && entry.name.endsWith(suffix)) matches.push(path);
-    }
-  }
-  return matches.sort();
 }
 
 function findNode(observation: ComputerObservation, name: string): InteractionSemanticNodeValue {

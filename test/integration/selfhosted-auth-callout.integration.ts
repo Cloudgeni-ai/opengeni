@@ -39,7 +39,7 @@ import {
   handleAuthorizationRequest,
   type AuthCalloutDeps,
 } from "../../apps/api/src/sandbox/auth-callout";
-import { freePort } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
 
 // ── A minimal in-memory DB stand-in for getEnrollment ────────────────────────
 // The responder only calls db.getEnrollment via the @opengeni/db helper, which runs

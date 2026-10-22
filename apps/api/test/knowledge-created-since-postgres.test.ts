@@ -8,11 +8,8 @@ import {
   saveKnowledgeEntry,
   type KnowledgeContext,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 
 let shared: SharedTestDatabase;

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   computerActionText,
+  computerObservationDiff,
   computerObservationText,
   computerOpenText,
   computerTargetsText,
@@ -189,7 +190,7 @@ describe("computerObservationText", () => {
     );
     expect(diff.split("\n").slice(3)).toEqual([
       "Focused element: e_elsewhere",
-      "Changed elements since o_0:",
+      "Changed elements since o_0; elements not listed are unchanged and keep their refs:",
       '- button "OK" [e_ok]',
       "(2 earlier elements removed)",
     ]);
@@ -266,7 +267,7 @@ describe("computer session and action text", () => {
         "2 targets:",
         'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
         'window window:2 "Chrome" pid 7 at 0,0 size 300x400 off screen',
-        "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.",
+        "A window marked off screen, such as one on another Space or a full-screen app, can be neither captured nor read until it is back on screen. Minimized windows and windows of hidden apps are not marked: reading one brings it back on screen behind the person's front window.",
       ].join("\n"),
     );
     expect(computerTargetsText([target])).not.toContain("off screen");
@@ -286,5 +287,84 @@ describe("computer session and action text", () => {
         "Error locator_not_found: No element matched",
       ].join("\n"),
     );
+  });
+});
+
+describe("computerObservationDiff", () => {
+  const ribbon = Array.from({ length: 12 }, (_, index) =>
+    node(`e${index + 10}`, "radio", `Style ${index}`, { value: "0" }),
+  );
+  const reading = (id: string, roots: ComputerTextNode[]) => ({
+    ...observation({ kind: "snapshot", roots, nodeCount: roots.length }),
+    observationId: id,
+  });
+
+  test("an action's reading lists only what changed; unchanged refs carry over", () => {
+    const before = reading("o_1", [node("e1", "textbox", "Name", { value: "" }), ...ribbon]);
+    const after = reading("o_2", [
+      node("e1", "textbox", "Name", { value: "Ada" }),
+      ...ribbon.slice(1),
+      node("e99", "button", "Save"),
+    ]);
+    const diff = computerObservationDiff(before, after)!;
+    expect(diff.semantic).toEqual({
+      kind: "diff",
+      baseObservationId: "o_1",
+      removedRefs: ["e10"],
+      changed: [node("e1", "textbox", "Name", { value: "Ada" }), node("e99", "button", "Save")],
+    });
+    expect(computerObservationText(diff).split("\n").slice(3)).toEqual([
+      "Changed elements since o_1; elements not listed are unchanged and keep their refs:",
+      '- textbox "Name" [e1] value="Ada"',
+      '- button "Save" [e99]',
+      "(1 earlier element removed)",
+    ]);
+  });
+
+  test("an action that changed nothing says so", () => {
+    const diff = computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!;
+    expect(computerObservationText(diff)).toEndWith(
+      "No element changed since o_1; its refs are still valid.",
+    );
+  });
+
+  test("keeps the whole reading when a diff would not help or could mislead", () => {
+    const base = reading("o_1", ribbon);
+    // Most elements are new: another view.
+    expect(
+      computerObservationDiff(
+        base,
+        reading(
+          "o_2",
+          ribbon.map((item, index) => ({ ...item, ref: `n${index}` })),
+        ),
+      ),
+    ).toBeNull();
+    // Another document in the same window, or another window.
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        target: { ...base.target, title: "Other" },
+      }),
+    ).toBeNull();
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        target: { ...base.target, targetGeneration: "g2" },
+      }),
+    ).toBeNull();
+    // A partial reading, or the same reading again.
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        semantic: {
+          kind: "snapshot",
+          roots: ribbon,
+          nodeCount: ribbon.length,
+          incomplete: { reason: "node_budget", unreadCount: 3 },
+        },
+      }),
+    ).toBeNull();
+    expect(computerObservationDiff(base, base)).toBeNull();
   });
 });

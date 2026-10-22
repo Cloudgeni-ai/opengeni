@@ -38,6 +38,7 @@ use crate::init::InitError;
 use crate::keys::Keys;
 pub use crate::keys::key_digest;
 use crate::link::LinkKeys;
+use crate::metrics::{Metrics, Outcome, track};
 use crate::service::{Drained, Failure, Service, request_digest};
 use crate::store::{AgentRef, SandboxRow, Spec, Store};
 
@@ -102,7 +103,9 @@ impl IntoResponse for ApiError {
             code: self.code,
             message: self.message,
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        response.extensions_mut().insert(Outcome(self.code));
+        response
     }
 }
 
@@ -330,13 +333,13 @@ pub struct HostView {
     pub epoch: u64,
     pub memory_mib: u64,
     pub memory_free_mib: u64,
-    /// Processor time in millicores it guarantees sandboxes at once now;
-    /// absent from a host that does not guarantee it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_millis: Option<u64>,
+    /// Memory in MiB it frees at once for a wake by ending idle VM
+    /// processes whose state is saved; placement counts it as free.
+    pub memory_reclaimable_mib: u64,
+    /// Processor time in millicores it guarantees sandboxes at once now.
+    pub cpu_millis: u64,
     /// Processor time in millicores a wake can still reserve on it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_free_millis: Option<u64>,
+    pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
@@ -388,8 +391,17 @@ async fn create<S: Store>(
         }
         _ => service.create(&team, spec, body.metadata).await?,
     };
-    if let Some(init) = &init {
-        crate::init::give(service, &team, row.id, &init.guest()).await?;
+    if let Some(init) = &init
+        && let Err(error) = crate::init::give(service, &team, row.id, &init.guest()).await
+    {
+        // A create that fails leaves no sandbox behind, unless its request
+        // id lets the caller ask again, which gives the init again.
+        if body.request_id.is_none()
+            && let Err(failure) = service.delete(&team, row.id).await
+        {
+            tracing::warn!(sandbox = %row.id, %failure, "removing a sandbox whose init failed");
+        }
+        return Err(error.into());
     }
     Ok((StatusCode::CREATED, Json(SandboxView::of(service, row))))
 }
@@ -598,28 +610,26 @@ async fn hosts<S: Store>(
         .view()
         .hosts()
         .into_iter()
-        .map(|known| {
-            let cpu_millis = crate::view::cpu_millis(&known.info, &known.capacity);
-            HostView {
-                name: known.target.name,
-                zone: known.info.zone,
-                profile: known.info.profile,
-                cpu_template: known.info.cpu_template,
-                state: match known.state {
-                    HostState::Live => "live",
-                    HostState::Draining => "draining",
-                    HostState::Lost => "lost",
-                }
-                .into(),
-                epoch: known.target.epoch.0,
-                memory_mib: known.info.memory_mib,
-                memory_free_mib: known.capacity.memory_free_mib,
-                cpu_millis,
-                cpu_free_millis: cpu_millis.and(known.capacity.cpu_free_millis),
-                disk_free_mib: known.capacity.disk_free_mib,
-                sandboxes: known.capacity.sandboxes,
-                awake: known.capacity.awake,
+        .map(|known| HostView {
+            name: known.target.name,
+            zone: known.info.zone,
+            profile: known.info.profile,
+            cpu_template: known.info.cpu_template,
+            state: match known.state {
+                HostState::Live => "live",
+                HostState::Draining => "draining",
+                HostState::Lost => "lost",
             }
+            .into(),
+            epoch: known.target.epoch.0,
+            memory_mib: known.info.memory_mib,
+            memory_free_mib: known.capacity.memory_free_mib,
+            memory_reclaimable_mib: known.capacity.memory_reclaimable_mib,
+            cpu_millis: known.capacity.cpu_millis,
+            cpu_free_millis: known.capacity.cpu_free_millis,
+            disk_free_mib: known.capacity.disk_free_mib,
+            sandboxes: known.capacity.sandboxes,
+            awake: known.capacity.awake,
         })
         .collect();
     Ok(Json(hosts))
@@ -644,8 +654,13 @@ async fn undrain<S: Store>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The public API's routes, with `operator` the team that manages hosts.
-pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
+/// The public API's routes, with `operator` the team that manages hosts,
+/// each request counted in `metrics`.
+pub fn router<S: Store>(
+    service: Arc<Service<S>>,
+    operator: String,
+    metrics: Arc<Metrics>,
+) -> Router {
     let api = Api(Arc::new(Inner {
         service,
         operator,
@@ -664,5 +679,6 @@ pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
         .route("/v1/hosts", get(hosts::<S>))
         .route("/v1/hosts/{name}/drain", post(drain::<S>))
         .route("/v1/hosts/{name}/undrain", post(undrain::<S>))
+        .route_layer(axum::middleware::from_fn_with_state(metrics, track))
         .with_state(api)
 }

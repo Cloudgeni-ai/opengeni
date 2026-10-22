@@ -10,7 +10,7 @@ import {
   type DbClient,
   type VaultDbContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createVaultProviderRegistry, VaultProviderError } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
 import { syncLinkedProviderVault } from "../src/domain/vaults/provider-sync";

@@ -9,7 +9,7 @@
 //! `FLEET_BUDGET_PRINT=1` prints the percentiles, as recorded in
 //! `docs/measurements.md` from a release build.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use compute_fleet::{
@@ -87,7 +87,8 @@ fn capacity(free_memory_mib: u64, sandboxes: u32, rng: &mut Rng) -> Capacity {
     Capacity {
         memory_mib: HOST_MEMORY_MIB,
         free_memory_mib,
-        free_cpu_millis: None,
+        reclaimable_memory_mib: 0,
+        free_cpu_millis: 1_000_000,
         free_disk_mib: 2_000_000,
         ready,
         sandboxes,
@@ -129,7 +130,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     while next < SANDBOXES {
         let wanted = demand(&mut rng);
         let placed = create.time(|| {
-            let placement = fleet.place(&wanted, &[], &mut rng)?;
+            let placement = fleet.place(&wanted, &HashSet::new(), &mut rng)?;
             fleet.reserve(placement, &wanted);
             Some(placement)
         });
@@ -167,7 +168,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     let mut found = 0;
     for _ in 0..20_000 {
         let wanted = demand(&mut rng);
-        let placement = full.time(|| fleet.place(&wanted, &[], &mut rng));
+        let placement = full.time(|| fleet.place(&wanted, &HashSet::new(), &mut rng));
         let host = placement.expect("some hosts have room").host;
         assert_eq!(host.0 % 50, 0, "placed on a full host");
         found += 1;
@@ -175,7 +176,8 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     assert_eq!(found, 20_000);
     full.check("create: place, fleet 98 % full");
 
-    // The worst case: nothing fits, so every pool is walked to the end.
+    // The worst case: nothing fits by the view, so every pool is walked to
+    // the end before a host that could hold it at all is asked anyway.
     for id in (0..HOSTS).step_by(50) {
         let host = usize::try_from(id).unwrap();
         let report = capacity(256, u32::try_from(on_host[host].len()).unwrap(), &mut rng);
@@ -184,9 +186,12 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     let mut none = Timings::default();
     for _ in 0..2_000 {
         let wanted = demand(&mut rng);
-        assert!(none.time(|| fleet.place(&wanted, &[], &mut rng)).is_none());
+        assert!(
+            none.time(|| fleet.place(&wanted, &HashSet::new(), &mut rng))
+                .is_some()
+        );
     }
-    none.check("create: no host has room");
+    none.check("create: no host has room by the view");
 
     // Wakes: the owner lookup in front of the proxy hop.
     let mut wake = Timings::default();

@@ -112,6 +112,12 @@ spec:
             - serve
             - --api=0.0.0.0:{{ $cc.service.apiPort }}
             - --hosts=0.0.0.0:8443
+            {{- with ($cc.metrics).port }}
+            - --metrics-listen=0.0.0.0:{{ int64 . }}
+            {{- end }}
+            {{- with ($cc.metrics).hostsTo }}
+            - --host-metrics-to={{ . }}
+            {{- end }}
             - --connections={{ $cc.database.connections }}
             - --host-authority=/etc/compute/tls
             - --host-url={{ $cc.hostUrl }}
@@ -182,6 +188,10 @@ spec:
               containerPort: {{ $cc.service.apiPort }}
             - name: hosts
               containerPort: 8443
+            {{- with ($cc.metrics).port }}
+            - name: metrics
+              containerPort: {{ int64 . }}
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: http

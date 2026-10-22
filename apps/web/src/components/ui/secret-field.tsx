@@ -6,7 +6,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
 import { TextArea, TextInput, useFieldControlProps } from "@opengeni/react/ui/field";
 import { Notice } from "@opengeni/react/ui/notice";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    Secret values (brief 7.17): handle secrets without showing them.

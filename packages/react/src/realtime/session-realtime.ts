@@ -55,6 +55,10 @@ export type RealtimeModelOption = {
   voiceDefaults?: RealtimeVoiceSettings | undefined;
   /** The workspace's saved voice settings for this model. */
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** True on the model the workspace chose to start voice conversations with. */
+  workspaceDefault?: boolean | undefined;
+  /** True on the model the organization chose; the workspace's own choice wins. */
+  organizationDefault?: boolean | undefined;
 };
 
 export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
@@ -701,6 +705,28 @@ function fallbackRealtimeModelId(
   );
 }
 
+/**
+ * The model a voice conversation starts with: the person's own pick when they
+ * can use it, else the model the workspace (or else its organization) chose,
+ * else Codex Live, else the first model they can use.
+ */
+function startingRealtimeModelId(
+  t: OpenGeniText,
+  models: readonly RealtimeModelOption[],
+  picked: SessionRealtimeModel | null,
+): SessionRealtimeModel {
+  const usable = (id: SessionRealtimeModel) =>
+    models.some((model) => model.id === id && model.available);
+  if (picked && usable(picked)) return picked;
+  const chosen =
+    models.find((model) => model.workspaceDefault) ??
+    models.find((model) => model.organizationDefault);
+  if (chosen?.available) return chosen.id;
+  // A pick the person can no longer use falls to the first usable model.
+  if (!picked && usable(CODEX_LIVE_MODEL(t).id)) return CODEX_LIVE_MODEL(t).id;
+  return fallbackRealtimeModelId(t, models);
+}
+
 export function useRealtimeModelSelection(options: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -728,13 +754,12 @@ export function useRealtimeModelSelection(options: {
     client: unknown;
     workspaceId: string;
   } | null>(null);
+  // A pick made here, for when browser storage can't keep it.
+  const pickedRef = useRef<{ workspaceId: string; model: SessionRealtimeModel } | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
-    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL(t).id;
-    if (!initialCachedCatalog) return preferred;
-    if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
-      return preferred;
-    }
-    return fallbackRealtimeModelId(t, initialCachedCatalog);
+    const picked = readRealtimeModelPreference(workspaceId);
+    if (!initialCachedCatalog) return picked ?? CODEX_LIVE_MODEL(t).id;
+    return startingRealtimeModelId(t, initialCachedCatalog, picked);
   });
 
   useEffect(() => {
@@ -743,10 +768,10 @@ export function useRealtimeModelSelection(options: {
     const applyCatalog = (models: RealtimeModelOption[]) => {
       catalogScopeRef.current = { client, workspaceId, source: "cache" };
       setCatalog(models);
-      setSelectedModelId((current) => {
-        if (models.some((model) => model.id === current && model.available)) return current;
-        return fallbackRealtimeModelId(t, models);
-      });
+      const picked =
+        readRealtimeModelPreference(workspaceId) ??
+        (pickedRef.current?.workspaceId === workspaceId ? pickedRef.current.model : null);
+      setSelectedModelId(startingRealtimeModelId(t, models, picked));
     };
     const cached = readCachedRealtimeModelCatalog(client, workspaceId);
     if (cached) {
@@ -795,6 +820,7 @@ export function useRealtimeModelSelection(options: {
       const model = catalog.find((candidate) => candidate.id === value);
       if (!model || !model.available || activeModel) return;
       setSelectedModelId(model.id);
+      pickedRef.current = { workspaceId, model: model.id };
       writeRealtimeModelPreference(workspaceId, model.id);
     },
     [activeModel, catalog, workspaceId],

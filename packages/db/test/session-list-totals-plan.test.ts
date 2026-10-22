@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { readFile } from "node:fs/promises";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql, type SQL } from "drizzle-orm";
 import {
@@ -11,6 +12,7 @@ import {
   withWorkspaceSubjectRls,
   type Database,
 } from "../src";
+import { parseConcurrentIndexMigration } from "../src/migrate";
 
 let shared: SharedTestDatabase;
 let driver: postgres.Sql;
@@ -37,11 +39,29 @@ afterAll(async () => {
 
 type PlanNode = {
   "Relation Name"?: string;
+  Alias?: string;
   "CTE Name"?: string;
   "Actual Rows": number;
   "Actual Loops": number;
+  "Shared Hit Blocks"?: number;
+  "Shared Read Blocks"?: number;
   Plans?: PlanNode[];
 };
+
+test("personal-state probe index is rolling, concurrent and idempotent", async () => {
+  const migration = "0901_session_personal_state_probes.sql";
+  const source = await readFile(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
+  expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+  const parsed = parseConcurrentIndexMigration(migration, source)!;
+  expect(parsed.indexName).toBe("session_pins_session_subject_idx");
+  await shared.admin.unsafe(parsed.statement);
+  await shared.admin.unsafe(parsed.statement);
+  const [index] =
+    await shared.admin`select indisvalid, indisready, pg_get_indexdef(indexrelid) as definition
+    from pg_index where indexrelid='session_pins_session_subject_idx'::regclass`;
+  expect(index).toMatchObject({ indisvalid: true, indisready: true });
+  expect(index!.definition).toContain("(session_id, subject_id)");
+});
 
 test("shallow workspace totals only read cursors contributing to unarchived groups", async () => {
   const identity = crypto.randomUUID();
@@ -83,6 +103,35 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
       case when parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots}
         then now() else null end, 0, false
     from sessions where workspace_id=${grant.workspaceId}`;
+  // A generic plan estimates average workspace/subject cardinalities. One
+  // populated workspace hides the bad nested-loop choice made when a large
+  // workspace shares a database with many small ones.
+  for (let ordinal = 0; ordinal < 100; ordinal++) {
+    const background = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: identity,
+      accountName: "Shallow totals",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `${identity}-${ordinal}`,
+      workspaceName: "Small background workspace",
+      subjectId: `background-${identity}-${ordinal}`,
+    });
+    const other = background.workspaceGrants[0]!;
+    const session = await createSession(db, {
+      accountId: other.accountId,
+      workspaceId: other.workspaceId,
+      initialMessage: "Small workspace fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await shared.admin`insert into session_pins(account_id, workspace_id, subject_id, session_id,
+      pinned, pinned_at) values (${other.accountId}, ${other.workspaceId}, ${other.subjectId},
+      ${session.id}, false, null)`;
+  }
   await shared.admin`analyze sessions`;
   await shared.admin`analyze session_pins`;
   await shared.admin`analyze session_event_cursors`;
@@ -128,13 +177,24 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
         await tx.execute(sql.raw("deallocate shallow_totals")).catch(() => undefined);
       }
       const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode; "Execution Time": number }[];
+      if (process.env.OPENGENI_BENCH_SESSION_LIST === "1")
+        console.log(JSON.stringify({ fixture: "shallow-plan", mode, plan: plans }));
       let cursorRows = 0;
       let sessionRows = 0;
+      let childRows = 0;
+      let personalRows = 0;
+      let personalBlocks = 0;
       function walk(node: PlanNode) {
+        if (node["Relation Name"] === "session_pins" || node["CTE Name"] === "personal_state")
+          personalRows += node["Actual Rows"] * node["Actual Loops"];
+        if (node["Relation Name"] === "session_pins")
+          personalBlocks += (node["Shared Hit Blocks"] ?? 0) + (node["Shared Read Blocks"] ?? 0);
         if (node["Relation Name"] === "session_event_cursors")
           cursorRows += node["Actual Rows"] * node["Actual Loops"];
         if (node["Relation Name"] === "sessions")
           sessionRows += node["Actual Rows"] * node["Actual Loops"];
+        if (node["Relation Name"] === "sessions" && node.Alias === "child")
+          childRows += node["Actual Rows"] * node["Actual Loops"];
         node.Plans?.forEach(walk);
       }
       walk(plans[0]!.Plan);
@@ -146,12 +206,29 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
           contributing,
           cursorRows,
           sessionRows,
+          childRows,
+          personalRows,
+          personalBlocks,
           executionMs: plans[0]!["Execution Time"],
         }),
       );
       expect(cursorRows).toBe(contributing);
+      // Root filtering must happen before materializing descendants. Archived
+      // trees cannot contribute, even though their children remain visible.
+      expect(childRows).toBe((roots - archivedRoots) * childrenPerRoot);
+      expect(personalRows).toBeLessThanOrEqual(roots * (childrenPerRoot + 1) * 5);
+      // An index scan can still walk an entire workspace range while returning
+      // one row. Bound its buffer work too, not just its output cardinality.
+      expect(personalBlocks).toBeLessThanOrEqual(roots * (childrenPerRoot + 1) * 8);
       expect(sessionRows).toBeLessThanOrEqual(roots * (childrenPerRoot + 1) + contributing);
     });
+  }
+  if (process.env.OPENGENI_BENCH_SESSION_LIST === "1") {
+    const [size] =
+      await shared.admin`select pg_relation_size('session_pins_session_subject_idx')::int as bytes`;
+    console.log(
+      JSON.stringify({ fixture: "personal-state-index", rows: 8100, bytes: size!.bytes }),
+    );
   }
 }, 180_000);
 

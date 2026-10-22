@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-import { FIRST_PARTY_CAPABILITY_LOGOS } from "../apps/web/src/components/capabilities/capability-logo-source";
+import { FIRST_PARTY_CAPABILITY_LOGOS } from "../packages/react/src/app/components/capabilities/capability-logo-source";
 import { svgActiveContentReason } from "./catalog-vendored-logos";
 
 const manifestUrl = new URL("../apps/web/public/capability-logos/manifest.json", import.meta.url);
@@ -29,8 +29,13 @@ describe("first-party catalog logo assets", () => {
     ]);
 
     for (const entry of manifest.entries) {
+      // The shared session UI inlines each logo, so embeds need no web assets.
+      const svg = await readFile(
+        new URL(`../apps/web/public/capability-logos/${entry.file}`, import.meta.url),
+        "utf8",
+      );
       expect(FIRST_PARTY_CAPABILITY_LOGOS[entry.capabilityId]).toBe(
-        `/capability-logos/${entry.file}`,
+        `data:image/svg+xml,${encodeURIComponent(svg)}`,
       );
       expect(entry.sourceUrl).toMatch(/^https:\/\//);
       expect(entry.sourceLicense.trim().length).toBeGreaterThan(0);

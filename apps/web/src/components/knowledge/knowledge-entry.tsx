@@ -33,12 +33,12 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Checkbox, Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
-import { InAppHelpLink } from "@/components/in-app-help-link";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
 import { HelpLink } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
@@ -54,8 +54,8 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";

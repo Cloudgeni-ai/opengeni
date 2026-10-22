@@ -345,15 +345,23 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 ### Recovery from tool-search misses
 
-Progressive discovery uses the same authorized deferred pool on Codex-native,
-OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
-exhaustive. Tools whose exact name (with an underscore) appears in the query
-come first, before the keyword ranking, and the result grows to include all of
-them. Past search results are stored as they were returned and never re-run,
-so this ordering changes new searches only, not any cached prompt. `tool_list` is a query-independent fallback: it returns compact
+Progressive discovery uses the same authorized deferred pool on every transport.
+Field-aware retrieval weights names and capability sentences separately from
+long operational descriptions. Search loads the strongest match per explicit
+query clause; ranking is not certainty. Native Responses routes retain hosted
+client `tool_search` and real loaded function definitions. Generic routes return
+compact alternatives in `suggestions`. Exact ties, operation-only queries and
+no matches return no loaded schemas; generic results still include compact candidates.
+An optional decision model selects from a wider shortlist for ambiguous searches;
+strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
+means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
+inference. Past results and schema snapshots are frozen and
+never rerun, so catalog changes do not alter any earlier prompt item.
+`tool_list({view:"groups"})` returns source/resource groups with counts and examples;
+pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-optional literal `namePrefix` filter. An invalid cursor requires restarting
+view, group and optional literal `namePrefix` filter. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
 
@@ -361,8 +369,9 @@ Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit
 a tool outside the current pool. Search backfills smaller candidates after
 schema-size exclusions while retaining existing count and byte limits.
-Native disclosure returns the original SDK tool objects; generic dispatch,
-approvals, and invocation continue through the existing runtime. Listing
+Selected schemas remain in native search outputs or are appended after the generic
+result, never added to the first-request tool block. The original SDK tool objects, approvals and invocation
+continue through the existing runtime on every provider. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
 
@@ -500,10 +509,11 @@ First-party Opengeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
-A model call to `knowledge_search` or `knowledge_prepare_save` receives a
-compact copy without bookkeeping or repeated preview text, keeping every ID,
-version, status, title, description and excerpt; Codemode and other callers
-receive the exact result. See
+A model call to `knowledge_search` receives small discovery cards (identity,
+title, kind, scope, outcome and a short snippet); `knowledge_get` supplies full
+text and citation/update identifiers. MCP search defaults to five results.
+`knowledge_prepare_save` keeps its lossless projection. Codemode and other
+programmatic callers receive the complete result shape. See
 [model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 

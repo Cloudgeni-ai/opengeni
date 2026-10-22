@@ -21081,6 +21081,9 @@
         "$.allowedProviders[]": "string",
         "$.modelCompactionThresholds": "object!",
         "$.modelCompactionThresholds{}": "integer",
+        "$.realtimeDefaultModel": "string! null",
+        "$.realtimeVoice": "object!",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings)",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)! null",
         "$.updatedAt": "string! null"
       }
@@ -21090,7 +21093,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"azure_openai\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openai\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationModelUsage": {
@@ -23418,6 +23421,26 @@
         "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
+    "SandboxCheckpointSelection": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveGeneration": "integer!",
+        "$.artifactId": "string! null",
+        "$.authorityEpoch": "integer!",
+        "$.capturedAt": "string!",
+        "$.leaseEpoch": "integer!",
+        "$.leaseId": "string!",
+        "$.revision": "string!",
+        "$.routeEpoch": "integer!",
+        "$.sandboxGroupId": "string!",
+        "$.sessionId": "string!",
+        "$.version": "const!=[\"1\"]",
+        "$.workspaceGeneration": "integer!"
+      }
+    },
     "SandboxFileArtifactReceipt": {
       "io": [
         "output"
@@ -23446,6 +23469,7 @@
       "shape": {
         "$": "object",
         "$.automaticAvailable": "boolean?",
+        "$.automaticCheckpoint": "ref(SandboxCheckpointSelection)?",
         "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
         "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
@@ -24752,6 +24776,7 @@
         "$.groups[].queued": "integer!",
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
+        "$.groups[].waiting": "integer?",
         "$.needsYouCount": "integer!"
       }
     },
@@ -28030,6 +28055,9 @@
         "$": "object",
         "$.modelCompactionThresholds": "unknown?",
         "$.modelPolicy": "ref(UpdateWorkspaceModelPolicyRequest)? null",
+        "$.realtimeDefaultModel": "ref(SessionRealtimeModel)? null",
+        "$.realtimeVoice": "object?",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null"
       }
     },
@@ -28522,6 +28550,7 @@
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
         "$.modelCompactionThresholds": "unknown?",
+        "$.realtimeDefaultModel": "ref(SessionRealtimeModel)? null",
         "$.realtimeVoice": "object?",
         "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
@@ -28580,6 +28609,7 @@
         "$.claudeIdentity": "object?",
         "$.claudeIdentity.accountUuid": "string!",
         "$.claudeIdentity.deviceId": "string!",
+        "$.endpoint": "string?",
         "$.expectedVersion": "integer?",
         "$.operationId": "string!"
       }
@@ -30398,6 +30428,8 @@
         "$.label": "string!",
         "$.languages": "array?",
         "$.languages[]": "string",
+        "$.organizationDefault": "boolean?",
+        "$.organizationVoiceSettings": "ref(RealtimeVoiceSettings)?",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
         "$.turnEagerness": "array?",
@@ -30409,6 +30441,7 @@
         "$.voices[]": "object",
         "$.voices[].id": "string!",
         "$.voices[].label": "string!",
+        "$.workspaceDefault": "boolean?",
         "$.workspaceVoiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
@@ -31554,6 +31587,7 @@
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
+      "isSessionModelResponsePhase": "value",
       "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
@@ -31824,6 +31858,7 @@
       "OrganizationMember": "type",
       "OrganizationMembershipRole": "type",
       "OrganizationModelAccountSettings": "type",
+      "OrganizationModelCatalogProviderKind": "type",
       "OrganizationModelDefaults": "type",
       "OrganizationModelProviderConnection": "type",
       "OrganizationModelProviderKind": "type",
@@ -32035,6 +32070,7 @@
       "SANDBOX_FILE_ARTIFACT_MAX_BYTES": "value",
       "SandboxBackend": "type",
       "SandboxCapabilityName": "type",
+      "SandboxCheckpointSelection": "type",
       "SandboxCommandOutputDeltaPayload": "type",
       "SandboxFileArtifactReceipt": "type",
       "SandboxOs": "type",
@@ -32077,6 +32113,11 @@
       "ServiceTurnInitiator": "type",
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
+      "SESSION_EVENT_BOOKKEEPING_STEP_TYPES": "value",
+      "SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES": "value",
+      "SESSION_EVENT_CONTENT_STEP_TYPES": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_HEADER": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_VERSION": "value",
       "SESSION_EVENT_PRESENTED_TOOL_LEAVES": "value",
       "SESSION_EVENT_STEP_TYPES": "value",
       "SESSION_EVENT_TYPES": "value",
@@ -32112,6 +32153,7 @@
       "sessionEventsToSseStream": "value",
       "sessionEventStreamCoveredThrough": "value",
       "SessionEventStreamTransport": "type",
+      "SessionEventToolOutputPreview": "type",
       "SessionEventType": "type",
       "SessionGoal": "type",
       "SessionGoalCreatedBy": "type",
@@ -32650,6 +32692,7 @@
       "WorkspaceRevisionDegradedPayload": "type",
       "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
+      "WorkspaceSessionListEvent": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
       "WorkspaceStateAttemptGovernance": "type",
@@ -34411,6 +34454,7 @@
       "ToolActionReviewDetails": "value",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "ToolRegistry": "type",
       "ToolRegistryEntry": "type",
       "ToolRenderer": "type",
@@ -34677,6 +34721,9 @@
       "useBrowserAccountTransitionBlocker": "value",
       "useOptionalBrowserAccounts": "value",
       "useOptionalBrowserAccountTransitionBlocker": "value"
+    },
+    "@opengeni/react/app.css": {
+      "default": "value"
     },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
@@ -35396,6 +35443,8 @@
     },
     "@opengeni/react/session": {
       "ActivityItem": "type",
+      "admissionControlNeedsRefresh": "value",
+      "admissionRecheckControl": "value",
       "AgentMessageItem": "type",
       "approvalsFromRequiresAction": "value",
       "AuthNeededItem": "type",
@@ -35414,6 +35463,7 @@
       "CreateEmbeddedSessionClientOptions": "type",
       "createOlderHistoryLoadReceipt": "value",
       "creditExhaustedFromEvents": "value",
+      "currentSessionMachineAccess": "value",
       "extractSessionRef": "value",
       "FILE_ONLY_MESSAGE_TEXT": "value",
       "FileAttachment": "type",
@@ -35433,6 +35483,7 @@
       "isGoalEvent": "value",
       "isHumanInputEvent": "value",
       "isLineageRefreshEvent": "value",
+      "isMachineComputeSelectable": "value",
       "isSessionMcpApprovalPolicyEvent": "value",
       "isTitleEvent": "value",
       "isTurnQueueEvent": "value",
@@ -35446,12 +35497,22 @@
       "OlderHistoryLoadReceipt": "type",
       "PendingApproval": "type",
       "PendingHumanInputRequest": "type",
+      "personalMachineCopy": "value",
+      "PersonalMachineCopy": "type",
       "projectPendingApprovals": "value",
       "projectPendingHumanInputRequests": "value",
       "QueueMutationKind": "type",
       "readClientConfig": "value",
       "ReasoningItem": "type",
+      "recheckSessionAdmission": "value",
       "SandboxItem": "type",
+      "savedMessageMachineChoices": "value",
+      "sessionAdmissionCopy": "value",
+      "SessionAdmissionCopy": "type",
+      "sessionAdmissionMachineChangedCopy": "value",
+      "sessionAdmissionNeedsDifferentMachine": "value",
+      "sessionAdmissionReason": "value",
+      "SessionAdmissionReason": "type",
       "SessionAttentionClientLike": "type",
       "SessionClientLike": "type",
       "SessionConversationController": "type",
@@ -35467,10 +35528,12 @@
       "SessionUsageLimitStop": "type",
       "shouldSteerOnKey": "value",
       "shouldSubmitOnKey": "value",
+      "TimelineAnnotationSourceDescriptor": "type",
       "TimelineGroup": "type",
       "TimelineItem": "type",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "TurnEndItem": "type",
       "TurnOutcome": "type",
       "TurnStepsItem": "type",
@@ -35509,6 +35572,9 @@
       "useSessionReadAcknowledgement": "value",
       "UseSessionReadAcknowledgementInput": "type",
       "UseSessionResult": "type",
+      "useSessionStart": "value",
+      "UseSessionStartOptions": "type",
+      "UseSessionStartResult": "type",
       "useTurnQueue": "value",
       "UseTurnQueueOptions": "type",
       "UseTurnQueueResult": "type",
@@ -35519,6 +35585,19 @@
       "sessionAgentsSignal": "value",
       "SessionAgentsSignal": "type",
       "sessionGoalStateLabel": "value"
+    },
+    "@opengeni/react/session-app": {
+      "EditableArtifactSurfaceProps": "type",
+      "MessageContextInput": "type",
+      "MessageContextItem": "type",
+      "PdfPreviewProps": "type",
+      "SESSION_UI_PRESETS": "value",
+      "SessionApp": "value",
+      "SessionAppProps": "type",
+      "SessionAppSurfaces": "type",
+      "SessionShellSlots": "type",
+      "SessionUiFeatures": "type",
+      "SessionUiPreset": "type"
     },
     "@opengeni/react/session-attention-model": {
       "readAcknowledgementFrontier": "value",
@@ -35543,6 +35622,7 @@
       "groupSessionsByProject": "value",
       "groupSessionsForRail": "value",
       "hasActiveEffectiveControl": "value",
+      "homeSessionSections": "value",
       "isCodexProductModel": "value",
       "isEffectivelyRunning": "value",
       "isRunningStatus": "value",
@@ -35642,6 +35722,7 @@
       "OpenGeniProviderProps": "type",
       "OpenGeniViewerTarget": "type",
       "parseOpenGeniLink": "value",
+      "PersonalMachineExplanation": "value",
       "QueueSurface": "value",
       "QueueSurfaceProps": "type",
       "RenderAllowanceExhausted": "type",
@@ -35654,6 +35735,8 @@
       "SecretRefText": "value",
       "SecretRefTextProps": "type",
       "SecretsUiProvider": "value",
+      "SessionAdmissionNotice": "value",
+      "SessionAdmissionNoticeProps": "type",
       "SessionChrome": "value",
       "SessionChromeAgentsSignal": "type",
       "sessionChromeGoalPillExplanation": "value",
@@ -35674,6 +35757,11 @@
       "SessionList": "value",
       "SessionListLabels": "type",
       "SessionListProps": "type",
+      "SessionMachineAccessNotice": "value",
+      "SessionMachineChoices": "value",
+      "SessionMachineChoicesProps": "type",
+      "SessionStartNotice": "value",
+      "SessionStartNoticeProps": "type",
       "setStartupDetails": "value",
       "StartupTimings": "value",
       "TimelineRow": "value",
@@ -35772,10 +35860,19 @@
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
       "AgentTitleParts": "type",
+      "ANNOTATION_MAX_NOTE_LENGTH": "value",
+      "ANNOTATION_MAX_QUOTE_BYTES": "value",
+      "ANNOTATION_SOURCE_CONTEXT_BYTES": "value",
+      "annotationDisplayOrdinal": "value",
+      "annotationFromSelection": "value",
+      "annotationHasNote": "value",
+      "annotationNoteNeedsDisclosure": "value",
+      "AnnotationSelection": "type",
       "answersFromDrafts": "value",
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
       "askPresentation": "value",
+      "bestQuoteOccurrence": "value",
       "BUILT_IN_TOOL_STEP_NAMES": "value",
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
       "BUILT_IN_TURN_SUMMARY_FACETS": "value",
@@ -35808,6 +35905,7 @@
       "isActionableHumanInputRequest": "value",
       "isApplyPatch": "value",
       "isPreparingWork": "value",
+      "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
       "namedAgentTitle": "value",
       "noticeDisplayText": "value",
@@ -35816,6 +35914,7 @@
       "NotificationBlock": "type",
       "notificationPlainText": "value",
       "NotificationSpan": "type",
+      "occurrenceOffsets": "value",
       "parseNotificationInline": "value",
       "parseNotificationText": "value",
       "parseToolArgs": "value",
@@ -35824,6 +35923,7 @@
       "plainToolRow": "value",
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
+      "presentsToolOutputPreview": "value",
       "QUESTION_NAV_HIDDEN_PX": "value",
       "QUESTION_NAV_MARGIN_PX": "value",
       "QuestionNavPrompt": "type",
@@ -35888,6 +35988,7 @@
       "toolStepLabel": "value",
       "toolStepPhase": "value",
       "ToolStepPhase": "type",
+      "truncateAnnotationQuote": "value",
       "truncatePreview": "value",
       "tryParseJson": "value",
       "TurnGroup": "type",
@@ -36057,6 +36158,7 @@
       "ContextMenuItem": "value",
       "ContextMenuLabel": "value",
       "ContextMenuSeparator": "value",
+      "ContextMenuShortcut": "value",
       "ContextMenuTrigger": "value"
     },
     "@opengeni/react/ui/copy-field": {
@@ -36305,6 +36407,11 @@
       "PageHeaderStyleProvider": "value",
       "PageHeaderVariant": "type",
       "usePageHeaderStyle": "value"
+    },
+    "@opengeni/react/ui/portal-container": {
+      "containedPortal": "value",
+      "PortalContainerProvider": "value",
+      "usePortalContainer": "value"
     },
     "@opengeni/react/ui/relative-time": {
       "DateInput": "type",
@@ -36567,6 +36674,9 @@
       "useUsage": "value",
       "UseUsageOptions": "type",
       "UseUsageResult": "type"
+    },
+    "@opengeni/react/workbench": {
+      "enableWorkbench": "value"
     }
   },
   "sdkMembers": {

@@ -476,3 +476,97 @@ async fn a_flush_sends_everything_now_and_the_observer_goes_on() {
     let request = received.try_recv().expect("the observer still exports");
     assert_eq!(records(&request), 1);
 }
+
+/// The paths and headers of every request received so far.
+fn drained(received: &mut mpsc::UnboundedReceiver<Received>) -> Vec<(String, Vec<String>)> {
+    let mut requests = Vec::new();
+    while let Ok(request) = received.try_recv() {
+        requests.push((request.path, request.headers));
+    }
+    requests
+}
+
+#[tokio::test]
+async fn metrics_sent_to_the_control_service_go_there_without_the_collectors_headers() {
+    let (endpoint, mut collected) = collector(Vec::new()).await;
+    let (control, mut passed) = collector(Vec::new()).await;
+    let mut export = ExportConfig {
+        endpoint: Some(endpoint),
+        ..ExportConfig::to_control(
+            format!("{control}/v1/hosts/metrics"),
+            reqwest::Client::new(),
+        )
+    };
+    export
+        .headers
+        .push(("authorization".into(), "Bearer t".into()));
+    export.logs_every = Duration::from_secs(3600);
+    export.metrics_every = Duration::from_secs(3600);
+    let observer = Observer::start(ObserveConfig {
+        export: Some(export),
+        journal: false,
+        ..ObserveConfig::default()
+    });
+    observer.emit(Event::new("compute.step", Severity::Info));
+    tokio::time::timeout(Duration::from_secs(5), observer.flush())
+        .await
+        .expect("the flush ends");
+
+    let collected = drained(&mut collected);
+    assert!(!collected.is_empty(), "the event went to the collector");
+    for (path, headers) in &collected {
+        assert_eq!(path, "/v1/logs", "only events go to the collector");
+        assert!(headers.contains(&"authorization: bearer t".into()));
+    }
+    let passed = drained(&mut passed);
+    assert!(
+        !passed.is_empty(),
+        "the metrics went to the control service"
+    );
+    for (path, headers) in &passed {
+        assert_eq!(path, "/v1/hosts/metrics");
+        assert!(
+            !headers
+                .iter()
+                .any(|header| header.starts_with("authorization:")),
+            "the collector's credentials stay with the collector: {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_collector_events_stay_on_the_host_while_metrics_go_to_the_control_service() {
+    let (control, mut passed) = collector(Vec::new()).await;
+    let mut export = ExportConfig::to_control(
+        format!("{control}/v1/hosts/metrics"),
+        reqwest::Client::new(),
+    );
+    export.logs_every = Duration::from_millis(10);
+    export.metrics_every = Duration::from_secs(3600);
+    let (tap, mut tapped) = mpsc::channel(8);
+    let observer = Observer::start(ObserveConfig {
+        export: Some(export),
+        journal: false,
+        tap: Some(tap),
+        ..ObserveConfig::default()
+    });
+    observer.emit(Event::new("compute.step", Severity::Info));
+    tokio::time::timeout(Duration::from_secs(5), observer.flush())
+        .await
+        .expect("the flush ends");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        tapped.try_recv().is_ok(),
+        "the event is still observed on the host"
+    );
+    let passed = drained(&mut passed);
+    assert!(
+        !passed.is_empty(),
+        "the metrics went to the control service"
+    );
+    assert!(
+        passed.iter().all(|(path, _)| path == "/v1/hosts/metrics"),
+        "nothing but metrics leaves the host: {passed:?}"
+    );
+}

@@ -3,14 +3,14 @@ import type { ConnectionMetadata } from "@opengeni/sdk";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { DirectModelProviderForm } from "./direct-model-provider-connection";
-import { applyConnectedModelToNewSessionDraft } from "@/lib/model-access-onboarding";
+import { applyConnectedModelToNewSessionDraft } from "@opengeni/react/app/lib/model-access-onboarding";
 import {
   invalidateModelSettingsQueries,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 export function DirectModelProviderConnections({
   workspaceId,

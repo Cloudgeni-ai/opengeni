@@ -6,9 +6,9 @@ import { toast } from "sonner";
 import { Button } from "@opengeni/react/ui/button";
 import { copyText } from "@opengeni/react/ui/copy-field";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
-import { vaultErrorText } from "./vault-model";
+import { vaultErrorText } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    The small icon actions on a secret value: Reveal, Copy, Copy reference.

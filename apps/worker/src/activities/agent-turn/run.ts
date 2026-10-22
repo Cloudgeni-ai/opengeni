@@ -82,10 +82,14 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
-import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
+import {
+  ActiveRouteDispatchBoundary,
+  checkpointHistoryBeforeProviderDispatch,
+} from "./provider-dispatch-barrier";
 import {
   assertProviderOverloadRecoveryActive,
   providerRecoveryCountAfterModelRequestPhase,
+  sandboxRouteTransitionCode,
 } from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
@@ -490,6 +494,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerRecoveryCount: attempt.providerRecoveryCount,
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
+    const activeRoute = new ActiveRouteDispatchBoundary({
+      session: () =>
+        sandboxState.resolvedSandbox?.established.session as
+          | { assertActiveRouteContinuable?: () => Promise<void> }
+          | undefined,
+      isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
+    });
     const checkpointBeforeProviderDispatch = async () => {
       assertRecoveryWindow();
       await awaitModelCallAdmission();
@@ -497,6 +508,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+        activeRoute,
       });
       assertRecoveryWindow();
     };

@@ -279,8 +279,7 @@ function dialogSummary(
 
 export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
-  daemonPid?: () => Promise<number | null>;
-  terminate?: (expectedPid?: number | null) => Promise<void>;
+  terminate?: () => Promise<void>;
   ownedProcessIdentity?: (
     cdpEndpoint: string,
     cdpBrowserPid?: number,
@@ -288,6 +287,9 @@ export type BrowserCommandRunner = {
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   /** A plain line for the agent about how this browser was launched. */
   readonly networkNotice?: string | null;
+  /** Credentials for the launch's proxy. They never reach the browser's
+   * argv or environment; the driver answers the proxy's challenges. */
+  readonly proxyCredentials?: { username: string; password: string } | null;
   externalAuth?: (
     command: BrowserExternalAuthCommand,
     options?: { timeoutMs?: number; signal?: AbortSignal },
@@ -390,6 +392,9 @@ type TargetState = {
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
+  /** Chrome's buffered console messages and exceptions already reported for
+   * this tab, so each on-demand replay appends only what is new. */
+  runtimeDiagnosticKeys: Set<string>;
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
@@ -398,6 +403,8 @@ type TargetState = {
     {
       method: string;
       url: string;
+      /** The document that issued the request; absent when not reported. */
+      loaderId: string | null;
       browserInitiated: boolean;
       /** An event stream or other response that never finishes by design,
        * so it does not keep the page from being network idle. */
@@ -544,8 +551,8 @@ function hasBrowserEmulation(
 }
 
 /**
- * Target-scoped browser authority. agent-browser owns the pinned Chrome/profile
- * lifecycle; Opengeni talks to that private browser through one local CDP
+ * Target-scoped browser authority. The runner owns the browser process and
+ * its private profile; Opengeni talks to that browser through one local CDP
  * connection and keeps an independent causal queue for every target.
  */
 export class AgentBrowserDriver implements BrowserInteractionDriver {
@@ -751,11 +758,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: BrowserTabNavigationOptions = {},
   ): Promise<BrowserObservationValue> {
     const deferNavigation = url !== undefined && url !== "about:blank";
-    // Resolving the daemon's private CDP endpoint is itself the cold-start
-    // primitive. Calling `agent-browser open` first makes the CLI perform one
-    // complete launch/lifecycle reconciliation and `get cdp-url` immediately
-    // perform another. Apart from adding seconds on headed macOS, the first
-    // command can also manufacture a redundant tab. Connect once, reuse the
+    // Resolving the browser's private CDP endpoint is itself the cold-start
+    // primitive (it launches the browser when needed). Connect once, reuse the
     // launch-created page, and perform the one intended navigation through our
     // target-scoped CDP authority.
     this.started = true;
@@ -1037,22 +1041,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.connectionPromise = null;
     let closeError: unknown = null;
     let terminationError: unknown = null;
-    let daemonPid: number | null = null;
-    if (this.started && this.targetLifecycle === "runner" && this.runner.daemonPid) {
-      try {
-        daemonPid = await this.runner.daemonPid();
-      } catch (error) {
-        terminationError = error;
-      }
-    }
     if (this.started && this.targetLifecycle === "runner") {
-      // agent-browser runs its own CDP work in line with its commands. A tab
-      // that closes while it is still preparing that page leaves a request
-      // Chromium never answers, and its daemon then holds every command,
-      // `close` included, for its 30 second CDP deadline. The controller's
-      // own connection is independent of that queue, so it asks the browser
-      // to shut down cleanly first; the daemon's close then only reconciles a
-      // browser that is already exiting.
+      // Ask the browser to shut down cleanly over CDP, so it writes its
+      // profile state, then wait for the process to exit.
       if (connection) {
         try {
           await connection.send(
@@ -1061,7 +1052,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             { timeoutMs: BROWSER_CLOSE_REQUEST_TIMEOUT_MS },
           );
         } catch {
-          // The daemon's close below still shuts the browser down.
+          // Termination below still stops the browser.
         }
       }
       try {
@@ -1074,7 +1065,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.started = false;
     try {
-      await this.runner.terminate?.(daemonPid);
+      await this.runner.terminate?.();
     } catch (error) {
       terminationError ??= error;
     } finally {
@@ -1082,10 +1073,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     if (terminationError) {
       if (closeError) {
-        throw new AggregateError(
-          [closeError, terminationError],
-          "managed browser and daemon cleanup failed",
-        );
+        throw new AggregateError([closeError, terminationError], "managed browser cleanup failed");
       }
       throw terminationError;
     }
@@ -1359,6 +1347,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "diagnostic limit",
     );
     return await this.withTarget(targetId, async (state) => {
+      if (!kinds || kinds.has("console") || kinds.has("page_error")) {
+        await this.harvestRuntimeDiagnostics(state);
+      }
       const available = state.diagnosticEntries.filter(
         (entry) => entry.sequence > afterSequence && (!kinds || kinds.has(entry.kind)),
       );
@@ -2104,6 +2095,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }>("Browser.getVersion");
       this.browserProduct = typeof version.product === "string" ? version.product : "";
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
+      if (this.runner.proxyCredentials) {
+        this.browserUnsubscribe.push(
+          ...(await answerProxyChallenges(connection, this.runner.proxyCredentials)),
+        );
+      }
       this.presentedUserAgent = this.completeClientHints
         ? await this.loadPresentedUserAgent(connection)
         : null;
@@ -2414,7 +2410,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             autoAttach: true,
             waitForDebuggerOnStart: true,
             flatten: true,
-            filter: [{ type: "iframe" }],
+            // Chromium holds this page's dedicated workers before their
+            // first script too, filtered or not; attach them only to resume.
+            filter: [{ type: "iframe" }, { type: "worker" }],
           },
           { sessionId, timeoutMs: 5_000 },
         )
@@ -2567,8 +2565,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       const initialized = (async () => {
         await Promise.all([
+          // Runtime stays disabled: a page can detect an enabled Runtime
+          // domain (it serializes every console argument), the common
+          // automation tell. Console messages and exceptions are read on
+          // demand instead (harvestRuntimeDiagnostics).
           connection.send("Page.enable", {}, { sessionId }),
-          connection.send("Runtime.enable", {}, { sessionId }),
           connection.send("DOM.enable", {}, { sessionId }),
           connection.send("Accessibility.enable", {}, { sessionId }),
           connection.send("Network.enable", {}, { sessionId }),
@@ -2640,6 +2641,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
       diagnosticEntries: [],
       diagnosticSequence: 0,
+      runtimeDiagnosticKeys: new Set(),
       inflightRequests: new Set(),
       networkTrackingOverflow: false,
       failedRequests: new Set(),
@@ -2697,42 +2699,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         sessionId,
       ),
       connection.on(
-        "Runtime.consoleAPICalled",
-        (event) => {
-          const level = consoleLevel(event.params.type);
-          if (level === "error") state.diagnostics.consoleErrorCount += 1;
-          this.appendDiagnostic(state, {
-            kind: "console",
-            level,
-            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
-            url: null,
-            method: null,
-            status: null,
-            filename: null,
-          });
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Runtime.exceptionThrown",
-        (event) => {
-          state.diagnostics.pageErrorCount += 1;
-          const details = isRecord(event.params.exceptionDetails)
-            ? event.params.exceptionDetails
-            : {};
-          this.appendDiagnostic(state, {
-            kind: "page_error",
-            level: "error",
-            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
-            url: boundedUrlField(details.url),
-            method: null,
-            status: null,
-            filename: null,
-          });
-        },
-        sessionId,
-      ),
-      connection.on(
         "Network.requestWillBeSent",
         (event) => {
           const requestId = stringField(event.params, "requestId");
@@ -2747,6 +2713,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state.requests.set(requestId, {
               method: boundedMethod(request.method),
               url: boundedUrlField(request.url) ?? "about:blank",
+              loaderId: stringField(event.params, "loaderId"),
               // Chrome fetches the page's icon (/favicon.ico or a declared
               // <link rel=icon>) by itself, reported as type Other with an
               // "other" initiator. A missing icon is not a page failure and,
@@ -3340,10 +3307,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof attached.sessionId !== "string") {
         throw new Error("browser could not attach its hidden metadata target");
       }
-      await Promise.all([
-        connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
-        connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
-      ]);
+      await connection.send("Page.enable", {}, { sessionId: attached.sessionId });
       if (this.userAgentMetadataSource === "intercepted_local") {
         await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
       } else {
@@ -4283,11 +4247,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => event,
         () => null,
       );
+    // The click's input can be acknowledged before a dialog it opened is
+    // reported; a dialog instead of a chooser still means nothing was chosen.
+    let dialogOpened = false;
+    const dialog = new Promise<"dialog">((resolve) => {
+      const stops = [...new Set([state.sessionId, frameSessionId])].map((sessionId) =>
+        connection.on(
+          "Page.javascriptDialogOpening",
+          () => {
+            dialogOpened = true;
+            resolve("dialog");
+          },
+          sessionId,
+        ),
+      );
+      abort.signal.addEventListener("abort", () => {
+        for (const stop of stops) stop();
+      });
+    });
     let clicked = false;
     try {
       await this.clickNode(state, node.backendDOMNodeId, "left", 1);
       clicked = true;
-      const event = await chooser;
+      const event = await Promise.race([chooser, dialog]);
+      if (event === "dialog") throw new DialogOpenedSignal("upload control opened a dialog");
       if (!event) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
@@ -4327,13 +4310,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw error;
     } finally {
       abort.abort();
-      await connection.send(
+      const restored = connection.send(
         "Page.setInterceptFileChooserDialog",
         { enabled: false },
         {
           sessionId: frameSessionId,
         },
       );
+      // An open dialog holds the page's commands until it is answered; the
+      // restore stays queued behind it instead of hiding the dialog outcome.
+      if (dialogOpened || state.dialog) void restored.catch(() => undefined);
+      else await restored;
     }
   }
 
@@ -6344,6 +6331,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // frame id itself changes.
     if (frame.id !== state.frame.id) return;
     state.navigationPending = false;
+    if (frame.loaderId !== state.frame.loaderId) {
+      // The previous document and its frames are gone. Chromium does not
+      // always report their unfinished requests (a WebUI start page's
+      // resources, for one), so they must not keep the new page loading.
+      for (const requestId of [...state.inflightRequests]) {
+        const loaderId = state.requests.get(requestId)?.loaderId;
+        if (loaderId == null || loaderId === frame.loaderId) continue;
+        state.inflightRequests.delete(requestId);
+        state.requests.delete(requestId);
+      }
+    }
     state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
@@ -6381,14 +6379,110 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /**
+   * Append the tab's console messages and uncaught exceptions that were not
+   * reported yet. The page session never keeps Runtime enabled, because a page
+   * can detect that. Chrome buffers these messages per document and replays
+   * them all, before answering, when Runtime is enabled; a brief enable, then
+   * disable, reads them only when the caller asks for diagnostics.
+   */
+  private async harvestRuntimeDiagnostics(state: TargetState): Promise<void> {
+    const connection = await this.ensureConnection();
+    const sessionId = state.sessionId;
+    const replayed: Array<
+      | { kind: "console"; key: string; params: Record<string, unknown> }
+      | { kind: "page_error"; key: string; params: Record<string, unknown> }
+    > = [];
+    const stops = [
+      connection.on(
+        "Runtime.consoleAPICalled",
+        (event) => {
+          const params = event.params;
+          replayed.push({
+            kind: "console",
+            key: `console:${String(params.executionContextId)}:${String(params.timestamp)}:${String(params.type)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Runtime.exceptionThrown",
+        (event) => {
+          const params = event.params;
+          const details = isRecord(params.exceptionDetails) ? params.exceptionDetails : {};
+          replayed.push({
+            kind: "page_error",
+            key: `exception:${String(details.exceptionId)}:${String(params.timestamp)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+    ];
+    try {
+      // The replay arrives before the enable response on the same session.
+      await connection.send("Runtime.enable", {}, { sessionId });
+    } finally {
+      for (const stop of stops) stop();
+      void connection.send("Runtime.disable", {}, { sessionId }).catch(() => undefined);
+    }
+    if (this.states.get(state.targetId) !== state) return;
+    const current = new Set<string>();
+    for (const message of replayed) {
+      current.add(message.key);
+      if (state.runtimeDiagnosticKeys.has(message.key)) continue;
+      const occurredAt = runtimeTimestamp(message.params.timestamp);
+      if (message.kind === "console") {
+        const level = consoleLevel(message.params.type);
+        if (level === "error") state.diagnostics.consoleErrorCount += 1;
+        this.appendDiagnostic(
+          state,
+          {
+            kind: "console",
+            level,
+            message: consoleMessage(message.params.args, (text) => this.typedSecrets.redact(text)),
+            url: null,
+            method: null,
+            status: null,
+            filename: null,
+          },
+          occurredAt,
+        );
+      } else {
+        state.diagnostics.pageErrorCount += 1;
+        const details = isRecord(message.params.exceptionDetails)
+          ? message.params.exceptionDetails
+          : {};
+        this.appendDiagnostic(
+          state,
+          {
+            kind: "page_error",
+            level: "error",
+            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
+            url: boundedUrlField(details.url),
+            method: null,
+            status: null,
+            filename: null,
+          },
+          occurredAt,
+        );
+      }
+    }
+    // Chrome drops a document's messages with the document, so anything it no
+    // longer replays cannot come back; keep only the keys it still holds.
+    state.runtimeDiagnosticKeys = current;
+  }
+
   private appendDiagnostic(
     state: TargetState,
     entry: Omit<BrowserDiagnosticEntry, "sequence" | "occurredAt">,
+    occurredAt: string = this.timestamp(),
   ): void {
     const parsed = BrowserDiagnosticEntry.parse({
       ...entry,
       sequence: ++state.diagnosticSequence,
-      occurredAt: this.timestamp(),
+      occurredAt,
     });
     state.diagnosticEntries.push(parsed);
     if (state.diagnosticEntries.length > INTERACTION_MAX_DIAGNOSTIC_ENTRIES) {
@@ -6964,7 +7058,12 @@ const STICKY_COVER_FUNCTION = `function() {
     if (position === "sticky") return true;
     if (position === "fixed") {
       const box = node.getBoundingClientRect();
-      return !(box.left <= 0 && box.top <= 0 && box.right >= innerWidth && box.bottom >= innerHeight);
+      // The layout viewport excludes visible scrollbars, which a fixed layer
+      // over the whole page does not cover.
+      const viewport = document.scrollingElement || document.documentElement;
+      const width = viewport.clientWidth || innerWidth;
+      const height = viewport.clientHeight || innerHeight;
+      return !(box.left <= 0 && box.top <= 0 && box.right >= width && box.bottom >= height);
     }
     const parentRoot = node.getRootNode();
     node = node.parentElement ?? (parentRoot instanceof ShadowRoot ? parentRoot.host : null);
@@ -7382,6 +7481,13 @@ function browserDialog(params: Record<string, unknown>, openedAt: string): Brows
   });
 }
 
+/** A CDP Runtime timestamp (milliseconds since the epoch) as an ISO time. */
+function runtimeTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {
   if (value === "debug") return "debug";
   if (value === "error" || value === "assert") return "error";
@@ -7662,6 +7768,52 @@ function frameTreeFingerprint(frames: readonly MainFrame[]): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Answer an authenticating proxy for every page, worker and new tab of the
+ * browser. Browser-wide request interception is the only CDP surface that
+ * reaches proxy challenges, so each request pauses briefly and is continued
+ * unchanged; only a challenge from the proxy itself receives the
+ * credentials, and every other challenge keeps the browser's default. */
+async function answerProxyChallenges(
+  connection: BrowserCdpConnection,
+  credentials: { username: string; password: string },
+): Promise<Array<() => void>> {
+  const unsubscribe = [
+    connection.on("Fetch.requestPaused", (event) => {
+      const requestId = event.params.requestId;
+      if (typeof requestId !== "string") return;
+      void connection.send("Fetch.continueRequest", { requestId }).catch(() => undefined);
+    }),
+    connection.on("Fetch.authRequired", (event) => {
+      const requestId = event.params.requestId;
+      if (typeof requestId !== "string") return;
+      const challenge = event.params.authChallenge;
+      const fromProxy = isRecord(challenge) && challenge.source === "Proxy";
+      void connection
+        .send("Fetch.continueWithAuth", {
+          requestId,
+          authChallengeResponse: fromProxy
+            ? {
+                response: "ProvideCredentials",
+                username: credentials.username,
+                password: credentials.password,
+              }
+            : { response: "Default" },
+        })
+        .catch(() => undefined);
+    }),
+  ];
+  try {
+    await connection.send("Fetch.enable", {
+      handleAuthRequests: true,
+      patterns: [{ urlPattern: "*" }],
+    });
+  } catch (error) {
+    for (const stop of unsubscribe) stop();
+    throw error;
+  }
+  return unsubscribe;
 }
 
 async function assertOwnedCdpProcess(

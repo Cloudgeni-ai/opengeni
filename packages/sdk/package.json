@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "4.2.0",
+  "version": "4.3.1",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -37,6 +37,10 @@
     "./this-computer": {
       "types": "./src/this-computer.ts",
       "default": "./src/this-computer.ts"
+    },
+    "./desktop-bridge": {
+      "types": "./src/desktop-bridge.ts",
+      "default": "./src/desktop-bridge.ts"
     },
     ".": {
       "types": "./src/index.ts",

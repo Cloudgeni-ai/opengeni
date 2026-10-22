@@ -177,6 +177,55 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("select presses a radio button, and is still refused on a plain button", async () => {
+    class RadioFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "get_window_state" || !response.structuredJson) return response;
+        const data = JSON.parse(response.structuredJson);
+        if (data.elements)
+          data.elements.push({
+            ...data.elements[0],
+            element_index: 2,
+            element_token: `s${this.snapshot}:2`,
+            role: "AXRadioButton",
+            label: "Landscape",
+          });
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      }
+    }
+    const fixture = new RadioFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const radio = observation.roots.find((node) => node.role === "radio")!;
+      expect(radio.actions).toEqual(["invoke", "focus"]);
+      await backend.dispatch({
+        ...command(observation),
+        action: { type: "semantic", action: "select", locator: { kind: "ref", ref: radio.ref } },
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:2",
+        button: "left",
+      });
+      const fresh = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(fresh),
+          action: { ...command(fresh).action, action: "select" } as never,
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element does not offer select; use one it offers: invoke, focus",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("revives idle owned sessions and retires expired viewer controls before input", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
@@ -361,18 +410,18 @@ describe("CUA desktop boundary", () => {
         { redacted: true, reason: "policy" },
       ]);
       expect(observation.roots[0]).toMatchObject({
-        ref: "s1:0",
+        ref: "e1",
         name: "Named field",
         actions: ["set_value"],
       });
-      expect(observation.roots[1]).toMatchObject({ ref: "s1:1", actions: ["set_value"] });
+      expect(observation.roots[1]).toMatchObject({ ref: "e2", actions: ["set_value"] });
       expect(observation.roots[1]!.name).toBeUndefined();
       await backend.dispatch({
         ...command(observation),
         action: {
           type: "semantic",
           action: "set_value",
-          locator: { kind: "ref", ref: "s1:1" },
+          locator: { kind: "ref", ref: "e2" },
           value: "Replacement",
         },
       });
@@ -444,7 +493,11 @@ describe("CUA desktop boundary", () => {
             value: "Rejected",
           },
         }),
-      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element offers no actions; act on a nearby control or its window instead",
+      });
       expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
     } finally {
       await backend.close();
@@ -610,6 +663,63 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("focuses a macOS control through CUA's element focus click", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    const focused: Record<string, unknown>[] = [];
+    fixture.callTool = async (name, argumentsJson) => {
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "click" && args.action === "focus") focused.push(args);
+      return await original(name, argumentsJson);
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      expect(observed.roots[0]!.actions).toEqual(["invoke", "focus"]);
+      expect(observed.roots[1]!.actions).toEqual(["set_value", "focus"]);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await backend.dispatch(focus);
+      // The ref is Opengeni's; CUA gets its own token of the latest snapshot.
+      expect(focused).toEqual([
+        expect.objectContaining({
+          element_token: `${observed.observationId.split(":").pop()}:0`,
+          action: "focus",
+          delivery_mode: "background",
+        }),
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an element that cannot take the focus says what to do instead", async () => {
+    const fixture = new LinuxPermissionsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await expect(backend.dispatch(focus)).rejects.toMatchObject({
+        code: "unsupported",
+        message:
+          "Elements cannot be focused on their own here: invoke the element, or set its value",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keeps tokens current, redacts protected values and never calls browser tools", async () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);
@@ -620,11 +730,12 @@ describe("CUA desktop boundary", () => {
       const first = await backend.observe(target.id);
       expect(JSON.stringify(first)).not.toContain("must-not-leak");
       const second = await backend.observe(target.id);
-      // CUA honours only its latest tokens: the ref is sent as the same
-      // element's token from the latest observation.
+      // CUA honours only its latest tokens: the ref, the same in both
+      // readings, is sent as its element's token from the latest one.
+      expect(second.roots[0]!.ref).toBe(first.roots[0]!.ref);
       await backend.dispatch(command(first));
       expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
-        element_token: second.roots[0]!.ref,
+        element_token: second.observationId.split(":").pop() + ":0",
       });
       const fresh = await backend.observe(target.id);
       await backend.validate(command(fresh));
@@ -741,11 +852,12 @@ describe("CUA desktop boundary", () => {
     try {
       const target = (await backend.targets())[0]!;
       const seen = await backend.observe(target.id);
-      // An action without fences is checked against a fresh observation,
-      // which mints new refs and retires the old ones in CUA; the ref the
-      // model read is rebased to the same element in the fresh observation.
+      // An action without fences is checked against a fresh observation. CUA
+      // mints new tokens for it, but an element that stayed keeps its ref,
+      // which now names the fresh token.
       const fresh = await backend.observe(target.id);
-      expect(fresh.roots[0]!.ref).not.toBe(seen.roots[0]!.ref);
+      expect(fresh.roots[0]!.ref).toBe(seen.roots[0]!.ref);
+      expect(fresh.observationId).not.toBe(seen.observationId);
       await backend.dispatch({
         ...command(fresh),
         action: {
@@ -756,16 +868,22 @@ describe("CUA desktop boundary", () => {
       });
       expect(
         [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
-      ).toMatchObject({
-        element_token: fresh.roots[0]!.ref,
-      });
+      ).toMatchObject({ element_token: expect.stringMatching(/^s[0-9a-f]+:0$/u) });
+      const freshToken = (
+        [...fixture.calls].reverse().find((call) => call.name === "click")!.args as {
+          element_token: string;
+        }
+      ).element_token;
       // A ref action may name the observation its ref came from, even after
       // the window was read again.
       const again = await backend.observe(target.id);
       await backend.dispatch({ ...command(seen), targetId: again.target.id });
-      expect(
-        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
-      ).toMatchObject({ element_token: again.roots[0]!.ref });
+      const againToken = (
+        [...fixture.calls].reverse().find((call) => call.name === "click")!.args as {
+          element_token: string;
+        }
+      ).element_token;
+      expect(againToken).not.toBe(freshToken);
       // Other actions still need the latest observation.
       await expect(
         backend.dispatch({
@@ -773,15 +891,17 @@ describe("CUA desktop boundary", () => {
           action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
         }),
       ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
-      // Once anything in the window changed, even another element or only
-      // the window's title (a Delete button can look the same for a different
-      // row or document), an earlier ref is refused before any input, without
-      // quoting any label.
+      // Another element changing leaves a ref alone.
+      fixture.fieldLabel = "Password again";
+      const sibling = await backend.observe(target.id);
+      expect(sibling.roots[0]!.ref).toBe(seen.roots[0]!.ref);
+      expect(sibling.roots[1]!.ref).not.toBe(seen.roots[1]!.ref);
+      fixture.fieldLabel = "Password";
+      // Once its element changed, or the window's title did (a Delete button
+      // can look the same for another document), an earlier ref is refused
+      // before any input, without quoting any label.
       const clicks = fixture.calls.filter((call) => call.name === "click").length;
       for (const change of [
-        async () => {
-          fixture.fieldLabel = "Password again";
-        },
         async () => {
           fixture.applyLabel = "Apply all";
         },
@@ -2081,7 +2201,9 @@ describe("CUA desktop boundary", () => {
         // A stale token stops the batch: CUA does not act on a lookalike.
         expect(window).toMatchObject({ pid: 42, window_id: 1, refind_stale: false });
         expect(steps.map((step) => step.tool)).toEqual(["click", "type_text", "press_key"]);
-        expect(steps[0]!.args.element_token).toBe(observation.roots[0]!.ref);
+        expect(steps[0]!.args.element_token).toBe(
+          `${observation.observationId.split(":").pop()}:0`,
+        );
         // Earlier actions may have moved the focus: later keys go where it is.
         expect(steps[1]!.args).not.toHaveProperty("element_token");
         expect(steps[1]!.args.text).toBe("hello");

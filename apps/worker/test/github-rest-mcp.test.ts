@@ -6,7 +6,7 @@ import {
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
 } from "@opengeni/runtime/github-rest-mcp";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildGitHubRestMcpForTurn } from "../src/github-rest-mcp";
 
 const appResource: ResourceRef = {

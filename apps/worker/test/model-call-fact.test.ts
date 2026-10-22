@@ -3,7 +3,7 @@ import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as config from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
 
 import {

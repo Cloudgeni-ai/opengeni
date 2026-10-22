@@ -2,7 +2,7 @@
 // (components/settings/workspace-settings-shell.tsx): General, Access,
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
@@ -24,10 +24,10 @@ import {
   useOrganizationWorkspaceAdministration,
   type OrganizationWorkspaceAdministration,
 } from "@/components/settings/organization-workspace-administration";
-import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
+import { VoiceInputPreferenceRow } from "@opengeni/react/app/components/transcription-settings";
 import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DisabledReasonTooltip,
   SettingNavRow,
@@ -40,24 +40,24 @@ import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
-import { orgLabel } from "@/lib/org";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { useOrganizationName } from "@/lib/use-organization-name";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
-} from "@/lib/workspace-deletion";
+} from "@opengeni/react/app/lib/workspace-deletion";
 import {
   canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import { hasAccountPermission } from "@/lib/permissions";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({

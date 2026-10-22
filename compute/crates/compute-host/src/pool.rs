@@ -137,7 +137,8 @@ impl PoolConfig {
 }
 
 /// Where today's templates come from. Fixed for the agent's life; the
-/// files' contents are checked whenever a template is built or used.
+/// files' contents are checked whenever a template is built or used, a
+/// stored image's by the cache that keeps it.
 #[derive(Debug)]
 pub(crate) struct Sources {
     pub kernel: PathBuf,
@@ -167,21 +168,16 @@ impl Sources {
     }
 
     /// The inputs a template of `shape` built now has. Blocks: the first
-    /// time, and after a file changed, it reads the whole file. Fails for
-    /// a shape whose image file is not that image.
+    /// time, and after a file changed, it reads the whole file; never a
+    /// stored image's, which its id names.
     pub fn inputs(&self, shape: Shape) -> io::Result<Inputs> {
-        let files: Vec<FileId> = [&self.kernel, &self.image(shape)]
-            .into_iter()
-            .chain(&self.depends_on)
-            .map(|path| self.content(path))
-            .collect::<io::Result<_>>()?;
-        if let Some(image) = shape.image
-            && files[1].blake3 != image.to_string()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("the file of image {image} holds another image"),
-            ));
+        let mut files = vec![self.content(&self.kernel)?];
+        files.push(match shape.image {
+            Some(image) => self.stored(image)?,
+            None => self.content(&self.base_image)?,
+        });
+        for path in &self.depends_on {
+            files.push(self.content(path)?);
         }
         Ok(Inputs {
             format: FORMAT,
@@ -191,6 +187,20 @@ impl Sources {
             networked: self.networked,
             memory: self.memory.clone(),
             ready_port: self.ready_port,
+        })
+    }
+
+    /// What the host's file of the stored image `image` holds: that image,
+    /// whose id is the hash of its content. The cache checks the file
+    /// against it before anything copies it, and nothing writes to it, so
+    /// reading it again would only repeat that check. Its metadata could
+    /// not stand in for it either: every create marks it used.
+    fn stored(&self, image: ImageId) -> io::Result<FileId> {
+        let path = self.rootfs.path(image);
+        Ok(FileId {
+            len: fs::metadata(&path)?.len(),
+            path,
+            blake3: image.to_string(),
         })
     }
 
@@ -851,6 +861,18 @@ async fn attempt<E: Engine>(
         let ordinal = build.ordinal;
         let memory_mib = build.shape.memory_mib;
         let shape = build.shape;
+        // Held until its disk is copied, as a create holds it: the copy is
+        // of an image the cache checked, and it is not removed meanwhile.
+        let held = match shape.image {
+            Some(image) => Some(
+                sources
+                    .rootfs
+                    .hold(image)
+                    .await
+                    .ok_or_else(|| format!("image {image} is no longer on the host"))?,
+            ),
+            None => None,
+        };
         Arc::new(
             blocking(move || {
                 remove_dir(&paths.dir)?;
@@ -862,6 +884,7 @@ async fn attempt<E: Engine>(
                 fs::write(paths.dir.join(MEMORY), memory_mib.to_string())?;
                 fs::write(paths.dir.join(VCPUS), shape.vcpus.to_string())?;
                 copy_sparse(&sources.image(shape), &paths.disk)?;
+                drop(held);
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
                     isolated.ensure(uid, uid).map_err(io::Error::other)?;

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb, listSessionEventPage, SESSION_EVENT_DB_PAGE_MAX_BYTES } from "../src";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

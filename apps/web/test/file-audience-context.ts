@@ -4,7 +4,7 @@ import {
   type FileAsset,
   type RetainedArtifactReference,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 // The owner's two files (one Only me, one shared), a teammate's shared file,
 // and someone else's Only me file that the API refuses as private.

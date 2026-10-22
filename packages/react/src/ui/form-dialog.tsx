@@ -22,6 +22,9 @@ import { Skeleton } from "./skeleton";
 import type { AnalyticsAction } from "./analytics-actions";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "./api-error";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
 /* ----------------------------------------------------------------------------
    FormFrame, FormDialog, FormPage and FormInline (brief 7.15).
@@ -113,7 +116,9 @@ export interface FormFrameProps {
   /** Close button in the header (dialog and sheet). Default true. */
   showClose?: boolean | undefined;
   /** Back link above the title (page only). */
-  back?: { label: ReactNode; href?: string; onClick?: () => void };
+  back?:
+    | { label: ReactNode; href?: string | undefined; onClick?: (() => void) | undefined }
+    | undefined;
   /** What gets focus when an overlay opens: the first field (default) or Cancel. */
   initialFocus?: "field" | "cancel" | undefined;
   /** The current values are loading (an edit form): fields show as placeholders. */
@@ -671,7 +676,7 @@ export function FormDialog({
   return (
     <DialogPrimitive.Root {...overlay.rootProps}>
       {trigger ? <DialogPrimitive.Trigger asChild>{trigger}</DialogPrimitive.Trigger> : null}
-      <DialogPrimitive.Portal>
+      <DialogContainedPortal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-[120ms] starting:opacity-0" />
         <DialogPrimitive.Content
           {...overlay.contentProps}
@@ -694,7 +699,7 @@ export function FormDialog({
             </SectionFrameReset>
           </FormChromeContext.Provider>
         </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
+      </DialogContainedPortal>
     </DialogPrimitive.Root>
   );
 }

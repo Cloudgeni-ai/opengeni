@@ -8,7 +8,7 @@ import {
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { claimTurnAttempt, type ClaimTurnDeps } from "../src/activities/agent-turn/claim";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {

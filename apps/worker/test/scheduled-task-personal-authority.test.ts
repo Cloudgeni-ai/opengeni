@@ -60,10 +60,10 @@ import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legac
 import {
   acquireSharedTestDatabase,
   acquireBlankTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
@@ -1915,6 +1915,9 @@ describe("scheduled task personal MCP authority", () => {
       // 0873 patches the account-binding fence as rewritten by withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0873_mcp_binding_delegation_revocation.sql')`;
+      // The list invalidation triggers read visibility from withheld 0501.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0888_session_list_invalidation.sql')`;
       // These learning-scope repairs rewrite routines installed by withheld
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.

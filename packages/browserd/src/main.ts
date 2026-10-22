@@ -8,9 +8,8 @@ import {
   redactInteractionDriverMessage,
 } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
-import { resolvePinnedAgentBrowserBinary } from "./binary";
 import { resolvePinnedHeadlessShell } from "./headless-shell";
-import { resolvePinnedLightpandaBinary } from "./lightpanda-binary";
+import { lazyPinnedLightpandaBinary } from "./lightpanda-binary";
 import {
   ExistingComputerEnvironmentAllocator,
   LinuxVirtualComputerEnvironmentAllocator,
@@ -37,11 +36,8 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   ) {
     throw new Error("CUA requires an isolated Linux seat or an existing macOS/Windows desktop");
   }
-  const agentBrowserBinary = config.agentBrowserBinaryPath
-    ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })
-    : undefined;
   const lightpandaBinary = config.lightpandaBinaryPath
-    ? await resolvePinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
+    ? lazyPinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
     : undefined;
   const headlessShell = config.headlessShellDirectory
     ? await resolvePinnedHeadlessShell(config.headlessShellDirectory)
@@ -52,12 +48,10 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       : undefined;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: config.rootDirectory,
-    ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
     ephemeralContextPoolEnabled: environment.OPENGENI_BROWSERD_EPHEMERAL_CONTEXT_POOL === "1",
     networkIsolation: environment.OPENGENI_BROWSERD_NETWORK_ISOLATION !== "off",
     ...(headlessShell ? { headlessShell } : {}),
-    ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
     ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });
   let computerSupervisor: ComputerSupervisor | undefined;
@@ -176,14 +170,12 @@ function boundedDiagnostic(value: string, maxBytes: number): string {
 
 type BrowserdConfig = {
   rootDirectory: string;
-  socketRootDirectory?: string;
   adminToken: string;
   hostname: string;
   port: number;
   maxSessions: number;
   allowedOrigins: string[];
   browserExecutablePath?: string;
-  agentBrowserBinaryPath?: string;
   lightpandaBinaryPath?: string;
   headlessShellDirectory?: string;
   computerNativeBinaryPath?: string;
@@ -198,9 +190,6 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
   return {
     rootDirectory,
     ...computerRuntimeConfig(environment),
-    ...(environment.OPENGENI_BROWSERD_SOCKET_ROOT
-      ? { socketRootDirectory: resolve(environment.OPENGENI_BROWSERD_SOCKET_ROOT) }
-      : {}),
     adminToken: await readOwnerOnlyToken(tokenFile),
     hostname: environment.OPENGENI_BROWSERD_HOSTNAME ?? "0.0.0.0",
     port: environmentInteger(
@@ -227,9 +216,6 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
     allowedOrigins: commaSeparated(environment.OPENGENI_BROWSERD_ALLOWED_ORIGINS),
     ...(environment.OPENGENI_BROWSERD_BROWSER_EXECUTABLE
       ? { browserExecutablePath: resolve(environment.OPENGENI_BROWSERD_BROWSER_EXECUTABLE) }
-      : {}),
-    ...(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-      ? { agentBrowserBinaryPath: resolve(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY) }
       : {}),
     ...(environment.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
       ? { headlessShellDirectory: resolve(environment.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY) }

@@ -1,5 +1,5 @@
 import type { InboxItem } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 const at = new Date(Date.now() - 12 * 60_000).toISOString();
 const base = {

@@ -8,7 +8,7 @@ import {
   clearSharedQueries,
   invalidateSharedQueries,
   retainSharedQueries,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 const getWorkspaceModelAccessPolicy = mock(
   async (_workspaceId: string): Promise<WorkspaceModelAccessPolicy> => ({
@@ -42,7 +42,7 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => context,
 }));
 
@@ -75,7 +75,8 @@ const {
   usableModelCount,
   useModelAccessPolicy,
 } = await import("./model-access-policy");
-const { useWorkspaceModelCatalog } = await import("@/lib/use-workspace-model-catalog");
+const { useWorkspaceModelCatalog } =
+  await import("@opengeni/react/app/lib/use-workspace-model-catalog");
 
 /** The Defaults rows of the Models page that read the policy. */
 function DefaultsRows({ canManage = true }: { canManage?: boolean }) {

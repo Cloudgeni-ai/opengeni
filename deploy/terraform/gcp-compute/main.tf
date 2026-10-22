@@ -280,24 +280,30 @@ resource "google_compute_instance_template" "host" {
   }
 
   metadata = {
-    block-project-ssh-keys = length(var.ssh_source_ranges) == 0 ? "true" : "false"
-    enable-oslogin         = "TRUE"
-    compute-bundle-url     = var.host_bundle.url
-    compute-bundle-sha256  = var.host_bundle.sha256
-    compute-control        = var.control_url
-    compute-store          = local.store
-    compute-base-image     = var.base_image_ref
-    compute-host-authority = "${tls_self_signed_cert.authority.cert_pem}${var.previous_host_authority_pem}"
-    compute-memory-profile = local.memory_profile
-    compute-huge-pages-pct = tostring(var.huge_pages_percent)
-    compute-host-args      = var.host_args
-    compute-prelude        = var.host_startup_prelude
-    compute-advertise      = var.advertise_interface
-    startup-script         = file("${path.module}/host-startup.sh")
+    block-project-ssh-keys   = length(var.ssh_source_ranges) == 0 ? "true" : "false"
+    enable-oslogin           = "TRUE"
+    compute-bundle-url       = var.host_bundle.url
+    compute-bundle-sha256    = var.host_bundle.sha256
+    compute-control          = var.control_url
+    compute-store            = local.store
+    compute-base-image       = var.base_image_ref
+    compute-host-authority   = "${tls_self_signed_cert.authority.cert_pem}${var.previous_host_authority_pem}"
+    compute-memory-profile   = local.memory_profile
+    compute-huge-pages-pct   = tostring(var.huge_pages_percent)
+    compute-host-args        = var.host_args
+    compute-prelude          = var.host_startup_prelude
+    compute-advertise        = var.advertise_interface
+    compute-advertise-public = var.advertise_public_address ? "true" : "false"
+    startup-script           = file("${path.module}/host-startup.sh")
   }
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = !var.advertise_public_address || (var.assign_external_ip && var.advertise_interface == "")
+      error_message = "advertise_public_address needs assign_external_ip, and an empty advertise_interface."
+    }
   }
 }
 

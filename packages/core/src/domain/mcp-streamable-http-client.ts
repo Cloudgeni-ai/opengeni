@@ -42,6 +42,52 @@ export async function connectMcpStreamableHttpClient(
   }
 }
 
+/**
+ * Run `use` against a connected client, then close it. A server can answer the
+ * 2026-07-28 `server/discover` probe yet send 2025-era results without the
+ * required `resultType`, so every result fails validation. Such a server is a
+ * 2025-era server in practice: reconnect it over the 2025 handshake and run
+ * `use` once more instead of losing its results.
+ */
+export async function withMcpStreamableHttpClient<T>(
+  input: McpStreamableHttpConnectInput,
+  use: (client: McpStreamableHttpClient) => Promise<T>,
+): Promise<T> {
+  let client = await connectMcpStreamableHttpClient(input);
+  try {
+    try {
+      return await use(client);
+    } catch (error) {
+      if (!isModernEraResultMismatch(client, error)) throw error;
+    }
+    await client.close().catch(() => undefined);
+    try {
+      client = await connectOnce(input, "legacy");
+    } catch (error) {
+      throw legacyMcpClientError(error);
+    }
+    return await use(client);
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+export function isModernEraResultMismatch(
+  client: McpStreamableHttpClient,
+  error: unknown,
+): boolean {
+  try {
+    return (
+      client.getProtocolEra() === "modern" &&
+      SdkError.isInstance(error) &&
+      error.code === SdkErrorCode.InvalidResult &&
+      (error.data as { violation?: unknown } | undefined)?.violation === "missing-resultType"
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function connectOnce(
   input: McpStreamableHttpConnectInput,
   mode: "auto" | "legacy",

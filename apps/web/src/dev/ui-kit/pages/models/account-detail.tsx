@@ -30,7 +30,7 @@ import {
   DetailPageBody,
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,

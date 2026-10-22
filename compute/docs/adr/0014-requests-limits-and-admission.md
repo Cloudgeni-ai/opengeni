@@ -25,6 +25,33 @@ pick a VM.
   object storage before it downloads anything, through its restore. On an
   overdrawn budget (after a restart with less) nothing more wakes, not even
   a resume that takes nothing more.
+- A create, a claim of a ready sandbox and an adoption from object storage
+  are admitted as the first wake they lead to: the host says yes only while
+  that wake would fit now (memory request, processors, disk, and the local
+  copy for an adoption), and books it from that yes until the sandbox
+  first runs, it breaks, or two minutes pass without a wake. A burst of
+  creates therefore never takes more sandboxes than the host can wake; the
+  rest are refused with `host_full` at once and placed elsewhere
+  ([15](0015-placement-and-moves-between-hosts.md)).
+  - The deadline of that booking is in the sandbox's record and the record
+    drops it only once a wake of the sandbox succeeded, so an agent that
+    restarts books each first wake still due again before it admits
+    anything else, including one whose first try failed.
+  - An adoption is first checked without its copy's disk, since only
+    claiming the copy shows how long that is, never by this host's base
+    image. Once claimed, it is checked with the copy's disk and refused with
+    `host_full` if that does not fit, before anything of it is made on the
+    host, leaving the store's copy for another host. Its files are made
+    only after that check and its record last, so an agent that restarts
+    meanwhile finds no adopted sandbox, at most files it tidies, and a
+    repeat of the adopt meanwhile is answered busy, never done. A create or
+    adopt that fails after making files or a network deletes them; what it
+    cannot delete keeps its id blocked and its ordinal taken, and removing
+    the id again retries, as after a removal that stopped part way.
+  - A claimed ready sandbox's VM already holds memory. Its first wake books
+    that memory up to the request, and only what the VM holds beyond the
+    request stays counted apart until the sandbox joins the core, so claims
+    that overlap never count one VM twice.
 - Admission in create, wake and connect is arithmetic on numbers held in
   memory (microseconds). Inside a request the only relief is instant: ending
   idle VMs that already have a valid saved copy (milliseconds, no I/O). If
@@ -103,8 +130,13 @@ pick a VM.
   what the group gets: above the processors it overcommits them on
   purpose, requests then hold only in proportion, and the agent warns.
   Hosts
-  report their capacity as it is now and what is free; placement skips a
-  host without
+  report their capacity as it is now, what is free, and what ending idle
+  VM processes whose state is saved, and ready spare VMs, frees at once,
+  which admission counts for a wake (ADR 4). Placement and host groups
+  count both as free, so a saved idle sandbox holds no room; placement
+  prefers a host with free memory, which leaves those VMs in memory,
+  waking fastest, until a wake needs their room. Placement skips a host
+  without
   room for a sandbox's request, and a host group grows for whichever of
   memory and processor time runs short first, or when its hosts have too
   few rooms for the largest sandbox (its memory and processor time on one
@@ -306,9 +338,8 @@ pick a VM.
   A sandbox's bound comes from its own disk's length, recorded when its
   disk is made, so a base image that changes later does not change what
   older sandboxes book; a new one before its disk exists uses today's
-  base image. A record written before lengths were kept learns its length
-  on the next start, before anything of it is admitted, from its local
-  disk or the store's copy, and is blocked if neither can say. An awake VM's
+  base image. A sandbox adopted from the store keeps the length of the
+  disk in the copy it claims. An awake VM's
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve
   covers. A wake that cannot book what it needs

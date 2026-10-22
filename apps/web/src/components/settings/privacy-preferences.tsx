@@ -1,8 +1,11 @@
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
-import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
-import type { ClientConfig } from "@/types";
+import {
+  analyticsPreferencesAvailable,
+  openAnalyticsPreferences,
+} from "@opengeni/react/app/lib/analytics-consent";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 /**
  * Privacy preferences, in Your account. It only exists on a deployment that

@@ -76,6 +76,7 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
+import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-discovery";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
@@ -778,10 +779,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         connectorActionPolicy,
         attemptConnectorActionBindings,
         ...(approvedToolCallId ? { approvedToolCallId } : {}),
-        // LIVE by-reference connector namespaces (fills during this turn's
-        // codex_apps tools/list): the codex tool_search description reads it per
-        // model call so the model sees the account's real connected sources.
+        // Legacy connector metadata remains available to non-progressive paths.
+        // Progressive discovery reads the authorized pool, never a changing
+        // source directory in its first-request control schemas.
         codexConnectorNamespaces: preparedTools.codexConnectorNamespaces,
+        // Best-effort MCP servers whose tools are missing this turn, and why;
+        // tool discovery reports them in its results.
+        unavailableMcpServers: preparedTools.unavailableMcpServers,
         // Resolved-model routing + gating (legacy defaults when null). The model
         // is passed as the model *string* (agent.model = runSettings.openaiModel),
         // NOT a Model instance: an instance only survives the in-process
@@ -800,6 +804,25 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
+        toolSearchDecisionModel: configuredToolDecisionModel({
+          settings: runSettings,
+          onUnavailable: () =>
+            observability.warn(
+              "Configured decision model is unavailable; using lexical tool discovery",
+            ),
+          recordUsage: (modelId, usage, requestId) =>
+            recordToolDecisionUsage({
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              turnAttemptId: input.attemptId,
+              modelId,
+              usage,
+              requestId,
+            }),
+        }),
         ...(eventing.toolPreparationReady
           ? {
               toolPreparationReady: eventing.toolPreparationReady,

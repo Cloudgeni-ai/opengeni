@@ -1,48 +1,45 @@
+/* The task pane around the shared Opengeni session app. The app brings its own
+   design system (the published, scoped stylesheet); this file only styles the
+   pane's own screens, the workbook status strip and the account row. */
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
-body {
-  background: var(--og-color-bg, #fff);
-  color: var(--og-color-fg, #1b1b1f);
-  font-family:
-    "Inter Variable",
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+.pane-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--og-color-bg);
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-.pane {
+#root {
   display: flex;
   flex-direction: column;
-  height: 100%;
   min-height: 0;
 }
 
 .pane-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--og-color-border, #e6e6ea);
-  font-size: 12px;
-  color: var(--og-color-fg-muted, #6b6b75);
-  min-height: 28px;
-}
-
-.pane-bar-status {
-  display: flex;
-  align-items: center;
   gap: 6px;
-  min-width: 0;
-  flex: 1;
+  min-height: 28px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--og-color-border);
+  font-size: 12px;
+  color: var(--og-color-fg-muted);
+  flex: none;
 }
 
-.pane-bar-status span:last-child {
+.pane-bar-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -53,20 +50,20 @@ body {
   height: 7px;
   border-radius: 50%;
   flex: none;
-  background: var(--og-color-status-idle, #9a9aa3);
+  background: var(--og-color-status-idle);
 }
 
 .pane-dot[data-state="connected"] {
-  background: var(--og-color-status-running, #2f9e44);
+  background: var(--og-color-status-running);
 }
 
 .pane-dot[data-state="busy"] {
-  background: var(--og-color-accent, #6d5efc);
+  background: var(--og-color-accent);
   animation: pane-pulse 1s ease-in-out infinite;
 }
 
 .pane-dot[data-state="offline"] {
-  background: var(--og-color-status-failed, #d9480f);
+  background: var(--og-color-status-failed);
 }
 
 @keyframes pane-pulse {
@@ -81,29 +78,46 @@ body {
   }
 }
 
-.pane-bar select,
-.pane-bar button {
+.pane-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--og-color-border);
+  font-size: 13px;
+  color: var(--og-color-fg-muted);
+}
+
+.pane-account-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-account select {
+  min-width: 0;
+  flex: 1;
+}
+
+.pane-account select,
+.pane-account button {
   font: inherit;
   color: inherit;
   background: transparent;
-  border: 1px solid transparent;
+  border: 1px solid var(--og-color-border);
   border-radius: 6px;
-  padding: 2px 6px;
+  padding: 4px 8px;
   cursor: pointer;
-  max-width: 45%;
 }
 
-.pane-bar select:hover,
-.pane-bar button:hover,
-.pane-bar select:focus-visible,
-.pane-bar button:focus-visible {
-  border-color: var(--og-color-border, #e6e6ea);
-  color: var(--og-color-fg, #1b1b1f);
-}
-
-.pane-chat {
-  flex: 1;
-  min-height: 0;
+.pane-account select:hover,
+.pane-account button:hover,
+.pane-account select:focus-visible,
+.pane-account button:focus-visible {
+  border-color: var(--og-color-border-strong);
+  color: var(--og-color-fg);
 }
 
 .pane-center {
@@ -122,7 +136,7 @@ body {
   font-size: 18px;
   font-weight: 600;
   margin: 0;
-  color: var(--og-color-fg, #1b1b1f);
+  color: var(--og-color-fg);
 }
 
 .pane-center p {
@@ -130,7 +144,7 @@ body {
   line-height: 1.5;
   margin: 0;
   max-width: 260px;
-  color: var(--og-color-fg-muted, #6b6b75);
+  color: var(--og-color-fg-muted);
 }
 
 .pane-primary {
@@ -140,13 +154,13 @@ body {
   padding: 8px 18px;
   border-radius: 8px;
   border: 1px solid var(--og-color-primary-border, transparent);
-  background: var(--og-color-primary, #1b1b1f);
-  color: var(--og-color-primary-fg, #fff);
+  background: var(--og-color-primary);
+  color: var(--og-color-primary-fg);
   cursor: pointer;
 }
 
 .pane-primary:hover {
-  background: var(--og-color-primary-hover, #333);
+  background: var(--og-color-primary-hover);
 }
 
 .pane-primary:disabled {
@@ -155,5 +169,5 @@ body {
 }
 
 .pane-error {
-  color: var(--og-color-danger, #c92a2a) !important;
+  color: var(--og-color-danger) !important;
 }

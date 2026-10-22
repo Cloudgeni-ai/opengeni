@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { runCommand } from "@opengeni/testing";
+import { runCommand } from "@opengeni/testing/process";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 

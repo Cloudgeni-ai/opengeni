@@ -4,7 +4,7 @@ import { CapabilityCatalogItem, type PluginDiscoveryItem } from "@opengeni/contr
 import { ConnectionCatalog, ConnectionLogo, SkillDiscovery } from "@opengeni/react/connect";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { PluginDiscovery } from "../src/components/capabilities/plugin-discovery";
-import { CapabilityDetailSheet } from "../src/components/capabilities/capability-detail-sheet";
+import { CapabilityDetailSheet } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import "@opengeni/react/connect.css";
 import "../src/styles.css";
 

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { buildOpenGeniAgent, persistentAgentInstructionInspectionFor } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
 
 test("ordinary integration guidance is discoverable on every compute shape without loading its body", () => {

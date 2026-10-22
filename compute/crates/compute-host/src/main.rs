@@ -710,14 +710,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let pool = pool_config(&args);
     let threads = args.threads();
     tracing::info!(?threads, "thread counts");
-    let memory_profile = if let Some(profile) = args.memory_profile {
-        profile
-    } else {
-        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
-        let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
-        tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
-        profile
-    };
+    let memory_profile = args.memory_profile.map_or_else(chosen_memory_profile, Ok)?;
     let sample_every = Duration::from_secs(1);
     let mut policy = host_policy(&args, memory_profile, sample_every)?;
     let share = processor_share(&args, &policy);
@@ -745,13 +738,15 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         memory_profile: memory_profile.to_string(),
         cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
         memory_bytes: budget,
-        cpu_millis: policy.cpu_budget,
+        cpu_millis: policy
+            .cpu_budget
+            .context("a serving host guarantees processor time")?,
     })?;
     let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
     let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
-    let observer = args.observe.observer(&about)?;
+    let observer = args.observe.observer(&about, fleet.as_ref())?;
     let canary = args.observe.canary(&args.root, args.store.is_some())?;
     // The canary makes sandboxes of its own, which a fleet's service would
     // not know of: the host would drop them when it registers.
@@ -814,6 +809,15 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .await
 }
 
+/// The memory profile the CPU's hypervisor flag calls for, when the
+/// operator names none.
+fn chosen_memory_profile() -> anyhow::Result<MemoryProfile> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+    let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+    tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+    Ok(profile)
+}
+
 /// Runs the agent on the store `store` names: none, a bucket or a
 /// directory. A host in a fleet needs a bucket, and archives there only
 /// while it holds its lease.
@@ -834,12 +838,9 @@ async fn run_with_store(
         return run_agent(config, engine, NoStore, socket, canary, None).await;
     };
     if let Some(chunked) = Chunked::from_url(&store)? {
-        let chunked = chunked.with_compress_threads(threads.compress);
-        chunked
-            .refuse_unreadable()
-            .await
-            .with_context(|| format!("opening {store}"))?;
-        let chunked = chunked.with_watch(Arc::new(StoreAlarms(config.observer.clone())));
+        let chunked = chunked
+            .with_compress_threads(threads.compress)
+            .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
         if let Some((fleet, prepared)) = fleet {
             let leased = Leased::new(chunked, prepared.gate.clone());
             return run_agent(

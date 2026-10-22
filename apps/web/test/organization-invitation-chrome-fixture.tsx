@@ -25,8 +25,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@opengeni/react/ui/tooltip";
-import { AppearanceProvider, useAppearance } from "../src/lib/appearance";
-import type { OrganizationInvitation } from "../src/types";
+import { AppearanceProvider, useAppearance } from "@opengeni/react/app/lib/appearance";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const displayName = "Ada Lovelace";

@@ -1,5 +1,5 @@
 import type { CadencePickerVariant } from "@opengeni/react/ui/cadence-picker";
-import type { DestructiveConfirmVariant } from "@/components/ui/destructive-confirm";
+import type { DestructiveConfirmVariant } from "@opengeni/react/app/components/ui/destructive-confirm";
 import type { DisclosureVariant } from "@opengeni/react/ui/disclosure";
 import type { EmptyStateVariant } from "@opengeni/react/ui/empty-state";
 import type { RowListVariant } from "@opengeni/react/ui/list-row";

@@ -24,14 +24,14 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
-import { useAppContext, type AppContextValue } from "@/context";
+import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 /** What failed, and the error behind it: the UI shows advice, never the raw API string. */
 type SkillsFailure = { title: string; cause: unknown };

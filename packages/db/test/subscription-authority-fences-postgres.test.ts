@@ -11,10 +11,10 @@ import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../../../apps/worker/src/activities/scheduled-tasks";

@@ -1,7 +1,7 @@
 import type { KnowledgeEntryListResponse, KnowledgeIndexStatus } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import { useAppContext } from "@/context";
-import { hasAccountPermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 
 const labels: Record<KnowledgeIndexStatus, string> = {
   saved: "Saved · indexing not started",

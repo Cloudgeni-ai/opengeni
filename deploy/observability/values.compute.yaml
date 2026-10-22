@@ -1,0 +1,22 @@
+# Opt-in metrics of Opengeni compute's hosts. The compute control service
+# passes each host's metrics on to Prometheus's OTLP receiver
+# (computeControl.metrics.hostsTo in the application chart, such as
+# http://opengeni-observability-kub-prometheus.observability:9090/api/v1/otlp/v1/metrics),
+# and hosts send them over their mutual TLS with the service, so they need no
+# route or credentials of their own to Prometheus.
+#
+# The receiver takes writes from anything that reaches Prometheus's Service,
+# so admit only the control service there where network policy is enforced.
+# A host's series carry its name in the fleet as host_name, the label the
+# control service's own compute_fleet_host_info carries, which scopes each
+# host to its Opengeni release in the chart's alerts and the Compute
+# dashboard and gives its zone, memory profile and CPU template. The service
+# passes on no other resource attributes, so a host's series depend only on
+# its name.
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      enableOTLPReceiver: true
+      otlp:
+        promoteResourceAttributes:
+          - host.name

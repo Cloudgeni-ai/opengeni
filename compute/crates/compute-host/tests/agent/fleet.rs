@@ -9,19 +9,19 @@ use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 
-use compute_core::{HostPolicy, Level, Priority};
+use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
-    ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
+    DiskStatus, ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{
-    Archive, Claimed, Directory, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch, Receipt,
-    SavedFiles, Stamp, Store,
+    Archive, Claimed, Directory, DiskGauge, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch,
+    Receipt, SavedFiles, Stamp, Store,
 };
 use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
 
@@ -128,6 +128,37 @@ async fn a_sandbox_handed_off_by_one_host_wakes_on_another_with_its_files_and_pr
         ["kept", "on-disk"],
         "programs and files moved with it"
     );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopted sandbox's record keeps the length of the disk it was handed
+/// off with, so what its wake books is its own disk's, never the adopting
+/// host's base image, however much shorter that is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_sandbox_keeps_the_length_of_the_disk_it_was_handed_off_with() {
+    const GROWN: u64 = 1 << 20;
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(4);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["write on-disk"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(one.sandbox_dir(sandbox).join("root/disk.ext4"))
+        .unwrap()
+        .set_len(GROWN)
+        .unwrap();
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let base = std::fs::metadata(two.root.join("base.img")).unwrap().len();
+    assert!(base < GROWN, "the adopting host's base image is shorter");
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], GROWN);
+    let woken = two.wake(sandbox).await;
+    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], GROWN);
     one.assert_clean();
     two.assert_clean();
 }
@@ -391,6 +422,166 @@ async fn an_adopt_without_a_stored_copy_leaves_nothing() {
     );
     assert_eq!(one.status().await.sandboxes, Vec::new());
     assert!(!one.sandbox_dir(sandbox).exists());
+}
+
+/// Has the agent of `lab` read `bytes` free on its disk, and inodes to
+/// spare, then tells what its disk book holds.
+async fn read_disk(lab: &Lab, gauge: &DiskGauge, bytes: u64) -> DiskStatus {
+    gauge.give(DiskSpace {
+        bytes,
+        inodes: 1 << 40,
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gauge.taken() {
+        assert!(Instant::now() < deadline, "no sample took the reading");
+        sleep(Duration::from_millis(5)).await;
+    }
+    lab.status().await.disk.expect("a disk policy")
+}
+
+/// Two hosts sharing a store, the second of which reads its free disk
+/// from the gauge returned, and a sandbox of the first's per id, written
+/// to, paused and handed off through the store.
+async fn handed_to_a_gauged_host(sandboxes: &[Id]) -> (Lab, Lab, DiskGauge, PathBuf) {
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    let one = Lab::start_stored(a, Arc::default(), Directory::new(&shelf)).await;
+    let gauge = DiskGauge::default();
+    let reading = gauge.clone();
+    let two = Lab::start_stored_configured(
+        Lab::root(),
+        Arc::default(),
+        Directory::new(&shelf),
+        move |config| {
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+        },
+    )
+    .await;
+    for &sandbox in sandboxes {
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &["write on-disk"]).await;
+        assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+        one.wait_level(sandbox, LevelName::Paused).await;
+    }
+    (one, two, gauge, shelf)
+}
+
+/// An adopt books the first wake without the copy's disk before it claims
+/// the store's copy, then books it again with the copy's own disk: a copy
+/// this host has no disk for is refused there, before anything of it is
+/// made here, leaving the store's copy whole for another host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_the_copy() {
+    const GROWN: u64 = 64 << 20;
+    const PLENTY: u64 = 1 << 50;
+    let (small, grown) = (id(1), id(2));
+    let (one, two, gauge, shelf) = handed_to_a_gauged_host(&[small, grown]).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(one.sandbox_dir(grown).join("root/disk.ext4"))
+        .unwrap()
+        .set_len(GROWN)
+        .unwrap();
+    for sandbox in [small, grown] {
+        assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    }
+
+    // What the first wake of the small copy books.
+    let empty = read_disk(&two, &gauge, PLENTY).await.free;
+    assert_eq!(adopt(&two, small, 2).await, Reply::Done);
+    let first = empty - two.status().await.disk.unwrap().free;
+    assert!(first > 0);
+    // Room for one more such wake, but not for the grown disk's.
+    let booked = PLENTY - empty + first;
+    let disk = read_disk(&two, &gauge, booked + first + (16 << 20)).await;
+    assert_eq!(disk.free, first + (16 << 20));
+
+    let reply = adopt(&two, grown, 2).await;
+    assert_eq!(code(&reply), Some(ErrorCode::HostFull), "{reply:?}");
+    assert!(
+        !two.sandbox_dir(grown).exists(),
+        "the refused adopt made files"
+    );
+    let status = two.status().await;
+    assert!(status.sandboxes.iter().all(|sandbox| sandbox.id != grown));
+    assert!(status.blocked.is_empty(), "{:?}", status.blocked);
+    assert_eq!(
+        status.disk.unwrap().free,
+        first + (16 << 20),
+        "its booking ended"
+    );
+    assert!(shelf.join(grown.to_string()).exists(), "the store keeps it");
+
+    // With room, a later ownership adopts the very copy.
+    read_disk(&two, &gauge, PLENTY).await;
+    assert_eq!(adopt(&two, grown, 3).await, Reply::Done);
+    assert_eq!(two.record(grown)["allocation"]["disk_bytes"], GROWN);
+    let files = two.run(grown, &["disk"]).await;
+    assert_eq!(
+        files[0].trim_end_matches('\0'),
+        "on-disk",
+        "its files moved"
+    );
+    assert_eq!(two.run(small, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt never takes over or deletes a directory already there for its
+/// sandbox, which belongs to a sandbox this agent does not know: it is
+/// refused as existing and leaves the directory as it was, and the same
+/// adopt goes through once the directory is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_leaves_an_unknown_directory_of_its_sandbox_alone() {
+    let sandbox = id(4);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    read_disk(&two, &gauge, 1 << 40).await;
+    let unknown = two.sandbox_dir(sandbox);
+    std::fs::create_dir_all(&unknown).unwrap();
+    std::fs::write(unknown.join("theirs"), b"kept").unwrap();
+
+    let reply = adopt(&two, sandbox, 2).await;
+    assert_eq!(code(&reply), Some(ErrorCode::Exists), "{reply:?}");
+    assert_eq!(std::fs::read(unknown.join("theirs")).unwrap(), b"kept");
+    let status = two.status().await;
+    assert!(status.sandboxes.is_empty() && status.blocked.is_empty());
+
+    std::fs::remove_dir_all(&unknown).unwrap();
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt judges disk by the store's copy alone, never by the adopting
+/// host's base image: a host with room for the copy's first wake but not
+/// for one of a disk as long as its base image, far longer than the
+/// copy's, takes the copy and books only what it needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_judges_disk_by_the_copy_never_by_the_base_image() {
+    const LONG: u64 = 8 << 30;
+    let sandbox = id(3);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(two.root.join("base.img"))
+        .unwrap()
+        .set_len(LONG)
+        .unwrap();
+
+    let free = read_disk(&two, &gauge, LONG / 2).await.free;
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let booked = free - two.status().await.disk.unwrap().free;
+    assert!(booked > 0 && booked < LONG / 4, "booked {booked}");
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
 }
 
 /// Once its lease runs out a host's VMs are frozen by its guard, so the

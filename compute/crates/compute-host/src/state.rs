@@ -96,7 +96,7 @@ pub(crate) struct Allocation {
     pub link: Option<LinkAddresses>,
     /// Its disk's length, from when its first files were written. A disk
     /// keeps its length, in object storage too, whatever base image the
-    /// host has since; unknown for a record written before it was kept.
+    /// host has since; unknown only until then, before it is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_bytes: Option<u64>,
 }
@@ -137,10 +137,8 @@ pub(crate) struct Record {
     /// The store holds a copy matching the local files.
     pub archived: bool,
     /// Removal has begun; it finishes even across a restart.
-    #[serde(default)]
     pub removing: bool,
     /// Whether its guest knows it is this sandbox.
-    #[serde(default)]
     pub identity: Identity,
     /// Its last activity, in milliseconds since the Unix epoch, as of the
     /// record's latest write, so a restart does not reset how long it has
@@ -156,20 +154,23 @@ pub(crate) struct Record {
     /// ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
     /// The store refuses this host's writes once a later one holds it. A
     /// host outside a fleet keeps the first.
-    #[serde(default = "first_owner")]
     pub owner_epoch: u64,
     /// The number of the last save this owner began archiving, recorded
     /// before it began, so no two archives of one owner share a number.
-    #[serde(default)]
     pub saves: u64,
     /// Its removal leaves the store's copy, which belongs to a later owner
     /// or was handed on: the host drops only what it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
-}
-
-fn first_owner() -> u64 {
-    OwnerEpoch::FIRST.0
+    /// Until when the host keeps the room of its first wake booked, in
+    /// milliseconds since the Unix epoch: set as it is created, claimed
+    /// or adopted here, so an agent that starts before then and finds it
+    /// not running books that wake again (see
+    /// [`compute_core::Input::Creating`]). Dropped only once a wake
+    /// succeeded, so a first wake that fails and is tried again keeps its
+    /// room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_wake_by_ms: Option<u64>,
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -210,6 +211,7 @@ impl Record {
             owner_epoch: OwnerEpoch::FIRST.0,
             saves: 0,
             handed_off: false,
+            first_wake_by_ms: None,
         }
     }
 
@@ -278,11 +280,11 @@ pub(crate) struct Change {
     backed_up_ms: Option<u64>,
     next_save: bool,
     handed_off: bool,
+    woke: bool,
     owner: Option<OwnerEpoch>,
     /// The agent link the control service sent last, `None` inside for none;
     /// boxed, as most writes leave it.
     link: Option<Box<Option<compute_protocol::link::AgentLink>>>,
-    disk_bytes: Option<u64>,
 }
 
 impl Change {
@@ -342,6 +344,13 @@ impl Change {
         self
     }
 
+    /// A wake of it succeeded: its first wake is done, so no agent books
+    /// that wake's room again.
+    pub fn woke(mut self) -> Self {
+        self.woke = true;
+        self
+    }
+
     /// This host holds the sandbox under owner epoch `owner` from now on.
     /// Its save numbers go on from where they were.
     pub fn owner(mut self, owner: OwnerEpoch) -> Self {
@@ -361,13 +370,6 @@ impl Change {
     pub fn handed_off(mut self) -> Self {
         self.handed_off = true;
         self.removing = true;
-        self
-    }
-
-    /// Records the disk's length where the record does not know it yet,
-    /// as for one written before it was kept; a known length never changes.
-    pub fn disk_bytes(mut self, bytes: u64) -> Self {
-        self.disk_bytes = Some(bytes);
         self
     }
 
@@ -398,14 +400,14 @@ impl Change {
             record.saves += 1;
         }
         record.handed_off |= self.handed_off;
+        if self.woke {
+            record.first_wake_by_ms = None;
+        }
         if let Some(owner) = self.owner {
             record.owner_epoch = owner.0;
         }
         if let Some(link) = self.link {
             record.config.link = *link;
-        }
-        if let Some(bytes) = self.disk_bytes {
-            record.allocation.disk_bytes.get_or_insert(bytes);
         }
     }
 }
@@ -917,6 +919,7 @@ impl Records {
         id: Id,
         config: SandboxConfig,
         owner: OwnerEpoch,
+        first_wake_by_ms: u64,
     ) -> Result<Record, StateError> {
         let entry = {
             let mut entries = locked(&self.entries);
@@ -958,6 +961,7 @@ impl Records {
                     owner_epoch: owner.0,
                     saves: 0,
                     handed_off: false,
+                    first_wake_by_ms: Some(first_wake_by_ms),
                     ..current
                 };
                 slot.write(Some(next.clone()))?;

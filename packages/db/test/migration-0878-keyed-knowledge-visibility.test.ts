@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
 import { readFile } from "node:fs/promises";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   listingDatabase,
   readListing,
@@ -153,7 +153,7 @@ test("generic recursive plans examine exact dependency rows rather than scanning
     JOIN knowledge_entry_links l ON l.account_id=e.account_id AND l.entry_id=e.id AND l.revision_id=e.published_revision_id
     WHERE e.account_id=${fixture.accountId} AND l.relation='evidence' LIMIT 1`;
   const [source] = await shared.admin`SELECT prosrc,pg_get_userbyid(proowner) AS owner FROM pg_proc
-    WHERE oid='knowledge_revision_visible(uuid,uuid,uuid,boolean)'::regprocedure`;
+    WHERE oid='knowledge_revisions_visible(uuid,uuid[],uuid[],boolean)'::regprocedure`;
   await shared.admin.begin(async (tx) => {
     await tx`SET LOCAL ROLE ${tx(source!.owner as string)}`;
     await tx`SELECT set_config('opengeni.account_id',${fixture.accountId},true),set_config('opengeni.workspace_id',${fixture.workspaceId},true),
@@ -161,13 +161,13 @@ test("generic recursive plans examine exact dependency rows rather than scanning
     await tx`SET LOCAL plan_cache_mode = force_generic_plan`;
     const body = (source!.prosrc as string)
       .replace(/\bp_account\b/g, "$1")
-      .replace(/\bp_entry\b/g, "$2")
-      .replace(/\bp_revision\b/g, "$3")
+      .replace(/\bp_entries\b/g, "$2")
+      .replace(/\bp_revisions\b/g, "$3")
       .replace(/\bp_pending\b/g, "$4");
-    await tx.unsafe(`PREPARE visibility_plan(uuid,uuid,uuid,boolean) AS ${body}`);
+    await tx.unsafe(`PREPARE visibility_plan(uuid,uuid[],uuid[],boolean) AS ${body}`);
     try {
       // These are generated fixture UUIDs, not caller-supplied SQL expressions.
-      const args = `'${fixture.accountId}','${member!.id}','${member!.revision}',false`;
+      const args = `'${fixture.accountId}',ARRAY['${member!.id}'::uuid],ARRAY['${member!.revision}'::uuid],false`;
       const rows = await tx.unsafe(
         `EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) EXECUTE visibility_plan(${args})`,
       );

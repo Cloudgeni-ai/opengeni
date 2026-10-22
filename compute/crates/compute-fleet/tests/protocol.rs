@@ -28,7 +28,7 @@
 //! run exercised.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::time::Duration;
 
 use compute_fleet::{
@@ -44,6 +44,8 @@ const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 const HOST_MEMORY_MIB: u64 = 256 * 1024;
 const SANDBOX_MIB: u64 = 1024;
+/// How many hosts the model tries for one create or adopt.
+const MODEL_TRIES: u32 = 3;
 /// How long a host waits for an archive's answer before it starts another.
 const ARCHIVE_GIVE_UP: Duration = Duration::from_secs(30);
 
@@ -160,7 +162,8 @@ impl Host {
         Capacity {
             memory_mib: HOST_MEMORY_MIB,
             free_memory_mib: HOST_MEMORY_MIB.saturating_sub(self.awake() * SANDBOX_MIB),
-            free_cpu_millis: None,
+            reclaimable_memory_mib: 0,
+            free_cpu_millis: 1_000_000,
             free_disk_mib: 1_000_000,
             ready: Vec::new(),
             sandboxes: u32::try_from(self.sandboxes.len()).unwrap(),
@@ -1673,7 +1676,7 @@ impl Sim {
             disk_mib: 1,
             prefer: Prefer::Any,
         };
-        let Some(placement) = self.fleet.place(&demand, &[], &mut self.rng) else {
+        let Some(placement) = self.fleet.place(&demand, &HashSet::new(), &mut self.rng) else {
             return;
         };
         self.fleet.reserve(placement, &demand);
@@ -1712,11 +1715,14 @@ impl Sim {
             at,
             row,
             archived,
-            (tries, 3),
         );
         match next {
-            Next::Nothing => {}
-            Next::PlaceElsewhere => self.place_and_send(id, Some(row), op, tries + 1),
+            // The model places without excluding hosts that refused, so it
+            // stops after a few.
+            Next::PlaceElsewhere if tries < MODEL_TRIES => {
+                self.place_and_send(id, Some(row), op, tries + 1);
+            }
+            Next::Nothing | Next::PlaceElsewhere => {}
             // The host holds nothing of it under this epoch: it finished a
             // hand-off the service has not heard of yet, or its copy is
             // behind. Adopt the archive there under a new epoch, so that a

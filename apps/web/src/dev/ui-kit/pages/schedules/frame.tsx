@@ -28,7 +28,7 @@ import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { firstFormField } from "@opengeni/react/ui/form-dialog";
 import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
 import { NavGroup, NavItem, type NavItemSize } from "@opengeni/react/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, currentWorkspace, organization, you } from "../../fixtures";
 import { KitRailItems, type KitRailId } from "../kit-rail";

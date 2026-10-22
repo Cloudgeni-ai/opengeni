@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import type { ScheduledTaskAccessAttention } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import type { ScheduledTaskAccessAttention } from "@opengeni/react/app/types";
 
 const ATTENTION_UPDATED = "opengeni:scheduled-task-attention-updated";
 const ATTENTION_SEEN = "opengeni:scheduled-task-attention-seen";

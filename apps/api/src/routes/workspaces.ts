@@ -1,5 +1,5 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
-import { realtimeVoiceOptions } from "../realtime-websocket";
+import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
@@ -17,6 +17,8 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  resolveRealtimeVoiceSettings,
+  resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
@@ -103,7 +105,6 @@ import {
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceVercelAiGatewayConnectionActive,
-  getWorkspaceProviderApiKeyConnectionMetadata,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -703,7 +704,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       getOrganizationModelProviderCatalogForWorkspace(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        providerKinds,
+        // Organization Azure OpenAI has no workspace custom-model rail.
+        providerKinds: [...providerKinds, "openai", "azure_openai"],
       }),
       getWorkspace(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
@@ -760,6 +762,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceOpperCustomModels: workspaceCustomModels.opper,
       organizationOpperConnectionActive: organizationProviders.opper.active,
       organizationOpperCustomModels: organizationProviders.opper.models,
+      organizationDirect: {
+        openai: {
+          active: organizationProviders.openai?.active === true,
+          models: organizationProviders.openai?.models ?? [],
+        },
+        azure_openai: {
+          active: organizationProviders.azure_openai?.active === true,
+          endpoint: organizationProviders.azure_openai?.endpoint ?? null,
+          models: organizationProviders.azure_openai?.models ?? [],
+        },
+      },
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
@@ -1238,6 +1251,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceGatewayConnected,
       elevenLabsConnected,
       workspaceSettings,
+      organizationDefaults,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1246,10 +1260,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       }),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
-      getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, "elevenlabs").then(
-        (connection) => connection !== null,
-      ),
+      elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
+      getOrganizationModelDefaults(deps.db, grant.accountId),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1339,7 +1352,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: model.label,
         provider: "Your ElevenLabs" as const,
         description: model.description,
-        ...availability(elevenLabsConnected, "Connect a workspace ElevenLabs key"),
+        ...availability(elevenLabsConnected, "Connect an ElevenLabs key"),
         recommended: false,
       })),
       ...gatewayModels.map((model) => ({
@@ -1352,13 +1365,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       })),
     ];
     // Each model lists the voice settings its provider offers, with the
-    // workspace's saved values for it.
+    // workspace's saved values for it and the organization's default, and
+    // which model each of them chose to start voice conversations with.
+    const workspaceDefaultModel = resolveWorkspaceRealtimeDefaultModel(workspaceSettings);
+    const organizationDefaultModel = organizationDefaults.realtimeDefaultModel;
     const withVoiceSettings = models.map((model) => {
       const saved = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model.id);
+      const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {
         ...model,
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
+        ...(inherited ? { organizationVoiceSettings: inherited } : {}),
+        ...(model.id === workspaceDefaultModel ? { workspaceDefault: true } : {}),
+        ...(model.id === organizationDefaultModel ? { organizationDefault: true } : {}),
       };
     });
     c.header("cache-control", "private, no-store");

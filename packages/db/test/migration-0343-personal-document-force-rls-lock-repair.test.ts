@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +62,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     if (!owned) return;
     const { admin, adminUrl, ownerUrl, ownerRole, appPassword } = owned;
     await applyBelow(ownerUrl, REPAIR);
-    await admin`alter table session_events add column usage_source_key text`;
+    await admin`alter table session_events add column usage_source_key text, add column tool_name text`;
     // Current session adapters select the complete current sessions row while
     // this fixture intentionally holds the database below 0343. Supply only
     // the later columns they need, then remove them before the real deferred
@@ -422,7 +422,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_realtime_modes
       drop column personal_connection_delegations,
       drop column mcp_account_bindings`;
-    await admin`alter table session_events drop column usage_source_key`;
+    await admin`alter table session_events drop column usage_source_key, drop column tool_name`;
     await migrate(ownerUrl);
     // 0494 must recreate the real receipt columns after the temporary bridge
     // is gone, retaining historical NULL rather than accepting an empty list.

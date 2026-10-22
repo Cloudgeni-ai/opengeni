@@ -95,7 +95,7 @@ import {
 } from "../src/index";
 import * as schema from "../src/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import postgres from "postgres";
 

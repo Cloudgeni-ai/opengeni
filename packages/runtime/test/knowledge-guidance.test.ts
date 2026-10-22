@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { allAgentCapabilities, type FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   DEFAULT_AGENT_IDENTITY,

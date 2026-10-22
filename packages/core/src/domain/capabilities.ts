@@ -7,11 +7,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
-import {
-  connectMcpStreamableHttpClient,
-  legacyMcpClientError,
-  type McpStreamableHttpClient,
-} from "./mcp-streamable-http-client";
+import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -870,35 +866,37 @@ async function probeStreamableHttpMcpServer(
   if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  let client: McpStreamableHttpClient | undefined;
   try {
-    client = await connectMcpStreamableHttpClient({
-      url: input.url,
-      clientName: "opengeni-capability-probe",
-      clientVersion: "0.1.0",
-      timeoutMs: input.timeoutMs,
-      requestInit: {
-        signal: controller.signal,
-        ...(input.headers ? { headers: input.headers } : {}),
+    return await withMcpStreamableHttpClient(
+      {
+        url: input.url,
+        clientName: "opengeni-capability-probe",
+        clientVersion: "0.1.0",
+        timeoutMs: input.timeoutMs,
+        requestInit: {
+          signal: controller.signal,
+          ...(input.headers ? { headers: input.headers } : {}),
+        },
+        fetch: (url, init) =>
+          pinnedFetch(url, init, settings, {
+            label: "MCP capability probe",
+            requireHttpsOutsideLocalTest: true,
+          }),
       },
-      fetch: (url, init) =>
-        pinnedFetch(url, init, settings, {
-          label: "MCP capability probe",
-          requireHttpsOutsideLocalTest: true,
-        }),
-    });
-    const tools = await client
-      .listTools(undefined, {
-        timeout: input.timeoutMs,
-        maxTotalTimeout: input.timeoutMs,
-      })
-      .catch((error: unknown) => {
-        throw legacyMcpClientError(error);
-      });
-    return { toolCount: tools.tools.length };
+      async (client) => {
+        const tools = await client
+          .listTools(undefined, {
+            timeout: input.timeoutMs,
+            maxTotalTimeout: input.timeoutMs,
+          })
+          .catch((error: unknown) => {
+            throw legacyMcpClientError(error);
+          });
+        return { toolCount: tools.tools.length };
+      },
+    );
   } finally {
     clearTimeout(timeout);
-    await client?.close().catch(() => undefined);
   }
 }
 

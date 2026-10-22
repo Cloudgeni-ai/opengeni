@@ -1,5 +1,5 @@
 //! The API hosts call: get their certificate, register, renew and report,
-//! and ask for their agent-link tokens, over TLS.
+//! ask for their agent-link tokens, and post their metrics, over TLS.
 //!
 //! Each connection carries the names its client certificate is valid for,
 //! and a host may act only under one of them. A caller without a
@@ -10,23 +10,31 @@
 //! names what it names, if it was itself proven by a certificate: one an
 //! instance identity token proved renews only with a fresh token
 //! ([`Proven`]).
+//!
+//! A host's metrics, an OTLP/HTTP export in JSON, are passed on as they
+//! are to the metrics store the service is given (`--host-metrics-to`),
+//! once every resource in them names the host by a name its certificate
+//! holds; the store's answer goes back to the host, so it retries what the
+//! store asks it to. Without a store the route does not exist.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{DefaultBodyLimit, Extension, FromRequestParts, Json, State};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{StatusCode, header};
 use axum::routing::post;
 use axum::{Router, response::IntoResponse};
+use bytes::Bytes;
 use compute_fleet::LeaseTerms;
 use compute_protocol::fleet::{
     CERTIFICATE_PATH, CertificateAsked, HostCertificate, LINK_TOKENS_PATH, LinkTokens,
-    LinkTokensAsked, Proof, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register, Registered, Renew,
-    Renewed, Report, Ruling, Terms, Verdict,
+    LinkTokensAsked, METRICS_PATH, Proof, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register,
+    Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
 };
 use compute_protocol::host::Id;
+use compute_protocol::host_metrics::{self, Refused};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
@@ -36,6 +44,7 @@ use tower::ServiceExt as _;
 use crate::authority::{Authority, ISSUED_FOR, Proven, requested_key, verify};
 use crate::identity::GceIdentity;
 use crate::link::Links;
+use crate::metrics::{Metrics, Passed};
 use crate::store::{Admission, Store};
 use crate::tls::names_of;
 
@@ -44,6 +53,45 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest certificate request body: a request and a token are a few
 /// KiB.
 pub const MAX_CERTIFICATE_ASKED: usize = 16 << 10;
+/// The longest metrics export a host may post: a host's are tens of KiB.
+pub const MAX_METRICS: usize = 4 << 20;
+/// How long the metrics store may take to take an export.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where hosts' metrics are passed on to.
+#[derive(Debug)]
+pub struct HostMetrics {
+    /// An OTLP/HTTP metrics endpoint that takes JSON, such as Prometheus's
+    /// `/api/v1/otlp/v1/metrics`.
+    url: String,
+    client: reqwest::Client,
+    metrics: Arc<Metrics>,
+}
+
+impl HostMetrics {
+    /// Passes hosts' metrics on to `url`, counting each in `metrics`.
+    ///
+    /// # Errors
+    ///
+    /// When `url` is not an `http://` or `https://` URL.
+    pub fn new(url: &str, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|error| anyhow::anyhow!("--host-metrics-to {url:?}: {error}"))?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "--host-metrics-to {url:?} must be an http:// or https:// URL"
+        );
+        let client = reqwest::Client::builder()
+            .timeout(METRICS_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            url: url.to_owned(),
+            client,
+            metrics,
+        })
+    }
+}
 
 /// A client certificate the TLS handshake verified: the names it is valid
 /// for, and the certificate itself, whose validity is checked again where
@@ -169,6 +217,7 @@ struct Inner<S> {
     terms: LeaseTerms,
     links: Option<Arc<Links>>,
     certificates: Arc<Certificates>,
+    host_metrics: Option<Arc<HostMetrics>>,
 }
 
 /// The host API's state.
@@ -447,14 +496,16 @@ fn renewed(
     }
 }
 
-/// The host API's routes.
+/// The host API's routes; with `host_metrics`, also the one hosts post
+/// their metrics to.
 pub fn router<S: Store>(
     store: Arc<S>,
     terms: LeaseTerms,
     links: Option<Arc<Links>>,
     certificates: Arc<Certificates>,
+    host_metrics: Option<Arc<HostMetrics>>,
 ) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route(REGISTER_PATH, post(register::<S>))
         .route(RENEW_PATH, post(renew::<S>))
         .route(REPORT_PATH, post(report::<S>))
@@ -462,13 +513,134 @@ pub fn router<S: Store>(
         .route(
             CERTIFICATE_PATH,
             post(certificate::<S>).layer(DefaultBodyLimit::max(MAX_CERTIFICATE_ASKED)),
-        )
-        .with_state(HostApi(Arc::new(Inner {
-            store,
-            terms,
-            links,
-            certificates,
-        })))
+        );
+    if host_metrics.is_some() {
+        router = router.route(
+            METRICS_PATH,
+            post(pass_metrics::<S>).layer(DefaultBodyLimit::max(MAX_METRICS)),
+        );
+    }
+    router.with_state(HostApi(Arc::new(Inner {
+        store,
+        terms,
+        links,
+        certificates,
+        host_metrics,
+    })))
+}
+
+/// Passes a host's metrics on to the metrics store, and its answer back:
+/// only what [`host_metrics::check`] keeps, under the host's own name.
+/// Data points it leaves out are reported back as rejected, the way an
+/// OTLP collector reports a partial success, so the host counts them.
+async fn pass_metrics<S: Store>(
+    State(api): State<HostApi<S>>,
+    Peer(names): Peer,
+    export: Bytes,
+) -> axum::response::Response {
+    let Some(to) = &api.0.host_metrics else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let checked = match host_metrics::check(&export, &names) {
+        Ok(checked) => checked,
+        Err(refused) => {
+            to.metrics.passed(Passed::Refused);
+            return match refused {
+                Refused::Malformed(why) => (StatusCode::BAD_REQUEST, why),
+                Refused::OtherHost(why) => (StatusCode::FORBIDDEN, why),
+            }
+            .into_response();
+        }
+    };
+    to.metrics.left_out(checked.rejected);
+    if checked.kept == 0 {
+        if checked.rejected > 0 {
+            to.metrics.passed(Passed::Refused);
+        }
+        return partial_success(checked.rejected, checked.problem.as_deref(), None);
+    }
+    let sent = to
+        .client
+        .post(&to.url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(checked.export)
+        .send()
+        .await;
+    let response = match sent {
+        Ok(response) => response,
+        Err(error) => {
+            to.metrics.passed(Passed::Failed);
+            tracing::warn!(%error, "passing a host's metrics on failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the metrics store did not answer",
+            )
+                .into_response();
+        }
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let kind = response.headers().get(header::CONTENT_TYPE).cloned();
+    let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+    let answer = match response.bytes().await {
+        Ok(answer) => answer,
+        Err(error) => {
+            to.metrics.passed(Passed::Failed);
+            tracing::warn!(%error, "reading the metrics store's answer failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the metrics store's answer was cut off",
+            )
+                .into_response();
+        }
+    };
+    if !status.is_success() {
+        to.metrics.passed(Passed::Failed);
+        tracing::warn!(%status, "the metrics store refused a host's metrics");
+    } else if checked.rejected > 0 {
+        to.metrics.passed(Passed::Forwarded);
+        return partial_success(checked.rejected, checked.problem.as_deref(), Some(&answer));
+    } else {
+        to.metrics.passed(Passed::Forwarded);
+    }
+    let mut answered = (status, answer).into_response();
+    for (name, value) in [
+        (header::CONTENT_TYPE, kind),
+        (header::RETRY_AFTER, retry_after),
+    ] {
+        if let Some(value) = value {
+            answered.headers_mut().insert(name, value);
+        }
+    }
+    answered
+}
+
+/// A successful answer that says `rejected` data points were not taken,
+/// and why the first was, adding what the metrics store's own `answer`
+/// says it rejected.
+fn partial_success(
+    rejected: u64,
+    problem: Option<&str>,
+    answer: Option<&[u8]>,
+) -> axum::response::Response {
+    let store = answer
+        .and_then(|answer| serde_json::from_slice::<serde_json::Value>(answer).ok())
+        .and_then(|answer| {
+            let rejected = answer
+                .pointer("/partialSuccess/rejectedDataPoints")?
+                .clone();
+            rejected
+                .as_u64()
+                .or_else(|| rejected.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "partialSuccess": {
+            "rejectedDataPoints": rejected.saturating_add(store).to_string(),
+            "errorMessage": problem.unwrap_or_default(),
+        }
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 /// Serves `router` on `listener` to clients `acceptor` verifies, each
@@ -606,6 +778,7 @@ mod tests {
             LeaseTerms::RECOMMENDED,
             None,
             certificates,
+            None,
         );
         Api {
             router,

@@ -266,10 +266,14 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
-/** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
- * a server runtime secret (the worker calls Jev; the API only checks that it is
- * set); it never reaches a sandbox. Unset keeps the tool off. */
+/** Shared decision settings plus legacy Jev code-search compatibility. Keys are
+ * server runtime secrets, never sandbox environment. Keep the historical export
+ * name for deployment consumers; the same allowlist serves both callers. */
 export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_DECISION_MODEL_PROVIDER",
+  "OPENGENI_DECISION_MODEL_ID",
+  "OPENGENI_DECISION_MODEL_API_KEY",
+  "OPENGENI_DECISION_MODEL_BASE_URL",
   "OPENGENI_JEV_API_KEY",
   "OPENGENI_JEV_BASE_URL",
   "OPENGENI_JEV_MODEL",

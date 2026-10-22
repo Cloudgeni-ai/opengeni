@@ -6,7 +6,7 @@ import {
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
 import { and, asc, eq, sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   applySessionTurnSettlement,
   addSessionSystemUpdate,

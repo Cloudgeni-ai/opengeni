@@ -2023,6 +2023,58 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
 - GitHub branch protection may still require a review to merge into `main`;
   that is a merge-time GitHub rule, not a second operator PASS check.
 
+**Tested-descendant candidate admission.** When the merge batcher lands a
+Version PR as a singleton true merge and `main` then fast-forwards to a later
+fully green tested tip, dispatch `release-candidate.yml` with `source_sha` set
+to that released tip and the optional `provenance_sha` set to the exact Version
+PR merge. An empty `provenance_sha` (or one equal to `source_sha`) keeps the
+exact-source lane above unchanged. The two SHAs stay separate: every Version
+proof above (merged associated PR from `changeset-release/main` by the GitHub
+Actions bot, reviewed base/head, `merge` or provider-verified moving-main merge
+topology, full reviewed delta, release-head retention and exact-head source
+admission) runs at `provenance_sha`, while every CI, image and artifact proof
+runs at `source_sha` only. `scripts/check-release-pr-automation.mjs` additionally
+requires, fail-closed:
+
+- `source_sha` retained by `main` at the initial and terminal reads, with
+  `provenance_sha` on its first-parent chain; the controller is either the
+  Version PR's reviewed base or a later `main` commit, never `source_sha` itself;
+- every intervening first-parent commit is a two-parent merge whose single
+  associated PR merged into `main` with `merge_commit_sha` equal to that merge
+  and head equal to its second parent; a competing `changeset-release/main` PR,
+  a direct commit, a squash or rebase, or a missing association is rejected;
+- every merge tree from `provenance_sha` to `source_sha` is recomputed from
+  protected `main` history fetched as Git objects only (`git merge-tree
+  --write-tree`) and must equal the recorded tree, so conflict resolutions and
+  hidden extra deltas are rejected;
+- every reviewed Version path keeps its reviewed content at `source_sha`, and no
+  pending `.changeset/*.md` exists there;
+- the required source CI jobs plus `Verify landed merge content` and
+  `Publish fully green main SHA` succeeded in one `push` run on `main` for
+  `source_sha`; the newest `Full CI` commit status was created by the GitHub
+  Actions bot and targets that run's current attempt; and that run attempt owns
+  exactly one unexpired, digest-bearing `full-green-main-<source_sha>` and
+  `canary-images-<source_sha>` artifact created after that attempt started.
+  Admission downloads each exact artifact ID, verifies its archive digest and
+  parses the canonical receipts. Source, workflow, run, attempt, full mode and
+  all eight workload image repositories/digests must match; a previous attempt's
+  receipt is not accepted even when its run ID or artifact name matches.
+  Batch-ready or queue-ready signals are
+  not full green, and nothing is borrowed from the Version merge's own CI.
+
+The walk is bounded to 100 intervening merges and 2,000 compared commits. Any
+later change to a reviewed Version path fails closed; choose an earlier green
+tip. The admission job reports `release_source_sha`, `version_provenance_sha`
+and `release_admission_mode`; the candidate receipt schema is unchanged.
+
+Recover a failed full-main run intended for release with **Re-run all jobs**, not
+"Re-run failed jobs": the canary image and full-green receipts must come from the
+same selected attempt. A green provider run with stale image receipts is still
+ineligible. `latest-green-main.ts` discovers full-CI-green SHAs, not complete
+Version-release eligibility; a tip with pending changesets or altered reviewed
+Version content is rejected by admission. Prefer the isolated Version merge's own
+fully green run or a qualifying descendant, never relax those checks.
+
 Do not recreate admission from a live review list, a review comment, a commit
 message, or a local record. The ordinary operator still records identity fields
 (`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on
@@ -2217,12 +2269,26 @@ and terminal head identity remain fail-closed. The merge authority separately pe
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR until trusted
+Before batcher activation, do not enable or leave auto-merge armed on a generated Version PR until trusted
 CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
 `headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
 remain open and auto-merge to remain null, then merge with an exact head-SHA
 fence. Never rely on an earlier UI observation for this boundary. Ordinary
 candidate/operator admission does not re-read GitHub reviews after merge.
+
+After the rollout owner enables the in-house batcher, replace only that manual
+merge action with the `queue-ready` label. Keep auto-merge off for Version PRs.
+First require the exact-head trusted full CI, `Queue ready`, current-base source
+admission and release-head retention evidence described above. Also run the
+full relevant VM tests, obtain independent review, and post the genuine exact-head
+evidence comment required by `AGENTS.md`; bot-created PRs have no exemption.
+The existing workflows create/update and validate Version PRs, but do not merge
+them automatically or fabricate that comment. Observe the singleton batch's
+`Batch ready` result and actual landed merge SHA. A regenerated head invalidates
+the earlier VM/review evidence and requires a fresh admission. The batcher performs
+the final head/readiness reread and post-land reconciliation; a late newer head
+must never be described as tested. The release consumer separately verifies full
+main CI at the released tip, not just the fast batch result.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -2850,6 +2916,16 @@ The runtime secret must provide values such as:
   re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
   including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
+- Optional `OPENGENI_DATABASE_NOTIFICATION_URL`: a direct or session-pooled connection
+  to the **same database and runtime role**, for committed sidebar invalidations.
+  Each API process lazily opens one dedicated `LISTEN` connection, shared by its
+  open workspace streams. Direct deployments use `OPENGENI_DATABASE_URL` by default.
+  Transaction-pooled deployments (port 6432 or prepared statements explicitly
+  disabled) must provide this separate URL to enable hints; otherwise clients keep
+  their existing polling. Do not point this at a transaction-mode pooler or an
+  owner credential. Listener loss restores polling, and reconnect reconciles every
+  loaded list before the client resumes hint-driven reads. Rolling migrations
+  must run before the new API starts serving, as for the other runtime schema.
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
 - `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key

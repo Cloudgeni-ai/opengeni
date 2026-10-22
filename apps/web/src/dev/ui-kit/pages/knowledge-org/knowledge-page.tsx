@@ -12,7 +12,7 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DropdownMenu,
   DropdownMenuContent,

@@ -47,6 +47,7 @@ import {
   type DesktopAccountsSnapshot,
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
+  type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
   type ThisComputerPermissionId,
@@ -65,7 +66,7 @@ import {
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
-import { buildApplicationMenu } from "./menu";
+import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
@@ -174,6 +175,11 @@ export class DesktopShell {
   private quitConfirmed = false;
   private confirmingQuit = false;
   private readonly lastPaths = new Map<string, string>();
+  /** Each account page's menu bar actions, as it last reported them. */
+  private readonly pageMenuActions = new Map<
+    string,
+    { actions: DesktopMenuAction[]; key: string }
+  >();
   /** Accounts whose page didn't load, with the address to try again. */
   private readonly failedLoads = new Map<string, string>();
   private unreachable: Unreachable | null = null;
@@ -1035,6 +1041,21 @@ export class DesktopShell {
         // Ignore messages from anything but an account's own page.
       }
     });
+    ipcMain.on(DESKTOP_IPC.menuActionsSet, (event, value: unknown) => {
+      let account: StoredAccount;
+      try {
+        account = this.senderAccount(event);
+      } catch {
+        return;
+      }
+      const actions = readMenuActions(value);
+      if (!actions) return;
+      const key = JSON.stringify(actions);
+      if ((this.pageMenuActions.get(account.id)?.key ?? "[]") === key) return;
+      if (actions.length === 0) this.pageMenuActions.delete(account.id);
+      else this.pageMenuActions.set(account.id, { actions, key });
+      if (this.store.snapshot().activeId === account.id) Menu.setApplicationMenu(this.menu());
+    });
     ipcMain.on(DESKTOP_IPC.appearanceSet, (event, appearance: unknown) => {
       try {
         this.senderAccount(event);
@@ -1172,6 +1193,14 @@ export class DesktopShell {
               if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
             }
           : null,
+      pageActions:
+        active && !active.signedOut ? (this.pageMenuActions.get(active.id)?.actions ?? null) : null,
+      runPageAction: (id) => {
+        if (!active || active.signedOut) return;
+        this.reveal();
+        const contents = this.window?.contentsFor(active.id);
+        if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.menuAction, id);
+      },
       updates: this.updates
         ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
         : null,

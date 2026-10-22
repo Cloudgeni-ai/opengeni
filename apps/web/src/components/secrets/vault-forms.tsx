@@ -18,7 +18,7 @@ import {
   personalAvailabilityFrom,
   type AvailabilityWorkspace,
 } from "./availability-editor";
-import { vaultErrorText } from "./vault-model";
+import { vaultErrorText } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    New vault (S5) and the vault's own small forms: Rename (one-field dialog)

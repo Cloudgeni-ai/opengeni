@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import { SESSION_USAGE_LIMIT_BASIS } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import {

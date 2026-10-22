@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../../src/index";
 import { LEGACY_PROMPT_CASES } from "./legacy-cases";
 

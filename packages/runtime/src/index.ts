@@ -208,6 +208,7 @@ import {
   restoreDirectDeferredCallArgumentTypes,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { createToolSelector } from "./tool-discovery-decision";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   HARNESS_CONTROL_MCP_SERVER_ID,
@@ -457,6 +458,7 @@ export {
 } from "./model-preemption";
 import {
   createTurnToolCancellationController,
+  isRouteMoveRefusal,
   TurnSandboxCommandCancelledError,
   wrapCapabilityToolsForTurnCancellation,
   type TurnSandboxCommandArgs,
@@ -625,6 +627,8 @@ export {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
+  OrganizationOpenAIUnavailableError,
+  OrganizationAzureOpenAIUnavailableError,
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
@@ -2145,6 +2149,8 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Admitted decision provider; caller owns its accounting and cancellation. */
+  toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -2272,6 +2278,8 @@ export type BuildAgentOptions = {
   // the account's ACTUALLY-connected sources (codex-rs parity). Only meaningful
   // on the codex tool-search path.
   codexConnectorNamespaces?: ReadonlySet<string>;
+  /** Live: best-effort MCP servers unavailable this attempt (PreparedAgentTools.unavailableMcpServers). */
+  unavailableMcpServers?: ReadonlyMap<string, string>;
   // Stable per-session routing key for provider-side prompt prefix caches. The
   // worker passes this only for transports whose docs/API surface accept
   // prompt_cache_key; registry providers that use a different affinity field stay
@@ -3476,13 +3484,13 @@ export function buildOpenGeniAgent(
  * rollout flag remains only an on/off switch; provider selection never depends
  * on the unrelated sandbox structured-tool Boolean.
  *
- * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
- * exact MCP objects may finish materializing after the first request begins.
+ * Every route uses ordinary search/list/invoke controls. Exact MCP objects
+ * may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
  * that catalog is ready. Classification is origin, not transport: the same
  * always-visible base set, eager MCP tools, and authorized first-party harness
- * control tools are in the first request on every path. Generic providers add stable ordinary tool_search/tool_invoke
- * schemas; a valid dispatcher call is renamed to the real tool and bound by
+ * control tools are in the first request on every path. Selected schemas are
+ * frozen in append-only history; a valid dispatcher call is renamed and bound by
  * the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
@@ -3545,6 +3553,10 @@ function maybeInstallLazyToolTransport(
       }
       return names;
     },
+    options.toolSearchDecisionModel
+      ? createToolSelector(options.toolSearchDecisionModel)
+      : undefined,
+    () => options.unavailableMcpServers ?? new Map(),
   );
 }
 
@@ -4576,6 +4588,9 @@ function buildAgentCapabilitiesFromComposition(
         }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
         if (isRoutingMutationOutputRejectedError(error)) throw error;
+        // The turn's call-level wrapper knows whether this call reached a
+        // route; it reports a refused move as not started (or fails closed).
+        if (toolCancellation && isRouteMoveRefusal(error)) throw error;
         if (isRoutingMutationOutcomeUnknownError(error)) {
           // The outer physical fence must retain the exact process before
           // rendering uncertainty. Platform/setup calls still throw normally.
@@ -4695,6 +4710,13 @@ export type PreparedAgentTools = {
   // tool_search description accurate. It is never persisted or used for inference
   // credential selection.
   codexConnectorNamespaces: Set<string>;
+  /**
+   * Live, by-reference: each best-effort MCP server whose connect or tools/list
+   * failed during this preparation, with a short public reason. Progressive
+   * discovery reports it in its own results, so an empty search is not
+   * mistaken for "this integration has no such tool".
+   */
+  unavailableMcpServers: ReadonlyMap<string, string>;
   /**
    * Optional completion fence for non-eager MCP discovery. Only session-marked
    * eager servers are connected/listed before this handle is returned. Search,
@@ -5178,6 +5200,7 @@ export async function prepareAgentTools(
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
+  const unavailableMcpServers = new Map<string, string>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
@@ -5563,6 +5586,11 @@ export async function prepareAgentTools(
   // first request, and its other schemas stay deferred.
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
+  for (const entry of servers) {
+    if (entry.bestEffort && entry.server instanceof PrefixedMcpServer) {
+      entry.server.unavailableSink = unavailableMcpServers;
+    }
+  }
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
   const deferredEntries = deferNonEager ? servers.filter((entry) => !joinsBarrier(entry)) : [];
   const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
@@ -5606,6 +5634,10 @@ export async function prepareAgentTools(
     for (const failed of connected.failed) {
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
+        unavailableMcpServers.set(
+          failed.registryId,
+          mcpUnavailableReason(connected.errors.get(failed), "connect"),
+        );
       }
       if (
         !(failed instanceof PrefixedMcpServer) ||
@@ -5771,6 +5803,7 @@ export async function prepareAgentTools(
           if (firstError !== undefined) throw firstError;
         },
         codexConnectorNamespaces,
+        unavailableMcpServers,
       };
     } catch (error) {
       // In deferred mode the eager and in-process servers have already been
@@ -5897,6 +5930,7 @@ export async function prepareAgentTools(
       await prepared.close();
     },
     codexConnectorNamespaces,
+    unavailableMcpServers,
     ready,
     startDeferredPreparation,
   };
@@ -7404,6 +7438,11 @@ type McpPublicErrorFields = {
   serverId?: string;
   status?: number;
   retryable?: boolean;
+  /** Error class name, SDK or numeric error code and validation violation; never message text. */
+  causeName?: string;
+  causeCode?: string;
+  causeNumber?: number;
+  violation?: string;
   origin: "runtime";
 };
 
@@ -7457,7 +7496,73 @@ function mcpErrorFields(
   } catch {
     // Retry classification is also a public projection and must remain inert.
   }
+  try {
+    if (error && typeof error === "object") {
+      const name = (error as { name?: unknown }).name;
+      if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) {
+        fields.causeName = name;
+      }
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code)) {
+        fields.causeCode = code;
+      } else if (typeof code === "number" && Number.isInteger(code)) {
+        fields.causeNumber = code;
+      }
+      const data = (error as { data?: unknown }).data;
+      const violation =
+        data && typeof data === "object" ? (data as { violation?: unknown }).violation : undefined;
+      if (typeof violation === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(violation)) {
+        fields.violation = violation;
+      }
+    }
+  } catch {
+    // The cause projection is diagnostic only and must remain inert.
+  }
   return fields;
+}
+
+/**
+ * Why a best-effort server's tools are missing this turn, for the model. Built
+ * only from the public diagnostic projection: status, error class and code,
+ * never provider message text.
+ */
+export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"): string {
+  const fields = mcpErrorFields(
+    error,
+    phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
+  );
+  // The MCP SDK's HTTP transports (StreamableHTTPError, SseError) report the
+  // response status as a numeric `code`, with no `status`. McpError's `code` is
+  // the server's JSON-RPC error code, which can be any integer (including
+  // positive ones such as 403) and is never an HTTP status. Match McpError by
+  // name, which its subclasses inherit, so duplicate SDK copies are covered.
+  const status =
+    fields.status ??
+    (fields.causeName !== "McpError" &&
+    fields.causeNumber !== undefined &&
+    fields.causeNumber >= 100 &&
+    fields.causeNumber <= 599
+      ? fields.causeNumber
+      : undefined);
+  const code =
+    fields.causeCode ??
+    (fields.causeNumber === undefined || fields.causeNumber === status
+      ? undefined
+      : `code ${fields.causeNumber}`);
+  const detail = [
+    status === undefined ? undefined : `HTTP ${status}`,
+    [fields.causeName, code].filter(Boolean).join(" ") || undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
+  const next =
+    status === 401 || status === 403
+      ? "; its connection may need to be signed in again"
+      : fields.retryable
+        ? "; this may be temporary"
+        : "";
+  return `${what}${detail ? ` (${detail})` : ""}${next}`;
 }
 
 type McpTransportError = Error & {
@@ -8528,6 +8633,8 @@ export class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
+  /** Where a best-effort server records that its tools are unavailable this attempt. */
+  unavailableSink: Map<string, string> | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
@@ -8851,6 +8958,7 @@ export class PrefixedMcpServer implements MCPServer {
           mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
         );
       }
+      this.unavailableSink?.set(this.registryId, mcpUnavailableReason(error, "list"));
       this.releaseAggregateBudget();
       return [];
     }
@@ -10256,6 +10364,12 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
+export { createToolSelector } from "./tool-discovery-decision";
+export type {
+  ToolSelector,
+  ToolDecisionInput,
+  ToolDecisionCandidate,
+} from "./tool-discovery-decision";
 
 export { MaxTurnsExceededError } from "@openai/agents";
 
@@ -11137,11 +11251,12 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
 }
 
 function objectStorageFileMount(settings: Settings, prefix: string): any {
-  // Descriptor-driven: a nativeBucketMount backend (modal) mounts via the
+  // Descriptor-driven: a native bucket-mount backend (modal) mounts via the
   // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
   // it needs pre-signed downloads instead. Reading the descriptor (not a
   // hard-coded backend name) keeps this honest as providers are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
+  const nativeBucketMount =
+    CAPABILITY_DESCRIPTORS[settings.sandboxBackend].bucketMount === "native";
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
       throw new Error(

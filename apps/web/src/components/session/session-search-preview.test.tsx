@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { act, useState, type ComponentProps } from "react";
-import { SessionSearchPreview } from "./session-search-dialog";
+import { SessionSearchPreview } from "@opengeni/react/app/components/session/session-search-dialog";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   registerDom,

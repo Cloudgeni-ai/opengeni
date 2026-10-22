@@ -18,6 +18,11 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const codemode = dockerfile.indexOf("runtime=/out/codemode-runtime", sourceCopy);
   const ogtool = dockerfile.indexOf("RUN cd packages/ogtool && bun run build", codemode);
   const targetStage = dockerfile.indexOf("FROM oven/bun:${BUN_VERSION} AS browserd-build", ogtool);
+  // The controller is compiled by the distrusted target Bun, and the check
+  // after the compile proves the program embeds no distrusted root.
+  const targetDistrustedBun = dockerfile.indexOf(
+    "FROM oven/bun:${BUN_VERSION} AS browserd-build\nCOPY --from=bun-runtime /out/bun /usr/local/bin/bun\n",
+  );
   const targetSource = dockerfile.indexOf(
     "COPY --from=browserd-source-build /src /src",
     targetStage,
@@ -29,13 +34,22 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const targetArchitecture = dockerfile.indexOf("\nARG TARGETARCH\n", targetCodemode);
   const nativeCompile = dockerfile.indexOf("bun build --compile \\", targetArchitecture);
   const targetController = dockerfile.indexOf(
-    'install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}"',
+    'install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda',
     nativeCompile,
   );
   const nextStage = dockerfile.indexOf("\nFROM ", targetController);
-  const bunRuntime = dockerfile.indexOf("FROM oven/bun:${BUN_VERSION} AS bun-runtime");
+  const compiledCheck = dockerfile.indexOf(
+    "distrust-embedded-roots.ts --check \\\n  /opt/opengeni-docker/distrusted-roots.pem /out/opengeni-browserd",
+    targetController,
+  );
+  // The target Bun is patched by the build machine's Bun, never executed.
+  const bunRuntime = dockerfile.indexOf(
+    "FROM oven/bun:${BUN_VERSION} AS bun-target\n" +
+      "FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-runtime\n" +
+      "COPY --from=bun-target /usr/local/bin/bun /out/bun\n",
+  );
   const targetBunCopy = dockerfile.indexOf(
-    "COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun",
+    "COPY --from=bun-runtime /out/bun /usr/local/bin/bun",
     nextStage,
   );
 
@@ -46,12 +60,15 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
     codemode > sourceCopy &&
     ogtool > codemode &&
     targetStage > ogtool &&
+    targetDistrustedBun === targetStage &&
     targetSource > targetStage &&
     targetCodemode > targetSource &&
     targetArchitecture > targetCodemode &&
     nativeCompile > targetArchitecture &&
     targetController > nativeCompile &&
     nextStage > targetController &&
+    compiledCheck > targetController &&
+    compiledCheck < dockerfile.indexOf("COPY --from=computer-native-build", targetController) &&
     bunRuntime >= 0 &&
     bunRuntime < sourceStage &&
     targetBunCopy > nextStage &&

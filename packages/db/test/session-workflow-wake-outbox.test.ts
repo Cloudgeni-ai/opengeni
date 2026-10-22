@@ -8,9 +8,9 @@ import {
 } from "@opengeni/contracts";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  waitFor,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { waitFor } from "@opengeni/testing/process";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";
 import type { PostClaimDatabaseRecoveryDetail } from "../../../apps/worker/src/activities/types";

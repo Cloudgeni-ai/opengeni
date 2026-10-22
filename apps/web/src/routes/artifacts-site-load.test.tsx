@@ -1,3 +1,4 @@
+import "@/app-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -61,7 +62,7 @@ const accessContext = {
   workspaceGrants: [{ workspaceId, permissions: ["artifacts:read", "artifacts:publish"] }],
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     accessContext,
     client: siteClient,
@@ -80,11 +81,11 @@ mock.module("@opengeni/react/sites", () => ({
   },
 }));
 
-mock.module("@/lib/site-tool-bridge", () => ({
+mock.module("@opengeni/react/app/lib/site-tool-bridge", () => ({
   createSiteToolBridge: () => undefined,
 }));
 
-mock.module("@/components/artifacts/site-conversations", () => ({
+mock.module("@opengeni/react/app/components/artifacts/site-conversations", () => ({
   SiteConversations: () => createElement("button", { type: "button" }, "Conversations"),
 }));
 
@@ -129,7 +130,7 @@ afterAll(() => {
 });
 
 async function renderDetail(initialEntry = "/") {
-  const { ArtifactDetailRoute } = await import("./artifacts");
+  const { ArtifactDetailRoute } = await import("@opengeni/react/app/routes/artifacts");
   const route = createRootRoute({
     component: () =>
       createElement(ArtifactDetailRoute, {

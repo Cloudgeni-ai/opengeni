@@ -17,6 +17,11 @@ import {
 } from "../src/main/app-shots/mac";
 import { AppShotError, type AppShotPlatform } from "../src/main/app-shots/platform";
 import {
+  MAC_CAPTURE_SCRIPT,
+  MAC_MODIFIER_PAIR_SCRIPT,
+  MAC_PERMISSIONS_SCRIPT,
+} from "../src/main/app-shots/mac-script";
+import {
   AppShotSettingsStore,
   defaultAppShotSettings,
   mergeAppShotSettings,
@@ -241,6 +246,35 @@ describe("macOS helpers", () => {
         ? permissionsGranted(file, args, options)
         : { code: 0, stdout: '{"error":"no_window"}', stderr: "" };
     await expect(mac(run).capture({})).rejects.toMatchObject({ code: "no_window" });
+  });
+
+  // Some macOS releases (26.2) run a JavaScript script's top level but never
+  // call its `run(argv)` handler, which left every helper doing nothing. Each
+  // script calls its own entry point with the arguments after `-e <script>`.
+  test.each([
+    ["capture", MAC_CAPTURE_SCRIPT],
+    ["modifier pair", MAC_MODIFIER_PAIR_SCRIPT],
+    ["permissions", MAC_PERMISSIONS_SCRIPT],
+  ])("the %s script calls main itself instead of relying on a run handler", (_name, script) => {
+    expect(script).not.toMatch(/^function run\(/mu);
+    expect(script).toContain("\nfunction main(argv) {\n");
+    expect(script.trimEnd().endsWith("\nmain(scriptArguments());")).toBe(true);
+    const footer = script.slice(script.lastIndexOf('\nObjC.import("Foundation");'));
+    const argumentsFor = (argv: string[]) =>
+      new Function(
+        "ObjC",
+        "$",
+        "main",
+        footer.replace("main(scriptArguments());", "return scriptArguments();"),
+      )(
+        { import: () => undefined, deepUnwrap: (value: unknown) => value },
+        { NSProcessInfo: { processInfo: { arguments: argv } } },
+        () => undefined,
+      ) as string[];
+    expect(
+      argumentsFor(["/usr/bin/osascript", "-l", "JavaScript", "-e", script, "2", "4"]),
+    ).toEqual(["2", "4"]);
+    expect(argumentsFor(["/usr/bin/osascript", "-l", "JavaScript", "-e", script])).toEqual([]);
   });
 
   // The scripts are plain text to TypeScript; only the system's osascript can

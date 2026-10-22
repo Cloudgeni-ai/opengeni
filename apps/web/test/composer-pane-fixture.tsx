@@ -1,10 +1,11 @@
 import { ChatComposer, ComposerTranscriptionControl } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
-import { ModelPicker } from "../src/components/pickers";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { NewSessionDraftSyncNotice } from "@opengeni/react/app/components/new-session-draft-sync-notice";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
@@ -20,7 +21,7 @@ const newSession = new URLSearchParams(location.search).has("new-session");
 const sendingPreview = new URLSearchParams(location.search).has("sending");
 const attachmentPreview = new URLSearchParams(location.search).has("attachment");
 const AgentLearningSettingsEditor = lazy(() =>
-  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
   })),
 );
@@ -185,4 +186,26 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+// Keep the production settings editor, but supply deterministic context at the
+// fixture boundary instead of bootstrapping a live authenticated app.
+let agentLearningSettings: Record<string, string> = {};
+const fixtureAppContext = {
+  client: {
+    getAgentLearningSettings: async () => ({ version: 1, settings: agentLearningSettings }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      agentLearningSettings = { ...agentLearningSettings, ...input.settings };
+      return { version: 2, settings: agentLearningSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
+
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureAppContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

@@ -1,5 +1,5 @@
 import { AppearanceSubmenu } from "@/components/appearance-menu";
-import { DesktopAppSubmenu } from "@/components/desktop-app-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { HelpMenu } from "@/components/help-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
@@ -30,8 +30,8 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { AccountTrigger } from "@/components/rail/account-trigger";
-import { useRail } from "@/components/rail/rail-context";
-import { AccountUsageMenuItem } from "@/components/usage/usage-entry";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
+import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -40,7 +40,7 @@ import {
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 type ManagedAuthLoginSlot = ManagedAuthSessionSetProjection["slots"][number];
@@ -289,6 +289,7 @@ export function BrowserAccountMenu({
             onSendFeedback={onSendFeedback}
           />
           <DesktopAppSubmenu />
+          <ExcelAddinMenuItem />
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="forced-colors:text-[CanvasText]!"

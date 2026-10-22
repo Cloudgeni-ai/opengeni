@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { EnrollmentRecord } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { channelAConnectionBinding } from "../src/sandbox/routing";
 
 test("a machine allowed in another workspace is addressed where it is enrolled", () => {

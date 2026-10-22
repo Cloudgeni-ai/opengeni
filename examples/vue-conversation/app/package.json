@@ -8,8 +8,8 @@
     "server": "bun --env-file=.env.local src/server.ts",
     "onboard": "bun --env-file=.env.local src/onboard.ts",
     "start": "bun --env-file=.env.local src/server.ts",
-    "typecheck": "vue-tsc --noEmit",
-    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "tsrs --runExternalCode --noEmit",
+    "build": "bun run typecheck && vite build",
     "test": "bun test src",
     "preview:check": "bun src/visual-check.ts"
   },
@@ -18,11 +18,11 @@
     "vue": "3.5.43"
   },
   "devDependencies": {
+    "@chatium/vue-ts-mapper-rs": "0.2.7",
     "@types/bun": "1.4.3",
     "@vitejs/plugin-vue": "6.0.9",
     "playwright": "1.58.2",
-    "typescript": "5.9.3",
-    "vite": "8.3.2",
-    "vue-tsc": "3.2.6"
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
+    "vite": "8.3.2"
   }
 }

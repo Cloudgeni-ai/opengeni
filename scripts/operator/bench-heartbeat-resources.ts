@@ -2,7 +2,8 @@ import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
 import { createConnection, createServer } from "node:net";
 import type postgres from "postgres";
-import { acquireSharedTestDatabase, MemoryEventBus } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   bootstrapWorkspace,
   createDb,

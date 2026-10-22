@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { allAgentCapabilities, type ResolvedAgentConfig } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { effectiveSkillSelectionsForAgent, buildOpenGeniAgent } from "../src/index";
 import {
   composeRuntimeSkills,

@@ -1,19 +1,17 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
 import { type OpenGeniText } from "../messages/runtime";
+import { occurrenceOffsets } from "../timeline/annotation-model";
+
+export {
+  annotationDisplayOrdinal,
+  annotationHasNote,
+  matchingQuoteInSource,
+  occurrenceOffsets,
+  truncateAnnotationQuote,
+} from "../timeline/annotation-model";
 
 export const ANNOTATION_CHROME_SELECTOR =
   "[data-og-annotation-chrome], [data-og-annotation-badge], [data-og-annotation-popover]";
-
-export function annotationHasNote(note: string): boolean {
-  return note.trim().length > 0;
-}
-
-export function annotationDisplayOrdinal(
-  annotation: { readonly id?: string; readonly ordinal?: number | undefined },
-  index: number,
-): number {
-  return typeof annotation.ordinal === "number" ? annotation.ordinal : index + 1;
-}
 
 export function sourceKindLabel(t: OpenGeniText, kind: TimelineAnnotationSource["kind"]): string {
   switch (kind) {
@@ -30,12 +28,6 @@ export function annotationSourceLabel(t: OpenGeniText, source: TimelineAnnotatio
   return source.label?.trim() || sourceKindLabel(t, source.kind);
 }
 
-export function truncateAnnotationQuote(quote: string, maxChars = 160): string {
-  const normalized = quote.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
-}
-
 export function cssEscapeAttribute(value: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -44,46 +36,6 @@ export function cssEscapeAttribute(value: string): string {
 export function isAnnotationChromeNode(node: Node | null): boolean {
   const element = node instanceof Element ? node : node?.parentElement;
   return Boolean(element?.closest(ANNOTATION_CHROME_SELECTOR));
-}
-
-export function occurrenceOffsets(text: string, quote: string): number[] {
-  if (!quote) return [];
-  const offsets: number[] = [];
-  let cursor = 0;
-  while (cursor <= text.length - quote.length) {
-    const offset = text.indexOf(quote, cursor);
-    if (offset < 0) break;
-    offsets.push(offset);
-    cursor = offset + 1;
-  }
-  return offsets;
-}
-
-function uniqueNonEmpty(values: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const value of values) {
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-  }
-  return out;
-}
-
-export function matchingQuoteInSource(sourceText: string, quote: string): string | null {
-  for (const candidate of uniqueNonEmpty([quote, quote.trim()])) {
-    if (sourceText.includes(candidate)) return candidate;
-  }
-  const trimmed = quote.trim();
-  for (let length = trimmed.length; length >= 8; length--) {
-    const slice = trimmed.slice(0, length);
-    if (sourceText.includes(slice)) return slice;
-  }
-  for (let start = 1; start <= trimmed.length - 8; start++) {
-    const slice = trimmed.slice(start);
-    if (sourceText.includes(slice)) return slice;
-  }
-  return null;
 }
 
 type AnnotatableSpan = {

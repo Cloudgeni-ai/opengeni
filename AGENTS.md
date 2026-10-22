@@ -155,6 +155,10 @@ empty literal-prefix listings may suggest authorized names but never restore
 disabled tools or grant execution outside the current catalog.
 
 - Public clients talk only to the API.
+- Typed decision models are separate from conversational models. Tool discovery
+  and code-search judgments share `@opengeni/decisions`; provider adapters must not
+  silently fall back to chat completions or borrow a customer's credential. See
+  `docs/decision-models.md` for configuration and verified provider boundaries.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
   authority hierarchy: `managed_accounts.id` remains the physical organization
   id, organization membership is distinct from ordinary workspace membership,
@@ -313,6 +317,8 @@ disabled tools or grant execution outside the current catalog.
   hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
+
+- **Discovery is compact and history is append-only.** `tool_search` uses field-aware selection; an optional configured decision model handles ambiguous queries, while strong matches and exact `names` bypass inference. Native Responses routes retain hosted client search and native function loading; generic routes load the strongest match with compact alternatives through ordinary search/list/invoke. Compact candidates are not loaded schemas. Freeze selection on the originating call and retain its native output or append its generic declaration after the result; never reread today's catalog to reconstruct old discovery. `tool_list({view: "groups"})` is the directory; never prepend a changing directory to an earlier prompt. See `scripts/tool-discovery-eval/README.md` for the eval and provider limitations.
 
 Session creation reserves an idle shell, not queued work. Initial admission
 commits the first turn, status and wake atomically. Never reconstruct accepted
@@ -748,7 +754,7 @@ User-message file attachments enter the runtime manifest and eager materializati
 
 Published-file chat links use `artifact:<id>` and host artifact navigation;
 `sandbox:` links still open the workspace inspector. Media previews share
-`apps/web/src/components/artifacts/retained-file-preview.tsx`. Preserve closed
+`packages/react/src/app/components/artifacts/retained-file-preview.tsx`. Preserve closed
 publication receipts and legacy non-media identities; see `docs/artifact-library.md`.
 
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
@@ -780,7 +786,74 @@ Supply fixture settings through the service environment, or use an explicit
 
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
 
+## Reviewed merges to main
+
+Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
+and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
+Run the full relevant suites
+on the VM (not only the fast queue checks), with bounded workers and isolated
+services. Obtain an independent agent review of the exact candidate head. Post
+one PR evidence comment containing that head SHA, commands/results, reviewer
+session and any limitations. Recheck the evidence after substantive head changes.
+
+Admission is ordered: complete the relevant full VM suites, obtain genuine
+independent review of that exact head, then post the real evidence and apply
+`queue-ready` only when the rollout owner has enabled intake. Never fabricate a
+test/reviewer receipt, copy evidence from another head, or treat a green provider
+check as independent review. A changed head revokes the old admission; repeat
+tests/review for the new head before signalling readiness again. Version PRs
+need the same human-readable exact-head evidence, not a bot exemption.
+
+Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
+enforcement and vendor installation stay off. The batcher starts in read-only
+shadow mode; only the rollout owner's explicit go permits activation.
+Candidate-only CI shadow permission is not permission to control main or change
+rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
+does not activate anything; keep main control inactive until the release hold is
+cleared and the rollout owner gives a separate explicit go.
+Before activation, use the repository's normal squash merge after the same
+local-test and independent-review evidence. Once active, submit the documented
+ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and observe the **Batch ready**
+result and exact landed SHA. Never use `--admin`, a direct merge API or a direct
+main push. Do not rebase merely because main advanced: the batcher tests the
+combined tree. Any head change invalidates earlier evidence and requires a new
+candidate. Version PRs always occupy their own batch.
+
+Queue-green is not release-green. Releases require full main CI on the exact
+released tip, with verified Version ancestry and matching image provenance.
+Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
+the controller owns the single unchanged-input flaky retry. Do not stack manual
+or in-job retries on it, or silently resubmit an ejected unchanged head.
+Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
+the plan and task receipts are deliberately bound to one run attempt.
+Full main CI also requires **Re-run all jobs** when recovering a release candidate:
+the Full CI and canary image receipts must belong to the same selected attempt.
+A partial rerun can turn the provider run green while leaving the SHA ineligible
+for release. Changes to
+the batcher or its CI control files require an isolated batch and explicit
+independent review of those control-plane changes.
+
+Budget/threshold increases, newly skipped tests and reduced coverage must be
+explicit in the PR and evidence comment, independently confirmed by the reviewer,
+and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+The documented `hotfix/*` → `production` incident lane stays separate; ordinary
+main changes never bypass the queue. See the incident and rollback steps in the
+queue runbook before any exceptional main action.
+
+If full post-merge main CI goes red, identify and reproduce the culprit against
+the last fully green SHA, then **revert the culprit PR first through the queue**
+and fix it afterwards. Do not leave main red while developing the forward fix.
+Coalesced runs can contain several PRs: the tip PR is not automatically the culprit.
+Cancelled runs are not failures. Automatic blind reverts are not authorized.
+
 ## Deployment Work Notes
+
+Runtime posture tolerates securely shaped unknown tables and invoker routines,
+not changes to known contracts or unknown callable SECURITY DEFINER routines.
+Run the pinned previous-binary readiness test for schema changes and keep its
+production baseline advancement separate from migration PRs. The initial pin
+is bootstrap evidence until this compatibility binary ships; see
+`docs/migrations-expand-contract.md#pinned-previous-binary-readiness`.
 
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
 

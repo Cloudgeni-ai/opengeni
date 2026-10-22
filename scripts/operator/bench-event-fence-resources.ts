@@ -1,8 +1,9 @@
 import { createConnection, createServer } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import type postgres from "postgres";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
+  appendSessionEvents,
   appendSessionEventsForTurnAttempt,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -28,6 +29,7 @@ type Sample = {
 };
 let current: Sample | undefined;
 const samples: Sample[] = [];
+const generic = process.env.OPENGENI_BENCH_GENERIC_EVENTS === "1";
 const shared = await acquireSharedTestDatabase("event-fence-benchmark");
 if (!shared) throw new Error("Local PostgreSQL required");
 const upstream = new URL(shared.appUrl);
@@ -118,9 +120,11 @@ try {
           payload: { text: `exact bytes ${index}` },
         }));
         for (let run = -3; run < Number(process.env.OPENGENI_BENCH_SAMPLES ?? "20"); run++) {
-          for (const projection of run % 2 === 0
-            ? ["full", "event", "checkpoint"]
-            : ["checkpoint", "event", "full"]) {
+          for (const projection of generic
+            ? ["generic"]
+            : run % 2 === 0
+              ? ["full", "event", "checkpoint"]
+              : ["checkpoint", "event", "full"]) {
             const sample: Sample = {
               shape,
               lane: type,
@@ -135,21 +139,36 @@ try {
             current = sample;
             const started = performance.now(),
               cpu = process.cpuUsage();
-            const result = await appendSessionEventsForTurnAttempt(
-              client.db,
-              grant.workspaceId,
-              session.id,
-              claim.turn.id,
-              claim.turn.executionGeneration,
-              attemptId,
-              inputs,
-              undefined,
-              projection === "full"
-                ? async () => true
-                : projection === "checkpoint"
-                  ? { rowProjection: "event", mutate: async () => true }
-                  : undefined,
-            );
+            const result = generic
+              ? {
+                  accepted: true,
+                  events: await appendSessionEvents(
+                    client.db,
+                    grant.workspaceId,
+                    session.id,
+                    inputs.map((input) => ({
+                      ...input,
+                      turnId: claim.turn.id,
+                      turnGeneration: claim.turn.executionGeneration,
+                      turnAttemptId: attemptId,
+                    })),
+                  ),
+                }
+              : await appendSessionEventsForTurnAttempt(
+                  client.db,
+                  grant.workspaceId,
+                  session.id,
+                  claim.turn.id,
+                  claim.turn.executionGeneration,
+                  attemptId,
+                  inputs,
+                  undefined,
+                  projection === "full"
+                    ? async () => true
+                    : projection === "checkpoint"
+                      ? { rowProjection: "event", mutate: async () => true }
+                      : undefined,
+                );
             sample.ms = performance.now() - started;
             const used = process.cpuUsage(cpu);
             sample.cpuMs = (used.user + used.system) / 1000;

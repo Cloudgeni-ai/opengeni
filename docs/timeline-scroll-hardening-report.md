@@ -177,7 +177,7 @@ The published `MessageTimeline` and its `useSessionEvents` integration should be
 
 ### Host paths
 
-- `apps/web/src/routes/session.tsx`
+- `packages/react/src/app/routes/session.tsx`
   - first-party composition of `useSessionEvents` and `MessageTimeline`.
 - `packages/react/src/index.ts`, `session.ts`, and `session-ui.ts`
   - public exports and compatibility boundaries.

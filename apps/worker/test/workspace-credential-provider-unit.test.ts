@@ -3,7 +3,7 @@ import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as database from "@opengeni/db";
 import { verifyOpenGeniSignature, type RunCredentialsRequest } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { verifyCredentialProviderRequest } from "@opengeni/sdk";
 import {
   credentialProviderRequestBody,

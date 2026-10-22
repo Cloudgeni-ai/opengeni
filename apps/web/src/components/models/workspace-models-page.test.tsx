@@ -1,3 +1,4 @@
+import "@/app-host";
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
@@ -10,8 +11,8 @@ import type {
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { ModelsView } from "@/lib/models-route";
-import { useConsoleSharedQueries } from "@/lib/shared-query";
+import type { ModelsView } from "@opengeni/react/app/lib/models-route";
+import { useConsoleSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -242,7 +243,17 @@ const client = {
     ],
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
-  listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  listOrganizationProviderCustomModels: mock(async (): Promise<unknown> => ({ models: [] })),
+  createOrganizationProviderCustomModel: mock(
+    async (...args: unknown[]): Promise<unknown> => ({
+      id: "org-model",
+      upstreamModelId: (args[2] as { upstreamModelId: string }).upstreamModelId,
+      label: null,
+      version: 1,
+      createdAt: "2026-10-17T12:00:00.000Z",
+      updatedAt: "2026-10-17T12:00:00.000Z",
+    }),
+  ),
   getWorkspaceSubscriptionUsagePools: mock(async (_workspaceId: string) => ({ pools: [] })),
   getOrganizationSubscriptionUsagePools: mock(async (_organizationId: string) => ({ pools: [] })),
   listOrganizationSuperGrokAccounts: mock(
@@ -287,18 +298,21 @@ let navigateTo: (search: {
 }) => void = () => {};
 let lastNavigation: { to?: string; search: Record<string, unknown> } | null = null;
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
 }));
-mock.module("@tanstack/react-router", () => ({
+const navigationMock = () => ({
   useNavigate:
     () => (options: { to?: string; search: { account?: string; view?: ModelsView } }) => {
       lastNavigation = options;
       navigateTo(options.search);
     },
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
-}));
+});
+// The page itself and the shared session pieces it renders both navigate.
+mock.module("@tanstack/react-router", navigationMock);
+mock.module("@opengeni/react/app/lib/navigation", navigationMock);
 mock.module("@/components/default-session-model", () => ({
   DefaultSessionModelPreferenceRow: ({
     describePayer,
@@ -330,7 +344,7 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     title,
@@ -524,7 +538,7 @@ beforeAll(() => undefined);
 
 beforeEach(async () => {
   // Account lists are retained per client between mounts; every test starts cold.
-  const { clearSharedQueries } = await import("@/lib/shared-query");
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
   clearSharedQueries(client);
   organizationAdmin = false;
   organizationList = false;
@@ -647,7 +661,7 @@ async function cleanup({ container, root }: { container: HTMLElement; root: Root
 
 /** Start an explicitly cold mock scenario without relying on teardown timers. */
 async function renderColdModelsFixture(): ReturnType<typeof render> {
-  const { clearSharedQueries } = await import("@/lib/shared-query");
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
   clearSharedQueries(client);
   return render();
 }
@@ -761,7 +775,7 @@ describe("Codex rows", () => {
 
   test("a fresh revisit renders retained accounts and live usage without reads; Refresh re-reads", async () => {
     // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -803,7 +817,8 @@ describe("Codex rows", () => {
 
   test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
     const { useCodexSubscriptions } = await import("@/components/codex-connection");
-    const { retainSharedQueries, peekSharedQuery } = await import("@/lib/shared-query");
+    const { retainSharedQueries, peekSharedQuery } =
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     let remaining = 1;
     client.codexOverview.mockImplementation(async () => {
@@ -845,7 +860,7 @@ describe("Codex rows", () => {
   });
 
   test("an explicit live refresh failure says Usage unavailable, not the older reading", async () => {
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -879,7 +894,7 @@ describe("Codex rows", () => {
 
   test("an account change elsewhere is never shown stale on the next visit", async () => {
     const { invalidateSharedQueries, peekSharedQuery, retainSharedQueries } =
-      await import("@/lib/shared-query");
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
@@ -898,7 +913,7 @@ describe("Codex rows", () => {
   });
 
   test("a retained live overview older than five minutes revalidates on revisit", async () => {
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
@@ -1546,8 +1561,9 @@ describe("Connect Codex", () => {
   }
 
   test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
-    const { codexAccountsQueryKey, peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
-      await import("@/lib/shared-query");
+    const { codexAccountsQueryKey } = await import("@opengeni/react/app/lib/codex-usage-query");
+    const { peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const originalOpen = window.open;
     window.open = (() => null) as typeof window.open;
@@ -2297,6 +2313,231 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  /** Types into a controlled input the way React reads it. */
+  async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+      const props = (
+        input as unknown as Record<
+          string,
+          {
+            onChange?: (event: { target: HTMLInputElement }) => void;
+            onBlur?: (event: { target: HTMLInputElement }) => void;
+          }
+        >
+      )[reactPropsKey ?? ""];
+      props?.onChange?.({ target: input });
+      props?.onBlur?.({ target: input });
+    });
+  }
+
+  const AZURE_CONNECTION = {
+    providerKind: "azure_openai",
+    status: "active",
+    version: 1,
+    endpoint: "https://acme.openai.azure.com/openai/v1",
+    createdAt: "2026-10-17T12:00:00.000Z",
+    updatedAt: "2026-10-17T12:00:00.000Z",
+  };
+
+  test("an organization Azure OpenAI key needs its resource endpoint and saves it with the key", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    // The server keeps what was saved, so the page's re-read finds it connected.
+    let saved = false;
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "azure_openai" && saved ? AZURE_CONNECTION : null,
+    );
+    client.upsertOrganizationModelProviderConnection.mockImplementation(async () => {
+      saved = true;
+      return AZURE_CONNECTION;
+    });
+    const view = await render();
+    try {
+      // Connect provider lists it for the organization.
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      const choice = [...view.container.querySelectorAll<HTMLElement>("[data-row-action]")].find(
+        (candidate) => candidate.closest("[data-slot=list-row]")?.textContent?.includes("Azure"),
+      );
+      expect(choice).toBeDefined();
+      await act(async () => choice!.click());
+      await flush();
+      expect(lastNavigation?.search.view).toBe("connect-org:azure_openai");
+
+      const key = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Organization Azure OpenAI API key"]',
+      )!;
+      const endpoint = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI endpoint"]',
+      )!;
+      expect(key.type).toBe("password");
+      expect(endpoint.placeholder).toBe("https://RESOURCE.openai.azure.com");
+      await typeInto(key, "azure-secret-key");
+      // No endpoint, or one that isn't an Azure OpenAI resource, can't be saved.
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(true);
+      await typeInto(endpoint, "https://proxy.example.com/openai/v1");
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(true);
+      expect(view.container.textContent).toContain(
+        "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+      );
+      expect(client.upsertOrganizationModelProviderConnection).not.toHaveBeenCalled();
+
+      await typeInto(endpoint, "https://acme.openai.azure.com");
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(false);
+      await act(async () => button(view.container, "Connect Azure OpenAI")!.click());
+      await flush();
+      await flush();
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledTimes(1);
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledWith(
+        "organization-a",
+        "azure_openai",
+        {
+          operationId: expect.any(String),
+          expectedVersion: 0,
+          apiKey: "azure-secret-key",
+          endpoint: "https://acme.openai.azure.com",
+        },
+      );
+      // Its page names the saved endpoint and never the key.
+      expect(lastNavigation?.search.account).toBe("org:gateway:azure_openai");
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Azure OpenAI");
+      expect(view.container.textContent).toContain("https://acme.openai.azure.com/openai/v1");
+      expect(view.container.textContent).toContain("Deployments");
+      expect(view.container.innerHTML).not.toContain("azure-secret-key");
+    } finally {
+      await cleanup(view);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
+      client.upsertOrganizationModelProviderConnection.mockImplementation(async () => ({
+        id: "org-key",
+        status: "active",
+        version: 1,
+      }));
+    }
+  });
+
+  test("Azure OpenAI deployments are added by exact name once the organization is connected", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    let connected = false;
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "azure_openai" && connected ? AZURE_CONNECTION : null,
+    );
+    // The server keeps the deployments it accepted, so the page's re-read lists them.
+    const deployments: unknown[] = [];
+    client.listOrganizationProviderCustomModels.mockImplementation(async (...args: unknown[]) => ({
+      models: args[1] === "azure_openai" ? [...deployments] : [],
+    }));
+    client.createOrganizationProviderCustomModel.mockImplementation(
+      async (...args: unknown[]): Promise<unknown> => {
+        const model = {
+          id: `org-model-${deployments.length}`,
+          upstreamModelId: (args[2] as { upstreamModelId: string }).upstreamModelId,
+          label: null,
+          version: 1,
+          createdAt: "2026-10-17T12:00:00.000Z",
+          updatedAt: "2026-10-17T12:00:00.000Z",
+        };
+        deployments.push(model);
+        return model;
+      },
+    );
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      // Not connected: deployments come after connecting, so there's nothing to type yet.
+      await act(async () => navigateTo({ account: "org:gateway:azure_openai" }));
+      await flush();
+      expect(view.container.textContent).toContain(
+        "Deployments can be added after Azure OpenAI is connected.",
+      );
+      expect(
+        view.container.querySelector('input[aria-label="Azure OpenAI deployment name"]'),
+      ).toBeNull();
+    } finally {
+      await cleanup(view);
+    }
+
+    connected = true;
+    const page = await render();
+    try {
+      await act(async () => navigateTo({ account: "org:gateway:azure_openai" }));
+      await flush();
+      const text = page.container.textContent ?? "";
+      expect(text).toContain("Deployments");
+      expect(text).toContain("Add a deployment");
+      expect(text).toContain("checked against the organization's endpoint before it is saved");
+      // The endpoint is the only connection detail shown; the key is write-only.
+      expect(text).toContain("https://acme.openai.azure.com/openai/v1");
+      expect(text).toContain("Stored encrypted");
+      const input = page.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI deployment name"]',
+      )!;
+      expect(input.placeholder).toBe("gpt-6.1-sol");
+      await typeInto(input, "gpt 6.1 sol");
+      expect(button(page.container, "Add deployment")!.disabled).toBe(true);
+      expect(page.container.textContent).toContain(
+        "Use the exact deployment name: letters, numbers, dots, underscores or hyphens.",
+      );
+      // A deployment Azure refuses is checked once, not asked about again.
+      const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
+      client.createOrganizationProviderCustomModel.mockImplementationOnce(async () => {
+        throw new OpenGeniApiError(422, "", { mutation: true });
+      });
+      await typeInto(input, "missing-deployment");
+      await act(async () => button(page.container, "Add deployment")!.click());
+      await flush();
+      await flush();
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenCalledTimes(1);
+      expect(page.container.querySelector('[aria-label="Deployments on Azure OpenAI"]')).toBeNull();
+
+      await typeInto(input, "gpt-6.1-sol");
+      expect(button(page.container, "Add deployment")!.disabled).toBe(false);
+      await act(async () => button(page.container, "Add deployment")!.click());
+      await flush();
+      await flush();
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenCalledTimes(2);
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenLastCalledWith(
+        "organization-a",
+        "azure_openai",
+        { operationId: expect.any(String), upstreamModelId: "gpt-6.1-sol" },
+      );
+      const list = page.container.querySelector<HTMLElement>(
+        '[aria-label="Deployments on Azure OpenAI"]',
+      );
+      expect(list?.textContent).toContain("gpt-6.1-sol");
+      // A workspace's own Azure key stays a direct connection, not a Models account.
+      expect(page.container.textContent).not.toContain("Connect a key for Design preview");
+    } finally {
+      await cleanup(page);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
+      client.listOrganizationProviderCustomModels.mockImplementation(async () => ({ models: [] }));
+      client.createOrganizationProviderCustomModel.mockImplementation(
+        async (...args: unknown[]): Promise<unknown> => ({
+          id: "org-model",
+          upstreamModelId: (args[2] as { upstreamModelId: string }).upstreamModelId,
+          label: null,
+          version: 1,
+          createdAt: "2026-10-17T12:00:00.000Z",
+          updatedAt: "2026-10-17T12:00:00.000Z",
+        }),
+      );
+    }
+  });
+
   test("a member connects their own account in their Personal workspace", async () => {
     personalWorkspace = true;
     const view = await render();
@@ -2761,7 +3002,7 @@ describe("One Models page for the organization and the workspace", () => {
     });
 
     test("retains successful access across navigation but reads a deliberately cold error fixture", async () => {
-      const { retainSharedQueries } = await import("@/lib/shared-query");
+      const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
       const release = retainSharedQueries(client);
       organizationAdmin = true;
       routeBoth();

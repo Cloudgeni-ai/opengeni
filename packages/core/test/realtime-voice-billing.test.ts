@@ -7,7 +7,7 @@ import {
   realtimeVoiceStartedMinutes,
 } from "@opengeni/config";
 import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createRealtimeVoiceBilling,
   createVoiceInputBilling,

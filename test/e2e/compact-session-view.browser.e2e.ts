@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, waitFor, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -538,11 +539,16 @@ describe("compact session view on the live local workspace route (API fixture)",
   }, 45_000);
 
   const invalidate = async () => {
-    await page.evaluate(async (targetWorkspaceId) => {
-      const modulePath = "/src/lib/session-list-invalidation.ts";
-      const { notifySessionListChanged } = await import(modulePath);
-      notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
-    }, workspaceId);
+    // The listener set is module state, so import the same URL the dev server
+    // gave the app: Vite serves this workspace package from its real path.
+    const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
+    await page.evaluate(
+      async ({ targetWorkspaceId, moduleUrl }) => {
+        const { notifySessionListChanged } = await import(moduleUrl);
+        notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
+      },
+      { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
+    );
   };
   const settleRead = async () => {
     await page.waitForLoadState("networkidle");
@@ -629,6 +635,10 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(archiveFixture.mutationStarted).toBe(true);
       const openSearch = async (query: string) => {
         await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();
+        await page
+          .getByRole("dialog", { name: "Command menu", exact: true })
+          .getByRole("option", { name: "Search messages", exact: true })
+          .click();
         const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
         await dialog
           .getByRole("searchbox", { name: "Search session titles and messages" })
@@ -718,6 +728,9 @@ describe("compact session view on the live local workspace route (API fixture)",
         await invalidate();
         await settleRead();
         expect(await matchingChildren.count()).toBe(0);
+        // A failed quiet refresh must leave cached disclosure and its cursor
+        // usable, not turn them into a failed request for older sessions.
+        expect(await rail.getByRole("button", { name: /^Retry sessions in/ }).count()).toBe(0);
         await rail.getByText("Unrelated 00", { exact: true }).waitFor();
         for (let visible = 8; visible <= 48; visible += 4) {
           await disclosure.click();

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -95,6 +95,10 @@ beforeAll(async () => {
     "0777_workspace_admin_subscription_connections.sql",
     // Patches 0707's owner reader (as 0715 rewrites it).
     "0884_subscription_core_personal_quarantine_expiry.sql",
+    // Rewrites 0707's disconnect writer and 0777's policies.
+    "0897_workspace_owner_administers_subscriptions.sql",
+    // Restricts the predicate 0897 creates.
+    "0900_workspace_admin_predicate_privileges.sql",
   ];
   // The drained SuperGrok and Claude cutovers and the retirement after them
   // are maintenance-only: a rolling deployment of 0707 never applies them, so

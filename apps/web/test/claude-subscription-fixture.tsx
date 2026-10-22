@@ -7,7 +7,7 @@ import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@o
 import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Toaster } from "../src/components/ui/sonner";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import {
   PROVIDER_CONNECTION_CONFIGS,
   ProviderConnectPage,
@@ -19,7 +19,7 @@ import {
 import { useOrganizationProviderConnection } from "../src/components/organization-model-provider-connection";
 import { ACCOUNT_COLUMNS } from "../src/components/models/codex-models";
 import { RowList } from "@opengeni/react/ui/list-row";
-import { AppearanceProvider } from "../src/lib/appearance";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import "../src/styles.css";
 
 const scopeId = "22222222-2222-4222-8222-222222222222";

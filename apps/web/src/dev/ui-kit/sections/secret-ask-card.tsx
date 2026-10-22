@@ -14,8 +14,8 @@ import type {
   ToolActionReview,
 } from "@opengeni/sdk";
 
-import { MarkdownText } from "@/components/markdown";
-import { webSecretsUi } from "@/lib/secrets-ui";
+import { MarkdownText } from "@opengeni/react/app/components/markdown";
+import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 
 /* ----------------------------------------------------------------------------

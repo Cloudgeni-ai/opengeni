@@ -44,7 +44,6 @@ e2e(
     const sockets = await mkdtemp("/tmp/og-offscreen-s-");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: root,
-      socketRootDirectory: sockets,
     });
     const reference = {
       browserSessionId: randomUUID(),
@@ -152,7 +151,6 @@ linuxWithoutDisplayE2e(
     const sockets = await mkdtemp("/tmp/og-ol-s-");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: root,
-      socketRootDirectory: sockets,
     });
     const reference = {
       browserSessionId: randomUUID(),

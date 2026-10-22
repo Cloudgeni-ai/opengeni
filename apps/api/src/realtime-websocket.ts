@@ -16,12 +16,16 @@ import type {
   SessionRealtimeWebsocketInitialItem,
   WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/contracts";
-import { resolveWorkspaceRealtimeVoiceSettings } from "@opengeni/contracts";
+import { resolveRealtimeVoiceSettings } from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
+  getOrganizationModelDefaults,
   getSessionRealtimeContinuityEntries,
+  getWorkspaceProviderApiKeyConnectionMetadata,
   getWorkspaceSettings,
+  loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
+  organizationModelProviderConnectionActiveForWorkspace,
   loadWorkspaceVercelAiGatewayApiKey,
   readSubscriptionCoreProviderRouteForWorkspace,
   readSubscriptionCoreSessionOwner,
@@ -518,6 +522,39 @@ const ELEVENLABS_REALTIME_VOICES = voiceChoices([
  * comes from the person's language; it sets what the model hears and the
  * language it replies in. An unsupported language keeps the provider default.
  */
+/**
+ * The ElevenLabs key a workspace's voice sessions use: the workspace's own
+ * key when it has one, else its organization's key.
+ */
+async function loadElevenLabsApiKey(
+  db: Database,
+  settings: Settings,
+  scope: { accountId: string; workspaceId: string },
+): Promise<string | null> {
+  return (
+    (await loadWorkspaceProviderApiKey(db, settings, scope.workspaceId, "elevenlabs")) ??
+    (await loadOrganizationModelProviderApiKey(db, settings, {
+      ...scope,
+      providerKind: "elevenlabs",
+    }))
+  );
+}
+
+/** Whether a workspace has an ElevenLabs key to use, its own or its organization's. */
+export async function elevenLabsKeyAvailable(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  const [own, organization] = await Promise.all([
+    getWorkspaceProviderApiKeyConnectionMetadata(db, scope.workspaceId, "elevenlabs"),
+    organizationModelProviderConnectionActiveForWorkspace(db, {
+      ...scope,
+      providerKind: "elevenlabs",
+    }),
+  ]);
+  return own !== null || organization;
+}
+
 const elevenLabsProvider: RealtimeWebsocketProvider = {
   id: "elevenlabs",
   errorCodePrefix: "ELEVENLABS_REALTIME",
@@ -539,7 +576,7 @@ const elevenLabsProvider: RealtimeWebsocketProvider = {
       );
     }
     const [apiKey, voice] = await Promise.all([
-      loadWorkspaceProviderApiKey(input.db, input.settings, input.workspaceId, "elevenlabs"),
+      loadElevenLabsApiKey(input.db, input.settings, input),
       input.voice,
     ]);
     if (!apiKey) {
@@ -740,12 +777,15 @@ export async function createRealtimeWebsocketConnection(input: {
   }
   const instructions = openGeniRealtimeInstructions();
   // Read alongside the provider's credential, not before it.
-  const voice = getWorkspaceSettings(input.db, input.workspaceId).then((settings) =>
+  const voice = Promise.all([
+    getWorkspaceSettings(input.db, input.workspaceId),
+    getOrganizationModelDefaults(input.db, input.accountId),
+  ]).then(([settings, organizationDefaults]) =>
     resolveRealtimeVoice({
       provider,
       model: input.model,
       connection: input.voiceSettings,
-      workspace: resolveWorkspaceRealtimeVoiceSettings(settings, input.model),
+      workspace: resolveRealtimeVoiceSettings(settings, organizationDefaults, input.model),
       personLanguage: input.language,
     }),
   );

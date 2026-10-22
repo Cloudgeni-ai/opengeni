@@ -72,7 +72,15 @@ RUN set -eux; \
       native/terminal-ready/terminal-ready.c -o /out/opengeni-terminal-ready.so; \
     xx-verify /out/opengeni-terminal-ready.so
 
-FROM oven/bun:${BUN_VERSION} AS bun-runtime
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-runtime
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
 
@@ -133,6 +141,7 @@ COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/decisions/package.json packages/decisions/package.json
 COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
@@ -214,6 +223,7 @@ RUN set -eux; \
 RUN cd packages/ogtool && bun run build
 
 FROM oven/bun:${BUN_VERSION} AS browserd-build
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 WORKDIR /src
 COPY --from=browserd-source-build /src /src
@@ -224,8 +234,8 @@ ARG TARGETARCH
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
-      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49; lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
-      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1; lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
+      amd64) lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
+      arm64) lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
       *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
@@ -233,8 +243,6 @@ RUN set -eux; \
       packages/browserd/src/main.ts \
       --outfile /out/opengeni-browserd; \
     chmod 0755 /out/opengeni-browserd; \
-    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
-    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
     install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda; \
     test "$(sha256sum /out/lightpanda | awk '{print $1}')" = "$lightpanda_expected"; \
     install -m 0644 /lightpanda-assets/lightpanda-0.3.5-source.tar.gz /out/lightpanda-0.3.5-source.tar.gz; \
@@ -243,11 +251,15 @@ RUN set -eux; \
     test "$(sha256sum /out/lightpanda-LICENSE | awk '{print $1}')" = 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef; \
     { \
       printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
-      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
       printf '%s  %s\n' "$lightpanda_expected" /usr/local/lib/opengeni/lightpanda; \
       printf '%s  %s\n' a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 /usr/local/share/source/lightpanda-0.3.5.tar.gz; \
       printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
     } > /out/SHA256SUMS
+
+# The compiled controller embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check \
+  /opt/opengeni-docker/distrusted-roots.pem /out/opengeni-browserd
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
@@ -269,9 +281,16 @@ RUN printf '%s  %s\n' \
       /usr/local/bin/opengeni-agent \
       >> /out/SHA256SUMS
 
-FROM node:22.22.0-bookworm-slim AS node-runtime
+# Node also trusts roots compiled into its binary (as PEM). Distrust them the same
+# way, natively, for the target architecture's Node (never executed here).
+FROM node:22.22.0-bookworm-slim AS node-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS node-runtime
+COPY --from=node-target /usr/local/bin/node /out/node
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/node
 
 FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
@@ -297,7 +316,7 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 
 WORKDIR /src
 COPY . .
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /out/node /usr/local/bin/node
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -330,7 +349,9 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
+# certifi 2026.10.19 drops the compromised emSign ECC Root CA - G3. It is newer
+# than the shared PyPI cutoff, so it alone gets a later one.
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6 openpyxl==3.1.5 python-docx==1.2.0 python-pptx==1.0.2"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
@@ -401,8 +422,8 @@ RUN set -eux; \
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 RUN test "$(node --version)" = "v22.22.0"
 
 # Pinned native document-to-Markdown parser. The lock contains the registry
@@ -524,9 +545,10 @@ RUN set -eux; \
     test "$(uv cache dir)" = /var/cache/uv; \
     test "$(python3 -m pip cache dir)" = /var/cache/pip; \
     uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
-      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
+      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" \
+      --exclude-newer-package certifi=2026-10-21T00:00:00Z ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'; \
     python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
@@ -560,7 +582,6 @@ ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 ENV OPENGENI_BROWSERD_PORT=7682
-ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
 ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
@@ -575,7 +596,6 @@ ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
-COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
@@ -606,7 +626,7 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
-               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
+               /usr/local/bin/opengeni-browserd \
                /usr/local/lib/opengeni/lightpanda \
                /usr/local/lib/opengeni/opengeni-computer-native \
                /usr/local/bin/opengeni-agent; \

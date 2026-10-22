@@ -9,7 +9,8 @@ import type {
   ConnectorActionPolicySnapshotEntry,
 } from "@opengeni/db";
 import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
-import { startTestMcpServer, testSettings, type TestMcpServer } from "@opengeni/testing";
+import { startTestMcpServer, type TestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 

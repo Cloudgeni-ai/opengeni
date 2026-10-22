@@ -72,8 +72,9 @@ networkPolicy:
     podSelector: {}
   # Optional: allow a metrics scraper (Prometheus) to reach GET /metrics on the
   # relay's internal relay.metricsPort (its wss port when that is null) and the
-  # API's internal api.metricsPort. Leave unset to omit those rules (the relay
-  # has no other ingress source than the ingress controller). When the
+  # API's internal api.metricsPort, and on computeControl.metrics.port. Leave
+  # unset to omit those rules (the relay has no other ingress source than the
+  # ingress controller). When the
   # kube-prometheus ServiceMonitor scrapes from a separate namespace, set both
   # selectors here.
   monitoring: {}
@@ -1472,6 +1473,23 @@ computeControl:
   service:
     # Opengeni's API and workers call the API here, in the cluster.
     apiPort: 8080
+  metrics:
+    # The service's metrics, GET /metrics in Prometheus's text format, on
+    # this port of its pods and of the API Service (never the hosts
+    # Service), for example 9464. observability.serviceMonitor.enabled
+    # scrapes it, and networkPolicy.monitoring admits the scraper. null (the
+    # default): no metrics.
+    port: null
+    # Where the service passes its hosts' metrics on to: an OTLP/HTTP
+    # metrics endpoint that takes JSON, such as Prometheus's OTLP receiver
+    # (http://<prometheus>:9090/api/v1/otlp/v1/metrics, with the receiver
+    # turned on; deploy/observability does). Hosts send them over their
+    # mutual TLS with the service when they run with
+    # --otlp-metrics-to-control, so they need no route or credentials of
+    # their own to the store. With networkPolicy.egress.enabled, the egress
+    # rules must admit this endpoint. Empty: the service refuses hosts'
+    # metrics, and the host alerts are left out.
+    hostsTo: ""
   hostsService:
     # Hosts dial this endpoint from outside the cluster: a LoadBalancer
     # (annotations for an internal one) or a NodePort.

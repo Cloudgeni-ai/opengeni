@@ -42,6 +42,7 @@ const requiredMethods = [
 const optionalMethods = [
   "setWorkspaceInferenceState",
   "updateSessionAttention",
+  "listEventPage",
 ] as const satisfies readonly (keyof EmbeddedSessionClientLike)[];
 
 /**

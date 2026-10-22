@@ -1,13 +1,13 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildAgentCapabilities } from "@opengeni/runtime";
 import {
   resolveSandboxRoute,
   resolveMachineEnrollmentForTurn,
 } from "../src/activities/agent-turn/sandbox-establish";
 import { Agent, Runner, tool, type ModelRequest, type StreamEvent } from "@openai/agents";
-import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import { checkpointHistoryBeforeProviderDispatch } from "../src/activities/agent-turn/provider-dispatch-barrier";
 import { sandboxRouteTransitionCode } from "../src/activities/agent-turn/errors";
 

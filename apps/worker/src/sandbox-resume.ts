@@ -24,6 +24,7 @@ import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   effectiveSandboxLifecycle,
+  sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
@@ -77,6 +78,7 @@ import {
   parseWorkspaceArchiveDescriptor,
   providerWorkspaceCapturePolicy,
   SandboxProviderContinuityUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   requirePersistableReplacementSandboxEnvelope,
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
@@ -2136,6 +2138,9 @@ async function resumeBoxForTurnOnce(
       // tracked backstops, and we must not erase the only provider pointer.
       if (terminated) {
         const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
+        // Only proof that the workspace itself is gone ends its lineage as a
+        // loss; otherwise the receipt is retired for an archive restore.
+        const workspaceAbsent = error instanceof SandboxProviderWorkspaceAbsentError;
         if (rematerialization && !createdEstablished?.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
@@ -2154,6 +2159,7 @@ async function resumeBoxForTurnOnce(
                 ? error.retryable
                 : true,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         } else {
           await failWarmingToCold(db, {
@@ -2162,6 +2168,7 @@ async function resumeBoxForTurnOnce(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         }
       }
@@ -2252,6 +2259,10 @@ async function resumeBoxForTurnOnce(
         expectedEpoch: leaseEpoch,
         expectedInstanceId: live.instanceId,
         expectedBackend: ids.backend,
+        providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+          settings,
+          ids.backend as Settings["sandboxBackend"],
+        ),
       });
       if (marked.status === "marked") {
         await publishDurableSessionEvents(

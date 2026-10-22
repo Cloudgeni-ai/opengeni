@@ -19,8 +19,8 @@ use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    Answer, Answered, Capacity, Envelope, Held, HostInfo, REGISTER_PATH, RENEW_PATH, ReadyClones,
-    Register, Registered, Renew, Renewed, Verdict,
+    Answer, Answered, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH, RENEW_PATH,
+    ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
 use compute_protocol::host::{ErrorCode, Id, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
@@ -260,6 +260,19 @@ impl Fleet {
 
     /// A fleet whose leader sizes `scaling`, with `settings` adjusted.
     pub async fn start_with(scaling: Option<Scaling>, adjust: impl FnOnce(&mut Settings)) -> Self {
+        Self::start_full(scaling, None, adjust).await
+    }
+
+    /// A fleet that passes hosts' metrics on to `store`.
+    pub async fn start_passing_metrics_to(store: &str) -> Self {
+        Self::start_full(None, Some(store.to_owned()), |_| {}).await
+    }
+
+    async fn start_full(
+        scaling: Option<Scaling>,
+        host_metrics: Option<String>,
+        adjust: impl FnOnce(&mut Settings),
+    ) -> Self {
         let pki = Pki::new();
         let store = Arc::new(MemoryStore::new());
         for (key, team) in [
@@ -295,6 +308,8 @@ impl Fleet {
                 scaling,
                 seed: 7,
                 e2b: None,
+                metrics: Some(loopback),
+                host_metrics,
             },
         )
         .await
@@ -311,6 +326,23 @@ impl Fleet {
 
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.running.api)
+    }
+
+    /// The replica's metrics, as Prometheus scrapes them.
+    pub async fn scrape(&self) -> String {
+        let address = self.running.metrics.expect("a metrics listener");
+        let response = self
+            .http
+            .get(format!("http://{address}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            compute_control::metrics::CONTENT_TYPE
+        );
+        response.text().await.unwrap()
     }
 
     /// A request to the public API with `key`.
@@ -396,8 +428,9 @@ impl Fleet {
 pub fn roomy() -> Capacity {
     Capacity {
         memory_free_mib: 64 * 1024,
-        cpu_millis: None,
-        cpu_free_millis: None,
+        memory_reclaimable_mib: 0,
+        cpu_millis: 64_000,
+        cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,
         ready: Vec::new(),
         awake: 0,
@@ -554,6 +587,26 @@ impl FakeHost {
     pub async fn register_again(&self) -> Registered {
         let attempt = self.inner.attempt.load(Ordering::SeqCst);
         send_register(&self.inner, attempt).await
+    }
+
+    /// Posts `export` as its metrics, over its mutual TLS; answers the
+    /// status, the `Retry-After` it was given, if any, and the body.
+    pub async fn post_metrics(&self, export: &Value) -> (u16, Option<String>, String) {
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{METRICS_PATH}", self.inner.hosts_url))
+            .json(export)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (status, retry_after, response.text().await.unwrap())
     }
 
     /// Stops or resumes its renewals.
@@ -714,7 +767,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 64 * 1024,
-            cpu_millis: None,
+            cpu_millis: 64_000,
             disk_mib: 1 << 20,
         },
         capacity: inner.capacity.lock().unwrap().clone(),
@@ -876,6 +929,59 @@ fn error(code: ErrorCode, message: &str) -> Reply {
     }
 }
 
+/// The status of sandbox `id` as a host reports it, at its first boot
+/// under `owner_epoch`, at `level` with `holds` holds.
+pub fn sandbox_status(
+    id: Id,
+    owner_epoch: u64,
+    level: &str,
+    durability: &str,
+    holds: usize,
+) -> Value {
+    serde_json::json!({
+        "id": id.to_string(),
+        "generation": 1,
+        "owner_epoch": owner_epoch,
+        "revision": 1,
+        "level": level,
+        "durability": durability,
+        "backed_up_ms": null,
+        "memory_saved": true,
+        "step": null,
+        "holds": holds,
+        "launches": 1,
+        "resident_bytes": null,
+        "unsavable": false,
+        "broken": false,
+    })
+}
+
+/// A host's status holding `sandboxes`, with everything else a host
+/// reports empty.
+pub fn host_status(sandboxes: &[Value]) -> Reply {
+    let status = serde_json::json!({
+        "sandboxes": sandboxes,
+        "steps": [],
+        "available_memory": null,
+        "reclaimable_memory": 0,
+        "blocked": [],
+        "capacity": null,
+        "disk": null,
+        "templates": [],
+        "unseen_activity": 0,
+        "about": {
+            "build": "test",
+            "runtime": "test",
+            "memory_profile": "test",
+            "base_image": "test",
+            "checkpoints": false,
+        },
+    });
+    Reply::Status(Box::new(
+        serde_json::from_value(status).expect("a host's status"),
+    ))
+}
+
 /// An ordinary host's status: each sandbox it holds runs its first boot.
 fn status(inner: &HostInner) -> Reply {
     let sandboxes: Vec<Value> = inner
@@ -883,29 +989,9 @@ fn status(inner: &HostInner) -> Reply {
         .lock()
         .unwrap()
         .iter()
-        .map(|(id, owner_epoch)| {
-            serde_json::json!({
-                "id": id.to_string(),
-                "generation": 1,
-                "owner_epoch": owner_epoch,
-                "revision": 1,
-                "level": "running",
-                "durability": "volatile",
-                "memory_saved": true,
-                "step": null,
-                "holds": 0,
-                "broken": false,
-            })
-        })
+        .map(|(id, owner_epoch)| sandbox_status(*id, *owner_epoch, "running", "volatile", 0))
         .collect();
-    let status = serde_json::json!({
-        "sandboxes": sandboxes,
-        "steps": [],
-        "available_memory": null,
-    });
-    Reply::Status(Box::new(
-        serde_json::from_value(status).expect("a host's status"),
-    ))
+    host_status(&sandboxes)
 }
 
 /// What an ordinary host answers.

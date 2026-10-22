@@ -8,7 +8,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react
 import { Button } from "@opengeni/react/ui/button";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Field, TextArea } from "@opengeni/react/ui/field";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 type OrganizationKnowledgeModelSelection = {
   model: string;

@@ -63,6 +63,13 @@ Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
 live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
 Artifact writes use the same native authorization as any other agent session.
+
+New configured sessions persist Knowledge search eagerness through ordinary
+`ToolRef.eager` selection at creation; scheduled occurrences freeze that selection
+with accepted execution. Existing sessions and accepted executions are not
+rewritten. Knowledge search discovery cards are an execution-time model-result
+projection, never a history rewrite; programmatic results remain complete.
+See [Knowledge discovery](knowledge.md#model-visible-discovery-results).
 After a worker claims a turn, its session RLS actor carries the canonical
 authority projection's root into preparation and execution. This lets a guest's
 worker read its own frozen attempt policies without a human identity or a
@@ -151,6 +158,9 @@ Receipt and operation checkpoints explicitly request the same narrow fence
 projection as plain event appends; they do not fetch frozen prompts or catalogs
 they never read. Plain mutation callbacks retain their full-row contract. Both
 projections use identical locks and admission decisions in the same transaction.
+Generic event appends (including explicit field updates), history checkpoints,
+open-suffix attachment and transport/token markers use that narrow projection
+too; none needs frozen session or attempt configuration to perform its write.
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
@@ -162,6 +172,17 @@ until newer consumed activity or explicit mark-read.
 Session list totals materialize narrow, caller-RLS-authorized child metadata once
 before recursive traversal. Roots retain their list/scope filters; exact-target
 grants do not expand to children. Tree depth does not multiply base session scans.
+
+The workspace live SSE also carries transient session-list invalidation hints.
+PostgreSQL commit triggers notify only on list-relevant changes; one lazy dedicated
+listener per API process batches dirty IDs at the existing 15-second cadence and
+filters them through current list authority before delivery. These hints have no
+replay cursor and are never history: reconnect/focus reconciles the authoritative
+lists. Web and desktop share the dirty-scope renderer, so unchanged roots, pins,
+expanded branches and project windows no longer poll. Missing listener support,
+transaction-only database handles, finite HTTP/1 batches and external host ACLs
+retain polling. The source is `packages/db/src/session-list-notifications.ts`; the
+authorized batch is `apps/api/src/http/session-list-hints.ts`.
 
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
@@ -663,7 +684,12 @@ of upstream settlement. Workspace Gateway, OpenRouter, Opper, Anthropic API, and
 Claude subscription rows are provider-qualified overlays, separate from deployment
 catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`,
 `workspace-opper/*`, `organization-opper/*`) retain distinct provider/billing
-identities for identical slugs. Claude setup:
+identities for identical slugs. Organization OpenAI
+(`organization-openai/<model>`) and Azure OpenAI
+(`organization-azure-openai/<deployment>`) are the organization peers of the
+workspace direct routes: one encrypted key (plus Azure's non-secret endpoint)
+per organization, inherited by shared workspaces only (see
+[model-providers.md](model-providers.md#organization-openai-and-azure-openai)). Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
 Claude request-byte and independent image bounds live in
@@ -722,7 +748,7 @@ Model display: outside Models settings a model is its clean name plus its maker'
 logo, never a routing prefix, connection id or organization/workspace scope.
 `packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported
 by `@opengeni/sdk/model-display`) and `@opengeni/react`'s `ModelName`/`ModelMark` are
-the one source; the console's `apps/web/src/components/model-identity.tsx` adds the
+the one source; the console's `packages/react/src/app/components/model-identity.tsx` adds the
 logo tile and payer hint. The picker merges org- and workspace-connected copies.
 
 Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
@@ -1209,9 +1235,9 @@ contracts → sdk → react → apps/web
 Server-free clients: `apps/web` consumes SDK/React, never owning session/authorization
 semantics. Embedded API/core/worker hosts preserve these boundaries.
 
-Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+Console appearance: `packages/react/src/app/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
+Workspace management: `packages/react/src/app/lib/workspace-management-location.tsx`; lazy settings
 shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
 destinations.
 Excel add-in pane: `apps/web/office/` (its own Vite entry), served with its manifest by the
@@ -1634,6 +1660,16 @@ Canonical: [`model-providers.md`](model-providers.md),
 delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
+Discovery uses field-aware retrieval and optional generic decision-model selection.
+The shared typed predicate/choice/score interface is `@opengeni/decisions`, used by
+both discovery and the code-search judge. Deployment-owned Jev, OpenAI Decisions
+or OpenRouter Decisions credentials are explicit, separate from conversational
+models. See [`decision-models.md`](decision-models.md) for configuration, usage and
+verified provider boundaries; no ordinary-chat inference fallback is implied.
+Native Responses routes retain hosted search and native function loading; generic
+routes return compact alternatives and append selected schemas after the result.
+Catalog changes never rewrite prior items or the first-request tool block.
+`tool_list(view:"groups")` is an explicit source/resource directory, not a prefix.
 Unmatched `tool_list.namePrefix` returns empty pages plus bounded authorized
 suggestions, never schemas/authority; exact `tool_search` resolves them.
 
@@ -1662,7 +1698,7 @@ home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
 chat's override in the session dock's Agent tab beside its identity and
-capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
@@ -1672,6 +1708,17 @@ source tools retain files and prepare canonical source entries; agents save the
 useful findings. Parsing and indexing remain mechanical services. Original bytes
 and search caches have separate storage jobs. Review controls
 publication, while action permissions remain independent.
+
+Knowledge reads evaluate evidence visibility for the complete matched candidate
+set through `knowledge_revisions_visible`; scalar readers use the same helper.
+Keyword nonmatches can be excluded first because their rank is per revision,
+but access filtering still precedes ranking, cursor selection and pagination.
+Dependency cycles terminate with recursive `UNION`, and shared identities are
+checked once within that read, never cached between statements. Existing
+VOLATILE document/source ACL helpers keep their fresh-snapshot behavior; this
+does not promise a single immutable snapshot across all nested ACL checks.
+Accepted-agent session/turn/attempt SHARE locks remain held until transaction
+completion, so reducing search work also shortens the event-writer lock queue.
 
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
@@ -1719,6 +1766,12 @@ tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.
 
+The control worker repairs missing call facts through the durable,
+input-paged bootstrap and commit-coupled arrival queue in
+`packages/db/src/model-call-fact-reconciliation.ts`; completed windows are not
+rescanned. Each page commits its progress with its facts, and its database work is joined to
+the activity's existing run deadline and cancellation. See the
+[reconciliation lifecycle](insights-raw-usage-api.md#missing-model-fact-reconciliation).
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
@@ -1836,7 +1889,8 @@ behind a generic 500, so its session lookups run through
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
-| `packages/jev` | `@opengeni/jev` | Jev client and `code_search` engine |
+| `packages/decisions` | `@opengeni/decisions` | Provider-neutral predicate/choice/score model interface and OpenAI/OpenRouter typed Decisions transports; no conversational fallback |
+| `packages/jev` | `@opengeni/jev` | Existing Jev client, adapter to the shared decision-model interface, and provider-neutral `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
@@ -1870,7 +1924,7 @@ behind a generic 500, so its session lookups run through
 | `packages/desktop` | `@opengeni/desktop` | Electron kit for desktop apps: accounts, server windows, notifications, deep links, updates, and Connected Machine setup |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
-| `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
+| `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers; import the package's leaf exports so pure tests do not initialize unrelated services or schema graphs |
 
 ### 6.3 Examples
 
@@ -1940,8 +1994,8 @@ serves stock HTTP and in-process embedding hosts, owning validation, draft rotat
 event append, turn routing, receipt/replay behavior, and the response contract.
 Web Send rebases drafts (including unavailable files), aligns
 file-only text with create, freezes edits, preserves late voice transcripts
-(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
-`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
+(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/app/lib/use-new-session-draft.tsx`,
+`packages/react/src/app/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -2486,6 +2540,14 @@ archives locally, never in deployed images.
 
 Timeline history: `packages/react`. `use-session-events.ts` fences navigation by
 session/client lifetime, independently of SSE reconnects; Web supplies events/session keys.
+Every return to the live tip (first open, hidden-tab return, a wake that
+`hooks/page-wake.ts` detects from a wall-clock jump or `online`/`resume`, and each
+SDK reconnect through the opt-in `streamSessionEvents` `beforeReconnect`) reads the
+durable head: at most 16 missed events replay over SSE; more catch up the
+conversation in at most two pages and re-read the working turn's newest steps, or
+load the newest window. A transient read failure retries (bounded attempts, each timed
+out) before falling back to exact replay. SDK callers without `beforeReconnect` keep
+exactly-once replay.
 Overlap uses retained event identity; prepends may change partial-message row IDs.
 `timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx` corrects
 residual browser-anchor movement without resuming tip-follow. Upward input loads
@@ -2651,6 +2713,15 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+Readiness is forward-compatible only for entirely unknown, securely shaped
+objects; named-object ACL, RLS and capability contracts remain exact. Unknown
+callable SECURITY DEFINER routines require a prior explicit binary contract.
+The pinned previous-binary inspector/evaluator CI and its release bootstrap are
+documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
+The migration runner partitions the live pending ledger into a posture-inert rolling prefix,
+maintenance span and eligible post-release suffix. Phase execution is cumulative
+and serialized by the existing advisory lock; default execution still applies
+everything. See [the phase contract](migrations-expand-contract.md#release-phases).
 The migration ledger keys receipts by full SQL filename, not ordinal. Published
 SQL names and bytes remain immutable, including historical duplicate ordinals.
 The source guard permits a duplicate group already present together on one
@@ -2820,7 +2891,7 @@ Topics: [`README.md`](README.md).
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/`, `packages/runtime/src/provider-quota.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
+| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `packages/react/src/app/components/session/model-context-inspector.tsx`, `packages/react/src/app/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
@@ -2892,7 +2963,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
-| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
+| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
 | Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
@@ -2910,10 +2981,27 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
+The standalone merge batcher (`scripts/merge-batcher/`) is an operational
+controller, not part of the API or Temporal workers. It reconstructs state from
+Git objects and GitHub, builds one merge commit per admitted PR without checking
+out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
+run-attempt receipts distinguish assertion failures from infrastructure and
+cancellation. Landing requires the exact tested tip, a fast-forward base fence and
+a final head/readiness reread; late PR-head races require post-land reconciliation,
+never a claim that the newer head was tested. Post-merge full CI remains independent.
+`queue-health.yml` records provider batch timing separately from the controller's
+admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
+writes. The separately authorized CI-shadow stage pushes candidate refs only,
+with one hosted candidate in flight; it never updates main or PR readiness.
+Its portable container and deployment/rollback boundary are documented in
+[merge batcher](merge-batcher.md); the historical measurements and inactive
+native/vendor configurations remain in [merge queue](merge-queue.md).
+
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md) |
+| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
+| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---

@@ -5,7 +5,7 @@ import {
   buildOpenAIClientFromSettings,
   CompactionProviderResponseError,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   agentRunFailurePayload,
   compactionFailureReasonFromError,

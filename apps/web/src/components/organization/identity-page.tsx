@@ -7,12 +7,12 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   AGENT_LEARNING_TITLE,
   IDENTITY_POLICY_MODE,
   LEARNING_MODE_LABEL,
-} from "@/lib/agent-learning-vocabulary";
+} from "@opengeni/react/app/lib/agent-learning-vocabulary";
 import {
   apiErrorDetails,
   isPermissionDenied,
@@ -20,7 +20,7 @@ import {
 } from "@opengeni/react/ui/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
-import type { CompanyProfileAgentPolicy } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Organization identity: the small identity and

@@ -34,11 +34,8 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { createObservability, type Observability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";

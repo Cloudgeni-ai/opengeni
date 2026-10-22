@@ -18,6 +18,10 @@ import {
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
+import {
+  createSessionListChangeSource,
+  type SessionListChangeSource,
+} from "./session-list-notifications";
 
 // Structural cross-driver query port. Opengeni passes explicit tables to its
 // builders; it never uses Drizzle's schema-registered relational `query` API.
@@ -221,6 +225,8 @@ export type UserProfileLookup = (
 ) => Promise<ManagedUserProfile[]>;
 
 export type CreateDbOptions = {
+  /** Direct or session-pooled PostgreSQL URL for API list invalidations. Lazy; never a transaction pooler. */
+  notificationDatabaseUrl?: string;
   /**
    * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
    * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
@@ -272,9 +278,16 @@ type DbBinding = {
   rlsStrategy: RlsStrategy;
   userLookup?: UserLookup;
   userProfileLookup?: UserProfileLookup;
+  sessionListChanges?: SessionListChangeSource;
+  cancellableTransactions?: boolean;
 };
 
 const dbBindings = new WeakMap<object, DbBinding>();
+
+/** Absent for externally constructed handles or transaction-only connections. */
+export function sessionListChangesFor(db: Database): SessionListChangeSource | undefined {
+  return dbBindings.get(db as object)?.sessionListChanges;
+}
 
 /** The strategy bound to a handle (or the `"force"` default). */
 export function rlsStrategyFor(db: Database): RlsStrategy {
@@ -431,6 +444,42 @@ export function defaultDatabasePreparedStatements(databaseUrl: string): boolean 
 }
 
 type PostgresSql = postgres.Sql | postgres.TransactionSql;
+const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
+
+/** Only used on a reserved transaction connection. Join the protocol cancel
+ * before allowing rollback/release, so it cannot reach a later pool borrower.
+ * The postgres patch exposes the driver's existing cancellation completion.
+ */
+function abortableQuery<T extends postgres.Row[]>(
+  query: postgres.PendingQuery<T>,
+  signal: AbortSignal,
+): postgres.PendingQuery<T> {
+  const observe = query.then.bind(query);
+  let result: Promise<unknown> | undefined;
+  Object.defineProperty(query, "then", {
+    value: (...args: Parameters<Promise<unknown>["then"]>) => {
+      result ??= (async () => {
+        signal.throwIfAborted();
+        let cancellation: Promise<void> | undefined;
+        const abort = () => {
+          cancellation = query.cancel();
+          // Observe a failed cancel immediately; the query still must settle.
+          void cancellation.catch(() => {});
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+          return await new Promise<unknown>((resolve, reject) => observe(resolve, reject));
+        } finally {
+          signal.removeEventListener("abort", abort);
+          if (cancellation) await cancellation;
+          signal.throwIfAborted();
+        }
+      })();
+      return result.then(...args);
+    },
+  });
+  return query;
+}
 
 /**
  * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
@@ -439,19 +488,29 @@ type PostgresSql = postgres.Sql | postgres.TransactionSql;
  * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
  * parameters keep postgres-js's one-message simple protocol.
  */
-function preparingUnsafe<T extends PostgresSql>(target: T): T {
+function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reserved = false): T {
   const wrapScoped = (args: unknown[]) =>
     args.map((arg) =>
       typeof arg === "function"
-        ? (scoped: postgres.TransactionSql) =>
-            (arg as (scoped: postgres.TransactionSql) => unknown)(preparingUnsafe(scoped))
+        ? async (scoped: postgres.TransactionSql) => {
+            databaseQuerySignal.getStore()?.throwIfAborted();
+            const result = await (arg as (scoped: postgres.TransactionSql) => unknown)(
+              preparingUnsafe(scoped, prepare, true),
+            );
+            databaseQuerySignal.getStore()?.throwIfAborted();
+            return result;
+          }
         : arg,
     );
   return new Proxy(target, {
     get(base, property) {
       if (property === "unsafe") {
-        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) =>
-          base.unsafe(query, parameters as never, { prepare: true, ...options });
+        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) => {
+          const signal = reserved ? databaseQuerySignal.getStore() : undefined;
+          signal?.throwIfAborted();
+          const pending = base.unsafe(query, parameters as never, { prepare, ...options });
+          return signal ? abortableQuery(pending, signal) : pending;
+        };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
@@ -515,18 +574,55 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   });
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
-  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client);
+  const db = drizzle(preparingUnsafe(client, preparedStatements));
+  const sessionListChanges = options.notificationDatabaseUrl
+    ? createSessionListChangeSource(options.notificationDatabaseUrl, {
+        ...(options.searchPath ? { searchPath: options.searchPath } : {}),
+      })
+    : undefined;
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
+    cancellableTransactions: true,
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
     ...(options.userProfileLookup ? { userProfileLookup: options.userProfileLookup } : {}),
+    ...(sessionListChanges ? { sessionListChanges } : {}),
   });
   return {
     db,
     close: async () => {
+      await sessionListChanges?.close();
       await client.end();
     },
   };
+}
+
+/** Run maintenance within its caller's existing deadline, not a new timeout.
+ * Keep any shorter configured statement timeout. A disconnected caller is
+ * detected during execution, including an abrupt process exit. A network
+ * partition remains subject to TCP failure detection and the server deadline.
+ * Unsupported injected drivers are explicit rather than silently detached.
+ */
+export async function withDatabaseMaintenanceLifetime<T>(
+  db: Database,
+  lifetime: { signal: AbortSignal; deadlineAtMs?: number },
+  run: (scoped: Database) => Promise<T>,
+): Promise<T> {
+  lifetime.signal.throwIfAborted();
+  if (!dbBindingFor(db)?.cancellableTransactions)
+    throw new Error("The database driver does not support joined maintenance cancellation");
+  return databaseQuerySignal.run(lifetime.signal, () =>
+    db.transaction(async (tx) => {
+      lifetime.signal.throwIfAborted();
+      const remaining =
+        lifetime.deadlineAtMs === undefined ? null : Math.floor(lifetime.deadlineAtMs - Date.now());
+      if (remaining !== null && remaining <= 0)
+        throw new Error("The maintenance run deadline passed");
+      await tx.execute(sql`select
+      set_config('statement_timeout', coalesce(least(nullif(extract(epoch from current_setting('statement_timeout')::interval)*1000,0),${remaining}::numeric),0)::text || 'ms',true),
+      set_config('client_connection_check_interval',least(nullif(extract(epoch from current_setting('client_connection_check_interval')::interval)*1000,0),100)::text || 'ms',true)`);
+      return run(tx);
+    }),
+  );
 }
 
 /**

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import * as core from "@opengeni/core";
 import * as dbApi from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { CodexFetch } from "@opengeni/codex";
 import {
   hashCodexBrowserSession,

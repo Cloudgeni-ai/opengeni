@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import type postgres from "postgres";
 
 let shared: RestrictedRuntimeTestDatabase;

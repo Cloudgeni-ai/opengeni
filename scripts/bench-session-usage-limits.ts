@@ -28,7 +28,7 @@ import {
   createSession,
   settleSessionUsageReceipt,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 
 export type Distribution = { samples: number; p50: number; p95: number; max: number };

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Agent, Runner, tool, setTracingDisabled, type ModelRequest } from "@openai/agents";
 import { z } from "zod";
 import { configuredProviders, type ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   AnthropicMessagesModel,
   AnthropicProviderRejection,

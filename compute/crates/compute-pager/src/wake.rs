@@ -19,8 +19,7 @@ const PAGE_SIZES: std::ops::RangeInclusive<u64> = 4 << 10..=2 << 20;
 pub struct WakeProfile {
     pub version: u32,
     pub offsets: Vec<u64>,
-    /// Bytes per page; 0 in profiles recorded before it was kept.
-    #[serde(default)]
+    /// Bytes per page.
     pub page_size: u64,
 }
 

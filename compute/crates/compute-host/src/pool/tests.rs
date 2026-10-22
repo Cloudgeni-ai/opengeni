@@ -192,6 +192,75 @@ fn inputs_follow_file_contents() {
     );
 }
 
+/// A stored image is named by its id, the hash the cache checked it
+/// against: never read again, and unchanged by creates marking it used.
+#[tokio::test]
+async fn a_stored_image_is_named_by_its_id_and_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    let store = crate::store::Directory::new(dir.path().join("store"));
+    let image = store
+        .put_rootfs(&file("built.ext4", "an image"))
+        .await
+        .unwrap();
+    let rootfs = Arc::new(
+        Cache::open(
+            dir.path().join("rootfs"),
+            PoolConfig::UNUSED_AFTER,
+            crate::state::Ownership::detached(),
+        )
+        .unwrap(),
+    );
+    drop(rootfs.get(image, &store).await.unwrap());
+    let sources = Sources {
+        kernel: file("vmlinux", "kernel"),
+        base_image: file("base.img", "base one"),
+        rootfs: Arc::clone(&rootfs),
+        depends_on: Vec::new(),
+        boot_args: String::new(),
+        networked: false,
+        memory: String::new(),
+        ready_port: 52,
+        hashes: Mutex::default(),
+    };
+    let stored = Shape {
+        image: Some(image),
+        ..shape(1, 512)
+    };
+    let before = sources.inputs(stored).unwrap();
+    assert_eq!(before.files[1].path, rootfs.path(image));
+    assert_eq!(before.files[1].len, 8);
+    assert_eq!(
+        before.files[1].blake3,
+        blake3::hash(b"an image").to_hex().as_str()
+    );
+
+    // A create marks it used, which changes its metadata.
+    let modified = || {
+        fs::metadata(rootfs.path(image))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let unused = modified();
+    std::thread::sleep(Duration::from_millis(20));
+    drop(rootfs.hold(image).await.unwrap());
+    assert_ne!(modified(), unused);
+    assert_eq!(sources.inputs(stored).unwrap(), before);
+    assert!(
+        !sources
+            .hashes
+            .lock()
+            .unwrap()
+            .contains_key(&rootfs.path(image)),
+        "never read"
+    );
+}
+
 #[test]
 fn inputs_name_every_change() {
     let base = template(shape(1, 512)).inputs;

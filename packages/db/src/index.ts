@@ -104,7 +104,10 @@ export type SessionEventMutation<Projection extends "full" | "event" = "full"> =
 export type SessionEventMutationInput =
   | SessionEventMutation
   | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
-export { sessionHasToolRouterHistory } from "./session-tool-router-history";
+export {
+  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
+} from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
@@ -313,6 +316,7 @@ import {
   childTerminalResultFinalAnswerWithGoalContinuations,
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryResponse,
@@ -897,6 +901,8 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -1335,6 +1341,7 @@ import {
 } from "./database";
 export {
   createDb,
+  sessionListChangesFor,
   databaseReconnectBackoffSeconds,
   defaultDatabasePreparedStatements,
   isTransactionHandle,
@@ -1377,6 +1384,11 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export type {
+  SessionListChangeSource,
+  SessionListDatabaseChange,
+  SessionListNotification,
+} from "./session-list-notifications";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,
@@ -32934,7 +32946,10 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
  * them or received a prompt they sent directly. Agent-relayed and service
  * turns do not count, even when they carry the human's causal authority.
  * Applies to every row through its root, so a root page and its children
- * agree. The turn probe is served by session_turns_human_prompt_subject_idx.
+ * agree. Keep the existential turn probe keyed by session: pulling it into a
+ * workspace-wide hashed subplan reads a person's entire prompt history, and
+ * repeats turn RLS checks, even when the page contains only a few roots.
+ * OFFSET 0 preserves the correlated index probes without changing predicates.
  */
 function sessionMineSql(subjectId: string): SQL {
   return sql`(
@@ -32947,13 +32962,17 @@ function sessionMineSql(subjectId: string): SQL {
     )
     or exists (
       select 1 from ${schema.sessions} mine_tree
-      join ${schema.sessionTurns} mine_turn
-        on mine_turn.workspace_id = mine_tree.workspace_id
-        and mine_turn.session_id = mine_tree.id
       where mine_tree.workspace_id = ${schema.sessions.workspaceId}
         and mine_tree.root_session_id = ${schema.sessions.rootSessionId}
-        and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
-        and mine_turn.initiator_subject_id = ${subjectId}
+        and exists (
+          select 1 from ${schema.sessionTurns} mine_turn
+          where mine_turn.workspace_id = mine_tree.workspace_id
+            and mine_turn.session_id = mine_tree.id
+            and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
+            and mine_turn.initiator_subject_id = ${subjectId}
+          offset 0
+        )
+      offset 0
     )
   )`;
 }
@@ -32995,27 +33014,14 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive personal_state as materialized (
+    -- Inline this subject's state so each lateral lookup can use the session
+    -- key. A materialized workspace range has no index: generic estimates can
+    -- choose to rescan the whole range once per root or descendant.
+    with recursive personal_state as not materialized (
       select workspace_id, subject_id, session_id, pinned, archived,
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
       where workspace_id = ${workspaceId} and subject_id = ${options.subjectId}
-    ), visible_children as materialized (
-      -- Keep the recursive join off the base table: a hash-join plan otherwise
-      -- scans the whole workspace and rechecks RLS at every tree depth. This
-      -- narrow projection uses the same caller's RLS in the same statement.
-      -- Pin state is static for this statement. Join it once here, not once
-      -- per recursive depth (which repeatedly sorts/joins the same rows).
-      select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
-        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
-        child.direct_control_state, child.direct_pause_revision,
-        coalesce(personal.pinned, false) as pinned,
-        coalesce(case when personal.manually_unread_through is not null then -1
-          else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
-        coalesce(personal.actively_working, false) as actively_working
-      from ${schema.sessions} child
-      left join personal_state personal on personal.session_id = child.id
-      where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
     ), roots as materialized (
       select ${schema.sessions.id} as id, ${schema.sessions.channelId} as channel_id,
         ${schema.sessions.accountId} as account_id,
@@ -33033,9 +33039,30 @@ async function sessionListTotalsInScope(
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
         coalesce(root_personal.actively_working, false) as actively_working
       from ${schema.sessions}
-      left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
-      left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.id} offset 0
+      ) root_personal on true
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.rootSessionId} offset 0
+      ) root_archive on true
       where ${rootFilters}
+    ), visible_children as materialized (
+      -- Immutable root lineage excludes trees that cannot enter this recursion.
+      -- Retain each child's RLS check and materialize once, so depth cannot
+      -- multiply base-table or personal-state scans.
+      select child.id, child.parent_session_id, child.account_id, child.status, child.active_turn_id,
+        child.input_wait_until, child.input_wait_turn_id, child.subtree_run_override_revision,
+        child.direct_control_state, child.direct_pause_revision,
+        coalesce(personal.pinned, false) as pinned,
+        coalesce(case when personal.manually_unread_through is not null then -1
+          else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
+        coalesce(personal.actively_working, false) as actively_working
+      from ${schema.sessions} child
+      left join lateral (
+        select * from personal_state where session_id = child.id offset 0
+      ) personal on true
+      where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
+        and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
         acknowledged_sequence, actively_working) as (
@@ -33228,13 +33255,14 @@ function sessionFilters(
       filters.push(eq(schema.sessions.parentSessionId, parentSessionId));
     }
   }
-  const search = options.search?.trim();
-  if (search) {
+  // Every word must appear in the title or the first message, in any order, so
+  // "deploy fix" finds "Fix the deploy script". Words are literal,
+  // case-insensitive substrings rather than user-authored SQL globbing.
+  for (const word of sessionSearchWords(options.search)) {
     // PostgreSQL LIKE uses backslash as its default escape. Escape it first so
     // a literal trailing slash cannot consume our surrounding wildcard; then
-    // escape the two wildcard metacharacters. The resulting search is literal,
-    // case-insensitive substring matching rather than user-authored SQL globbing.
-    const pattern = `%${search
+    // escape the two wildcard metacharacters.
+    const pattern = `%${word
       .replaceAll("\\", "\\\\")
       .replaceAll("%", "\\%")
       .replaceAll("_", "\\_")}%`;
@@ -33425,6 +33453,11 @@ function sessionParentFilter(parentSessionId: string | null | undefined): string
     : parentSessionId === null
       ? "null"
       : parentSessionId;
+}
+
+/** The words of a chat title search; a long query keeps its first eight words. */
+function sessionSearchWords(search: string | undefined): string[] {
+  return [...new Set((search ?? "").trim().split(/\s+/).filter(Boolean))].slice(0, 8);
 }
 
 function sessionSearchFilter(search: string | undefined): string | null {
@@ -33763,6 +33796,76 @@ export async function listSessionEntriesForSubject(
   return page;
 }
 
+type SessionListReadAuthority = Pick<
+  ListSessionsForSubjectOptions,
+  "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+>;
+
+/** Apply the same removal fence to pages and their transient invalidation hints. */
+async function requireSessionListReadAuthorityInScope(
+  tx: Database,
+  workspaceId: string,
+  options: SessionListReadAuthority,
+): Promise<void> {
+  // READ COMMITTED observes a removal that held the exclusive fence first.
+  await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
+  const [membership] = await tx
+    .select({ id: schema.workspaceMemberships.id })
+    .from(schema.workspaceMemberships)
+    .where(
+      and(
+        eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        eq(schema.workspaceMemberships.subjectId, options.subjectId),
+      ),
+    )
+    .limit(1);
+  // Non-user credentials legitimately have no membership. Managed personal
+  // owners require the route's verified provenance AND current canonical grant.
+  if (
+    !membership &&
+    options.subjectId.startsWith("user:") &&
+    !(
+      options.personalWorkspaceOwnerException === true &&
+      (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: await accountIdInRlsScope(tx),
+        workspaceId,
+        subjectId: options.subjectId,
+      }))
+    )
+  )
+    throw new SessionListAccessError();
+}
+
+/** No configuration, parent IDs or inaccessible IDs cross the hint boundary. */
+export async function listVisibleSessionInvalidationIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<string[]> {
+  if (!sessionIds.length) return [];
+  return await withWorkspaceSubjectRls(
+    db,
+    workspaceId,
+    authority.subjectId,
+    async (tx) => {
+      await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
+      const rows = await tx
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            inArray(schema.sessions.id, sessionIds),
+            ...sessionFilters({ ...authority, archiveStatus: "all" }),
+          ),
+        );
+      return rows.map((row) => row.id);
+    },
+    { isolationLevel: "read committed" },
+  );
+}
+
 async function readSessionListForSubject(
   db: Database,
   workspaceId: string,
@@ -33779,59 +33882,7 @@ async function readSessionListForSubject(
       workspaceId,
       options.subjectId,
       async (tx) => {
-        // READ COMMITTED is deliberate: if removal already owns the exclusive
-        // advisory fence, this transaction waits before checking membership and
-        // then observes the committed deletion in a fresh statement snapshot.
-        // The shared fence keeps every personal pin row stable across the page's
-        // ordinary/pinned queries while allowing concurrent list readers.
-        await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
-        // Authorization is resolved before this helper by the API, but that
-        // grant can be stale by the time this transaction starts. The subject
-        // fence above makes removal and listing deterministic: listing first lets
-        // removal clean its committed snapshot, while removal first makes this
-        // fresh membership read observe the deletion and do no writes.
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, workspaceId),
-              eq(schema.workspaceMemberships.subjectId, options.subjectId),
-            ),
-          )
-          .limit(1);
-        // A missing membership only means "denied" for user subjects — people
-        // are authorized exclusively through memberships, so absence here is a
-        // removal that the route-level grant hasn't observed yet. Non-user
-        // principals (workspace-scoped `api_key:*`, delegated service subjects)
-        // are authorized by requireAccessGrant from their own credential row and
-        // may legitimately have no membership; they list without the removal
-        // serialization. That is sound: member-removal cleanup already purges a
-        // removed subject's pins and snapshots, and any snapshot a never-member
-        // subject writes is bounded by TTL expiry.
-        //
-        // The one human who is authorized WITHOUT a membership row is the owner
-        // of a managed personal workspace: migration 0219 raises if that
-        // workspace ever gets one, so the pointer on their own organization
-        // membership is the whole grant. Ask the canonical resolver rather than
-        // re-deriving that rule here — it runs on this same transaction handle,
-        // so the shared personal-state fence above still serializes it against
-        // member removal. Gated on the caller's canonical managed-cookie
-        // assertion; see PersonalWorkspaceOwnerException.
-        if (
-          !membership &&
-          options.subjectId.startsWith("user:") &&
-          !(
-            options.personalWorkspaceOwnerException === true &&
-            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
-              accountId: await accountIdInRlsScope(tx),
-              workspaceId,
-              subjectId: options.subjectId,
-            }))
-          )
-        ) {
-          throw new SessionListAccessError();
-        }
+        await requireSessionListReadAuthorityInScope(tx, workspaceId, options);
 
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
@@ -36775,11 +36826,20 @@ export type ListSessionEventsOptions = {
    * Keep `agent.toolCall.created` rows of presented tools (see
    * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
    * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY
-   * output) are kept too: no per-turn step read can find them. No effect
-   * unless `agent.toolCall.created` is excluded.
+   * changes without loading every step. Excluded rows without a turn (PTY and
+   * background command output) stay excluded: the sandbox dock reads them
+   * itself. No effect unless `agent.toolCall.created` is excluded.
    */
   retainPresentedToolCalls?: boolean;
+  /**
+   * Full-mode step reads: return each `agent.toolCall.output` payload larger
+   * than SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES as a bounded preview
+   * (long strings keep their head and tail around an explicit omission
+   * marker) carrying an `outputPreview` fact. Readers load one row's exact
+   * payload with an ordinary full read when they need it. No effect in other
+   * payload modes.
+   */
+  toolOutputPreview?: boolean;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
@@ -36790,6 +36850,16 @@ export type ListSessionEventsOptions = {
   authoritativeLatest?: boolean;
 };
 
+/**
+ * LIKE patterns equal to isPresentedSessionToolName: each leaf alone, or after
+ * `__`. One LIKE ANY evaluates the name once per row and costs a fraction of
+ * the equivalent regex, which dominated long scans even on a short column.
+ */
+const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -36798,16 +36868,19 @@ function sessionEventExcludeTypesFilter(
   if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
     return excluded;
   }
-  // The name check reads only created rows (never tool outputs), but it still
-  // detoasts large arguments on each excluded call it scans.
-  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  // The name check reads only created rows (never tool outputs) and uses the
+  // trigger-filled tool_name column (migration 0889), so it never detoasts a
+  // call's arguments. Rows written before 0889 keep a NULL column; only they
+  // fall back to the payload name, which classifies them exactly as before.
+  const patterns = sql.join(
+    PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
-    // Turnless rows (PTY output) belong to no turn's step read.
-    isNull(schema.sessionEvents.turnId),
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
     ),
   )!;
 }
@@ -36840,6 +36913,25 @@ export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
  */
 export const SESSION_EVENT_FULL_READ_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const SESSION_EVENT_FULL_READ_PREVIEW_CHARS = 32 * 1024;
+/** A previewed step read returns tool-output payloads up to this size exactly. */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES = 4 * 1024;
+/** Hard ceiling of one previewed tool-output payload (structured or text). */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES = 16 * 1024;
+/** Strings longer than this keep only their head and tail in a preview. */
+const TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS = 2048;
+const TOOL_OUTPUT_PREVIEW_HEAD_CHARS = 1024;
+const TOOL_OUTPUT_PREVIEW_TAIL_CHARS = 512;
+/**
+ * Nesting below `output` whose strings are shortened in place
+ * (output.content[i].text is 3). Containers are walked above this depth only.
+ */
+const TOOL_OUTPUT_PREVIEW_DEPTH = 3;
+/** A walked array or object wider than this sends the row to the text preview. */
+const TOOL_OUTPUT_PREVIEW_MAX_WIDTH = 16;
+/** Internal marker of a container too wide to walk; never delivered. */
+const TOOL_OUTPUT_PREVIEW_TOO_WIDE = "opengeni:tool-output-preview:too-wide";
+/** A previewed output plans at least this share of its source bytes (1/n). */
+const TOOL_OUTPUT_PREVIEW_SOURCE_SHARE = 16;
 const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
@@ -36926,6 +37018,8 @@ export async function listSessionEventPage(
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
   const direction = options.direction ?? (hasBefore ? "before" : "after");
   const payloadMode = options.payloadMode ?? "full";
+  const toolOutputPreview = payloadMode === "full" && options.toolOutputPreview === true;
+  const transferBytesSql = sessionEventTransferBytes(toolOutputPreview);
   const typeFilters = resolveSessionEventTypeFilters({
     includeTypes: options.includeTypes,
     excludeTypes: options.excludeTypes,
@@ -37050,7 +37144,7 @@ export async function listSessionEventPage(
             ),
             bounded as (
               select ordered.id, ordered.row_number,
-                octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                ${transferBytesSql} + 1
                   as cumulative_transfer_bytes
               from ordered
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37058,7 +37152,7 @@ export async function listSessionEventPage(
               union all
               select ordered.id, ordered.row_number,
                 bounded.cumulative_transfer_bytes
-                  + octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                  + ${transferBytesSql} + 1
               from bounded
               join ordered on ordered.row_number = bounded.row_number + 1
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37071,7 +37165,7 @@ export async function listSessionEventPage(
           ) as session_event_page_selected`;
           const selectedRows = await scopedDb
             .select({
-              ...sessionEventProjectionSelect("full"),
+              ...sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
               sourceRowCount: sql<number>`session_event_page_selected.source_row_count`,
             })
             .from(schema.sessionEvents)
@@ -37090,7 +37184,7 @@ export async function listSessionEventPage(
           // public event, so this conservatively bounds ordinary page transfer.
           // One oversized event is selected alone and remains exact.
           const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect())
+            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
             .from(schema.sessionEvents)
             .where(and(...filters))
             .orderBy(ordering)
@@ -37129,7 +37223,9 @@ export async function listSessionEventPage(
 
           if (exactIds.length > 0) {
             rows = await scopedDb
-              .select(sessionEventProjectionSelect("full"))
+              .select(
+                sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
+              )
               .from(schema.sessionEvents)
               .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
               .orderBy(ordering)
@@ -37157,6 +37253,7 @@ export async function listSessionEventPage(
         }
         const event = mapProjectedEvent(row);
         if (row.payloadReadBounded === true) fullPayloadsExact = false;
+        if (toolOutputPreview && isToolOutputPreviewEvent(event)) fullPayloadsExact = false;
         const eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
@@ -37197,17 +37294,362 @@ export async function listSessionEventPage(
   });
 }
 
-function sessionEventProjectionMetadataSelect() {
+export type SessionEventConversationTurn = {
+  turnId: string;
+  /**
+   * Sequence of the turn's first `turn.started` in the page, if the page holds
+   * one. The turn's first stored `turn.started` takes precedence.
+   */
+  started: number | null;
+};
+
+const SESSION_TURN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Bookkeeping rows one turn may add to a conversation page (normally a handful). */
+const SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN = 64;
+
+/**
+ * The bookkeeping rows (SESSION_EVENT_BOOKKEEPING_STEP_TYPES) a conversation
+ * page that excludes them still carries, strictly inside `(after, before)`,
+ * for the page's turns and the turn last started at or before `after` (its
+ * rows may continue into this page without any of its rows on it):
+ *
+ * - a turn with no content step at all (SESSION_EVENT_CONTENT_STEP_TYPES)
+ *   keeps every bookkeeping row, so its window skips no sequence and a reader
+ *   is not offered steps that are not there;
+ * - any other turn keeps its model request rows from its first `turn.started`
+ *   through its first model response: the only ones its startup phases draw.
+ *   Later request rows and all usage rows are steps. The segment depends only
+ *   on stored rows, so every page boundary splits it the same way.
+ *
+ * One statement plans the ids from indexes (per turn, at most
+ * SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN rows of each kind) and a
+ * second reads them, ascending.
+ */
+export async function listSessionEventConversationBookkeeping(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: {
+    turns: readonly SessionEventConversationTurn[];
+    after: number;
+    before?: number | undefined;
+    payloadMode?: SessionEventPayloadMode;
+  },
+): Promise<SessionEvent[]> {
+  const turns = options.turns.filter((turn) => SESSION_TURN_ID_PATTERN.test(turn.turnId));
+  const after = Math.max(0, Math.floor(options.after));
+  const before =
+    options.before !== undefined && Number.isFinite(options.before)
+      ? Math.min(POSTGRES_INT_MAX, Math.floor(options.before))
+      : POSTGRES_INT_MAX;
+  if (before <= after + 1) return [];
+  const turnIds = `{${turns.map((turn) => turn.turnId).join(",")}}`;
+  const anchors = `{${turns.map((turn) => (turn.started === null ? "NULL" : String(Math.floor(turn.started)))).join(",")}}`;
+  const contentTypes = `{${SESSION_EVENT_CONTENT_STEP_TYPES.join(",")}}`;
+  const bookkeepingTypes = `{${SESSION_EVENT_BOOKKEEPING_STEP_TYPES.join(",")}}`;
+  const perTurn = SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const planned = await rawRows<{ id: string }>(
+      scopedDb,
+      sql`with open_turn as (
+          select e.turn_id, e.sequence as anchor from session_events e
+          where e.workspace_id = ${workspaceId}::uuid
+            and e.session_id = ${sessionId}::uuid
+            and e.type = 'turn.started'
+            and e.sequence <= ${after}
+            and e.turn_id is not null
+          order by e.sequence desc
+          limit 1
+        ),
+        listed as (
+          select turn_id, anchor from unnest(${turnIds}::uuid[], ${anchors}::int[]) as t(turn_id, anchor)
+          union all
+          select turn_id, anchor from open_turn
+        ),
+        turn_list as (
+          select turn_id, min(anchor) as listed_anchor from listed group by turn_id
+        ),
+        page_turns as (
+          select t.turn_id, coalesce((
+            select min(s.sequence) from session_events s
+            where s.workspace_id = ${workspaceId}::uuid
+              and s.turn_id = t.turn_id
+              and s.type = 'turn.started'
+              and s.session_id = ${sessionId}::uuid
+          ), t.listed_anchor) as anchor, exists (
+            select 1 from session_events c
+            where c.workspace_id = ${workspaceId}::uuid
+              and c.turn_id = t.turn_id
+              and c.type = any(${contentTypes}::text[])
+              and c.session_id = ${sessionId}::uuid
+          ) as has_content
+          from turn_list t
+        ),
+        content_free as (
+          select b.id from page_turns p
+          cross join lateral (
+            select e.id from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.turn_id = p.turn_id
+              and e.type = any(${bookkeepingTypes}::text[])
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) b
+          where not p.has_content
+        ),
+        startup as (
+          select r.id, p.turn_id, r.sequence, r.responded from page_turns p
+          cross join lateral (
+            select e.id, e.turn_id, e.sequence,
+              coalesce(e.payload ->> 'phase', '') in ('first_byte', 'first_event') as responded
+            from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.type = 'agent.model.request'
+              and e.sequence > p.anchor
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) r
+          where p.has_content and p.anchor is not null and r.turn_id = p.turn_id
+        ),
+        startup_segment as (
+          select id from (
+            select id, sequence, coalesce(sum(case when responded then 1 else 0 end) over (
+              partition by turn_id order by sequence
+              rows between unbounded preceding and 1 preceding
+            ), 0) as earlier_responses
+            from startup
+          ) ranked
+          where earlier_responses = 0 and sequence > ${after}
+        )
+        select id from content_free
+        union
+        select id from startup_segment`,
+    );
+    if (planned.length === 0) return [];
+    const rows = await scopedDb
+      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          inArray(
+            schema.sessionEvents.id,
+            planned.map((row) => row.id),
+          ),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    return rows.map(mapProjectedEvent);
+  });
+}
+
+function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
   return {
     id: schema.sessionEvents.id,
     sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`,
+    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
   } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
+}
+
+/**
+ * Conservative transfer size used to plan a page before payloads are read. A
+ * tool output a previewed read may bound counts its preview ceiling, or a
+ * sixteenth of its source when larger: the page then also bounds the source
+ * bytes the projection walks, not only the bytes it delivers. A row the
+ * projection then returns exact is still bounded by the delivered page check.
+ */
+function sessionEventTransferBytes(toolOutputPreview: boolean): SQL {
+  const exact = sql`octet_length(row_to_json(${schema.sessionEvents})::text)::bigint`;
+  if (!toolOutputPreview) return exact;
+  const ceiling = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES + 2048));
+  const share = sql.raw(String(TOOL_OUTPUT_PREVIEW_SOURCE_SHARE));
+  // offset 0 keeps the serialized size computed once instead of inlined. The
+  // payload is read here anyway, so only a row the projection can preview (an
+  // object with an `output`) is planned below its exact size.
+  return sql`(select case when ${toolOutputPreviewCandidate(schema.sessionEvents)}
+        and jsonb_typeof(${schema.sessionEvents.payload}) = 'object'
+        and (${schema.sessionEvents.payload} -> 'output') is not null
+      then least(tool_output_row.bytes, greatest(${ceiling}, tool_output_row.bytes / ${share}))
+      else tool_output_row.bytes end
+    from (select ${exact} as bytes offset 0) as tool_output_row)`;
+}
+
+/**
+ * A row a previewed read may bound: a tool output not stored with the
+ * lossless string codec (shortening an encoded string would corrupt it).
+ * Decided from columns alone, without reading the payload; its shape and size
+ * are decided once inside the projection.
+ */
+function toolOutputPreviewCandidate(
+  source: Pick<SessionEventProjectionSource, "type" | "payloadCodecVersion">,
+): SQL {
+  return sql`(
+    ${source.type} = 'agent.toolCall.output'
+    and ${source.payloadCodecVersion} is null
+  )`;
+}
+
+/** Head and tail of a long string around an explicit omission marker. */
+function toolOutputPreviewText(text: SQL): SQL {
+  const max = sql.raw(String(TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS));
+  const head = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS));
+  const tail = sql.raw(String(TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  const kept = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS + TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  return sql`case when char_length(${text}) <= ${max} then ${text}
+    else left(${text}, ${head}) || chr(10) || '…[' || (char_length(${text}) - ${kept})::text
+      || ' characters omitted from this preview]…' || chr(10) || right(${text}, ${tail})
+    end`;
+}
+
+/**
+ * Shorten the long strings of one JSON value, keeping its shape. Inline media
+ * (data URLs, `data`/`image_url` fields) is kept whole: a shortened image is
+ * not an image, so such a row falls back to the text preview below. A
+ * container wider than TOOL_OUTPUT_PREVIEW_MAX_WIDTH is not walked: it becomes
+ * a marker that sends the row to the text preview, so the walk stays bounded
+ * however large the output is. Each string is extracted once (offset 0).
+ */
+function toolOutputPreviewValue(value: SQL, key: SQL | null, depth: number): SQL {
+  const t = sql.raw(`tool_output_s${depth}.t`);
+  const shortened = sql`(select case when left(${t}, 5) = 'data:' then ${value}
+      else to_jsonb(${toolOutputPreviewText(t)}) end
+    from (select ${value} #>> '{}' as t offset 0) as ${sql.raw(`tool_output_s${depth}`)})`;
+  const string = key
+    ? sql`case when ${key} in ('data', 'image_url', 'blob') then ${value} else ${shortened} end`
+    : shortened;
+  if (depth >= TOOL_OUTPUT_PREVIEW_DEPTH) {
+    return sql`case when jsonb_typeof(${value}) = 'string' then ${string} else ${value} end`;
+  }
+  const width = sql.raw(String(TOOL_OUTPUT_PREVIEW_MAX_WIDTH));
+  const wide = sql.raw(`to_jsonb('${TOOL_OUTPUT_PREVIEW_TOO_WIDE}'::text)`);
+  const k = sql.raw(`tool_output_k${depth}`);
+  const x = sql.raw(`tool_output_x${depth}`);
+  const o = sql.raw(`tool_output_o${depth}`);
+  return sql`case jsonb_typeof(${value})
+    when 'string' then ${string}
+    when 'object' then case
+      when (select count(*) from (
+        select 1 from jsonb_object_keys(${value}) limit ${width} + 1
+      ) as ${sql.raw(`tool_output_w${depth}`)}) > ${width} then ${wide}
+      else coalesce((
+        select jsonb_object_agg(${k}, ${toolOutputPreviewValue(x, k, depth + 1)})
+        from jsonb_each(${value}) as ${sql.raw(`tool_output_e${depth}`)}(${k}, ${x})
+      ), '{}'::jsonb) end
+    when 'array' then case
+      when jsonb_array_length(${value}) > ${width} then ${wide}
+      else coalesce((
+        select jsonb_agg(${toolOutputPreviewValue(x, null, depth + 1)} order by ${o})
+        from jsonb_array_elements(${value}) with ordinality as ${sql.raw(`tool_output_a${depth}`)}(${x}, ${o})
+      ), '[]'::jsonb) end
+    else ${value}
+  end`;
+}
+
+/**
+ * The bounded preview of one tool-output payload. A payload that is not an
+ * object with an `output`, or is within SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES,
+ * is exact. Otherwise every field but `output` is kept and the output keeps
+ * its shape with long strings shortened (`shape: "structured"`). When that is
+ * too wide or still exceeds the ceiling, a payload within the ceiling is exact
+ * and a larger one becomes the head and tail of its output text
+ * (`shape: "text"`). A payload with nothing to shorten is returned exact,
+ * without a preview fact.
+ *
+ * Each step is fenced with offset 0 so the planner does not inline it: the
+ * payload is read (detoasted) and serialized once, and the output text at
+ * most once more.
+ */
+function toolOutputPreviewPayload(payload: SQLWrapper): SQL {
+  const min = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES));
+  const max = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES));
+  const wide = sql.raw(`'"${TOOL_OUTPUT_PREVIEW_TOO_WIDE}"'`);
+  const source = sql.raw("tool_output_source.payload");
+  const output = sql.raw("tool_output_source.output");
+  const structuredText = sql.raw("tool_output_structured.text");
+  const flatText = sql.raw("tool_output_flat.preview");
+  const fact = (shape: "structured" | "text", previewBytes: SQL) => sql`jsonb_build_object(
+    'truncated', true,
+    'reason', 'tool_output_preview',
+    'shape', ${sql.raw(`'${shape}'`)},
+    'originalBytes', tool_output_size.original_bytes,
+    'previewBytes', ${previewBytes}
+  )`;
+  const textPreview = sql`(select jsonb_strip_nulls(jsonb_build_object(
+      'id', left(${source} ->> 'id', 256),
+      'name', left(${source} ->> 'name', 256),
+      'toolName', left(${source} ->> 'toolName', 256),
+      'status', left(${source} ->> 'status', 128),
+      'error', case
+        when jsonb_typeof(${source} -> 'error') = 'boolean' then ${source} -> 'error'
+        when jsonb_typeof(${source} -> 'error') = 'string'
+          then to_jsonb(left(${source} ->> 'error', 1024))
+        when ${output} -> 'isError' = 'true'::jsonb then 'true'::jsonb
+      end,
+      'failed', case when jsonb_typeof(${source} -> 'failed') = 'boolean'
+        then ${source} -> 'failed' end,
+      'truncation', case when octet_length((${source} -> 'truncation')::text) <= 4096
+        then ${source} -> 'truncation' end,
+      'output', to_jsonb(${flatText}),
+      'outputPreview', ${fact("text", sql`octet_length(${flatText})`)}
+    ))
+    from (select coalesce(
+        case when jsonb_typeof(${output}) = 'string' then ${output} #>> '{}' end,
+        ${output} #>> '{content,0,text}',
+        ${output}::text
+      ) as text offset 0) as tool_output_text,
+      lateral (select ${toolOutputPreviewText(sql.raw("tool_output_text.text"))} as preview
+        offset 0) as tool_output_flat)`;
+  return sql`(select case
+      when not tool_output_source.previewable then ${payload}
+      when tool_output_size.original_bytes <= ${min} then ${source}
+      when position(${wide} in ${structuredText}) = 0
+        and octet_length(${structuredText}) <= ${max}
+        then case when octet_length(${structuredText}) = tool_output_size.original_bytes
+          then ${source}
+          else tool_output_structured.payload || jsonb_build_object('outputPreview', ${fact(
+            "structured",
+            sql`octet_length(${structuredText})`,
+          )}) end
+      when tool_output_size.original_bytes <= ${max} then ${source}
+      else ${textPreview}
+    end
+    from (select tool_output_read.payload,
+        tool_output_read.payload -> 'output' as output,
+        jsonb_typeof(tool_output_read.payload) = 'object'
+          and (tool_output_read.payload -> 'output') is not null as previewable
+        from (select ${payload} || '{}'::jsonb as payload offset 0) as tool_output_read
+        offset 0) as tool_output_source,
+      lateral (select octet_length((${source})::text) as original_bytes offset 0)
+        as tool_output_size,
+      lateral (select tool_output_structured_value.payload,
+          tool_output_structured_value.payload::text as text
+        from (select case when tool_output_source.previewable
+            and tool_output_size.original_bytes > ${min} then
+          (${source} - 'output') || jsonb_build_object(
+            'output', ${toolOutputPreviewValue(output, null, 0)}
+          ) end as payload offset 0) as tool_output_structured_value
+        offset 0) as tool_output_structured)`;
+}
+
+function isToolOutputPreviewEvent(event: SessionEvent): boolean {
+  return (
+    event.type === "agent.toolCall.output" &&
+    typeof event.payload === "object" &&
+    event.payload !== null &&
+    Object.prototype.hasOwnProperty.call(event.payload, "outputPreview")
+  );
 }
 
 function sessionEventProjectionSelect(
   payloadMode: SessionEventPayloadMode = "full",
   source: SessionEventProjectionSource = schema.sessionEvents,
+  options: { toolOutputPreview?: boolean | undefined } = {},
 ) {
   const typeInvalid = sql`(
     octet_length(${source.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
@@ -37334,6 +37776,11 @@ function sessionEventProjectionSelect(
         ))
       )
     ))
+    ${
+      options.toolOutputPreview
+        ? sql`when ${toolOutputPreviewCandidate(source)} then ${toolOutputPreviewPayload(source.payload)}`
+        : sql``
+    }
     else ${source.payload}
   end`;
   const selectedPayload =
@@ -37457,7 +37904,12 @@ export async function listSessionEvents(
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
     const rows = await scopedDb
-      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .select(
+        sessionEventProjectionSelect(options.payloadMode ?? "full", schema.sessionEvents, {
+          toolOutputPreview:
+            (options.payloadMode ?? "full") === "full" && options.toolOutputPreview,
+        }),
+      )
       .from(schema.sessionEvents)
       .where(and(...filters))
       .orderBy(
@@ -39699,6 +40151,7 @@ export async function appendSessionHistoryItems(
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -40218,6 +40671,7 @@ export async function attachOpenSuffixToPendingToolCalls(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -41554,7 +42008,7 @@ export async function markSessionTurnModelTransportHttpOnly(
 ): Promise<boolean> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return false;
       await tx
         .update(schema.sessionTurns)
@@ -41591,6 +42045,7 @@ export async function setSessionLastInputTokensForTurnAttempt(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
       const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -43932,7 +44387,7 @@ const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
 
 type ProviderLossRecord = {
   version: 1;
-  source: "drain_probe" | "warm_resume";
+  source: "drain_probe" | "warm_resume" | "continuity_restore";
   leaseId: string;
   lostEpoch: number;
   instanceId: string | null;
@@ -43940,7 +44395,33 @@ type ProviderLossRecord = {
   observedAt: string;
   /** The lost object's recorded hard provider deadline, when known. */
   providerDeadlineAt: string | null;
+  /** Backend-specific proof that the lost object, and with it every copy of
+   * the workspace that only it held, no longer exists anywhere. A NotFound on
+   * its own is an observation, not proof: without this (or Modal's hard
+   * lifetime, or the compute control plane's own answer) the loss may at most
+   * restore a checkpoint, never continue on an empty workspace. */
+  deathProof?: ProviderDeathProof;
 };
+
+type ProviderDeathProof = {
+  /** `workspace_absent`: the same Docker daemon reports the exact container
+   * gone and its owned host workspace directory no longer exists.
+   * `provider_lifetime`: the provider ends every box within a known bound,
+   * so none can still be running after `provenAt`. */
+  kind: "workspace_absent" | "provider_lifetime";
+  provenAt: string;
+};
+
+function parsedProviderDeathProof(value: unknown): ProviderDeathProof | null | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const proof = value as Record<string, unknown>;
+  return (proof.kind === "workspace_absent" || proof.kind === "provider_lifetime") &&
+    typeof proof.provenAt === "string" &&
+    Number.isFinite(Date.parse(proof.provenAt))
+    ? { kind: proof.kind, provenAt: proof.provenAt }
+    : null;
+}
 
 function providerLossRecord(
   resumeState: Record<string, unknown> | null | undefined,
@@ -43949,7 +44430,9 @@ function providerLossRecord(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return record.version === 1 &&
-    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    (record.source === "drain_probe" ||
+      record.source === "warm_resume" ||
+      record.source === "continuity_restore") &&
     typeof record.leaseId === "string" &&
     typeof record.lostEpoch === "number" &&
     Number.isSafeInteger(record.lostEpoch) &&
@@ -43960,7 +44443,8 @@ function providerLossRecord(
     Number.isFinite(Date.parse(record.observedAt)) &&
     (record.providerDeadlineAt === null ||
       (typeof record.providerDeadlineAt === "string" &&
-        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+        Number.isFinite(Date.parse(record.providerDeadlineAt)))) &&
+    parsedProviderDeathProof(record.deathProof) !== null
     ? (record as ProviderLossRecord)
     : null;
 }
@@ -43976,7 +44460,17 @@ function providerLossRecordForLostRow(
   row: LeaseRow,
   source: ProviderLossRecord["source"],
   observedAt: string,
+  /** The provider's bound on how long any box can still run after this
+   * observation (its hard lifetime, or the renewable TTL nobody renews any
+   * more), when it has one. */
+  providerMaxRemainingLifetimeMs?: number | null,
 ): ProviderLossRecord {
+  const lifetimeEndsAt =
+    typeof providerMaxRemainingLifetimeMs === "number" &&
+    Number.isSafeInteger(providerMaxRemainingLifetimeMs) &&
+    providerMaxRemainingLifetimeMs >= 0
+      ? Date.parse(observedAt) + providerMaxRemainingLifetimeMs + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : null;
   return {
     version: 1,
     source,
@@ -43986,7 +44480,32 @@ function providerLossRecordForLostRow(
     workspaceGeneration: Number(row.workspace_generation),
     observedAt,
     providerDeadlineAt: timestampIso(row.provider_deadline_at),
+    ...(lifetimeEndsAt !== null && Number.isFinite(lifetimeEndsAt)
+      ? {
+          deathProof: {
+            kind: "provider_lifetime" as const,
+            provenAt: new Date(lifetimeEndsAt).toISOString(),
+          },
+        }
+      : {}),
   };
+}
+
+/** The carried loss record with `workspace_absent` proof added, minting the
+ * record when an older loss transition never wrote one. Never moves a record
+ * to another lease or workspace generation. */
+function providerLossRecordWithWorkspaceAbsent(
+  row: LeaseRow,
+  provenAt: string,
+): ProviderLossRecord {
+  const carried = providerLossRecord(row.resume_state);
+  const base =
+    carried &&
+    carried.leaseId === row.id &&
+    carried.workspaceGeneration === Number(row.workspace_generation)
+      ? carried
+      : providerLossRecordForLostRow(row, "continuity_restore", provenAt);
+  return { ...base, deathProof: { kind: "workspace_absent", provenAt } };
 }
 
 function resumeStateWithPreservedArchives(
@@ -45328,24 +45847,31 @@ async function sandboxGroupRecoveryBlockersTx(
   });
 }
 
-/** A registered CURRENT native Modal checkpoint older than the lost workspace.
- * The restore path independently verifies the opaque bytes and provider binding. */
+/** The CURRENT checkpoint older than the lost workspace: on Modal a registered
+ * native checkpoint, elsewhere the lease's own verified portable archive (which
+ * has no native artifact). The restore path independently verifies the bytes
+ * against the descriptor, and a native checkpoint's provider binding. */
 async function verifiedAutomaticCheckpointSelectionTx(
   tx: Database,
   row: LeaseRow,
   session: typeof schema.sessions.$inferSelect,
   recovery: SandboxRecoveryState,
-): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+): Promise<SandboxCheckpointSelection | null> {
   const descriptor = recovery.archive.current;
   if (
     recovery.archive.status !== "available" ||
     currentWorkspaceArchiveWasAbandoned(row) ||
-    descriptor?.version !== 2 ||
-    row.current_checkpoint_artifact_id === null ||
+    !descriptor ||
     row.archive_generation === null ||
     Number(row.archive_generation) >= Number(row.workspace_generation)
   )
     return null;
+  if ((row.resume_backend_id ?? row.backend) !== "modal") {
+    return descriptor.version === 1 && row.current_checkpoint_artifact_id === null
+      ? checkpointSelectionForSession(row, session, descriptor)
+      : null;
+  }
+  if (descriptor.version !== 2 || row.current_checkpoint_artifact_id === null) return null;
   const [artifact] = await rawRows<{ valid: boolean }>(
     tx,
     sql`select exists(select 1 from sandbox_checkpoint_artifacts
@@ -45366,8 +45892,8 @@ function checkpointSelectionForSession(
   row: LeaseRow,
   session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
   descriptor: { revision: string; capturedAt: string },
-): import("@opengeni/contracts").SandboxRecoverySelection | null {
-  const parsed = SandboxRecoverySelection.safeParse({
+): SandboxCheckpointSelection | null {
+  const parsed = SandboxCheckpointSelection.safeParse({
     version: 1,
     sessionId: session.id,
     sandboxGroupId: row.sandbox_group_id,
@@ -45438,7 +45964,7 @@ type AutomaticRecoveryLane =
   | {
       kind: "checkpoint";
       state: "available" | "authorized";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       operationId: string | null;
       initiatingSessionId: string | null;
       attempt: number;
@@ -45465,6 +45991,7 @@ type AutomaticRecoveryLane =
         | "restore_retry_backoff"
         | "restore_retry_exhausted"
         | "provider_lifetime_unexpired"
+        | "provider_death_unproven"
         | "authorization_pending"
         | "authorization_invalid";
       /** For a timed wait: the earliest time a new decision (Retry or a new
@@ -45480,10 +46007,42 @@ function isoTimestamp(...candidates: Array<string | null | undefined>): string {
   return new Date().toISOString();
 }
 
-/** Structural system continuity for a definitively lost managed Modal box.
- * Prefer the latest verified registered checkpoint; otherwise continue on a
- * new EMPTY workspace. Never for an ambiguous provider state, an unresolved
- * create, a live explicit authorization, or an unsettled late capture. Group
+/** Backends whose lost boxes the system may recover by itself. Connected
+ * Machines and backend-less sessions are never system recovered. */
+function automaticRecoveryBackend(
+  session: Pick<typeof schema.sessions.$inferSelect, "sandboxBackend">,
+  row: Pick<LeaseRow, "backend" | "resume_backend_id">,
+): boolean {
+  const backend = row.resume_backend_id ?? row.backend;
+  return (
+    session.sandboxBackend === backend &&
+    row.backend === backend &&
+    backend !== "none" &&
+    backend !== "selfhosted"
+  );
+}
+
+/** When the lost object is proven gone, as a database-clock epoch, or null
+ * when nothing proves it. Modal: past its hard lifetime, which no Modal
+ * sandbox outlives in any workspace. Compute: the control plane, which is
+ * authoritative for its own sandboxes, is the only source of a compute
+ * NotFound. Others: the backend-specific proof the loss recorded. */
+function providerDeathProvenAtMs(row: LeaseRow, loss: ProviderLossRecord): number | null {
+  const backend = row.resume_backend_id ?? row.backend;
+  if (backend === "modal") {
+    return loss.providerDeadlineAt
+      ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  }
+  if (backend === "compute") return Date.parse(loss.observedAt);
+  return loss.deathProof ? Date.parse(loss.deathProof.provenAt) : null;
+}
+
+/** Structural system continuity for a definitively lost managed box. Prefer
+ * the latest verified checkpoint; otherwise, only with proof the lost object is
+ * gone (providerDeathProvenAtMs), continue on a new EMPTY workspace. Never for
+ * an ambiguous provider state, an unresolved create, a live explicit
+ * authorization, or an unsettled late capture. Group
  * quiescence is checked separately, at the exact deciding attempt. Rows
  * written by older confirmDrainCold/lost-instance code qualify as-is: the
  * decision reads current lease truth, not a new loss-time receipt. */
@@ -45516,7 +46075,7 @@ async function automaticRecoveryLaneTx(
     };
   if (pendingFreshWorkspaceRecovery(row.resume_state))
     return { kind: "unavailable", reason: "authorization_invalid" };
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
+  if (!automaticRecoveryBackend(session, row))
     return { kind: "unavailable", reason: "not_applicable" };
   const automatic = automaticCheckpointMarker(row.resume_state);
   if (automatic?.status === "accepted") {
@@ -45632,13 +46191,12 @@ async function automaticRecoveryLaneTx(
     };
   }
   // No checkpoint Opengeni can restore automatically. An empty workspace is
-  // irreversible for the running sandbox, so it additionally waits until the
-  // lost object is past its hard provider lifetime: no Modal sandbox outlives
-  // it in any workspace, so a misconfigured credential or namespace cannot
-  // turn a live box into a false loss here.
-  const lifetimeEndsAt = loss.providerDeadlineAt
-    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
-    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  // irreversible for the running sandbox, so it needs proof that the lost
+  // object, and any workspace only it held, is really gone. A NotFound alone
+  // can come from a misconfigured credential or namespace, or a daemon under
+  // memory pressure, and must never turn a live workspace into an empty one.
+  const lifetimeEndsAt = providerDeathProvenAtMs(row, loss);
+  if (lifetimeEndsAt === null) return { kind: "unavailable", reason: "provider_death_unproven" };
   if (now < lifetimeEndsAt)
     return {
       kind: "unavailable",
@@ -45829,12 +46387,15 @@ async function projectPublicSandboxRecovery(
     currentWorkspace &&
     (currentWorkspace.reason === "fresh_workspace_selected" ||
       currentWorkspace.reason === "archive_retry_selected" ||
-      canRevalidateCurrentWorkspaceArchive(row) ||
-      row.backend !== "modal")
+      canRevalidateCurrentWorkspaceArchive(row))
   )
     return currentWorkspace;
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
-    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  // Explicit historical-checkpoint consent stays Modal-only; system continuity
+  // after a loss serves every automatically recoverable backend.
+  const modalHome = session.sandboxBackend === "modal" && row.backend === "modal";
+  const homeUnsupported = (): SandboxRecoveryProjection =>
+    currentWorkspace ?? { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  if (!modalHome && !automaticRecoveryBackend(session, row)) return homeUnsupported();
   const publicRecovery = row.public_recovery as Record<string, unknown> | null;
   const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
   if (publicRecovery && acceptedSelection.success && publicRecovery.sessionId === input.sessionId) {
@@ -45874,10 +46435,18 @@ async function projectPublicSandboxRecovery(
   if (purpose === "preview") {
     const lane = await automaticRecoveryLaneTx(tx, row, session);
     if (lane.kind === "checkpoint" || lane.kind === "fresh_workspace") {
-      const checkpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      const automaticCheckpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      // `checkpoint` keeps its public shape: a native checkpoint only. A
+      // portable one is named by `automaticCheckpoint` alone.
+      const nativeCheckpoint = SandboxRecoverySelection.safeParse(automaticCheckpoint);
+      const checkpoint = nativeCheckpoint.success ? nativeCheckpoint.data : null;
+      const blocked = (blockedReason: string): SandboxRecoveryProjection => ({
+        ...unavailable(blockedReason, checkpoint),
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
+      });
       const reason =
         lane.state === "authorized" ? null : await automaticLaneQuiescenceReason(tx, row, session);
-      if (reason) return unavailable(reason, checkpoint);
+      if (reason) return blocked(reason);
       // Retry reopens the latest failed turn, and never with a tool call whose
       // outcome it cannot prove. A new message still recovers the sandbox.
       const [retryTarget] = await rawRows<{ unresolved: boolean }>(
@@ -45888,12 +46457,13 @@ async function projectPublicSandboxRecovery(
               where turn.workspace_id = ${input.workspaceId} and turn.session_id = ${session.id}
               order by turn.position desc, turn.created_at desc limit 1)) as unresolved`,
       );
-      if (retryTarget?.unresolved) return unavailable("retry_tool_outcome_unresolved", checkpoint);
+      if (retryTarget?.unresolved) return blocked("retry_tool_outcome_unresolved");
       return {
         version: 1,
         status: "eligible",
         reason: null,
         checkpoint,
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
         operationId: null,
         automaticAvailable: true,
         automaticLane: lane.kind,
@@ -45909,6 +46479,7 @@ async function projectPublicSandboxRecovery(
     )
       return unavailable(lane.reason, null, lane.availableAt);
   }
+  if (!modalHome) return homeUnsupported();
   // A system decision already owns this lease; consent may not compete with it.
   if (
     pendingFreshWorkspaceRecovery(row.resume_state) ||
@@ -45937,8 +46508,13 @@ async function projectPublicSandboxRecovery(
     !row.current_checkpoint_artifact_id
   )
     return unavailable("registered_current_checkpoint_required");
-  const selection = checkpointSelectionForSession(row, session, descriptor);
-  if (!selection) return unavailable("checkpoint_metadata_invalid");
+  // Human consent is offered only for a registered native checkpoint, so the
+  // public selection always names its artifact.
+  const parsedSelection = SandboxRecoverySelection.safeParse(
+    checkpointSelectionForSession(row, session, descriptor),
+  );
+  if (!parsedSelection.success) return unavailable("checkpoint_metadata_invalid");
+  const selection = parsedSelection.data;
   if (selection.archiveGeneration >= selection.workspaceGeneration)
     return unavailable("historical_checkpoint_not_required", selection);
   if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
@@ -46356,7 +46932,7 @@ export type AutomaticSandboxRecoveryAuthorization =
   | {
       status: "authorized" | "already_authorized";
       lane: "checkpoint";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       groupSessionCount: number;
     }
   | {
@@ -46408,7 +46984,7 @@ async function writeAutomaticRecoveryReceiptsTx(
           ? input.actor
           : { type: "service", subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT };
       if (input.lane.kind === "checkpoint") {
-        const checkpoint = SandboxRecoverySelection.parse({
+        const checkpoint = SandboxCheckpointSelection.parse({
           ...input.lane.selection,
           sessionId: member.id,
           routeEpoch: member.activeEpoch,
@@ -46814,7 +47390,7 @@ export async function getSandboxRecoveryDiscontinuity(
       );
     }
     if (rows[0].action === "sandbox.recovery.automatic") {
-      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      const selection = SandboxCheckpointSelection.parse(rows[0].result.checkpoint);
       return automaticSandboxRecoveryDiscontinuity(
         selection,
         rows[0].result.scope === "shared" ? "shared" : "session",
@@ -47028,7 +47604,7 @@ async function authorizedHistoricalArchiveGeneration(
     // until verified warm publication.
     if (!session) return null;
     return session.sandboxGroupId === row.sandbox_group_id &&
-      session.sandboxBackend === "modal" &&
+      automaticRecoveryBackend(session, row) &&
       (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
       metadata?.version === 1 &&
       metadata.automaticHistoricalCheckpoint === true &&
@@ -47037,7 +47613,7 @@ async function authorizedHistoricalArchiveGeneration(
       metadata.leaseEpoch === Number(row.lease_epoch) &&
       metadata.workspaceGeneration === Number(row.workspace_generation) &&
       metadata.archiveGeneration === archiveGeneration &&
-      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      (metadata.artifactId ?? null) === row.current_checkpoint_artifact_id &&
       archiveGeneration !== null &&
       archiveGeneration < Number(row.workspace_generation) &&
       metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
@@ -47483,6 +48059,9 @@ export async function failSandboxRematerialization(
     failureCode: string;
     retryable: boolean;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -47515,7 +48094,9 @@ export async function failSandboxRematerialization(
         }
         const current = recoveryStateFromLeaseRow(row);
         const continuity =
-          input.retryable && !input.discardContinuity ? continuityRecoveryFromLeaseRow(row) : null;
+          input.retryable && !input.discardContinuity && !input.providerWorkspaceAbsent
+            ? continuityRecoveryFromLeaseRow(row)
+            : null;
         const terminalStatus: SandboxRestoreStatus = continuity
           ? "pending"
           : input.retryable
@@ -47553,7 +48134,15 @@ export async function failSandboxRematerialization(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = JSON.stringify(recoveryResumeState(row, recovery));
+        const resumeStateJson = JSON.stringify(
+          recoveryResumeState(
+            row,
+            recovery,
+            input.providerWorkspaceAbsent
+              ? providerLossRecordWithWorkspaceAbsent(row, new Date().toISOString())
+              : undefined,
+          ),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -50270,6 +50859,9 @@ export async function markWarmLeaseInstanceLost(
     expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
+    /** The backend's bound on how long the lost box could still run (its hard
+     * lifetime or unrenewed TTL), when it has one. Recorded as death proof. */
+    providerMaxRemainingLifetimeMs?: number | null;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
@@ -50397,7 +50989,12 @@ export async function markWarmLeaseInstanceLost(
         const coldResumeState = recoveryResumeState(
           current,
           recovery,
-          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+          providerLossRecordForLostRow(
+            current,
+            "warm_resume",
+            observedAt,
+            input.providerMaxRemainingLifetimeMs,
+          ),
         );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
@@ -50829,6 +51426,9 @@ export async function failWarmingToCold(
     sandboxGroupId: string;
     expectedEpoch: number;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -50850,11 +51450,22 @@ export async function failWarmingToCold(
         if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
-        const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
+        const continuity =
+          input.discardContinuity || input.providerWorkspaceAbsent
+            ? null
+            : continuityRecoveryFromLeaseRow(row);
         // A pending empty-workspace decision must survive a failed empty create;
-        // otherwise a null envelope would look like an ordinary new lease.
+        // otherwise a null envelope would look like an ordinary new lease. So
+        // must the evidence of a lost workspace: dropping it would let the next
+        // owner publish an empty box as if nothing had ever been there.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-        const hasRecovery = hasArchive || continuity !== null || freshPending;
+        const carriedLoss = providerLossRecord(row.resume_state);
+        const hasRecovery =
+          hasArchive ||
+          continuity !== null ||
+          freshPending ||
+          carriedLoss !== null ||
+          input.providerWorkspaceAbsent === true;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         // beginSandboxRematerialization already proved this exact registered
         // checkpoint unusable in this warming epoch. Keep that terminal truth
@@ -50913,7 +51524,15 @@ export async function failWarmingToCold(
           ...(continuity ? { continuity } : {}),
         };
         const resumeStateJson = hasRecovery
-          ? JSON.stringify(recoveryResumeState(row, recovery))
+          ? JSON.stringify(
+              recoveryResumeState(
+                row,
+                recovery,
+                input.providerWorkspaceAbsent
+                  ? providerLossRecordWithWorkspaceAbsent(row, now)
+                  : undefined,
+              ),
+            )
           : null;
         await tx.execute(sql`
           update sandbox_leases set
@@ -53676,6 +54295,9 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The backend's bound on how long a box reported missing could still
+     * run, when it has one. Recorded as death proof on the loss. */
+    providerMaxRemainingLifetimeMs?: number | null;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
     /** The reaper stopped the exact provider box (or proved it gone) before
@@ -53985,7 +54607,14 @@ export async function confirmDrainCold(
               recoveryResumeState(
                 row,
                 recovery,
-                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
+                workspaceLost
+                  ? providerLossRecordForLostRow(
+                      row,
+                      "drain_probe",
+                      now,
+                      input.providerMaxRemainingLifetimeMs,
+                    )
+                  : undefined,
               ),
             )
           : null;
@@ -64745,6 +65374,9 @@ export async function getSandbox(
   access: string | { accountId: string; workspaceId: string; subjectId: string },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  // Sandbox ids are UUIDs. Anything else (for example a machine's display name)
+  // names no sandbox, so answer "not found" rather than failing the uuid cast.
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   if (typeof access !== "string") {
     return await withRlsContext(db, access, async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, access.subjectId);
@@ -64783,6 +65415,7 @@ export async function getSandboxForAttempt(
   },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   const projection = await withRlsContext(db, input, async (scopedDb) => {
     await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ value: { sandbox: SandboxRecord | null } | null }>(
@@ -85831,6 +86464,7 @@ export async function appendSessionEvents(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],
@@ -87319,6 +87953,7 @@ export async function appendSessionEventsAndUpdateSession(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],

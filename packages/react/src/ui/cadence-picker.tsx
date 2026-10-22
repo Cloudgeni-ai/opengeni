@@ -37,6 +37,10 @@ import { Popover as PopoverPrimitive, Select as SelectPrimitive } from "radix-ui
 import { InlineDisabledReason, SelectMenuPanel, type SelectOption } from "./select-menu";
 import { MENU_CHECK_CLASS, MENU_SURFACE_CLASS } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const SelectContainedPortal = containedPortal(SelectPrimitive.Portal);
+const PopoverContainedPortal = containedPortal(PopoverPrimitive.Portal);
 
 /* ============================================================================
    1. Cadence logic
@@ -1199,7 +1203,7 @@ function ValueSelect<V extends string>({
           />
         </SelectPrimitive.Icon>
       </SelectPrimitive.Trigger>
-      <SelectPrimitive.Portal>
+      <SelectContainedPortal>
         <SelectPrimitive.Content
           position="popper"
           sideOffset={6}
@@ -1226,7 +1230,7 @@ function ValueSelect<V extends string>({
             ))}
           </SelectPrimitive.Viewport>
         </SelectPrimitive.Content>
-      </SelectPrimitive.Portal>
+      </SelectContainedPortal>
     </SelectPrimitive.Root>
   );
 }
@@ -1639,7 +1643,7 @@ export function TimeZonePicker({
           className="size-4 shrink-0 text-fg-subtle transition-transform duration-[120ms] group-data-[state=open]/zone:rotate-180"
         />
       </PopoverPrimitive.Trigger>
-      <PopoverPrimitive.Portal>
+      <PopoverContainedPortal>
         <PopoverPrimitive.Content
           align={variant === "ghost" ? "end" : "start"}
           sideOffset={6}
@@ -1659,7 +1663,7 @@ export function TimeZonePicker({
             }}
           />
         </PopoverPrimitive.Content>
-      </PopoverPrimitive.Portal>
+      </PopoverContainedPortal>
     </PopoverPrimitive.Root>
   );
 }
@@ -1864,7 +1868,7 @@ function DateField({
         <CalendarIcon aria-hidden="true" className="size-4 shrink-0 text-fg-subtle" />
         <span className="min-w-0 truncate">{label}</span>
       </PopoverPrimitive.Trigger>
-      <PopoverPrimitive.Portal>
+      <PopoverContainedPortal>
         <PopoverPrimitive.Content
           align="start"
           sideOffset={6}
@@ -1880,7 +1884,7 @@ function DateField({
             }}
           />
         </PopoverPrimitive.Content>
-      </PopoverPrimitive.Portal>
+      </PopoverContainedPortal>
     </PopoverPrimitive.Root>
   );
 }

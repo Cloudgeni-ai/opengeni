@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 test("macOS rail reserves native controls outside the scroll viewport", async () => {
   const port = await freePort();

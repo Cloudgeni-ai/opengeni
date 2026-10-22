@@ -2,15 +2,16 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import { ListRow } from "@opengeni/react/ui/list-row";
-import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
-import { useAppContext } from "@/context";
-import { formatMoneyMicros } from "@/lib/format";
-import { modelUsesCredits } from "@/lib/model-policy";
-import { hasAccountPermission } from "@/lib/permissions";
-import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
-import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
-import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
-import type { ClientConfig } from "@/types";
+import { OpenGeniCreditsTile } from "@opengeni/react/app/components/models/provider-mark";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import { modelUsesCredits } from "@opengeni/react/app/lib/model-policy";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
+import { CREDIT_BALANCE_CHANGED } from "@opengeni/react/app/lib/credit-balance-events";
+import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
+import { creditBalanceSplitLabel } from "@opengeni/react/app/lib/credit-coverage";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Opengeni credits in Settings > Models: on a deployment that bills credits,
@@ -27,7 +28,10 @@ export function deploymentBillsCredits(config: Pick<ClientConfig, "billingMode" 
 export interface OpenGeniCredits {
   /** False on deployments without credits: no row, and credits don't count as a payer. */
   visible: boolean;
-  /** "$12.40 left", "No credits left", or null while unknown or unreadable. */
+  /**
+   * "$12.40 left", "No credits left", "$0.00 for any model · $100.00 for
+   * selected models", or null while unknown or unreadable.
+   */
   balanceLabel: string | null;
   /** Billing admins: the row opens organization Billing. */
   canOpenBilling: boolean;
@@ -51,7 +55,11 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
         balanceMicros > 0
           ? `${formatMoneyMicros(balanceMicros, currency)} left`
           : "No credits left";
-      if (billing.balance.plan) {
+      // Scoped credit only pays for some models: say how much any model can use.
+      const split = creditBalanceSplitLabel(billing.balance);
+      if (split) {
+        label = split;
+      } else if (billing.balance.plan) {
         const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
         if (catalog?.plan) {
           const remaining = billing.balance.plan.creditRemainingMicros;

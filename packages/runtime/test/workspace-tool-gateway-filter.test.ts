@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { prepareAgentTools } from "../src";
 
 describe("workspace tool gateway filtering", () => {

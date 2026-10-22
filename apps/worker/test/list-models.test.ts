@@ -7,7 +7,7 @@ import {
   withCodexCatalogProvider,
 } from "@opengeni/config";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   LIST_MODELS_TOOL_NAME,
   createListModelsAttemptToolDefinition,

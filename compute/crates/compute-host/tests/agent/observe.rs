@@ -220,11 +220,15 @@ async fn renewing_a_hold_or_reading_status_is_only_counted() {
         is(event, "compute.request", "compute.request", "release")
     })
     .await;
-    let requests: Vec<&str> = seen
+    // Each request's event is written just after its reply is sent, so the
+    // next request, sent on that reply, can be written first: only which
+    // requests made events is checked, not their order.
+    let mut requests: Vec<&str> = seen
         .iter()
         .filter(|event| event.name == "compute.request")
         .filter_map(|event| text(event, "compute.request"))
         .collect();
+    requests.sort_unstable();
     assert_eq!(requests, ["create", "hold", "release"]);
     let metrics = observer.metrics();
     assert_eq!(metrics.requests(RequestKind::Hold, None), 3);

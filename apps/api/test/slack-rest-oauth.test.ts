@@ -21,11 +21,8 @@ import {
   slackRestMcpToolsForScopes,
 } from "@opengeni/contracts/slack-rest-mcp";
 import * as network from "@opengeni/network";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import { chooseMcpAuthorizeScopes } from "../src/integrations/oauth-client";

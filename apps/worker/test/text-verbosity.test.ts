@@ -23,7 +23,8 @@ import {
   normalizeSdkEvent,
 } from "@opengeni/runtime";
 import { requestBodyText } from "../../../packages/runtime/src/replayable-json-body";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import {
   reasoningSummaryForTurn,

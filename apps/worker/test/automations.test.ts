@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { AutomationAuthorityRevokedError, type AutomationRunExecution } from "@opengeni/db";
 import { createAutomationActivities } from "../src/activities/automations";
 import type { ActivityServices } from "../src/activities/types";
@@ -469,6 +470,18 @@ describe("automation agent configuration", () => {
       firstPartyMcpTools: ["wait_for_input", "goal_set"],
       tools: [{ kind: "mcp", id: "acme" }],
     });
+  });
+
+  test("an attached first-party search is saved eager only for the new session", async () => {
+    const execution = agentRun(undefined);
+    execution.acceptedExecution.sessionTemplate.tools = [{ kind: "mcp", id: "opengeni" }];
+    const { createInput } = await dispatch(execution);
+    expect(createInput).toMatchObject({
+      tools: [{ kind: "mcp", id: "opengeni", eager: ["knowledge_search"] }],
+    });
+    expect(execution.acceptedExecution.sessionTemplate.tools).toEqual([
+      { kind: "mcp", id: "opengeni" },
+    ]);
   });
 });
 

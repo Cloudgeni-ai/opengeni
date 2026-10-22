@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import PostalMime from "postal-mime";
 import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
 import { PrefixedMcpServer, runRecoverableMcpOperation, prepareAgentTools } from "../src/index";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   GmailRestMcpServer,
   GMAIL_REST_MCP_TOOLS,

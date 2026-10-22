@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import { fakeApiKeyProvider } from "./fixtures/subscription-core-fake-api-key";
 import {
@@ -1887,5 +1887,69 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     ]);
     expect(postCommit[0]).toMatchObject({ accepted: true });
     expect(postCommit[1]).toHaveProperty("operationId");
+  }, 180_000);
+
+  test("D-33 a lease released while its request reservation is admitted waits for the reservation", async () => {
+    const org = await fixture.organization();
+    const source = await fixture.connection(org, home);
+    const left = await fixture.turn(org);
+    await withSubscriptionCoreAcceptedTurn(fixture.client.db, left.identity, (tx) =>
+      acquireSubscriptionTurnLease(tx, {
+        ...left.identity,
+        provider: home.adapter.provider,
+        connectionId: source,
+        holderId: left.holderId,
+        generation: left.executionGeneration,
+        ttlMs: 60_000,
+      }),
+    );
+    const requestId = crypto.randomUUID();
+    const blocked = async (query: string) => {
+      for (let attempt = 0; attempt < 400; attempt++) {
+        const [row] = await fixture.admin<{ waiting: boolean }[]>`
+          select exists (select 1 from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+              and query ilike ${`${query}%`}) as waiting`;
+        if (row?.waiting) return true;
+        await Bun.sleep(25);
+      }
+      return false;
+    };
+    // Placement releases a lease without the connection lock. Hold the
+    // reservation between its lease check and its insert, then release the
+    // lease exactly there, as a concurrent placement switching the turn can.
+    let reservation!: Promise<PromiseSettledResult<{ operationId: string }>>;
+    let release!: Promise<number>;
+    await fixture.admin.begin(async (gate) => {
+      await gate`lock table subscription_operation_leases in share mode`;
+      reservation = Promise.allSettled([
+        subscriptionCoreRequests(home).reserveSubscriptionCoreRequest(
+          fixture.client.db,
+          left.identity,
+          { connectionId: source, holderId: left.holderId, generation: left.executionGeneration },
+          {
+            attemptId: left.attemptId,
+            executionGeneration: left.executionGeneration,
+            requestId,
+            transportAttempt: 1,
+          },
+        ),
+      ]).then(([settled]) => settled!);
+      expect(await blocked("insert into subscription_operation_leases")).toBe(true);
+      release = Promise.resolve(
+        fixture.admin`delete from subscription_leases
+          where turn_id = ${left.identity.turnId}::uuid and connection_id = ${source}::uuid
+          returning 1`,
+      ).then((rows) => rows.length);
+      // The release waits for the admitted reservation instead of slipping
+      // between its check and its insert.
+      expect(await blocked("delete from subscription_leases")).toBe(true);
+    });
+    expect(await reservation).toMatchObject({ status: "fulfilled" });
+    expect(await release).toBe(1);
+    const [reserved] = await fixture.admin<{ outcome: string }[]>`
+      select request_outcome as outcome from subscription_operation_leases
+      where turn_id = ${left.identity.turnId}::uuid and request_id = ${requestId}`;
+    expect(reserved).toEqual({ outcome: "reserved" });
   }, 180_000);
 });

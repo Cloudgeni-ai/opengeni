@@ -268,6 +268,32 @@ async fn the_group_grows_before_spare_memory_runs_out_and_only_once() {
     assert_eq!(resizes, ["resize 2"], "the booting host counts as coming");
 }
 
+/// Memory a host frees at once by ending idle VM processes whose state is
+/// saved counts as spare: idle sandboxes grow no group until it is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_saved_idle_sandboxes_hold_counts_as_spare_for_the_group() {
+    let (fleet, compute) = fleet(&[("hosts-a1b2", "RUNNING")]).await;
+    let host = fleet.host("hosts-a1b2").await;
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        memory_reclaimable_mib: 63 * 1024,
+        ..roomy()
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let resized = |compute: &Vec<String>| compute.iter().any(|asked| asked.starts_with("resize"));
+    assert!(!resized(&compute.asked()), "{:?}", compute.asked());
+    // Once those sandboxes wake, it is gone and the group grows.
+    host.set_capacity(Capacity {
+        memory_free_mib: 1024,
+        memory_reclaimable_mib: 0,
+        ..roomy()
+    });
+    until(Duration::from_secs(5), "the group grows", async || {
+        compute.asked().contains(&"resize 2".to_owned())
+    })
+    .await;
+}
+
 /// A host of the group that stops renewing is reset before its sandboxes
 /// lose their owner, and not given up on while the reset is under way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

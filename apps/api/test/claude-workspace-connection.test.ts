@@ -4,7 +4,7 @@ import {
   prepareClaudeSubscriptionCredential,
   prepareClaudeWorkspaceCredential,
 } from "../src/claude-workspace-connection";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 const identity = { accountUuid: "11111111-1111-4111-8111-111111111111", deviceId: "a".repeat(64) };
 const connection = (role: "anthropic" | "claude_subscription") => ({

@@ -18,8 +18,8 @@ import {
   providerRetryAfterMs,
   postClaimDatabaseRecoveryFailure,
 } from "../src/activities/agent-turn/errors";
-import { failedSessionCopy } from "../../web/src/lib/failed-session-copy";
-import { summarizeSessionFailure } from "../../web/src/lib/events";
+import { failedSessionCopy } from "../../../packages/react/src/app/lib/failed-session-copy";
+import { summarizeSessionFailure } from "../../../packages/react/src/app/lib/events";
 
 const provider: ResolvedModelProvider = {
   id: "claude",

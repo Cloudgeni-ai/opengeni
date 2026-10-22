@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { orchestrationFailureDiagnostic } from "../src/mcp/orchestration-failure-diagnostic";
 
 const caller = {

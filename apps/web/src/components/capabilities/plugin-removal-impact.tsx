@@ -1,5 +1,5 @@
 import { BookOpenIcon, CableIcon, LinkIcon } from "lucide-react";
-import type { PluginUninstallPreview } from "@/types";
+import type { PluginUninstallPreview } from "@opengeni/react/app/types";
 
 type Component = PluginUninstallPreview["components"][number];
 

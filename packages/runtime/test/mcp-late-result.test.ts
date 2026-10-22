@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import { prepareAgentTools } from "../src/index";
 import { observeMcpOperation } from "../src/mcp-operation-observation";

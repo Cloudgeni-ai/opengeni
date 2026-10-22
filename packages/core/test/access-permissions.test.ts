@@ -4,7 +4,7 @@ import {
   signDelegatedAccessToken,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   accountScopedApiKeyWorkspaceAuthority,

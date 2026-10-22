@@ -34,7 +34,7 @@ import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const ctx = { workspaceId: WORKSPACE_ID };
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";

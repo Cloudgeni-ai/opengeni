@@ -1,4 +1,10 @@
-import { AccountGroupHeading, SubscriptionAccountRow } from "./subscription-account-ui";
+import { possessive } from "./possessive";
+import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
+import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
+import {
+  AccountGroupHeading,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
@@ -19,7 +25,7 @@ import type {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
 import { isValidElement, useMemo, type ReactNode } from "react";
-import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
+import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -52,7 +58,7 @@ import {
   payerShortLabel,
   resetsLabel,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
@@ -78,9 +84,13 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
-import { billingClassForModel } from "@/lib/model-policy";
-import { accountKey, type GatewayId } from "@/lib/models-route";
-import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
+import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
+import {
+  accountKey,
+  type GatewayId,
+  type WorkspaceGatewayId,
+} from "@opengeni/react/app/lib/models-route";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models, the list: every account that pays for
@@ -94,13 +104,22 @@ import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "opper", "vercel"];
+export const GATEWAYS: readonly GatewayId[] = [
+  "anthropic",
+  "azure_openai",
+  "openai",
+  "openrouter",
+  "opper",
+  "vercel",
+];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
   vercel: "organization-gateway",
   openrouter: "organization-openrouter",
   opper: "organization-opper",
+  openai: "organization-openai",
+  azure_openai: "organization-azure-openai",
   anthropic: "organization-anthropic",
   claude_subscription: "organization-claude-subscription",
 };
@@ -109,6 +128,8 @@ const ORGANIZATION_KIND = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 } as const;
@@ -146,7 +167,7 @@ export interface WorkspaceModelsSnapshot {
   grokShared: SuperGrokAccount[];
   claudeOwn: ClaudeSubscriptionAccount[];
   claudeShared: ClaudeSubscriptionAccount[];
-  keysOwn: GatewayId[];
+  keysOwn: WorkspaceGatewayId[];
   keysShared: { id: GatewayId; models: number }[];
   /** "GPT-6 Astra · Codex", or null when it can't be read. */
   defaultModel: string | null;
@@ -201,12 +222,15 @@ async function readWorkspaceModels(
     grokShared: grokInherited ? (grokData?.accounts ?? []) : [],
     claudeOwn: claudeData?.source === "organization" ? [] : (claudeData?.accounts ?? []),
     claudeShared: claudeData?.source === "organization" ? (claudeData?.accounts ?? []) : [],
-    keysOwn: gateways.filter((id) =>
-      own.some(
-        (connection) =>
-          connection.status === "active" &&
-          isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
-      ),
+    keysOwn: gateways.filter(
+      (id): id is WorkspaceGatewayId =>
+        id !== "openai" &&
+        id !== "azure_openai" &&
+        own.some(
+          (connection) =>
+            connection.status === "active" &&
+            isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
+        ),
     ),
     keysShared: gateways
       .map((id) => ({ id, models: readyOrganizationKeyModels(models, id) }))
@@ -665,6 +689,22 @@ export function OrganizationModelsList({
         />
       ) : null}
 
+      {organizationDefaults && organizationId ? (
+        <Section
+          title="Voice"
+          description="Connect ElevenLabs once for every workspace, and choose how each voice model sounds and listens. A workspace can choose its own."
+        >
+          <OrganizationElevenLabsVoiceConnection
+            organizationId={organizationId}
+            organizationName={organizationName}
+          />
+          <OrganizationRealtimeVoiceSettingsRows
+            anchorWorkspaceId={anchorWorkspaceId}
+            defaults={organizationDefaults}
+          />
+        </Section>
+      ) : null}
+
       {accountRules ? (
         <OrganizationAccountRulesSection
           organizationName={organizationName}
@@ -826,10 +866,7 @@ export function OrganizationDefaultsSection({
   );
 }
 
-/** "Acme's", "Acme Robotics'". */
-export function possessive(name: string): string {
-  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
-}
+export { possessive };
 
 /** Cached weekly usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {

@@ -1,7 +1,9 @@
 import Stripe from "stripe";
 import type postgres from "postgres";
 import assert from "node:assert/strict";
-import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import * as database from "@opengeni/db";
 import {
   createDb,
@@ -14,7 +16,7 @@ import {
 import { DEFAULT_OPENROUTER_MODEL_ID } from "@opengeni/config";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { createApp } from "../src/app";
-import { applyConnectedModelToNewSessionDraft } from "../../web/src/lib/model-access-onboarding";
+import { applyConnectedModelToNewSessionDraft } from "../../../packages/react/src/app/lib/model-access-onboarding";
 import { ensureRunAllowedBetweenModelCalls } from "../../worker/src/activities/agent-turn/admission";
 import {
   processModelResponseTerminalEvent,

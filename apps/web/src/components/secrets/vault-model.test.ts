@@ -18,8 +18,11 @@ import {
   vaultError,
   vaultErrorText,
   vaultsOfConnection,
-} from "./vault-model";
-import { draftSecretsRows, sessionSecretsSummary } from "./session-secrets-panel";
+} from "@opengeni/react/app/components/secrets/vault-model";
+import {
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "@opengeni/react/app/components/secrets/session-secrets-panel";
 import { scheduleSecretsSummary } from "./schedule-secrets-field";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");

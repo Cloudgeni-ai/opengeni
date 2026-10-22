@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   ensureManagedAccessForUser,
@@ -65,6 +67,10 @@ test("a pre-writer personal-resource task retains its execution proof across mig
   const pendingUpdateTenancy = "0759_tenancy_quiescence_carries_owner_pending_updates.sql";
   // 0777 adds policies and a routine over the 0645 table and the 0707 owner helper.
   const workspaceAdminConnections = "0777_workspace_admin_subscription_connections.sql";
+  // 0897 rewrites the 0707 disconnect routine and 0777's policies.
+  const workspaceOwnerAdministers = "0897_workspace_owner_administers_subscriptions.sql";
+  // 0900 restricts the predicate 0897 creates; replay it after 0897.
+  const workspaceAdminPredicatePrivileges = "0900_workspace_admin_predicate_privileges.sql";
   // 0871 installs usage-history routines in the subscription schema; 0872 seeds them.
   const usageHistory = "0871_subscription_usage_history.sql";
   const usageHistorySeed = "0872_subscription_usage_call_history_seed.sql";
@@ -78,7 +84,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
     await database.admin`insert into schema_migrations(name) values (${writer}),
       (${cutover}), (${disconnect}), (${explicitRetry}), (${recovery}), (${neutral}), (${completion}), (${precursor}),
       (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}),
-      (${acceptanceReads}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections}), (${indexedLineage})`;
+      (${acceptanceReads}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), (${pendingUpdateTenancy}), (${workspaceAdminConnections}), (${indexedLineage}), (${workspaceOwnerAdministers}), (${workspaceAdminPredicatePrivileges})`;
     await database.admin`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
     // Usage history routines live in the subscription schema the deferred
     // writers create; the seed reads them. Defer both and replay after them.
@@ -136,7 +142,7 @@ test("a pre-writer personal-resource task retains its execution proof across mig
       await database.admin`select execution_digest, authority_revision from scheduled_tasks where id = ${taskId}::uuid`;
     await client.close();
     client = undefined;
-    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${personalQuarantineExpiry}, ${pendingUpdateTenancy}, ${workspaceAdminConnections}, ${indexedLineage})`;
+    await database.admin`delete from schema_migrations where name in (${writer}, ${cutover}, ${disconnect}, ${explicitRetry}, ${recovery}, ${neutral}, ${completion}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${acceptanceReads}, ${personalConnectionVersions}, ${personalQuarantineExpiry}, ${pendingUpdateTenancy}, ${workspaceAdminConnections}, ${indexedLineage}, ${workspaceOwnerAdministers}, ${workspaceAdminPredicatePrivileges})`;
     await database.admin`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
     await database.admin`delete from schema_migrations where name in (${usageHistory}, ${usageHistorySeed})`;
     await migrate(database.adminUrl);

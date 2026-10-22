@@ -37,6 +37,21 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
+    const contract = await buildCompleteSchemaContract();
+    for (const path of [
+      "0890_model_fact_reconciliation_progress.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0892_model_fact_event_pages.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+    ]) {
+      expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
+        path,
+        deploymentMode: "rolling",
+      });
+    }
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2325,6 +2340,22 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0903_organization_default_voice_model.sql",
+      "0902_batched_knowledge_visibility.sql",
+      "0901_session_personal_state_probes.sql",
+      "0900_workspace_admin_predicate_privileges.sql",
+      "0899_ordered_turn_history_pages.sql",
+      "0898_organization_direct_openai_model_providers.sql",
+      "0897_workspace_owner_administers_subscriptions.sql",
+      "0896_shared_child_turn_context_authority.sql",
+      "0895_organization_voice_defaults.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0892_model_fact_event_pages.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0890_model_fact_reconciliation_progress.sql",
+      "0889_session_events_tool_name.sql",
+      "0888_session_list_invalidation.sql",
       "0887_session_events_attempt_reference_index.sql",
       "0886_remove_duplicate_session_identity_indexes.sql",
       "0885_checkpoint_gc_reference_sets.sql",

@@ -419,6 +419,12 @@ export type WorkspaceRealtimeModelCatalogItem = {
   voiceDefaults?: RealtimeVoiceSettings | undefined;
   /** The workspace's saved voice settings for this model. */
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** The organization's default voice settings for this model, used while the workspace has none. */
+  organizationVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** True on the model this workspace chose to start voice conversations with. */
+  workspaceDefault?: boolean | undefined;
+  /** True on the model the organization chose to start voice conversations with; a workspace's own choice wins. */
+  organizationDefault?: boolean | undefined;
 };
 
 /** How readily a realtime voice model decides the speaker is done and answers. */
@@ -2665,9 +2671,32 @@ type SessionEventListCommonOptions = {
   /**
    * With `excludeTypes` containing `agent.toolCall.created`, keep the created
    * rows of presented tools (images, published files, Skill changes). Servers
-   * that predate this option ignore it and apply the plain type filter.
+   * that predate this option ignore it and apply the plain type filter; a
+   * server that applies it reports `SessionEventPage.conversationFilter`.
    */
   presentedToolCalls?: "include";
+  /**
+   * With `payloadMode: "full"`, return large `agent.toolCall.output` payloads
+   * as bounded previews carrying an `outputPreview` fact (see
+   * {@link SessionEventToolOutputPreview}). Read one row's exact output with
+   * an ordinary full read around its sequence. Servers that predate this
+   * option ignore it and return exact outputs.
+   */
+  toolOutputs?: "preview";
+};
+
+/**
+ * The fact a previewed `agent.toolCall.output` payload carries in
+ * `payload.outputPreview`. `structured` keeps the output's shape with long
+ * strings shortened to their head and tail around an omission marker; `text`
+ * replaces the output with the head and tail of its text.
+ */
+export type SessionEventToolOutputPreview = {
+  truncated: true;
+  reason: "tool_output_preview";
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -2759,6 +2788,13 @@ export type SessionEventPage = {
   nextAfter: number | null;
   nextBefore: number | null;
   forensicExact: boolean;
+  /**
+   * The conversation-filter version the server applied to a
+   * `presentedToolCalls: "include"` read (see
+   * `SESSION_EVENT_CONVERSATION_FILTER_VERSION`), or null when it announced
+   * none: an older server may have ignored `presentedToolCalls`.
+   */
+  conversationFilter?: number | null;
 };
 
 export type ToolAuthNeededPayload = {
@@ -4335,14 +4371,26 @@ export type ModelConnectionAccessKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  | "openai"
+  | "azure_openai";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  /** The organization's ElevenLabs key, for Eleven Realtime voices. */
+  | "elevenlabs"
+  | "openai"
+  | "azure_openai";
+
+/** Organization providers whose key runs models, with custom models to choose. */
+export type OrganizationModelCatalogProviderKind = Exclude<
+  OrganizationModelProviderKind,
+  "elevenlabs"
+>;
 
 export type ClaudeUsageWindow = {
   id:
@@ -4386,6 +4434,8 @@ export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
   version: number;
+  /** Azure OpenAI only: the non-secret `https://<resource>.openai.azure.com/openai/v1` endpoint. */
+  endpoint?: string | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -4394,6 +4444,8 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  /** Required for `azure_openai` (its resource endpoint); refused for every other kind. */
+  endpoint?: string | undefined;
   claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
@@ -4440,10 +4492,21 @@ export type OrganizationModelDefaults = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
   modelCompactionThresholds: Record<string, number>;
+  /** Voice settings by realtime model id, for workspaces without their own. */
+  realtimeVoice: Record<string, RealtimeVoiceSettings>;
+  /**
+   * The voice model new voice conversations start with in workspaces without
+   * their own choice, until the person picks one; null leaves it automatic.
+   */
+  realtimeDefaultModel: string | null;
   updatedAt: string | null;
 };
 
-/** Field-by-field update; compaction merges by model id and null resets one model. */
+/**
+ * Field-by-field update; compaction and voice settings merge by model id and
+ * null resets one model. `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
+ */
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
   modelPolicy?:
@@ -4451,6 +4514,8 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | null
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
 };
 
 /** A model-account setting an organization sets, and may lock for every workspace. */
@@ -5991,6 +6056,8 @@ export type WorkspaceSettings = {
    * from the realtime model catalog's `workspaceVoiceSettings`.
    */
   realtimeVoice?: Record<string, unknown> | undefined;
+  /** The workspace's default realtime voice model; null or absent follows the organization. */
+  realtimeDefaultModel?: string | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6097,6 +6164,11 @@ export type UpdateWorkspaceSettingsRequest = {
    * settings; models not listed keep theirs.
    */
   realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  /**
+   * The voice model new voice conversations in this workspace start with
+   * until the person picks one; null follows the organization again.
+   */
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
@@ -7044,6 +7116,11 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+/** The checkpoint automatic recovery restores, native or portable.
+ * `artifactId` is null for a portable archive. */
+export type SandboxCheckpointSelection = Omit<SandboxRecoverySelection, "artifactId"> & {
+  artifactId: string | null;
+};
 export type SandboxRecoveryTarget = {
   sessionId: string;
   sandboxGroupId: string;
@@ -7061,6 +7138,8 @@ export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
+  /** The registered native checkpoint a person can consent to restore, and for
+   * an automatic Retry its checkpoint when that one is native. */
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   target?: SandboxRecoveryTarget;
@@ -7068,9 +7147,12 @@ export type SandboxRecoveryProjection = {
   freshWorkspaceAvailable?: boolean;
   groupSessionCount?: number;
   automaticAvailable?: boolean;
-  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
-   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  /** What an automatic Retry does: restore `automaticCheckpoint`, or continue
+   * on a new empty workspace because no usable checkpoint survived the loss. */
   automaticLane?: "checkpoint" | "fresh_workspace";
+  /** The checkpoint an automatic Retry restores (lane `checkpoint`), native or
+   * portable. `checkpoint` is set as well only when it is native. */
+  automaticCheckpoint?: SandboxCheckpointSelection;
   /** For a timed recovery wait: the earliest time a Retry or a new message can
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;

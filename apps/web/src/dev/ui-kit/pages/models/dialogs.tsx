@@ -9,13 +9,13 @@ import {
   DestructiveConfirm,
   showUndoToast,
   type ConfirmDependency,
-} from "@/components/ui/destructive-confirm";
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Checkbox, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 

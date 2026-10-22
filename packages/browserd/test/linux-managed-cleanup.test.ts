@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { AgentBrowserJsonRunner, reapManagedBrowserProcesses } from "../src/runner";
+import { ManagedBrowserRunner, reapManagedBrowserProcesses } from "../src/runner";
 
 async function fixture() {
   const root = await mkdtemp("/tmp/og-linux-identity-");
@@ -13,21 +13,10 @@ async function fixture() {
   await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
   await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: "og",
-    sessionName: "identity-fixture",
-    socketDirectory: join(root, "socket"),
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory,
-    downloadDirectory: join(sessionDirectory, "downloads"),
-    screenshotDirectory: join(sessionDirectory, "screenshots"),
     headed: false,
     browserExecutablePath: executable,
-    binary: {
-      path: process.execPath,
-      name: "agent-browser-linux-x64",
-      version: "0.33.2",
-      sha256: "fixture",
-    },
   });
   return { root, profileDirectory, executable, runner };
 }

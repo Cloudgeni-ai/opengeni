@@ -3,6 +3,7 @@
 //! asked for, adopts it. Draining a host moves everything nothing holds
 //! awake.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use compute_fleet::{HostId, HostState, Next, Op, Outcome};
@@ -124,7 +125,7 @@ impl<S: Store> Service<S> {
         if let Some(to) = to {
             let row = self.get(team, id).await?;
             if row.ownership.owner.is_none() {
-                self.adopt(row, Some(to), Vec::new()).await?;
+                self.adopt(row, Some(to), HashSet::new()).await?;
             }
         }
         self.get(team, id).await
@@ -152,7 +153,7 @@ impl<S: Store> Service<S> {
             host,
             epoch,
         };
-        match self.settle(row.id, asked, &answered, 0).await?.0 {
+        match self.settle(row.id, asked, &answered).await?.0 {
             Next::Clear(_) => Ok(()),
             _ => Err(match answered.code() {
                 Some(ErrorCode::NotFound) => Failure::Unavailable(

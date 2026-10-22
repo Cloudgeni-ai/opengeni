@@ -532,10 +532,19 @@ export function useSandboxWorkspaceTabs(
     (capabilities?.Terminal.ptyCapable ?? false) &&
     capabilities?.Terminal.transport === "sse-events" &&
     capabilities?.Terminal.reason === null;
+  // The terminal reads its own history (PTY and agent command output) the
+  // first time its tab shows in a visible dock, and keeps it for the session.
+  const terminalShown =
+    terminalOn && workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_TERMINAL;
+  const [terminalOpenedSession, setTerminalOpenedSession] = useState<string | null>(null);
+  useEffect(() => {
+    if (terminalShown) setTerminalOpenedSession(sessionId);
+  }, [terminalShown, sessionId]);
   const terminal = useSandboxTerminal(sessionId, {
     events: terminalEnabled ? events : [],
     interactive: terminalEnabled && ptyCapable,
     liveness,
+    history: terminalShown || terminalOpenedSession === sessionId,
   });
   // Lazy provisioning (#315) creates the box mid-turn on the first sandbox tool
   // call, emitting sandbox.provision started→completed/failed on the live stream.
@@ -1039,7 +1048,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   openFileRequest?:
     | {
         path: string;
-        line?: number | null;
+        line?: number | null | undefined;
         requestId: number;
       }
     | null

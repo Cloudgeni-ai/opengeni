@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
@@ -38,7 +38,7 @@ import { subscriptionCoreOperations } from "../src/subscription-core/operations"
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -868,6 +868,27 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
       }),
     ).toBeNull();
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
+  });
+
+  test("under the automatic source, operations use the organization pool when the workspace pool cannot serve, as chat does", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const organizationScoped = await sharedConnection(org, "ops-auto-org");
+    // The workspace's own pool holds one paused account, so the automatic
+    // source resolves to the workspace pool while chat still admits both.
+    const pausedHere = await sharedConnection(org, "ops-auto-here", {
+      scope: "workspaces",
+      workspaces: [org.sharedWorkspaceId],
+      pool: "workspace",
+    });
+    await shared!.admin`
+      update subscription_connections set allocator_enabled = false
+      where id = ${pausedHere}::uuid`;
+    expect(
+      (await listSubscriptionCoreCodexOperationCandidates(client!.db, workspaceScope(org))).map(
+        (candidate) => candidate.connectionId,
+      ),
+    ).toEqual([organizationScoped]);
   });
 
   test("a sessionless completion holds its own lease and reserves each request in workspace scope", async () => {

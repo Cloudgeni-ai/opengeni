@@ -1,5 +1,5 @@
 /**
- * search.ts - the code_search pipeline (scout-0.3.1 with the Jev judge):
+ * search.ts - the code_search pipeline with a shared typed judge:
  *
  *  1. recall   (ripgrep)                        -> top maxCandidates files by distinct-keyword IDF
  *  2. wave 1   (file triage, 1 Noul per file)   -> up to maxFiles files (+ lexical guard)
@@ -7,14 +7,21 @@
  *  4. wave 3   (leads, exactly one round)       -> <= maxLeadsFollowed definitions, verified like wave 2
  *  5. pack     (bounded, verbatim, line-numbered) + status (1 request over the packed evidence)
  *
- * Every file and process access goes through the injected CodeSearchWorkspace. A Jev failure fails the
- * search (JevUnavailableError / JevRequestError propagate); only a failed final status check keeps the
- * fully Jev-scored pack and reports the status as unknown.
+ * Every file and process access goes through the injected CodeSearchWorkspace. A judge failure fails the
+ * search (DecisionUnavailableError / DecisionRequestError propagate); only a failed final status check keeps the
+ * fully scored pack and reports the status as unknown.
  */
-import { JevRequestError, JevUnavailableError, type JevClient } from "../client";
+import {
+  DecisionRequestError,
+  DecisionUnavailableError,
+  type DecisionModel,
+  type DecisionUsage,
+} from "@opengeni/decisions";
+import type { JevClient } from "../client";
+import { createJevDecisionModel } from "../decision-model";
 import { DEFAULT_CODE_SEARCH_CONFIG, type CodeSearchConfig } from "./config";
 import {
-  JevJudge,
+  CodeSearchJudge,
   type FileItem,
   type JudgeContext,
   type LeadItem,
@@ -96,21 +103,25 @@ export interface CodeSearchInput {
   /** Workspace-relative path prefixes to search; default the whole workspace. */
   paths?: string[] | undefined;
   workspace: CodeSearchWorkspace;
-  jev: JevClient;
+  decisionModel?: DecisionModel;
+  /** Compatibility for public callers of the existing client API; adapted once at entry. */
+  jev?: JevClient;
   signal?: AbortSignal | undefined;
   /** Max pack size in tokens (default 12000). */
   budgetTokens?: number | undefined;
   /** Tuning and tests only; defaults to DEFAULT_CODE_SEARCH_CONFIG. */
   config?: CodeSearchConfig | undefined;
-  /** In-memory stage trace (recall, wave1, wave2, leads, pack, summary, and one "jev" event per Jev request). */
+  /** In-memory stage trace, including one "decision" event per typed judgment request. */
   onStage?: ((stage: string, data: Record<string, unknown>) => void) | undefined;
+  /** Received provider usage is observable even if a later stage or answer fails. */
+  onDecisionUsage?: ((usage: DecisionUsage) => void | Promise<void>) | undefined;
 }
 
 export interface CodeSearchStatus {
   label: "sufficient" | "partial" | "insufficient" | "unknown";
   overall: number | null;
   subs: Array<number | null>;
-  /** Set when the final Jev sufficiency check failed (the pack itself is fully Jev-scored). */
+  /** Set when the final evidence check failed (the pack itself is fully scored). */
   error?: string;
 }
 
@@ -126,7 +137,14 @@ export interface CodeSearchStats {
   workspaceCalls: number;
   /** A ripgrep call returned partial output (byte cap or time limit); the pack header says so. */
   ripgrepTruncated: boolean;
-  jev: { requests: number; inputTokens: number; costUsd: number; model: string | null };
+  decision: {
+    requests: number;
+    inputTokens: number | null;
+    costUsd: number | null;
+    model: string | null;
+    provider: string | null;
+    costSources: Array<"provider-reported" | "estimate" | "unknown">;
+  };
 }
 
 export interface CodeSearchResult {
@@ -136,7 +154,7 @@ export interface CodeSearchResult {
   status: CodeSearchStatus;
   stats: CodeSearchStats;
   /** The error of a failed final status check, for a circuit breaker (the search itself succeeded). */
-  statusCheckError?: JevUnavailableError | JevRequestError;
+  statusCheckError?: DecisionUnavailableError | DecisionRequestError;
 }
 
 const r2 = (x: number | null | undefined) =>
@@ -297,7 +315,16 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     }
   };
   const session = new WorkspaceSession(o.workspace, signal, cfg.recall.ripgrepTimeoutMs);
-  const judge = new JevJudge({ client: o.jev, config: cfg, signal, onEvent: emit });
+  const decisionModel = o.decisionModel ?? (o.jev ? createJevDecisionModel(o.jev) : undefined);
+  if (!decisionModel)
+    throw new DecisionRequestError("Code search requires a configured decision model");
+  const judge = new CodeSearchJudge({
+    client: decisionModel,
+    config: cfg,
+    signal,
+    onEvent: emit,
+    onUsage: o.onDecisionUsage,
+  });
   const subQuestions = (o.subQuestions ?? [])
     .map((s) => s.trim())
     .filter(Boolean)
@@ -318,7 +345,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     budgetTokens,
   });
   // open keep-alive connections while recall runs
-  o.jev.warmUp(cfg.jev.warmConnections);
+  decisionModel.warmUp?.(cfg.jev.warmConnections);
 
   // ---- 1. recall
   let ts = performance.now();
@@ -1287,7 +1314,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     ...(fillMin !== undefined ? { fillMin } : {}),
   });
   let status: CodeSearchStatus = { label: "unknown", overall: null, subs: [] };
-  let statusCheckError: JevUnavailableError | JevRequestError | undefined;
+  let statusCheckError: DecisionUnavailableError | DecisionRequestError | undefined;
   let statusEvidenceChars = 0;
   const check = async (b: PackBody): Promise<void> => {
     if (!cfg.status.enabled || !b.included.length) {
@@ -1304,7 +1331,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       mark("status", tStatus);
       if (
         signal.aborted ||
-        !(error instanceof JevUnavailableError || error instanceof JevRequestError)
+        !(error instanceof DecisionUnavailableError || error instanceof DecisionRequestError)
       )
         throw error;
       statusCheckError = error;
@@ -1344,7 +1371,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     } catch (error) {
       if (
         signal.aborted ||
-        !(error instanceof JevUnavailableError || error instanceof JevRequestError)
+        !(error instanceof DecisionUnavailableError || error instanceof DecisionRequestError)
       )
         throw error;
       evidence.length = mark0.evidence;
@@ -1507,13 +1534,14 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   });
 
   // ---- render
-  const jevTotals = Object.values(judge.stats()).reduce(
+  const decisionTotals = Object.values(judge.stats()).reduce(
     (a, s) => ({
       requests: a.requests + s.requests,
-      inputTokens: a.inputTokens + s.inputTokens,
-      costUsd: a.costUsd + s.costUsd,
+      inputTokens:
+        a.inputTokens === null || s.inputTokens === null ? null : a.inputTokens + s.inputTokens,
+      costUsd: a.costUsd === null || s.costUsd === null ? null : a.costUsd + s.costUsd,
     }),
-    { requests: 0, inputTokens: 0, costUsd: 0 },
+    { requests: 0, inputTokens: 0 as number | null, costUsd: 0 as number | null },
   );
   const wallMs = Math.round(performance.now() - t0);
   const label = partialLabel(session);
@@ -1559,9 +1587,14 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     packTokensEst: estTokens(text.length, cpt),
     workspaceCalls: session.calls,
     ripgrepTruncated: session.partial,
-    jev: { ...jevTotals, model: judge.model() },
+    decision: {
+      ...decisionTotals,
+      model: judge.model(),
+      provider: judge.provider(),
+      costSources: judge.costSources(),
+    },
   };
-  emit("summary", { wallMs, stageMs, stats, status, jevByStage: judge.stats() });
+  emit("summary", { wallMs, stageMs, stats, status, decisionByStage: judge.stats() });
   const result: CodeSearchResult = { version: CODE_SEARCH_ENGINE_VERSION, text, status, stats };
   if (statusCheckError) result.statusCheckError = statusCheckError;
   return result;

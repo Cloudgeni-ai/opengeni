@@ -8,7 +8,7 @@
 //! registration that has since changed is refused by the host and sent
 //! again, and ownership is always read from the store.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -99,24 +99,13 @@ fn intern<T: Copy>(table: &mut HashMap<String, T>, key: &str, make: impl Fn(u16)
     value
 }
 
-/// The processor time a host guarantees its sandboxes now, in
-/// millicores: what it last reported, or, from an older host that reports
-/// only what it has left, what it registered with; `None` from a host that
-/// does not guarantee it.
-#[must_use]
-pub fn cpu_millis(info: &Described, reported: &Reported) -> Option<u64> {
-    info.cpu_millis
-        .map(|registered| reported.cpu_millis.unwrap_or(registered))
-}
-
 /// What placement reads of a host's report.
 fn capacity(info: &Described, reported: &Reported) -> Capacity {
     Capacity {
         memory_mib: info.memory_mib,
         free_memory_mib: reported.memory_free_mib,
-        // Only a host that guarantees processor time says what it has
-        // left, and only then is it checked.
-        free_cpu_millis: info.cpu_millis.and(reported.cpu_free_millis),
+        reclaimable_memory_mib: reported.memory_reclaimable_mib,
+        free_cpu_millis: reported.cpu_free_millis,
         free_disk_mib: reported.disk_free_mib,
         ready: reported
             .ready
@@ -211,6 +200,15 @@ impl View {
             .map(|known| known.target.name.clone())
     }
 
+    /// Whether host `host` is draining ahead of its removal.
+    #[must_use]
+    pub fn draining(&self, host: HostId) -> bool {
+        self.read()
+            .hosts
+            .get(&host)
+            .is_some_and(|known| known.state == HostState::Draining)
+    }
+
     /// The host named `name`.
     #[must_use]
     pub fn named(&self, name: &str) -> Option<Known> {
@@ -229,7 +227,7 @@ impl View {
 
     /// Places `demand` on a live host not in `exclude` and books it there
     /// until the host next reports.
-    pub fn place(&self, demand: &Demand, exclude: &[HostId]) -> Option<Placement> {
+    pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Option<Placement> {
         let mut inner = self.write();
         let inner = &mut *inner;
         let placement = inner.fleet.place(demand, exclude, &mut inner.rng)?;
@@ -258,8 +256,11 @@ impl View {
                 let host = GroupHost {
                     draining: known.state == HostState::Draining,
                     memory_mib: known.info.memory_mib,
-                    free_memory_mib: known.capacity.memory_free_mib,
-                    cpu_millis: cpu_millis(&known.info, &known.capacity),
+                    free_memory_mib: known
+                        .capacity
+                        .memory_free_mib
+                        .saturating_add(known.capacity.memory_reclaimable_mib),
+                    cpu_millis: known.capacity.cpu_millis,
                     free_cpu_millis: known.capacity.cpu_free_millis,
                     registered_cpu_millis: known.info.cpu_millis,
                 };
@@ -276,17 +277,16 @@ pub struct GroupHost {
     pub draining: bool,
     /// Memory in MiB it has for sandboxes.
     pub memory_mib: u64,
-    /// Memory in MiB it can still promise.
+    /// Memory in MiB it can still promise, counting what it frees at once
+    /// for a wake by ending idle VM processes whose state is saved.
     pub free_memory_mib: u64,
-    /// Processor time in millicores it guarantees sandboxes now; `None`
-    /// when it does not say.
-    pub cpu_millis: Option<u64>,
+    /// Processor time in millicores it guarantees sandboxes now.
+    pub cpu_millis: u64,
     /// Processor time in millicores it can still promise.
-    pub free_cpu_millis: Option<u64>,
+    pub free_cpu_millis: u64,
     /// Processor time in millicores it guaranteed sandboxes when it
-    /// registered, which a new host like it starts with; `None` when it
-    /// did not say.
-    pub registered_cpu_millis: Option<u64>,
+    /// registered, which a new host like it starts with.
+    pub registered_cpu_millis: u64,
 }
 
 /// Keeps `view` following the store's host rows, for as long as it runs.
@@ -326,50 +326,5 @@ pub async fn follow<S: Store>(view: Arc<View>, store: Arc<S>) {
             }
             Err(error) => tracing::warn!(%error, "reading the hosts failed"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn described(cpu_millis: Option<u64>) -> Described {
-        Described {
-            name: "h".into(),
-            address: "h:1".into(),
-            zone: "z".into(),
-            profile: "nested".into(),
-            cpu_template: "t".into(),
-            memory_mib: 1,
-            cpu_millis,
-            disk_mib: 1,
-        }
-    }
-
-    /// A host's processor time is what it reports now, which falls while
-    /// what else runs on it takes more of its processors, not what it
-    /// registered with.
-    #[test]
-    fn processor_time_is_what_a_host_reports_now() {
-        let lowered = Reported {
-            cpu_millis: Some(4000),
-            cpu_free_millis: Some(4000),
-            ..Reported::default()
-        };
-        assert_eq!(cpu_millis(&described(Some(7500)), &lowered), Some(4000));
-        let none_left = Reported {
-            cpu_millis: Some(0),
-            cpu_free_millis: Some(0),
-            ..Reported::default()
-        };
-        assert_eq!(cpu_millis(&described(Some(7500)), &none_left), Some(0));
-        // An older host reports only what it has left.
-        let older = Reported {
-            cpu_free_millis: Some(1000),
-            ..Reported::default()
-        };
-        assert_eq!(cpu_millis(&described(Some(7500)), &older), Some(7500));
-        // A host that does not guarantee it.
-        assert_eq!(cpu_millis(&described(None), &lowered), None);
     }
 }

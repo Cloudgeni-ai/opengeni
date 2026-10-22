@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { brokerAzureLive } from "../src/azure-live";
 const settings = testSettings({
   azureLiveEndpoint: "https://voice.example.test",

@@ -21,7 +21,7 @@ import {
   CONNECTED_COMMAND_CLASSIFY_LIMIT,
 } from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/operation-inventory";

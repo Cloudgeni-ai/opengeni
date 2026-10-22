@@ -75,8 +75,10 @@ describe("Knowledge surface", () => {
         "knowledge-learning.tsx",
         "knowledge-upload.tsx",
         "knowledge-labels.ts",
-        "agent-learning-settings.tsx",
-      ].map((name) => source(`components/knowledge/${name}`)),
+      ]
+        .map((name) => `components/knowledge/${name}`)
+        .concat("../../../packages/react/src/app/components/knowledge/agent-learning-settings.tsx")
+        .map(source),
     );
     for (const text of files) {
       expect(text).not.toContain("Allow updates");

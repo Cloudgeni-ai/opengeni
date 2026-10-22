@@ -8,9 +8,9 @@ import { Field } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { useAppContext } from "@/context";
-import { formatBytes } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatBytes } from "@opengeni/react/app/lib/format";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { errorText } from "./knowledge-data";
 

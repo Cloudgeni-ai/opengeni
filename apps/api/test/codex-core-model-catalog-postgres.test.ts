@@ -10,12 +10,9 @@ import {
   setInitialActiveCodexCredential,
   upsertCodexSubscriptionCredential,
 } from "../../../packages/db/test/fixtures/legacy-codex";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 // The workspace model catalog, the server-side default model and fresh
@@ -378,11 +375,18 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
       });
     // The core's management policies admit organization admins and the
     // managing workspace's admins; anyone else is refused, not told to reload.
-    await shared!.admin`update workspace_memberships set role = 'member'
+    // Since 0897 a membership administers by role or by workspace:admin in its
+    // permissions, so a real member membership drops both.
+    const [granted] = await shared!.admin<{ permissions: string[] }[]>`
+      select permissions from workspace_memberships
+      where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${fixture.subjectId}`;
+    await shared!.admin`update workspace_memberships set role = 'member',
+      permissions = opengeni_private.workspace_member_role_permissions('member')
       where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${fixture.subjectId}`;
     const refused = await save();
     expect(refused.status).toBe(403);
-    await shared!.admin`update workspace_memberships set role = 'admin'
+    await shared!.admin`update workspace_memberships set role = 'admin',
+      permissions = ${shared!.admin.json(granted!.permissions)}
       where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${fixture.subjectId}`;
     const write = await save();
     expect(write.status).toBe(200);

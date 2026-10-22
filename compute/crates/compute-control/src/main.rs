@@ -111,6 +111,15 @@ struct Serve {
     /// Where hosts reach the service, over TLS.
     #[arg(long, default_value = "0.0.0.0:8443")]
     hosts: SocketAddr,
+    /// Where Prometheus scrapes the service's metrics, `GET /metrics` over
+    /// plain HTTP, such as `0.0.0.0:9464`; without it there are none.
+    #[arg(long)]
+    metrics_listen: Option<SocketAddr>,
+    /// An OTLP/HTTP metrics endpoint that takes JSON, such as Prometheus's
+    /// `http://prometheus:9090/api/v1/otlp/v1/metrics`: hosts' metrics are
+    /// passed on to it. Without it hosts may not post any.
+    #[arg(long)]
+    host_metrics_to: Option<String>,
     /// The URL hosts reach the service at, such as
     /// `https://compute-control.example.com:8443`, exactly as they are given
     /// it: the service's own certificate is for its host, and hosts' identity
@@ -485,9 +494,17 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
         scaling: args.scaling()?,
         seed: seed()?,
         e2b: args.e2b_listen()?,
+        metrics: args.metrics_listen,
+        host_metrics: args.host_metrics_to.clone(),
     };
     let running = start(store, config).await?;
-    tracing::info!(api = %running.api, hosts = %running.hosts, e2b = ?running.e2b, "serving");
+    tracing::info!(
+        api = %running.api,
+        hosts = %running.hosts,
+        e2b = ?running.e2b,
+        metrics = ?running.metrics,
+        "serving"
+    );
     shutdown().await;
     Ok(())
 }

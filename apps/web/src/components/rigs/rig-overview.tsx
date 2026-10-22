@@ -10,7 +10,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { versionHasChecks } from "@/lib/rig-status";
-import type { Rig, RigChange, RigChangeVerification } from "@/types";
+import type { Rig, RigChange, RigChangeVerification } from "@opengeni/react/app/types";
 
 export function RigOverview({
   rig,

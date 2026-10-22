@@ -2,7 +2,10 @@ import {
   useIntegrationDefinitionRow,
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
-import type { ApiIntegrationInstallationSummary, IntegrationDefinitionSummary } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  IntegrationDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 export const ONEDRIVE_DEFINITION_ID = "microsoft-onedrive";
 export const ONEDRIVE_LOGO_URL =

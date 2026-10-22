@@ -167,7 +167,7 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { error: mock(() => undefined), success: mock(() => undefined) },
 }));
@@ -185,7 +185,7 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     onConfirm,
@@ -218,8 +218,9 @@ GlobalRegistrator.register();
 const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
-const { modelsScopeLabels } = await import("./models/models-ui");
-const { clearSharedQueries, useConsoleSharedQueries } = await import("@/lib/shared-query");
+const { modelsScopeLabels } = await import("@opengeni/react/app/components/models/models-ui");
+const { clearSharedQueries, useConsoleSharedQueries } =
+  await import("@opengeni/react/app/lib/shared-query");
 
 // Account lists are retained per client between mounts; every test starts cold.
 beforeEach(() => clearSharedQueries(context.client));

@@ -29,7 +29,8 @@ import {
   subjectFor,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
-import { startTestServices, waitFor, type TestServices } from "@opengeni/testing";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { waitFor } from "@opengeni/testing/process";
 
 const RELAY: SelfhostedRelayConfig = { host: "relay.test", port: 443, tls: true };
 const CONNECTION_INSTANCE_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

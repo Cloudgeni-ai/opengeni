@@ -6,7 +6,7 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,

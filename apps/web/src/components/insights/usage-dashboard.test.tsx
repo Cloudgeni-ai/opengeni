@@ -36,7 +36,7 @@ const context = {
     }),
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {
   GlobalRegistrator.register();

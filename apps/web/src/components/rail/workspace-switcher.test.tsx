@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { Workspace } from "@/types";
+import type { Workspace } from "@opengeni/react/app/types";
 
 const acme = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const northwind = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -58,7 +58,7 @@ mock.module("@tanstack/react-router", () => ({
 let authMode = "managedSession";
 let singleOrganization = false;
 const createRequests: unknown[] = [];
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     workspaces: singleOrganization
       ? workspaces.filter((candidate) => candidate.accountId === acme)

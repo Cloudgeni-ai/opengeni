@@ -1,6 +1,6 @@
 import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
-import { localDateTimeValue, formatTimestamp } from "@/lib/format";
+import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
 import type {
   ReasoningEffort,
   ResourceRef,
@@ -11,7 +11,7 @@ import type {
   ScheduledTaskRun,
   ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type CalendarSchedule = Extract<ScheduledTaskScheduleSpec, { type: "calendar" }>;
 export type ScheduledTaskCalendarDay = NonNullable<CalendarSchedule["daysOfWeek"]>[number];

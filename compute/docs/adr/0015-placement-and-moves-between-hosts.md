@@ -29,8 +29,15 @@ that is cut off keeps its VMs running, because VMs outlive their agent.
   - Hosts push their capacity (free, reserved, ready clones per shape) to the
     control plane on change, coalesced. Placement decides from that view in
     microseconds and never asks hosts while deciding.
-  - The host's admission check is the authority. A stale view costs one fast
-    "host full" and a retry on the next candidate. There is no global lock.
+  - The host's admission check is the authority. A host takes a create or
+    an adoption only while it can run the sandbox now, and books that room
+    until the sandbox first runs ([14](0014-requests-limits-and-admission.md)).
+    A stale view costs one fast "host full" and a try on the next
+    candidate; the search has no fixed number of tries and goes on until a
+    host takes the sandbox or every eligible one has refused. A view that
+    says no host fits does not refuse on its own either: a host whose
+    memory could hold the sandbox is asked, and only refusals from all of
+    them mean no capacity. There is no global lock.
   - Leases are renewed per host, not per sandbox. The only central write in a
     request is the owner record of a new or moved sandbox, done alongside the
     VM work.

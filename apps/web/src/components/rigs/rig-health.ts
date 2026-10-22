@@ -1,6 +1,6 @@
 import type { StatusTone } from "@opengeni/react/ui/status-dot";
 import { rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
-import type { Rig } from "@/types";
+import type { Rig } from "@opengeni/react/app/types";
 
 /** One health line for an environment: its active version's last check run. */
 export function rigHealth(rig: Rig): { tone: StatusTone; label: string; description: string } {

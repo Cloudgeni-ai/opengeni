@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeConnectionCatalog, type Settings } from "@opengeni/config";
 import { checkLimit, coreRoutedSubscriptionFunding, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";

@@ -17,11 +17,10 @@ import {
   type OAuthStartRequest,
 } from "@opengeni/contracts";
 import {
-  connectMcpStreamableHttpClient,
   integrationKeyForConnectProvider,
   legacyMcpClientError,
   requireEnvironmentEncryption,
-  type McpStreamableHttpClient,
+  withMcpStreamableHttpClient,
 } from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
@@ -2722,9 +2721,8 @@ async function verifyMcpToolsList(
   token: TokenResponse,
   signal: AbortSignal,
 ): Promise<Array<{ name: string; description?: string }>> {
-  let client: McpStreamableHttpClient | undefined;
-  try {
-    client = await connectMcpStreamableHttpClient({
+  const listed = await withMcpStreamableHttpClient(
+    {
       url: resource,
       clientName: "opengeni-integration-verify",
       clientVersion: "0.1.0",
@@ -2739,22 +2737,21 @@ async function verifyMcpToolsList(
           ...init,
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
-    });
-    const listed = await client
-      .listTools(undefined, {
-        timeout: 10_000,
-        maxTotalTimeout: 10_000,
-      })
-      .catch((error: unknown) => {
-        throw legacyMcpClientError(error);
-      });
-    return listed.tools.map((tool) => ({
-      name: tool.name,
-      ...(tool.description ? { description: tool.description } : {}),
-    }));
-  } finally {
-    await client?.close().catch(() => undefined);
-  }
+    },
+    (client) =>
+      client
+        .listTools(undefined, {
+          timeout: 10_000,
+          maxTotalTimeout: 10_000,
+        })
+        .catch((error: unknown) => {
+          throw legacyMcpClientError(error);
+        }),
+  );
+  return listed.tools.map((tool) => ({
+    name: tool.name,
+    ...(tool.description ? { description: tool.description } : {}),
+  }));
 }
 
 async function verifyMcpToolsListNonFatal(

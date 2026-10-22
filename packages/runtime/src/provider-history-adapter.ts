@@ -48,11 +48,9 @@ export function responsesRouteDeclaresAdditionalTools(providerKind: string): boo
  * is a developer message carrying the frozen definitions; each provider
  * projection renders it in that API's own form: a Responses `additional_tools`
  * item where the route accepts it, otherwise a developer or system message
- * as text. With tool_invoke (generic dispatch) the text carries the
- * definitions, and the model calls them by name or through tool_invoke. Native
- * Responses transports have no tool_invoke, and GPT models do not call a
- * function declared only in text, so there the text names the tools and asks
- * the model to load them with its native tool_search.
+ * as text. Generic routes carry definitions and call through tool_invoke;
+ * native routes retain native search and direct calls. Preserve the originating
+ * viaToolInvoke value on replay rather than rewriting earlier instructions.
  */
 export function toolDisclosureItem(
   tools: Record<string, unknown>[],

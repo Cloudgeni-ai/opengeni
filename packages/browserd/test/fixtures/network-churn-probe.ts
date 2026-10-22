@@ -6,10 +6,10 @@
 // change it observes (and closes HTTP/2 and QUIC sessions outright), so a
 // fresh connection after the churn means the change reached the browser.
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { AgentBrowserJsonRunner } from "../../src/runner";
+import { ManagedBrowserRunner } from "../../src/runner";
 
 const [mode, directory] = process.argv.slice(2) as ["isolated" | "shared", string];
 let connections = 0;
@@ -23,14 +23,8 @@ await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolve
 const port = (server.address() as { port: number }).port;
 
 const root = await mkdtemp(join(directory, `${mode}-`));
-const socketDirectory = await mkdtemp("/tmp/og-churn-");
-const runner = await AgentBrowserJsonRunner.create({
-  namespace: "og",
-  sessionName: mode,
-  socketDirectory,
+const runner = await ManagedBrowserRunner.create({
   profileDirectory: join(root, "profile"),
-  downloadDirectory: join(root, "downloads"),
-  screenshotDirectory: join(root, "screenshots"),
   headed: false,
   systemdScope: false,
   networkIsolation: mode === "isolated",
@@ -89,5 +83,4 @@ try {
 } finally {
   await runner.terminate();
   server.close();
-  await rm(socketDirectory, { recursive: true, force: true });
 }

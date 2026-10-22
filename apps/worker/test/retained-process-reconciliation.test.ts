@@ -22,11 +22,11 @@ import {
   reserveRetainedProviderInput,
   requestRetainedProcessCancellation,
 } from "@opengeni/db/retained-provider-commands";
+import { testSettings } from "@opengeni/testing/settings";
 import {
-  testSettings,
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,

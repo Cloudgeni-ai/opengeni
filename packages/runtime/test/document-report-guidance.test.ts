@@ -17,6 +17,8 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
     "Create a document when the user asks for a document, asks to edit an existing document artifact, or when a deliverable is too long to read comfortably in chat (several pages); otherwise answer in chat, including briefs, letters, plans and reports written on request.",
   );
   expect(prose).toContain("the file itself is the deliverable");
+  expect(prose).toContain("so do not load artifact tools just to check");
+  expect(prose).toContain("only if an import fails");
   expect(prose).toContain("Do not create a goal only to declare a document.");
   expect(prose).toContain("a short summary and the artifact link, not a restatement");
   expect(prose).not.toContain("create one with the report requirement");
@@ -34,4 +36,33 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   expect(source).toContain("unfinished requirement and state the concrete blocker");
   expect(source).toContain("internal worker findings");
   expect(source).toContain("explicitly requested local-file");
+});
+
+test("Office file Skills claim preinstalled only the Python packages the managed images install", async () => {
+  const pythonPackages = async (dockerfile: string) => {
+    const text = await Bun.file(new URL(`../../../docker/${dockerfile}`, import.meta.url)).text();
+    const list = /^ARG OPENGENI_PYTHON_PACKAGES="([^"]+)"$/m.exec(text)?.[1];
+    expect(list).toBeDefined();
+    return new Set(list!.split(/\s+/).map((pin) => pin.split("==")[0]));
+  };
+  const images = await Promise.all([
+    pythonPackages("sandbox.Dockerfile"),
+    pythonPackages("desktop.Dockerfile"),
+  ]);
+  for (const [skill, expected] of [
+    ["documents", "python-docx"],
+    ["presentations", "python-pptx"],
+    ["spreadsheets", "openpyxl"],
+  ] as const) {
+    const prose = (
+      await Bun.file(
+        new URL(`../src/bundled_artifact_skills/${skill}/SKILL.md`, import.meta.url),
+      ).text()
+    ).replace(/\s+/g, " ");
+    const claims = [...prose.matchAll(/Managed sandboxes already include ([^,;.]+)/g)].map(
+      (match) => match[1],
+    );
+    expect(claims).toEqual([expected]);
+    for (const image of images) expect(image.has(expected)).toBe(true);
+  }
 });

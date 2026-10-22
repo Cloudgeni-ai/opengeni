@@ -353,7 +353,11 @@ export function computerObservationText(observation: ComputerTextObservation): s
     lines.push(`Focused element: ${observation.focusedRef}`);
   }
   if (semantic.kind === "diff") {
-    lines.push(`Changed elements since ${semantic.baseObservationId}:`);
+    lines.push(
+      roots.length === 0 && semantic.removedRefs.length === 0
+        ? `No element changed since ${semantic.baseObservationId}; its refs are still valid.`
+        : `Changed elements since ${semantic.baseObservationId}; elements not listed are unchanged and keep their refs:`,
+    );
   } else if (rendered.listed === 0) {
     lines.push("The accessibility tree has no readable elements; use the screenshot.");
   }
@@ -381,6 +385,50 @@ export function computerObservationText(observation: ComputerTextObservation): s
     );
   }
   return lines.join("\n");
+}
+
+/** The part of an observation that differs from the earlier one of the same
+ * window the model already read, for the reading an action returns. Refs
+ * stay with their element across readings, so the model keeps acting on the
+ * refs it holds and reads only what changed: one ribbon of fifty styles is
+ * not repeated after every click, and an action that changed nothing says so.
+ * A complete observation is kept whenever a diff would not be shorter or
+ * cannot be exact: another window or document, nested trees, a partial
+ * reading, or a reading in which most refs are new. */
+export function computerObservationDiff<Observation extends ComputerTextObservation>(
+  base: ComputerTextObservation,
+  next: Observation,
+): Observation | null {
+  const before = base.semantic;
+  const after = next.semantic;
+  if (
+    before?.kind !== "snapshot" ||
+    after?.kind !== "snapshot" ||
+    before.incomplete ||
+    after.incomplete ||
+    base.target.id !== next.target.id ||
+    base.target.targetGeneration !== next.target.targetGeneration ||
+    base.target.title !== next.target.title ||
+    base.observationId === next.observationId ||
+    [...before.roots, ...after.roots].some((node) => (node.children?.length ?? 0) > 0)
+  )
+    return null;
+  const content = ({ bounds: _bounds, ...node }: ComputerTextNode & { bounds?: unknown }) =>
+    JSON.stringify(node);
+  const earlier = new Map(before.roots.map((node) => [node.ref, content(node)]));
+  const changed = after.roots.filter((node) => earlier.get(node.ref) !== content(node));
+  const kept = new Set(after.roots.map((node) => node.ref));
+  const removedRefs = before.roots.map((node) => node.ref).filter((ref) => !kept.has(ref));
+  if (changed.length * 2 > after.roots.length) return null;
+  return {
+    ...next,
+    semantic: {
+      kind: "diff",
+      baseObservationId: base.observationId,
+      removedRefs,
+      changed,
+    },
+  };
 }
 
 const PLACEMENT_LABELS: Record<string, string> = {
@@ -449,7 +497,7 @@ export function computerTargetsText(targets: readonly ComputerTextTarget[]): str
 
 /** Fixed text, so a listing renders identically for the same targets. */
 const OFF_SCREEN_NOTE =
-  "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.";
+  "A window marked off screen, such as one on another Space or a full-screen app, can be neither captured nor read until it is back on screen. Minimized windows and windows of hidden apps are not marked: reading one brings it back on screen behind the person's front window.";
 
 export function computerOpenText(output: {
   session: Parameters<typeof computerSessionLine>[0];

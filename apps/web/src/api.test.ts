@@ -1,5 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import "./app-host";
 import {
   AuthApiError,
   checkDeploymentRevision,

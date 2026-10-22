@@ -9,14 +9,14 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { integrationDisclosureElementId } from "@/components/capabilities/integration-sheet";
-import { ConnectorToolPermissions } from "./connector-tool-permissions";
+import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   INTEGRATION_LOCKED_SENTENCE,
   type IntegrationAccess,
   type IntegrationFooter,
   type IntegrationOption,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { Button } from "@opengeni/react/ui/button";
@@ -26,7 +26,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { Select } from "@opengeni/react/ui/select";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    The page for an integration Opengeni runs itself (Slack bot, GitHub, Google

@@ -10,11 +10,8 @@ import postgres from "postgres";
 import type { Settings } from "@opengeni/config";
 import { createDb, createSession, readLease, type Database, type DbClient } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
   type DrainCaptureDisposition,

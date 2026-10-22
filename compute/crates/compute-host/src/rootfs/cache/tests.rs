@@ -125,6 +125,99 @@ async fn concurrent_creates_of_one_image_share_its_fetch() {
     assert_eq!(names.len(), 1, "{names:?}");
 }
 
+/// Creates of one image copy it at the same time: none waits for another
+/// to finish its copy, an agent's first check of a kept image included.
+#[tokio::test]
+async fn copies_of_one_image_share_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let first = cache.get(image, &store).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), cache.get(image, &store))
+        .await
+        .expect("a second create waits for none")
+        .unwrap();
+    let third = tokio::time::timeout(Duration::from_secs(5), cache.hold(image))
+        .await
+        .expect("a third create waits for none")
+        .unwrap();
+    assert!(
+        cache
+            .retire(&HashSet::new(), SystemTime::now() + WEEK * 2)
+            .await
+            .is_empty(),
+        "never removed while copied"
+    );
+    drop((first, second, third));
+
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let (one, other) = tokio::join!(reopened.hold(image), reopened.hold(image));
+    let (one, other) = (one.unwrap(), other.unwrap());
+    assert_eq!(fs::read(&one.path).unwrap(), b"an image");
+    assert_eq!(one.path, other.path);
+}
+
+/// Creates that find an image still to be checked or fetched wait for
+/// that work alone: once it is done, none waits for another's copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn creates_waiting_for_a_check_or_fetch_never_wait_for_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let store = std::sync::Arc::new(store);
+    let kept = dir.path().join("rootfs");
+    {
+        let cache = Cache::open(kept.clone(), WEEK, Ownership::detached()).unwrap();
+        drop(cache.get(image, &*store).await.unwrap());
+    }
+
+    // A kept image, unchecked, wanted by two creates queued behind a
+    // removal's look at it.
+    let cache = std::sync::Arc::new(Cache::open(kept, WEEK, Ownership::detached()).unwrap());
+    let removal = cache.locks(image).file.write_owned().await;
+    let holds: Vec<_> = (0..2)
+        .map(|_| {
+            let cache = std::sync::Arc::clone(&cache);
+            tokio::spawn(async move { cache.hold(image).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(removal);
+    let mut held = Vec::new();
+    for hold in holds {
+        held.push(patient(hold).await.expect("checked and kept"));
+    }
+
+    // An image to fetch, wanted by two creates at once.
+    let fresh = std::sync::Arc::new(
+        Cache::open(dir.path().join("fresh"), WEEK, Ownership::detached()).unwrap(),
+    );
+    let locks = fresh.locks(image);
+    let work = locks.work.lock().await;
+    let gets: Vec<_> = (0..2)
+        .map(|_| {
+            let (cache, store) = (std::sync::Arc::clone(&fresh), std::sync::Arc::clone(&store));
+            tokio::spawn(async move { cache.get(image, &*store).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(work);
+    for get in gets {
+        held.push(patient(get).await.expect("fetched once"));
+    }
+    assert_eq!(fs::read_dir(dir.path().join("fresh")).unwrap().count(), 1);
+    for held in &held {
+        assert_eq!(fs::read(&held.path).unwrap(), b"an image");
+    }
+}
+
+/// What `task` ends with, which must be soon.
+async fn patient<T>(task: tokio::task::JoinHandle<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("waits for no copy")
+        .unwrap()
+}
+
 #[tokio::test]
 async fn an_image_nowhere_or_damaged_is_refused_and_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();

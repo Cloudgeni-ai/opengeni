@@ -45,7 +45,9 @@ import {
   type OpenGeniRuntime,
   type PrepareToolsOptions,
 } from "@opengeni/runtime";
-import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import {
   prepareTurnToolPolicy,

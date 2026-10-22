@@ -19,8 +19,9 @@ configuration, the native (no Docker) path, and the web-app walkthrough.
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-CLI typecheck runs on exact-pinned `tsrs`; stable TypeScript 7 remains the declaration
-compiler and tooling API boundary. See
+Typechecking and declaration emission run on exact-pinned `tsrs`, including compiler
+fixtures and packed-consumer checks. TypeScript dependencies remain only where metadata
+or editor/framework compatibility requires them. See
 [`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
@@ -35,7 +36,7 @@ For quick local iteration, run:
 
 ```bash
 bun run typecheck
-bun test
+bun run test:unit
 ```
 
 For broader changes that touch persistence, orchestration, sandboxing, or the web/API boundary, also run:
@@ -48,6 +49,11 @@ bun run test:e2e
 ## Pull Requests
 
 - Keep changes focused.
+- Main merges follow the [merge-batcher runbook](docs/merge-batcher.md): full relevant
+  local suites, independent agent review, exact-head evidence comment, then
+  the configured ready signal after activation. During shadow rollout, the
+  existing reviewed merge process remains in force. Fast batch green is not
+  full-suite/release green; the native queue and vendor drafts stay inactive.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
@@ -120,7 +126,11 @@ and artifacts afterward. Never print values or commit them to Git.
 
 **Promote `main` → `production`:** open a GitHub PR with base `production` and compare `main`. Merge with a **merge commit** (never squash, never GitHub rebase-and-merge: both rewrite SHAs and poison the next promote). The extra merge commit lives only on `production`. The next ship is the same PR shape again. Do not PR `production` back to `main` just because of that merge commit. Do not force-push `production`.
 
-**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies). Then merge `production` → `main` with a merge commit so daily work is not stranded. Squash remains allowed on PRs into `main`.
+**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies).
+Then bring the hotfix back to `main` so daily work is not stranded. Once the main
+queue is enabled, queue that PR with a merge commit. Before activation, follow
+the currently allowed main merge method and the same local-test/review process.
+Production protections and the incident hotfix lane are unchanged.
 
 **Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. The `production` pointer already exists; do not recreate it and do not force-push.
 

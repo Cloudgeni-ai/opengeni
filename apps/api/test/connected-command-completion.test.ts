@@ -10,11 +10,8 @@ import {
 } from "@opengeni/agent-proto";
 import type { EventBus } from "@opengeni/events";
 import { subjectFor, type ControlRpc, type OpStreamExecClient } from "@opengeni/runtime/sandbox";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
   bootstrapWorkspace,

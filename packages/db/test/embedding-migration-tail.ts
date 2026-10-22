@@ -5,6 +5,8 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
+  // Session list notifications reference the final imported/archive/site fields.
+  "0888_session_list_invalidation.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -364,4 +366,9 @@ export const embeddingMigrationTail = [
   // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
   "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites the subscription and vault routines and 0777's policies; replay
+  // after all of them.
+  "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
 ];

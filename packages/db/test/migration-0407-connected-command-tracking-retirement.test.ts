@@ -7,7 +7,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { bootstrapWorkspace, createDb, createEnrollment, createSession } from "../src/index";
 import { claimConnectedMachineSessionBackgroundCommands } from "../src/session-background-commands";
 

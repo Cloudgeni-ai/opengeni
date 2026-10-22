@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import type { CredentialAuthNeededPayload, ResourceRef } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import { mergeResourceRefs } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applyTurnGitHubRepositoryBindings,
   cachedGitHubRepositoryBindingLookup,

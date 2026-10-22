@@ -563,8 +563,11 @@ fn packing_follows_the_page_size_and_stops_at_the_ready_bytes() {
     let huge = 2 << 20;
     let pages = profile(vec![huge + 5, huge, 0, 7 * huge, 3 * huge + PAGE], huge);
     assert_eq!(packed(&pages, 4 * huge), vec![huge, 0, 3 * huge]);
-    // Profiles from before the page size was kept count small pages.
-    assert_eq!(packed(&profile(vec![PAGE + 1], 0), 4 * huge), vec![PAGE]);
+    // A profile without a page size guest memory comes in packs nothing.
+    assert_eq!(
+        packed(&profile(vec![PAGE + 1], 0), 4 * huge),
+        Vec::<u64>::new()
+    );
     let all = profile((0..10_000).map(|page| page * huge).collect(), huge);
     assert_eq!(packed(&all, u64::MAX / 2).len() as u64, READY_BYTES / huge);
     // A page past the end of the address space is no page of the image.

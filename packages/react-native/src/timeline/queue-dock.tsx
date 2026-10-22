@@ -17,6 +17,7 @@ import { blendOver, withAlpha } from "./primitives";
 import { CompactSignalsContext } from "./session-signals";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import type { NativeAnnotationLike } from "./annotations";
 
 /* ----------------------------------------------------------------------------
    The web session-chrome queue dock above the composer: a "N queued · Steer"
@@ -40,12 +41,15 @@ export function QueueDock({
   queue,
   composer,
   onComposerFocus,
+  onReviewAnnotations,
   leading,
   singleSend = false,
 }: {
   queue: TurnQueue;
   composer?: QueueDockComposer | undefined;
   onComposerFocus?: (() => void) | undefined;
+  /** Show a waiting message's quotes and notes. */
+  onReviewAnnotations?: ((annotations: readonly NativeAnnotationLike[]) => void) | undefined;
   /** Chips sharing the queue chip's row (goal, agents, commands). */
   leading?: ReactNode;
   /** One Send and nothing to choose: no Steer on waiting messages. */
@@ -215,6 +219,38 @@ export function QueueDock({
                   >
                     {label}
                   </Text>
+                  {annotationCount > 0 && onReviewAnnotations ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={t("timelineAnnotations.reviewCountlabel", {
+                        countLabel: t("counts.annotations", { count: annotationCount }),
+                      })}
+                      hitSlop={8}
+                      onPress={() => onReviewAnnotations(turn.annotations ?? [])}
+                      style={({ pressed }) => ({
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 3,
+                        height: 22,
+                        paddingHorizontal: 7,
+                        borderRadius: 11,
+                        backgroundColor: c["accent-soft"],
+                        opacity: pressed ? 0.6 : 1,
+                      })}
+                    >
+                      <Icon name="quote" size={10} color={c["fg-muted"]} />
+                      <Text
+                        style={{
+                          ...fontStyle(theme, 500),
+                          fontSize: 11,
+                          color: c["fg-muted"],
+                          fontVariant: ["tabular-nums"],
+                        }}
+                      >
+                        {annotationCount}
+                      </Text>
+                    </Pressable>
+                  ) : null}
                   {turns.length > 1 ? (
                     <>
                       <RowAction

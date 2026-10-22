@@ -6,13 +6,32 @@
 //! a little stale by design: a host that cannot fit what it is sent
 //! refuses it, and the sandbox goes to the next candidate.
 //!
+//! What a replica sent a host since its last report is counted against it
+//! until the next one, so a burst spreads over the hosts. That count only
+//! steers, and so does the report under it: removes are not taken off the
+//! count, and a report is up to a second or so old, so it can still book
+//! a sandbox that is gone. Placement never refuses on either. When no
+//! host fits by them, a live host whose memory could hold the sandbox at
+//! all is asked anyway, and the host's answer decides: a host takes a
+//! create or adopt only while it has room to run the sandbox now, and
+//! books that room until the sandbox first runs, so a host that cannot
+//! run it refuses it before making anything, and it goes to the next
+//! host. Only when every such host has refused is there no capacity.
+//!
+//! A host's memory fits a sandbox when what is free and what it would free
+//! at once by ending idle VM processes whose state is saved cover it: the
+//! host's own admission counts both (ADR 4), so an idle sandbox takes no
+//! room from placement once it is saved, and stays in memory, waking
+//! fastest, until a wake needs that room.
+//!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,
-//! then the one with more free memory. Drawing two keeps load even without
-//! herding every request onto the single emptiest host, and costs the same
-//! at five thousand hosts as at five.
+//! then the one with more free memory, then the one with more it could
+//! free. Drawing two keeps load even without herding every request onto the
+//! single emptiest host, and costs the same at five thousand hosts as at
+//! five.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::ids::{ClassId, HostId, ShapeKey, ZoneId};
 use crate::rng::Rng;
@@ -49,9 +68,12 @@ pub struct Capacity {
     /// Memory in MiB it can still promise to sandboxes that wake, beyond
     /// what it keeps spare.
     pub free_memory_mib: u64,
+    /// Memory in MiB it frees at once for a wake that needs it, by ending
+    /// idle VM processes whose state is saved.
+    pub reclaimable_memory_mib: u64,
     /// Processor time in millicores it can still promise to sandboxes
-    /// that wake; `None` when it does not say, so it is not checked.
-    pub free_cpu_millis: Option<u64>,
+    /// that wake.
+    pub free_cpu_millis: u64,
     /// Disk in MiB it can still promise.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
@@ -130,6 +152,7 @@ struct Slot {
     id: HostId,
     info: HostInfo,
     state: HostState,
+    /// As the host last reported it, less what was sent to it since.
     capacity: Capacity,
 }
 
@@ -259,7 +282,8 @@ impl Fleet {
         }
     }
 
-    /// A host's state and capacity, if it is in the view.
+    /// A host's state and capacity less what was sent to it since it last
+    /// reported, if it is in the view.
     #[must_use]
     pub fn get(&self, id: HostId) -> Option<(HostInfo, HostState, &Capacity)> {
         let slot = self.by_id.get(&id)?;
@@ -285,12 +309,13 @@ impl Fleet {
         self.unindex(slot);
         if let Some(entry) = self.slots[slot as usize].as_mut() {
             let capacity = &mut entry.capacity;
-            capacity.free_memory_mib = capacity
-                .free_memory_mib
-                .saturating_sub(demand.memory_on(entry.info));
-            if let Some(free) = capacity.free_cpu_millis.as_mut() {
-                *free = free.saturating_sub(demand.cpu_millis);
-            }
+            let memory = demand.memory_on(entry.info);
+            let from_free = memory.min(capacity.free_memory_mib);
+            capacity.free_memory_mib -= from_free;
+            capacity.reclaimable_memory_mib = capacity
+                .reclaimable_memory_mib
+                .saturating_sub(memory - from_free);
+            capacity.free_cpu_millis = capacity.free_cpu_millis.saturating_sub(demand.cpu_millis);
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
@@ -304,29 +329,46 @@ impl Fleet {
     }
 
     /// Chooses a live host for `demand`, other than those in `exclude`
-    /// (hosts that already refused it). `None` when no host fits.
-    pub fn place(&self, demand: &Demand, exclude: &[HostId], rng: &mut Rng) -> Option<Placement> {
-        let fits = |slot: u32| {
+    /// (hosts that already refused it): one that fits by the view if any
+    /// does, or else one whose memory could hold it at all. `None` when no
+    /// such host is left.
+    pub fn place(
+        &self,
+        demand: &Demand,
+        exclude: &HashSet<HostId>,
+        rng: &mut Rng,
+    ) -> Option<Placement> {
+        let fits = |slot: u32, now: bool| {
             self.slots[slot as usize].as_ref().is_some_and(|entry| {
+                let capacity = &entry.capacity;
+                let memory = demand.memory_on(entry.info);
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
-                    && entry.capacity.free_memory_mib >= demand.memory_on(entry.info)
-                    && entry
-                        .capacity
-                        .free_cpu_millis
-                        .is_none_or(|free| free >= demand.cpu_millis)
-                    && entry.capacity.free_disk_mib >= demand.disk_mib
+                    && capacity.memory_mib >= memory
+                    && (!now
+                        || (capacity
+                            .free_memory_mib
+                            .saturating_add(capacity.reclaimable_memory_mib)
+                            >= memory
+                            && capacity.free_cpu_millis >= demand.cpu_millis
+                            && capacity.free_disk_mib >= demand.disk_mib))
             })
         };
-        let pools = [
+        let class = demand.class().and_then(|class| self.by_class.get(&class));
+        let chosen = [
             demand.shape().and_then(|shape| self.ready.get(&shape)),
-            demand.class().and_then(|class| self.by_class.get(&class)),
+            class,
             Some(&self.live),
-        ];
-        let chosen = pools
-            .into_iter()
-            .flatten()
-            .find_map(|pool| self.best_of_two(pool, &fits, demand, rng))?;
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, true), demand, rng))
+        .or_else(|| {
+            [class, Some(&self.live)]
+                .into_iter()
+                .flatten()
+                .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, false), demand, rng))
+        })?;
         let entry = self.slots[chosen as usize].as_ref()?;
         Some(Placement {
             host: entry.id,
@@ -393,9 +435,13 @@ impl Fleet {
     /// Whether host `a` suits `demand` better than host `b`.
     fn better(&self, a: u32, b: u32, demand: &Demand) -> bool {
         let key = |slot: u32| {
-            self.slots[slot as usize]
-                .as_ref()
-                .map(|entry| (has_ready(entry, demand), entry.capacity.free_memory_mib))
+            self.slots[slot as usize].as_ref().map(|entry| {
+                (
+                    has_ready(entry, demand),
+                    entry.capacity.free_memory_mib,
+                    entry.capacity.reclaimable_memory_mib,
+                )
+            })
         };
         key(a) > key(b)
     }

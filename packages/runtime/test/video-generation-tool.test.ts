@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
 
 const capabilities = {

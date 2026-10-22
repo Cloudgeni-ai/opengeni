@@ -1,27 +1,57 @@
 import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
-} from "../src/components/repository-picker";
-import { FollowUpRepositoryMenuBody } from "../src/components/follow-up-repository-menu-body";
+} from "@opengeni/react/app/components/repository-picker";
+import { FollowUpRepositoryMenuBody } from "@opengeni/react/app/components/follow-up-repository-menu-body";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   SessionSecretsMenuBody,
   draftSecretsRows,
   sessionSecretsSummary,
-} from "../src/components/secrets/session-secrets-panel";
-import type { GitHubRepository } from "../src/types";
-import type { SessionToolSelection } from "../src/components/pickers";
+} from "@opengeni/react/app/components/secrets/session-secrets-panel";
+import type { GitHubRepository } from "@opengeni/react/app/types";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
 import type { AgentLearningOverrides, VaultPolicy, VaultSummary } from "@opengeni/sdk";
 import "../src/styles.css";
 
 const AgentLearningSettingsEditor = lazy(() =>
-  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
   })),
 );
+
+// The real settings editor reads and saves through the app's client. This
+// in-memory client keeps one chat's overrides over fixed workspace defaults.
+let chatSettings: AgentLearningOverrides = {};
+const fixtureAppContext = {
+  accessContext: { subjectId: "fixture-user" },
+  client: {
+    getAgentLearningSettings: async (_workspaceId: string, _scope: string, source?: unknown) => ({
+      version: 1,
+      settings: source
+        ? chatSettings
+        : { knowledge: "automatic", instructions: "review_first", skills: "off" },
+    }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      const next: Record<string, string> = { ...chatSettings };
+      for (const [key, value] of Object.entries(input.settings)) {
+        if (value === "inherit") delete next[key];
+        else next[key] = value;
+      }
+      chatSettings = next as AgentLearningOverrides;
+      return { version: 2, settings: chatSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -222,4 +252,8 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureAppContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

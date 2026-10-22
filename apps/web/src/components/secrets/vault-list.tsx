@@ -11,7 +11,12 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 
 import { ConnectionsSection } from "./provider-connections";
 import { SecretsLoadFailure, SyncStatus, VaultChips, VaultTile } from "./vault-parts";
-import { groupVaults, isMissingKeyError, itemsLabel, VAULT_GROUP_TITLE } from "./vault-model";
+import {
+  groupVaults,
+  isMissingKeyError,
+  itemsLabel,
+  VAULT_GROUP_TITLE,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   connectionName,
   everListed,

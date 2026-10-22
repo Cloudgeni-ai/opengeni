@@ -5,7 +5,11 @@ import { createRoot } from "react-dom/client";
 
 import { SuperGrokDeviceCodePanel, useSuperGrokSubscriptions } from "./supergrok-connection";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { peekSharedQuery, retainSharedQueries, sharedQueryWriter } from "@/lib/shared-query";
+import {
+  peekSharedQuery,
+  retainSharedQueries,
+  sharedQueryWriter,
+} from "@opengeni/react/app/lib/shared-query";
 import { ModelsRefreshControl } from "./models/models-refresh-control";
 
 beforeAll(() => {

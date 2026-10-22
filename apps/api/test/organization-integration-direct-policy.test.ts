@@ -10,12 +10,9 @@ import {
 } from "@opengeni/config";
 import { createDb, installApiIntegration, type DbClient } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerConnectionRoutes } from "../src/routes/connections";
 import { registerSocialRoutes } from "../src/routes/social";

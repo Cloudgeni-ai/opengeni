@@ -11,12 +11,9 @@ import {
   withSessionRlsActorContext,
   type KnowledgeContext,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import { createKnowledgeSourceAttemptTools } from "../src/activities/agent-turn/knowledge-source-tools";
 import type { ActivityServices, RunKnowledgeSourceSyncBatchInput } from "../src/activities/types";

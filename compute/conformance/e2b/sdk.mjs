@@ -21,7 +21,7 @@ const text = (data) => new TextDecoder().decode(data);
 // and connections go out at all.
 async function serverReport(box, port) {
   const script = [
-    "timeout 5 ss -ltn",
+    "cat /proc/net/tcp /proc/net/tcp6",
     "cat /etc/resolv.conf",
     `s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
     "s=$(date +%s%N); timeout 10 getent hosts example.com; echo getent $? $(( ($(date +%s%N) - s) / 1000000 )) ms",

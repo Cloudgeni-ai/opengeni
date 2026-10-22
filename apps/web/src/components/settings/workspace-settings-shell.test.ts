@@ -41,7 +41,7 @@ function grant(accountId: string, name: string, role: "owner" | "admin" | "membe
   };
 }
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     resetSessionView,
     workspaces,
@@ -117,7 +117,8 @@ const {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
 } = await import("./workspace-settings-shell");
-const { forgetLastSessionId, lastSessionMemoryId } = await import("@/lib/last-session-memory");
+const { forgetLastSessionId, lastSessionMemoryId } =
+  await import("@opengeni/react/app/lib/last-session-memory");
 
 const base = `/workspaces/${workspaceId}`;
 

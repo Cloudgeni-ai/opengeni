@@ -5,7 +5,7 @@ This guide is for a host app that wants to drop the Opengeni **session workspace
 machine-state chip — into its own UI. It is the frontend companion to the
 standalone SDK/proxy integration as well as the advanced in-process path in
 `docs/embedding.md`. It is the exact surface `apps/web` itself consumes (see
-`apps/web/src/components/session/sandbox-workspace.tsx`), so an external
+`packages/react/src/app/components/session/sandbox-workspace.tsx`), so an external
 embedder and the first-party app run the same code path.
 
 Shipping that code path is not acceptance by itself. The required live,

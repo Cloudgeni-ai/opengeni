@@ -1,3 +1,18 @@
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  DEFAULT_MODEL_COST_POLICY_JSON,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  DEFAULT_AGENT_INSTRUCTIONS,
+} from "./defaults";
+export {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  DEFAULT_MODEL_COST_POLICY_JSON,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  DEFAULT_AGENT_INSTRUCTIONS,
+} from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
@@ -100,11 +115,6 @@ export const DEFAULT_MODEL_STREAM_PROGRESS_TIMEOUT_MS = 600_000;
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
-export const DEFAULT_OPENROUTER_MODEL_ID =
-  "openrouter/nvidia/nemotron-3-super-120b-a12b:free" as const;
-export const DEFAULT_MODEL_COST_POLICY_JSON = JSON.stringify({
-  [DEFAULT_OPENROUTER_MODEL_ID]: "free",
-});
 
 // Archive capture claims are also the admission/teardown fence around a
 // provider snapshot. Keep a real settlement window after the provider request;
@@ -148,10 +158,6 @@ const PublicHttpUrl = z
   .url()
   .max(2_048)
   .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
-
-/** Default pacing between consecutive no-input goal continuations. */
-export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
-export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
 
 const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   if (typeof value !== "string") return value;
@@ -289,48 +295,6 @@ export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: 
   },
 };
 
-/**
- * Placeholder token inside an agent-instructions persona template. The runtime
- * substitutes the non-bypassable CORE (goal-loop ownership + the dynamic
- * workspace-environment block) at this marker. A template that omits the
- * marker still gets the CORE appended after it (a non-bypassable fail-safe),
- * so a white-labelled persona can never drop the goal-loop contract or the
- * environment metadata the agent depends on.
- */
-export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
-
-/**
- * Default per-workspace agent persona template. This is the BRAND + tool-usage
- * opinion (the white-labellable surface): the general-assistant identity line,
- * the framing/opinion lines, and the mount-path facts. Domain-specific tooling
- * guidance (for example Terraform or Checkov) belongs in opt-in Skills.
- *
- * The CORE that MUST survive any override — the goal-loop ownership line (which
- * names the opengeni__goal_* tools) and the dynamic workspace-environment block
- * — is injected at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER by the runtime, never
- * baked into this overridable string.
- *
- * INVARIANT: with no per-workspace override and an empty environment, the
- * runtime's composed instructions are byte-for-byte pinned by a runtime test.
- * The template below is joined by " ", followed by " " + the placeholder.
- * Changing a single character here changes that default; update the pin
- * intentionally.
- */
-export const DEFAULT_AGENT_INSTRUCTIONS = [
-  "You are an Opengeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
-  "Follow the user's task and the applicable Skill instructions for the current role.",
-  "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
-  "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
-  "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
-  "Attached files are mounted read-only; copy them before modifying.",
-  "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
-  "Provider CLIs such as gh, glab, and az may be pre-authenticated by the host through brokered git credentials or a sandbox preparation profile; try them before asking for credentials.",
-  "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
-  "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if the repository has a remote, say the changes are not pushed, and if the user asks for something you cannot make, say what blocks it.",
-  "Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.",
-  AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
-].join(" ");
-
 // Configuration and public session attachments share one authority contract.
 export const McpServerConnectionRefSchema = PublicMcpServerConnectionRef;
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
@@ -365,6 +329,9 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // LISTEN needs a session-pinned connection. Direct deployments reuse the
+  // ordinary URL; transaction poolers supply this separate direct endpoint.
+  databaseNotificationUrl: z.string().optional(),
   // API application pool only. Managed auth owns its separate pool; readiness
   // reuses the application handle. Keep the historical default for existing
   // deployments and let operators budget this per process with replica counts.
@@ -1049,6 +1016,12 @@ const SettingsSchema = z.object({
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
   // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
   lazyToolSearchEnabled: EnvBoolean.default(true),
+  // Typed decision-model category, separate from conversational models. Explicit
+  // configuration is shared by tool discovery and code search; no account fallback.
+  decisionModelProvider: z.enum(["jev", "openai", "openrouter"]).optional(),
+  decisionModelId: z.string().trim().min(1).optional(),
+  decisionModelApiKey: z.string().optional(),
+  decisionModelBaseUrl: z.string().url().optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -2269,6 +2242,44 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
+export type DecisionModelSettings = Pick<
+  Settings,
+  "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
+>;
+/** Explicit deployment credentials only. Compatibility is code-search-only. */
+export function decisionModelConfiguration(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch = false,
+):
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | undefined {
+  const explicit =
+    settings.decisionModelProvider !== undefined ||
+    settings.decisionModelId !== undefined ||
+    settings.decisionModelApiKey !== undefined ||
+    settings.decisionModelBaseUrl !== undefined;
+  if (explicit) {
+    const apiKey = usableDeploymentSecret(settings.decisionModelApiKey);
+    if (!settings.decisionModelProvider || !settings.decisionModelId || !apiKey) return undefined;
+    return {
+      provider: settings.decisionModelProvider,
+      model: settings.decisionModelId,
+      apiKey,
+      ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
+    };
+  }
+  const apiKey = allowLegacyCodeSearch ? usableJevApiKey(settings) : undefined;
+  return apiKey
+    ? {
+        provider: "jev",
+        model: settings.jevModel ?? "jev-latest",
+        apiKey,
+        ...(settings.jevBaseUrl ? { baseUrl: settings.jevBaseUrl } : {}),
+      }
+    : undefined;
+}
+
 /** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
   settings: FirstPartyMcpToolPolicySettings & Pick<Settings, "webSearchEnabled">,
@@ -2281,14 +2292,15 @@ export function agentConfigDeploymentPolicy(
 
 /**
  * Deployment half of the `code_search` decision. `available` is false when
- * the mode is off or no usable Jev key is configured; workspaces then cannot
+ * the mode is off or no usable decision model is configured; workspaces then cannot
  * turn it on. `workspaceDefault` applies to workspaces without their own
  * setting.
  */
 export function codeSearchDeploymentPolicy(
-  settings: Pick<Settings, "codeSearchMode" | "jevApiKey">,
+  settings: Pick<Settings, "codeSearchMode" | "jevApiKey"> & DecisionModelSettings,
 ): CodeSearchDeploymentPolicy {
-  const available = settings.codeSearchMode !== "off" && usableJevApiKey(settings) !== undefined;
+  const available =
+    settings.codeSearchMode !== "off" && decisionModelConfiguration(settings, true) !== undefined;
   if (!available) return { available: false, workspaceDefault: "off" };
   const workspaceDefault =
     settings.codeSearchMode === "default_on"
@@ -3079,6 +3091,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-organization",
   "direct-openai-workspace",
   "direct-azure-workspace",
+  "direct-openai-organization",
+  "direct-azure-organization",
   "openrouter-workspace",
   "openrouter-organization",
   "opper-workspace",
@@ -3288,6 +3302,15 @@ export const WORKSPACE_OPPER_PROVIDER_ID = "workspace-opper" as const;
 export const WORKSPACE_OPPER_MODEL_ID_PREFIX = "workspace-opper/" as const;
 export const ORGANIZATION_OPPER_PROVIDER_ID = "organization-opper" as const;
 export const ORGANIZATION_OPPER_MODEL_ID_PREFIX = "organization-opper/" as const;
+/**
+ * Organization-owned OpenAI and Azure OpenAI: one connection each (an API key,
+ * plus a resource endpoint for Azure) whose curated models (Azure deployments)
+ * inherit into shared workspaces.
+ */
+export const ORGANIZATION_OPENAI_PROVIDER_ID = "organization-openai" as const;
+export const ORGANIZATION_OPENAI_MODEL_ID_PREFIX = "organization-openai/" as const;
+export const ORGANIZATION_AZURE_OPENAI_PROVIDER_ID = "organization-azure-openai" as const;
+export const ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX = "organization-azure-openai/" as const;
 /** Opper's OpenAI-compatible Chat Completions surface (Bearer key). */
 export const OPPER_BASE_URL = "https://api.opper.ai/v3/compat" as const;
 
@@ -3305,6 +3328,8 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   OPPER_PROVIDER_ID,
   WORKSPACE_OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   "organization-anthropic",
   "organization-claude-subscription",
   "workspace-anthropic",
@@ -4939,6 +4964,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
@@ -5189,6 +5215,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
     openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
+    decisionModelProvider: optional("OPENGENI_DECISION_MODEL_PROVIDER"),
+    decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
+    decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
+    decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(
@@ -5843,6 +5873,18 @@ export function effectiveSandboxLifecycle(
     providerIdleTimeoutMs: null,
     rotationLeadMs: null,
   };
+}
+
+/** How long a box reported missing could still be running anywhere: its hard
+ * lifetime, or the renewable TTL nobody renews once the box is lost. Null when
+ * the backend has no such bound (its loss needs other proof). */
+export function sandboxProviderMaxRemainingLifetimeMs(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): number | null {
+  const lifecycle = effectiveSandboxLifecycle(settings, backend);
+  if (lifecycle.hardLifetimeMs !== null) return lifecycle.hardLifetimeMs;
+  return lifecycle.renewableTtlSeconds !== null ? lifecycle.renewableTtlSeconds * 1000 : null;
 }
 
 /**
@@ -6855,6 +6897,188 @@ export function withOrganizationOpperCredential(
   return { ...catalog, modelProvidersJson: JSON.stringify(providers) };
 }
 
+/** The organization's own OpenAI or Azure OpenAI key (a direct, non-gateway route). */
+export type OrganizationDirectModelProvider = "openai" | "azure_openai";
+
+const ORGANIZATION_DIRECT_ROUTES = {
+  openai: {
+    kind: "direct-openai-organization",
+    id: ORGANIZATION_OPENAI_PROVIDER_ID,
+    prefix: ORGANIZATION_OPENAI_MODEL_ID_PREFIX,
+    label: "Organization OpenAI",
+    wireProfile: "openai",
+  },
+  azure_openai: {
+    kind: "direct-azure-organization",
+    id: ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
+    prefix: ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX,
+    label: "Organization Azure OpenAI",
+    wireProfile: "azure-openai",
+  },
+} as const;
+
+/** The organization direct route a product model id belongs to, if any. */
+export function organizationDirectModelProviderOf(
+  modelId: string | null | undefined,
+): OrganizationDirectModelProvider | null {
+  if (modelId?.startsWith(ORGANIZATION_OPENAI_MODEL_ID_PREFIX)) return "openai";
+  if (modelId?.startsWith(ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX)) return "azure_openai";
+  return null;
+}
+
+export function organizationDirectModelIdPrefix(provider: OrganizationDirectModelProvider): string {
+  return ORGANIZATION_DIRECT_ROUTES[provider].prefix;
+}
+
+/**
+ * One organization-owned OpenAI or Azure OpenAI route with its curated models.
+ * A custom model's `upstreamModelId` is the exact OpenAI model or Azure
+ * deployment name. Capabilities match the workspace direct routes: Responses
+ * with ordinary function tools only, no reasoning control or hosted web search
+ * inferred for an arbitrary model or deployment name.
+ */
+function organizationDirectRegistryProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+    apiKey?: string;
+  },
+): InternalRegistryProvider | null {
+  const route = ORGANIZATION_DIRECT_ROUTES[provider];
+  const baseUrl =
+    provider === "openai"
+      ? "https://api.openai.com/v1"
+      : input.endpoint
+        ? organizationAzureOpenAIBaseUrl(input.endpoint)
+        : null;
+  if (!baseUrl) return null;
+  const seen = new Set<string>();
+  const models: RegistryProvider["models"] = [];
+  for (const model of input.models) {
+    if (seen.has(model.upstreamModelId)) continue;
+    seen.add(model.upstreamModelId);
+    models.push({
+      id: `${route.prefix}${model.upstreamModelId}`,
+      upstreamModelId: model.upstreamModelId,
+      aliases: [],
+      label: model.label?.trim() || model.upstreamModelId,
+      capabilities: legacyModelCapabilities(settings, {
+        reasoningEffort: false,
+        hostedWebSearch: false,
+      }),
+      toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+    });
+  }
+  if (models.length === 0) return null;
+  return {
+    kind: route.kind,
+    id: route.id,
+    label: route.label,
+    api: "responses",
+    wireProfile: route.wireProfile,
+    baseUrl,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models,
+  };
+}
+
+/**
+ * The official `https://<resource>.openai.azure.com/openai/v1` base for a
+ * stored organization endpoint, or null for anything else. The API validates
+ * the endpoint on write; this keeps a malformed persisted value from routing.
+ */
+function organizationAzureOpenAIBaseUrl(endpoint: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    !/^[a-z0-9-]+\.openai\.azure\.com$/i.test(url.hostname) ||
+    !["", "/", "/openai/v1", "/openai/v1/"].includes(url.pathname)
+  )
+    return null;
+  return `${url.origin}/openai/v1`;
+}
+
+function withOrganizationDirectProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  overlay: InternalRegistryProvider | null,
+): Settings {
+  if (!overlay) return settings;
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (candidate) => candidate.id !== ORGANIZATION_DIRECT_ROUTES[provider].id,
+  );
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, overlay]) };
+}
+
+/** Secret-free organization OpenAI or Azure OpenAI catalog overlay (models, and Azure's endpoint). */
+export function withOrganizationDirectCatalogProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectProvider(
+    settings,
+    provider,
+    organizationDirectRegistryProvider(settings, provider, input),
+  );
+}
+
+/** Runtime overlay after the worker resolves the organization's encrypted key. */
+export function withOrganizationDirectCredential(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  apiKey: string,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  if (!apiKey.trim()) throw new Error(`organization ${provider} credential is empty`);
+  return withOrganizationDirectProvider(
+    settings,
+    provider,
+    organizationDirectRegistryProvider(settings, provider, { ...input, apiKey }),
+  );
+}
+
+/** Secret-free organization Azure OpenAI catalog overlay (endpoint + deployments). */
+export function withOrganizationAzureOpenAICatalogProvider(
+  settings: Settings,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectCatalogProvider(settings, "azure_openai", input);
+}
+
+/** Runtime overlay after the worker resolves the organization's encrypted Azure key. */
+export function withOrganizationAzureOpenAICredential(
+  settings: Settings,
+  apiKey: string,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectCredential(settings, "azure_openai", apiKey, input);
+}
+
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
 export function withOrganizationGatewayCatalogProvider(
   settings: Settings,
@@ -7247,6 +7471,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "anthropic-organization":
     case "openrouter-organization":
     case "opper-organization":
+    case "direct-openai-organization":
+    case "direct-azure-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -7281,6 +7507,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "anthropic-organization":
     case "openrouter-organization":
     case "opper-organization":
+    case "direct-openai-organization":
+    case "direct-azure-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -7928,6 +8156,8 @@ const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
   WORKSPACE_OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   "workspace-anthropic",
   "organization-anthropic",
   "workspace-claude-subscription",
@@ -8375,6 +8605,9 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
       ? settings
       : withOrganizationOpperCatalogProvider(settings);
   }
+  // Organization OpenAI and Azure OpenAI have no secret-free fallback: each
+  // provider exists only with the organization's own curated models, which
+  // the workspace boundary overlays. Without them the model stays unresolved.
   return settings;
 }
 
@@ -8720,6 +8953,7 @@ function reviewedProviderModelPricing(
       }
       break;
     case "direct-openai-workspace":
+    case "direct-openai-organization":
       if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
         priceId = upstream;
       }
@@ -11155,6 +11389,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-organization" ||
       provider.kind === "direct-openai-workspace" ||
       provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-openai-organization" ||
+      provider.kind === "direct-azure-organization" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "opper-workspace" ||

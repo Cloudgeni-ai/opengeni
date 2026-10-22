@@ -22,7 +22,8 @@ import {
   parseIdToken,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { assistantMessage, functionCall, ScriptedModel, testSettings } from "@opengeni/testing";
+import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   buildModelInstance,

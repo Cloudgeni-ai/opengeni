@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { useAppContext } from "@/context";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { CheckboxField } from "@opengeni/react/ui/field";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Notice } from "@opengeni/react/ui/notice";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 export function SlackBotAccessSection({
   connection,

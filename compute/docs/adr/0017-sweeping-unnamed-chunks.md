@@ -60,11 +60,7 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   GCS.
 - Stamped pointers live under `pointers/v3`: after the write stamp comes
   the owner stamp ([18](0018-the-control-service-leases-and-fences.md)). An
-  agent will not start on, and a sweep will not run over, a store that
-  still holds `pointers/v1` or `pointers/v2`: their copies would look
-  absent and a sweep would delete what they name. Only lab stores ever
-  held them, so there is no migration; such a store is emptied or a new
-  prefix used.
+  agent and a sweep read pointers in that format only.
 - Deleting a sandbox leaves a tombstone, an empty pointer under its
   owner's stamp that no later archive publishes over. A sweep never
   stores a tombstone again, and never deletes one: the age of an object

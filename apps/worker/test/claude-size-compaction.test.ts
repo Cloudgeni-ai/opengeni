@@ -16,11 +16,8 @@ import * as schema from "@opengeni/db/schema";
 import { eq } from "drizzle-orm";
 import { AnthropicSizeRecoveryExhaustedError } from "@opengeni/runtime";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   maybeCompactContext,
   type CompactionSummarizer,

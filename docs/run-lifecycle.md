@@ -447,7 +447,7 @@ there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
 `packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
-`apps/web/src/routes/session.tsx`.
+`packages/react/src/app/routes/session.tsx`.
 
 Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
 one WebSocket path: `POST …/realtime/websocket` asks the provider registry in
@@ -3039,13 +3039,16 @@ No cancellation/reaper protocol changes are included.
 
 This is separate from human consent. Before agent construction (including
 on-demand sandbox turns), an exact live attempt may decide how a definitively
-lost managed Modal sandbox continues. A lost box never dead-ends its sessions:
+lost managed sandbox continues, on every backend Opengeni manages (Modal,
+Docker, compute and the other hosted providers; not self-hosted or none). A
+lost box never dead-ends its sessions:
 the decision covers the complete sandbox group at once, including parents,
 shared children and members private to another human.
 
 **Loss evidence.** Both lanes need durable proof that this lease lineage's
 provider object was definitively lost: the reaper's missing-before-capture
-cold commit or an exact warm-instance `NOT_FOUND`. Each records
+cold commit, an exact warm-instance `NOT_FOUND`, or a failed same-lease
+continuity restore (source `continuity_restore`). Each records
 `opengeniProviderLoss` on the lease (source, lost epoch and instance, workspace
 generation, observation time, stamped provider deadline); cold and warming
 rebuilds carry it and a verified warm publication ends it. A failed or reset
@@ -3058,7 +3061,9 @@ shape) or, when a replacement attempt overwrote that record (older code wrote
 `sandbox.provider_missing_before_capture` audit for the same lease and unchanged
 workspace generation, so stuck sessions recover on their next turn or Retry. A
 plain `not_created` (an ordinary drain, operator restore or capture failure)
-never revives an older loss. Turn start takes the workspace-control fence only
+never revives an older loss. A warming rebuild that fails while it carries a
+loss record keeps the loss on the cold lease rather than clearing it into a
+clean lease, which used to restart the session on a silent empty workspace. Turn start takes the workspace-control fence only
 for a lease with an incomplete archive and a loss-shaped provider record (or a
 pending decision), so the ordinary resume of a complete archive stays unlocked. A decision pins the evidence it used. Provider
 `unknown`, `creating` or `exists`, an unresolved provider create, an explicit
@@ -3077,8 +3082,10 @@ call is live while its attempt is open or awaits quiescence, or while its turn i
 not terminal; a row stranded by a terminal turn whose attempt settled is not a
 writer.
 
-The decision prefers the latest registered CURRENT native Modal checkpoint
-older than the lost workspace (lane `checkpoint`; singleton or shared). It
+The decision prefers the latest registered CURRENT checkpoint older than the
+lost workspace (lane `checkpoint`; singleton or shared): a native Modal
+checkpoint on Modal, a verified portable tar checkpoint (which has no native
+artifact, so its selection's `artifactId` is `null`) on the other backends. It
 records a system-attributed audit, one immutable `sandbox.recovery.automatic`
 receipt per member (the deciding attempt is the actor for its own session, the
 system recovery subject for the others) and a lease marker. Restore then uses
@@ -3101,15 +3108,33 @@ When the loss leaves no checkpoint Opengeni can restore automatically (no
 archive, an unverified archive, a legacy or unregistered descriptor, an invalid
 artifact, or a definitive integrity failure of the selected checkpoint), the
 decision is lane `fresh_workspace`: continue on a new EMPTY workspace. Because
-that is irreversible for the running sandbox, it also waits until the lost
-object is past its hard provider lifetime: its stamped provider deadline plus a
-one-hour create grace, or, for rows without one, the loss observation plus 24
-hours. Opengeni validates the Modal timeout to at most 24 hours (Modal's own
-cap) and never renews it, so no Modal sandbox can outlive that bound in any
-workspace. A misconfigured credential or namespace that turned a live box into
-a false `NOT_FOUND` therefore cannot cause an empty reset; this deadline proof
-subsumes a provider-binding check and needs no provider call on the turn path.
-Staging's 24-hour deadline kills satisfy it at loss time. The decision writes
+that is irreversible for the running sandbox, it also needs per-backend proof
+that the lost object is really gone:
+
+- Modal: the lost object is past its hard provider lifetime: its stamped
+  provider deadline plus a one-hour create grace, or, for rows without one, the
+  loss observation plus 24 hours. Opengeni validates the Modal timeout to at
+  most 24 hours (Modal's own cap) and never renews it, so no Modal sandbox can
+  outlive that bound in any workspace. Staging's 24-hour deadline kills satisfy
+  it at loss time.
+- Compute: the loss observation itself, because the compute control plane is
+  authoritative for its own sandboxes and its deletion is final.
+- Docker: a `workspace_absent` proof written when the continuity restore finds
+  the workspace gone on the same daemon: the durable ownership receipt names
+  that daemon, the daemon reports the exact container missing, and both owned
+  host roots are absent (`ENOENT`) while the directory that held them exists,
+  so an unmounted volume or another host's filesystem never passes.
+- Other hosted providers with a configured hard or renewable lifetime: a
+  `provider_lifetime` proof stamped at loss as the observation plus that
+  lifetime plus the one-hour create grace.
+
+Without such proof the lane is unavailable (`provider_death_unproven`): a
+transient or false `NOT_FOUND` (a misconfigured credential or namespace, or a
+host under memory pressure) can at most restore a checkpoint, never empty the
+workspace by itself. The session is still not stranded: the lease keeps its
+loss, so the public projection offers a person who controls the complete group
+Retry or an explicit fresh-workspace consent. This proof needs no provider call
+on the turn path. The decision writes
 its own audit (`sandbox.fresh_workspace_recovery.authorized`), one immutable
 `sandbox.recovery.fresh_workspace` receipt per member naming the loss time and
 reason, and a pending lease marker, and retires any late-capture receipt in the

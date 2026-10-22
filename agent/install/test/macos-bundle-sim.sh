@@ -230,12 +230,12 @@ unset OPENGENI_ALLOW_DOWNGRADE
 echo "SIM 6: every interaction helper is installed and nested-signed"
 RUNTIME="$WORK/runtime"
 mkdir -p "$RUNTIME"
-for helper in opengeni-browserd agent-browser opengeni-computer-native; do
+for helper in opengeni-browserd opengeni-computer-native; do
   printf '%s\n' "$helper" > "$RUNTIME/$helper"
   chmod 0755 "$RUNTIME/$helper"
 done
 MOCK_SECURITY_FILE="" run_local_install runtime "$RUNTIME"
-for helper in opengeni-browserd agent-browser opengeni-computer-native; do
+for helper in opengeni-browserd opengeni-computer-native; do
   installed="$WORK/home-runtime/Applications/OpenGeni Agent.app/Contents/Helpers/$helper"
   if [ -x "$installed" ] && grep -q -- "--sign - .*Contents/Helpers/$helper" "$WORK/codesign-runtime.log"; then
     ok "$helper installed executable and nested-signed"
@@ -290,7 +290,6 @@ mkdir -p "$PREBUILT_APP/Contents/MacOS" "$PREBUILT_APP/Contents/Helpers"
 for executable in \
   "$PREBUILT_APP/Contents/MacOS/opengeni-agent" \
   "$PREBUILT_APP/Contents/Helpers/opengeni-browserd" \
-  "$PREBUILT_APP/Contents/Helpers/agent-browser" \
   "$PREBUILT_APP/Contents/Helpers/opengeni-computer-native"
 do
   printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'opengeni-agent 9.9.9'" > "$executable"

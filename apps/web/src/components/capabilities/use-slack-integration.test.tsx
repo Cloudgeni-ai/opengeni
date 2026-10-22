@@ -6,13 +6,17 @@ import { act, isValidElement } from "react";
 import { createRoot } from "react-dom/client";
 
 import { Sheet } from "@opengeni/react/ui/sheet";
-import type { AccessContext, ConnectionMetadata, SlackInstallationBinding } from "@/types";
+import type {
+  AccessContext,
+  ConnectionMetadata,
+  SlackInstallationBinding,
+} from "@opengeni/react/app/types";
 import { IntegrationSheetBody } from "./integration-sheet";
 import type {
   IntegrationChoiceOption,
   IntegrationToggleOption,
   IntegrationViewModel,
-} from "./integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
@@ -20,7 +24,7 @@ const PERSONAL_CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 
 // The adapter reads everything through the app context; swap it per case.
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
     client.listAvailableOpenGeniSlackBots ??= async () => ({

@@ -6,10 +6,14 @@ import { ContextMenu as ContextMenuPrimitive } from "radix-ui";
 import {
   MENU_ITEM_CLASS,
   MENU_LABEL_CLASS,
+  MENU_META_CLASS,
   MENU_SEPARATOR_CLASS,
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const ContextMenuContainedPortal = containedPortal(ContextMenuPrimitive.Portal);
 
 // A thin radix ContextMenu wrapper on the one menu spec (menu-styles.ts), so
 // the rail row's right-click menu reads identically to the app's other menus.
@@ -30,7 +34,7 @@ function ContextMenuContent({
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Content>) {
   return (
-    <ContextMenuPrimitive.Portal>
+    <ContextMenuContainedPortal>
       <ContextMenuPrimitive.Content
         data-slot="context-menu-content"
         className={cn(
@@ -40,7 +44,7 @@ function ContextMenuContent({
         )}
         {...props}
       />
-    </ContextMenuPrimitive.Portal>
+    </ContextMenuContainedPortal>
   );
 }
 
@@ -94,8 +98,23 @@ function ContextMenuLabel({
   );
 }
 
+/** An item's key on the right, like `DropdownMenuShortcut`. */
+function ContextMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
+  return (
+    <span
+      // The item carries the key in aria-keyshortcuts; glyphs like "⇧⌘,"
+      // would only garble its accessible name.
+      aria-hidden
+      data-slot="context-menu-shortcut"
+      className={cn(MENU_META_CLASS, "tracking-widest pointer-coarse:hidden", className)}
+      {...props}
+    />
+  );
+}
+
 export {
   ContextMenu,
+  ContextMenuShortcut,
   ContextMenuTrigger,
   ContextMenuContent,
   ContextMenuItem,

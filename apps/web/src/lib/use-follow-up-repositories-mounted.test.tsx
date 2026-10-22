@@ -51,8 +51,9 @@ const context = {
   busy: false,
   githubAppBusy: false,
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
-const { useFollowUpRepositories } = await import("./use-follow-up-repositories");
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+const { useFollowUpRepositories } =
+  await import("@opengeni/react/app/lib/use-follow-up-repositories");
 
 const session = (resources: unknown[]) =>
   ({ id: "session-1", workspaceId: "workspace-1", resources }) as never;

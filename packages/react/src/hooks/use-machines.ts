@@ -7,7 +7,7 @@ import type {
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";

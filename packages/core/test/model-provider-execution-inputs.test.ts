@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { claudeProviderId, withDirectModelProviders } from "@opengeni/config";
 import { directModelConnectionSpec } from "@opengeni/contracts";
 import {
@@ -188,7 +185,9 @@ test("one scope replaces the serial provider reads without changing settings", a
     () => batched(scope),
   );
   expect(actual).toEqual(expected);
-  expect(before).toBe(18);
+  // The serial reference reads each organization provider kind twice (catalog, then
+  // credential); #5359 added OpenAI and Azure OpenAI, so it grew from 18 to 22.
+  expect(before).toBe(22);
   expect(after).toBe(1);
   for (const config of [
     { ...settings, environmentsEncryptionKey: undefined },

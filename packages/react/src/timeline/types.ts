@@ -153,6 +153,22 @@ export type ToolCallTruncation = {
   };
 };
 
+/**
+ * A tool output a step read delivered as a bounded preview: long strings keep
+ * their head and tail (`structured`), or the output is the head and tail of
+ * its text (`text`). The exact output is retained; `load` reads it, and the
+ * row then re-renders with it.
+ */
+export type ToolOutputPreview = {
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
+  /** `preview` until `load` is called; `error` when the exact read failed. */
+  state: "preview" | "loading" | "error";
+  /** Read the exact output. Absent when the timeline has no reader for it. */
+  load?: (() => void) | undefined;
+};
+
 export type ToolCallItem = {
   kind: "tool-call";
   id: string;
@@ -163,6 +179,8 @@ export type ToolCallItem = {
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
+  /** Set while `output` is a bounded preview of the exact output. */
+  outputPreview?: ToolOutputPreview | null | undefined;
   /**
    * The provider-native tool item (`agent.toolCall.created.payload.raw`). Carries
    * `type` (e.g. `apply_patch_call`, `computer_call`, `hosted_tool_call`) and the

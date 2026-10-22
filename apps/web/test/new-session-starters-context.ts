@@ -1,6 +1,6 @@
 // Only context/service boundaries are replaced. No UI, route, or resolver copies.
 import { useCallback, useRef } from "react";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
 export const workspaceId = "11111111-1111-4111-8111-111111111111";

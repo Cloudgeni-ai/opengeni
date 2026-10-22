@@ -5,8 +5,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
-import { migrate } from "@opengeni/db/migrate";
-import { provisionRoles } from "@opengeni/db/provision-roles";
 
 const execFileAsync = promisify(execFile);
 
@@ -485,6 +483,8 @@ async function ensureTemplateBuilt(withheld: readonly string[] = []): Promise<vo
   if (await templateReady(withheld)) {
     return;
   }
+  const { migrate } = await import("@opengeni/db/migrate");
+  const { provisionRoles } = await import("@opengeni/db/provision-roles");
   // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
   const TEMPLATE_DB = await templateDbName(withheld);
   const root = postgres(ADMIN_URL, { max: 1 });
@@ -991,6 +991,8 @@ export async function acquireRestrictedRuntimeTestDatabase(
   if (!owner) return null;
   let admin: postgres.Sql | null = null;
   try {
+    const { migrate } = await import("@opengeni/db/migrate");
+    const { provisionRoles } = await import("@opengeni/db/provision-roles");
     await owner.admin.unsafe(
       `CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION "${owner.ownerRole}"`,
     );

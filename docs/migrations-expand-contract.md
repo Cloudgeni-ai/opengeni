@@ -31,27 +31,122 @@ transaction boundaries remain unchanged; failure rolls back the local setting.
 
 ## Why rolling is the default
 
-The deploy applies every pending migration in the pre-upgrade hook, before it
-replaces application pods, so for the whole rollout the previous release's API,
-control workers and turn workers run against the new schema.
-`bun run db:migrate-plan` reports `requiresDrain: true` as soon as one pending
-migration is maintenance, and then every API, control and turn worker is
-stopped for the entire release, however many rolling migrations ride along. On
-2026-10-15 one release carried 135 migrations as a single maintenance batch and
-production was down for 1 h 47 min.
+Rolling migrations can run while the previous release's API, control workers
+and turn workers serve traffic. The legacy deployment runs all pending work in
+one job, parking the fleet if any migration needs maintenance. On 2026-10-15
+one release carried 135 migrations as a single maintenance batch and production
+was down for 1 h 47 min. Phase-aware orchestration can instead keep only the
+necessary middle span parked (the runner itself never parks or restores pods).
 
 A rolling migration therefore has one rule: **every binary from the previous
 release must keep reading, writing and passing readiness after it commits.**
+
+## Release phases
+
+Most authors need no new annotations: posture-inert rolling migrations run before parking,
+and non-unique concurrent indexes run after traffic returns, subject to file
+order. The runner never skips dependencies by moving files across each other.
+From the database's currently pending files, in file order, it partitions:
+
+1. **post**: the maximal suffix of post-release-eligible migrations.
+2. **pre**: the longest prefix of the rest that is both rolling and
+   posture-inert, stopping at the first other file.
+3. **maintenance**: everything between them, including any intervening rolling
+   work. Even an all-rolling release can have a nonempty maintenance span.
+
+These phase names describe safety classes, not deployment-mode headers. Until
+the old production binary has forward-compatible readiness, a rolling header
+alone cannot prove its continuously checked posture stays ready. Concurrent
+indexes and batched backfills are inert. Ordinary SQL is admitted only when it
+has no table/function/procedure creation, grants/revokes, ownership changes,
+row-level security or policies, schema creation, default privileges, views,
+`SECURITY DEFINER`, or table/function drops. Unknown/dynamic statement forms
+(including `DO`, `CALL`, and nonliteral `SELECT`/CTEs), table renames/moves/
+inheritance/partition changes, and role switches stay out of pre. Historical/unclassified files also
+stay out. Comments do not count as SQL; uncertainty conservatively moves work
+into the middle span rather than rejecting execution.
+
+For a maintenance deployment, run pre while live, then run maintenance while
+parked. For a rolling deployment, run **maintenance**, not just pre, before
+rolling the fleet, as the legacy workflow did; `requiresDrain` retains its
+existing meaning and is not recomputed from the phase name. Post always follows
+the rollout. TODO: relax the inert prefix only after forward-compatible
+readiness is already running in production, not when first deploying that fix.
+
+Only rolling migrations accepted by the concurrent-index or batched-backfill
+parser can be eligible. Non-unique concurrent indexes are eligible automatically.
+A unique concurrent index or batched backfill needs `-- opengeni:post-release`;
+add it **only when the new code tolerates the index being absent or the backfill
+being incomplete**. Never mark ordinary DDL, tables, columns, grants, functions,
+maintenance or unclassified migrations. Use `-- opengeni:pre-release` to keep an
+automatically eligible index out of post (it still follows file order and may
+therefore land in the maintenance span). Never combine both markers.
+
+Keep the execution directive on line 2 and the release marker immediately below
+it, before SQL. For example:
+
+```sql
+-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+-- opengeni:post-release
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS widgets_external_id ON widgets (external_id);
+```
+
+The same marker placement works with `-- opengeni:batched-backfill ...`.
+Do not edit shipped migrations to add markers; their hashes remain immutable.
+
+From `packages/db`, the ops contract is:
+
+| Command | Work applied |
+| --- | --- |
+| `bun src/migrate.ts --phase=pre` | pre only, before parking |
+| `bun src/migrate.ts --phase=maintenance` | pre + maintenance, parked for maintenance releases or before a rolling rollout |
+| `bun src/migrate.ts --phase=post` | all remaining work, after restoring traffic |
+| `bun src/migrate.ts` | all remaining work, unchanged default |
+
+`--phase pre` also works. `OPENGENI_MIGRATION_PHASE` selects the CLI phase when
+no flag is present; a flag wins, and invalid values fail before connecting.
+Programmatic `migrate`/`runMigrations` callers may pass `phase` in runtime
+options; without it they continue applying everything, independent of the CLI
+phase environment variable. Every invocation recomputes from committed receipts
+under the existing advisory lock, preserves depth-policy reconciliation, and is
+safe to retry after partial progress. A later phase catches up earlier work.
+Each phase opens a fresh connection with the database URL's startup settings.
+For example, 0874's `RESET statement_timeout` restores a URL-configured 35-minute
+timeout after 0867's backfill, and 0875/0879 inherit it whether executed in that
+same invocation or a fresh post phase. Concurrent builds temporarily use
+`lock_timeout=0` and do not override `statement_timeout`.
+
+`--plan` / `planMigrations` retain `pending` and `requiresDrain` unchanged and
+add `phaseProtocol: 1` and `phases: {pre: string[], maintenance: string[], post:
+string[]}`. Planning remains read-only; its snapshot is not execution authority.
+Ops must fall back to the legacy single job when `phaseProtocol` is absent.
+
+Every successful CLI phase prints the exact legacy success line:
+
+```text
+Applied Drizzle SQL migrations.
+```
+
+It also prints one compact JSON line (other existing runner logs remain):
+
+```json
+{"schemaVersion":"opengeni/migration-phase/v1","phase":"pre","applied":["0900_example.sql"],"remaining":["0901_example.sql"]}
+```
+
+Names are full SQL filenames in file order. `applied` means newly applied by
+this invocation, not the cumulative ledger; `remaining` is pending after it.
+No-phase runs report `"phase":"post"`. Failed runs do not print a success
+receipt; already committed migration receipts are used on retry.
 
 ## The sequence
 
 1. **Expand** (rolling). Add the new shape next to the old one: nullable
    columns or columns with a `DEFAULT`, indexes (`-- opengeni:concurrent-index`
    on hot tables), and triggers that fill or sync the new shape from old
-   writers' rows. New tables are safe in `opengeni_private` without direct
-   runtime grants; a new data-schema table with RLS or runtime grants changes
-   the runtime posture the previous release checks on every readiness probe, so
-   follow the posture recipe below.
+   writers' rows. New ungranted tables and securely shaped FORCE-RLS tables with
+   runtime grants can be additive, once the previous release contains the
+   forward-compatible posture evaluator. Follow the posture recipe below.
 2. **Migrate** (code plus rolling backfill). Ship code that writes both shapes
    and reads the new one, falling back to the old one where it is still empty.
    Backfill existing rows with a `-- opengeni:batched-backfill` migration on
@@ -75,7 +170,8 @@ that already ignores it. Count on two to three releases for a full sequence:
 | Change a column type           | same as rename, with the new type                             | read new only                                                | drop old (`contract-step`) |
 | Make a column NOT NULL         | code always writes it; fill trigger or `DEFAULT`; backfill    | `CHECK ... NOT VALID`, validate, `SET NOT NULL` (`contract-step`) | -                     |
 | New writer protocol (fences)   | code follows old **and** new protocol                         | enforce new protocol (`contract-step`)                       | drop old protocol          |
-| New FORCE-RLS, grants, posture | posture evaluator accepts both postures                       | apply the new posture                                        | evaluator requires it      |
+| New FORCE-RLS table + grants   | ship forward-compatible evaluator once                       | add securely shaped table + its code                         | -                          |
+| Change a known posture        | evaluator accepts both exact postures                        | apply the new posture                                        | evaluator requires it      |
 
 Steps marked for a later release can wait longer; they cannot go sooner.
 
@@ -118,16 +214,63 @@ the column is `NOT NULL` without a default, drops that constraint or adds a
 default so release N's inserts succeed. Release N+1 drops it with
 `-- contract-step:`.
 
-**New FORCE-RLS, grants or other runtime-posture changes.** API readiness
-re-checks the exact database posture on every probe
-(`packages/db/src/runtime-posture.ts`), so the previous release's evaluator
-marks its pods unready when it sees data-schema tables, policies, grants or
-FORCE-RLS state it does not know. Either keep the new objects in
-`opengeni_private` with execute-only access (as the allowance accounting tables
-do), or first ship an evaluator that accepts both postures, apply the posture in
-a later release, then tighten the evaluator. Migrations 0404-0405 changed the
-posture and the evaluator in one release, which made them a maintenance
-boundary.
+**New FORCE-RLS tables and routines.** API and worker startup and worker readiness
+use `packages/db/src/runtime-posture.ts`. Once this forward-compatible binary
+is the **previous production release**, an entirely unknown table in the data
+schema or `opengeni_private` may have SELECT, INSERT, UPDATE and DELETE grants when RLS is enabled,
+forced, active for the runtime role, has at least one policy, and the runtime
+does not own it, and it has no inheritance or partition relationship. Parent
+queries use the parent's ACL/RLS rather than a known child's contract, so these
+relationships require explicit compatibility review, even when the unknown
+child has no direct grants (a known parent still exposes it). TRUNCATE, REFERENCES,
+TRIGGER, MAINTAIN and other non-row privileges are never tolerated on unknown
+tables. Ungranted unknown non-RLS tables are harmless; runtime grants
+(including column-only grants) on them still fail readiness. A data-schema
+table declaring RLS but not meeting the secure shape also fails. Private
+owner-only tables without grants remain inert. Existing default privileges can
+grant DML automatically on new tables; inspect effective grants, not merely the
+presence of GRANT statements in a migration.
+
+Unknown routines may be SECURITY INVOKER, or SECURITY DEFINER only when neither
+runtime nor PUBLIC can execute them and they are not trigger/event-trigger
+functions or bound in `pg_trigger`. PostgreSQL does not check EXECUTE when a
+trigger fires: owner-only trigger definers still require a prior explicit binary
+contract. Definers must also have no catalog dependents in `pg_depend`: aggregates
+and other support-function callers can invoke them without checking the support
+function's EXECUTE grant. Missing dependency metadata fails closed. Runtime ownership always fails. A fixed
+search path and a non-runtime owner cannot prove an unknown definer's body
+safe: it could expose an owner capability or disable owner RLS. Introduce an
+explicit, reviewed compatibility-binary contract before granting EXECUTE on
+such a definer. The old private-routine catalog's implicit EXECUTE contract is
+now frozen in `packages/db/src/runtime-posture-legacy-routines.json`; it is an
+inventory, not a provisioning grant list. Never regenerate it from a live
+database to silence findings. New named private capabilities need explicit
+registration and their own authority tests.
+
+Every existing check for **known** objects remains exact: missing objects and
+privileges, excess grants, owner relationships, RLS, capability predicates,
+search paths and cutover receipts. Caller-specific contract overrides cannot
+turn a binary-known table or routine into an unknown one. A known table's
+column grants do not satisfy its required table-level privileges.
+
+This is structural readiness, not policy/body verification. Migration review
+must still establish tenant isolation and the appropriateness of every grant;
+always-true policies remain outside this structural check. Non-row privileges
+and unknown trigger definers fail readiness rather than relying on review alone.
+
+The 0796/0797 headers describe a **historical** previous binary that rejected
+all new protected tables. Leave their bytes and maintenance markers unchanged.
+For future changes of that shape, do not copy that blanket maintenance
+justification once the compatible binary is in production. A new FORCE-RLS
+table and DML grants can then be rolling in one release; new callable definers
+or changes to known-object contracts can still need a prior compatibility
+release. Cite the actual incompatible operation, the pinned old-binary test
+failure and why an expand/contract sequence cannot work if maintenance is
+necessary. The presence of a new table alone is no longer a justification.
+
+**Changes to a known posture.** Ship an evaluator accepting both specific
+postures, change the schema in a later release, then tighten it. Forward
+compatibility never permits relaxing an old object's RLS or widening its grants.
 
 **Writer-protocol changes** (for example a trigger that rejects writes without
 a new advisory fence, as in 0345). First ship binaries that follow the old and
@@ -156,7 +299,7 @@ because it is already shipped and its behavior is wrong. "It is more work" or
 "it is a small table" is not a justification.
 
 Put the justification in the leading comment block: the comment lines before
-the first SQL statement or `/* */` comment. An `-- opengeni:` directive must
+the first SQL statement or `/* */` comment. An execution `-- opengeni:` directive must
 stay on line 2, so the justification goes below it. Wrap long text onto
 continuation lines indented as `--   `; the value ends at a blank line or an
 unindented comment:
@@ -169,11 +312,60 @@ unindented comment:
 
 It needs at least 40 characters and six words, and placeholders such as `TODO`,
 `TBD`, `n/a` or `<...>` fail. A `-- opengeni:concurrent-index` migration cannot
-carry other comment lines and is always rolling. Also document the operator
+carry other comment lines except the release markers and is always rolling. Also document the operator
 steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 `docs/maintenance-migrations/`.
 
 ## The CI guard
+
+### Pinned previous-binary readiness
+
+`scripts/runtime-posture-baseline.json` pins a full immutable source commit,
+not a moving branch or tag. `runtime-posture-compatibility.yml` runs on database
+PRs (including main PRs, whose broad CI is otherwise post-merge only) and pushes.
+It migrates a fresh PostgreSQL database as a NOSUPERUSER/NOBYPASSRLS owner,
+runs the current `provision-roles`, then calls **both the inspector and evaluator
+from the pin** as the restricted runtime login. The checked-out source's full
+named-object contracts are used, not a reconstructed subset of tables.
+This is the deterministic readiness-code equivalent of starting the old API
+and workers; it does not test their other queries or writer protocols.
+
+The test also adds safe unknown objects and deliberately weakens RLS, adds
+unsafe grants/definers and revokes known EXECUTE privileges. Both the current
+and pinned binary must reject the negative controls. Missing PostgreSQL, pin
+objects or extraction dependencies fail the dedicated job; there is no green
+fallback to current code. Existing per-feature old-reader harnesses (for
+example `fixtures/site-limits-2fef1581b.ts`) remain necessary for non-readiness
+compatibility. The release-schema hash tests and historical maintenance notes
+are complementary, not evidence that an old readiness probe passes.
+
+The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`
+also runs as a negative control. Against the schema through 0887 it produces
+42 violations: undeclared RLS plus grants for `session_title_operations` and
+`site_session_access`, and 39 private helper EXECUTE expectations. The test
+replays the two safe table shapes and 19 non-trigger owner-only helpers under
+future names, preserving all current known objects, and requires both
+compatibility evaluators to accept them without granting EXECUTE. The other
+20 helpers are SECURITY DEFINER triggers: renamed unknown copies must still
+fail, even with EXECUTE revoked. Treating all 39 as inert would introduce an
+RLS-bypass path. Existing named trigger contracts remain unchanged. Later additions may add historical violations;
+intentional retirement of this witness needs an explicit test update.
+
+**Bootstrap:** the initial pin is explicitly `status: "bootstrap"`, pointing
+at the compatibility implementation commit in this PR. It is not a claim
+about today's production binary, which predates the fix. No additive rollout
+may rely on this tolerance until the fix has shipped. After this PR is merged
+and released, make a pin-only PR setting `sourceCommit` to the full released
+merge/source SHA, `status` to `production`, and `release` to its immutable
+production release receipt/tag. Repeat after each successful production
+release. Resolve tags to their source commit before recording them; do not
+follow "latest" at test time or advance the baseline in a migration PR to
+make an incompatibility disappear. Retain/fetch the exact pin commit when
+checking out shallow history. A legitimate incompatible maintenance change
+will fail this rolling-readiness proof and needs an explicitly coordinated
+compatibility release, not an automatic pin refresh or a skipped test.
+
+### Migration declaration checks
 
 `bun run check:migration-deployment-mode` (`scripts/check-migration-deployment-mode.ts`)
 runs in CI on every migration change. For every migration from ordinal 0786 on
@@ -181,8 +373,12 @@ it fails when:
 
 - line 1 is not exactly `-- deployment-mode: rolling` or
   `-- deployment-mode: maintenance`;
-- an `-- opengeni:` directive sits anywhere but line 2, or a concurrent-index
+- an execution `-- opengeni:` directive sits anywhere but line 2, or a concurrent-index
   migration is declared maintenance;
+- `post-release` marks anything other than a valid rolling concurrent-index or
+  batched-backfill migration, or both release markers appear together;
+- `pre-release` appears without a valid concurrent-index or batched-backfill
+  execution directive (ordinary migrations cannot carry this marker);
 - a maintenance migration has no meaningful `-- maintenance-justification:`;
 - a rolling migration runs `DROP COLUMN`, `DROP TABLE`, `RENAME COLUMN`,
   `RENAME TO`, `ALTER COLUMN ... TYPE` or `SET NOT NULL` on a table it did not

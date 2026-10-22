@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";

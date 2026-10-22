@@ -24,7 +24,7 @@ import type {
   GoogleDriveSyncCadence,
   IntegrationFacetBindingSummary,
   IntegrationFacetDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FolderCrumb = { id: string; name: string };
 

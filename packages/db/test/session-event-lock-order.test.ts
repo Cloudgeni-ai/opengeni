@@ -6,11 +6,8 @@ import {
 } from "@opengeni/core";
 import { SESSION_EVENT_RAW_DELTA_TYPES } from "@opengeni/contracts";
 import { appendAndPublishEvents } from "@opengeni/events";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";

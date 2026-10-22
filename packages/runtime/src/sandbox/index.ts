@@ -163,6 +163,7 @@ export {
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
   SandboxProviderUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,

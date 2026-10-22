@@ -6,7 +6,8 @@ import {
 } from "@opengeni/contracts";
 import { buildOpenGeniAgent } from "@opengeni/runtime";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../src/http/api-error";

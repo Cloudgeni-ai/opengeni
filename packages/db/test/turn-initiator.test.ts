@@ -7,7 +7,7 @@ import {
   renderMessageSentAtForModel,
   UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,

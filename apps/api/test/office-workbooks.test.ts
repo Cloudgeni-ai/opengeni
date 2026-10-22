@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { OpStreamConnection } from "@opengeni/events";
-import { MemoryEventBus } from "@opengeni/testing";
-import { chooseWorkbook } from "../src/mcp/excel-tools";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { chooseWorkbook, excelAddinInstallUrl } from "../src/mcp/excel-tools";
 import {
   clampTimeout,
   mintOfficeWorkbookTicket,
@@ -264,6 +264,14 @@ describe("chooseWorkbook", () => {
     expect(chooseWorkbook([], undefined)).toMatchObject({
       error: expect.stringContaining("No Excel workbook is connected"),
     });
+  });
+
+  test("links the add-in install page when no workbook is connected", () => {
+    const result = chooseWorkbook([], undefined, excelAddinInstallUrl("https://app.example/"));
+    const error = "error" in result ? result.error : "";
+    expect(error).toContain("give them this link");
+    expect(error.endsWith(" https://app.example/excel")).toBe(true);
+    expect(excelAddinInstallUrl(null)).toBeNull();
   });
 
   test("uses the only open workbook when none is named", () => {

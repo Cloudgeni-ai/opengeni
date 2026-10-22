@@ -13,11 +13,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { requestBodyValidationHttpError } from "../src/http/request-body";
 import { registerFileRoutes } from "../src/routes/files";

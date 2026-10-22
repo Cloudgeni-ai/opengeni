@@ -23,11 +23,6 @@ pub const PROTOCOL: u32 = 1;
 /// drops support for pagers started by agents older than the one before.
 pub const OLDEST_PROTOCOL: u32 = 1;
 
-/// Greetings from before the protocol was named are protocol 1.
-const fn unnamed_protocol() -> u32 {
-    1
-}
-
 /// From the pager to the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,7 +30,6 @@ pub enum ToHost {
     /// Sent first on every connection.
     Hello {
         /// The protocol the pager speaks.
-        #[serde(default = "unnamed_protocol")]
         protocol: u32,
         /// The image the pager serves, as the host named it at launch.
         tag: String,
@@ -118,12 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn a_greeting_that_names_no_protocol_is_the_first() {
+    fn a_greeting_names_its_protocol() {
         let greeting =
             br#"{"hello":{"tag":"7","device":1,"inode":2,"missing":[],"prefetched":true}}"#;
-        let Ok(ToHost::Hello { protocol, .. }) = parse::<ToHost>(greeting) else {
-            panic!("an old greeting no longer parses");
-        };
-        assert_eq!(protocol, 1);
+        assert!(parse::<ToHost>(greeting).is_err());
     }
 }

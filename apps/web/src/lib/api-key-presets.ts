@@ -8,7 +8,7 @@
  */
 
 import { apiKeyStatus as apiKeyStatusAt, type ApiKeyStatus } from "@/lib/api-key-status";
-import { defaultApiKeyPermissions } from "@/lib/permissions";
+import { defaultApiKeyPermissions } from "@opengeni/react/app/lib/permissions";
 
 export type ApiKeyPresetId =
   | "read_only"

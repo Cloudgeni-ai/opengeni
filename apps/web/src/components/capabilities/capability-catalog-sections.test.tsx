@@ -4,7 +4,7 @@ import { act, type ReactNode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { CapabilityBrowseSection } from "./capability-catalog-sections";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

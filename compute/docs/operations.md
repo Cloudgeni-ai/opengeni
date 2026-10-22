@@ -166,6 +166,12 @@ enabling it changes no session's backend.
    copy (ADR 18). `--checkpoint-every-s` (through
    `computeControl.extraArgs`) sets that target for the fleet; 0 takes
    none.
+10. **Metrics.** Set `computeControl.metrics.port` (for example 9464) to
+   serve the service's own metrics; `observability.serviceMonitor` and
+   `observability.prometheusRule` add their ServiceMonitor and alerts. For
+   the hosts' metrics, set `computeControl.metrics.hostsTo` to
+   Prometheus's OTLP receiver and add `--otlp-metrics-to-control` to the
+   hosts' `host_args` ([Observing](#observing)).
 
 A minimal values file:
 
@@ -361,8 +367,8 @@ authority alone for agent links.
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
   ```
 
-  Each host shows its memory and disk, and, when it guarantees processor
-  time, `cpu_millis` (what it guarantees at once now) and
+  Each host shows its memory and disk, `cpu_millis` (the processor time
+  it guarantees at once now) and
   `cpu_free_millis` (what a wake can still reserve). A `cpu_millis` below
   what the host was given means something outside the VMs' group takes
   more of its processors than it keeps back; the agent logs it.
@@ -525,10 +531,8 @@ before users move to compute from Modal:
   ([ADR 11](adr/0011-fixed-guest-network.md)), but for the exact
   destinations and TCP ports a host lists with `--reach`. Guests resolve
   names through the host's answer at their gateway, which asks public
-  name servers and never the host's own; a query a guest sends to a name
-  server it may not reach is answered there too. The review should
-  confirm that each listed destination is one sandboxes are meant to
-  reach.
+  name servers and never the host's own; the review should confirm that
+  each listed destination is one sandboxes are meant to reach.
 - **Hosts.** Hosts hold their sandboxes' disks and memory, encrypted at
   rest by the provider, and the host account can read and write every
   archived sandbox in the bucket. A host is as trusted as every sandbox
@@ -589,8 +593,7 @@ before users move to compute from Modal:
      VPC, IPv6, the cloud's public-to-private mapping (`--block`), each
      `--reach` destination's other ports, and the sandbox's name server
      (its gateway's port 53, the one thing in the namespace a guest
-     reaches, and where its queries to unreachable name servers are
-     sent), which parses guests' queries;
+     reaches), which parses guests' queries;
   3. the guest-to-host channels, whose input from guests is untrusted:
      the vsock ports the host serves (guest ports it forwards, and the
      agent link of ADR 21) and the pagers' and gateway's replies;
@@ -671,13 +674,51 @@ before users move to compute from Modal:
 
 What the agent reports is in [ADR 16](adr/0016-observability.md).
 
+- **Metrics in Prometheus.** In a fleet, the control service and its
+  hosts report to the Prometheus that Opengeni's chart already feeds
+  (`deploy/observability`), with no collector or credentials on the hosts:
+  - The control service serves `GET /metrics` on `--metrics-listen`
+    (`computeControl.metrics.port`, for example 9464), which the chart's
+    ServiceMonitor scrapes. Every replica reports its API requests by route
+    and outcome (`compute_control_requests_total`, with their latency),
+    whether it leads, and the hosts' metrics it passed on; the leader alone
+    reports the fleet as it reads it: each host's state, what it has and
+    can still promise for memory, processors and disk, its sandboxes, how
+    long ago its lease was renewed, and the host group
+    (`compute_fleet_*`).
+  - Hosts run with `--otlp-metrics-to-control` (on GCP, in the Terraform
+    module's `host_args`) and post their metrics every ten seconds
+    to the control service over the same mutual TLS as their lease. The
+    service refuses an export whose resource names another host than its
+    certificate does (`host.name`, which the host sets to its name in the
+    fleet), and passes on only the metrics hosts send (the list in
+    `compute-protocol`'s `host_metrics`): each with its kind, cumulative
+    counters, exactly its labels with their listed values, plain values
+    and the shared histogram bounds, under the host's own name and with
+    no resource attributes but the service's name and the host's. A host
+    cannot pass off the control service's or the fleet's series, another
+    host's, or labels of its own, and cannot add series by varying what it
+    says about itself: its zone, memory profile and CPU template come from
+    its registration, on the leader's `compute_fleet_host_info`. Data
+    points left out are answered as an OTLP partial
+    success and counted in
+    `compute_control_host_metric_points_left_out_total`. It passes them on to `--host-metrics-to`
+    (`computeControl.metrics.hostsTo`): Prometheus's OTLP receiver,
+    `/api/v1/otlp/v1/metrics`, which `deploy/observability`'s
+    `values.compute.yaml` turns on with `host.name` promoted to the
+    `host_name` label. Events stay in the host's journal.
+  - The chart's PrometheusRule alerts on both (with
+    `observability.prometheusRule.enabled`), scoping each host to its
+    release through the leader's `compute_fleet_host_info`, and the
+    **Opengeni · Compute** dashboard shows them.
 - **Run a collector next to each host.** Pass `--otlp-endpoint
   http://127.0.0.1:4318` to send events as OTLP log records and metrics
   every ten seconds (`--otlp-metrics-every`); add `--otlp-header
   name=value` for a remote collector that needs a token. Without it,
   events go only to the agent's log, one JSON line each under the
   `compute_event` target, which the journal keeps. `--no-journal-events`
-  turns that copy off once a collector takes them.
+  turns that copy off once a collector takes them. With
+  `--otlp-metrics-to-control` as well, only events go to the collector.
 - **Run the canary** with `--canary-every 5m` and, if the guest image
   serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
   and one created and removed per round, and a little store traffic. Its
@@ -713,25 +754,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 
 ## Upgrades
 
-- **Order.** Upgrade every host before the control service. A host restores
-  an adopted copy's memory only when the service says the copy is whole
-  (`whole`, ADR 18), and otherwise boots it from its files; a host from
-  before that ignores the field and always restores memory, including a
-  lost host's copy, which may be older than the sandbox had become.
-  Nothing refuses it, so the order is what keeps it from happening. A
-  newer host works with an older service, whose adopts then always boot
-  from files, so replicas of the earlier release serving during the
-  rollout, or after a rollback, never restore a stale copy; beside the
-  new schema they can only make a copy count as not whole. A host whose
-  guest image predates the `sync` request warns and saves without it.
-  One exception: hosts that report their processor capacity (`cpu_millis`
-  when they register, `cpu_millis` and `cpu_free_millis` in their
-  capacity) need a control
-  service that reads it first. The first releases refuse report fields
-  they do not know, so upgrade the service from before that release
-  first, then the hosts; from that release on, report fields a service
-  does not know are ignored, and the usual order holds again. A service
-  meeting hosts that do not report it places and scales by memory alone.
+- **Order.** Upgrade every host before the control service. Hosts refuse
+  requests they do not know, and fields they do not know in the
+  service's answers to registration and lease renewal, its rulings and
+  sleep settings; they ignore other unknown fields of a request they
+  know.
+  So a newer service could send an older host something it refuses, or
+  a setting it silently ignores. The service ignores what it does not
+  know in a host's description and capacity, so newer hosts work with
+  the older service meanwhile.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):
@@ -753,11 +784,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   is a new version that keeps what the previous release reads, so old
   replicas keep working beside new ones during a rollout, and a rollback
   to the previous image starts (it logs that the schema is newer than it
-  knows). Version 1 upgrades a database made before versions existed.
+  knows).
   The answer to a host's registration is stored (`compute_hosts.answer`)
   and read back by whichever replica sees that attempt again, so it is
   part of the schema too: a release adds to a ruling only what the
-  previous release's decoder accepts (`whole` is in the first release).
+  previous release's decoder accepts.
   Back up the schema before an upgrade that adds a version.
 - **Firecracker**: a wake uses whichever configured Firecracker (the
   current one or one kept with `--retained-firecracker`) reads the image's
@@ -832,15 +863,22 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   asked for them; do not accept routes or use an exit node on hosts, and
   give hosts an overlay identity that may reach only the service's host
   endpoint and Opengeni's endpoints.
-- **Upgrading a host in place.** An agent that starts forgets the
-  connections sandboxes made under an older version that its rules refuse
-  ([ADR 11](adr/0011-fixed-guest-network.md)), such as queries a guest
-  keeps sending one private name server from one socket, which would
-  otherwise keep going there rather than to the guest's own; the log says
-  how many per namespace (`forgot connections the rules no longer let
-  through`). It reads them through the kernel's netlink interface to
-  connection tracking (`nf_conntrack_netlink`, loaded on demand); without
-  it the agent warns and such connections end only once idle.
+- **A control service in another cloud.** Where the control service runs
+  outside the hosts' network with no private path to it, such as in an
+  Opengeni cluster on another cloud, both directions go over public
+  addresses, still mutual TLS of the hosts' authority alone: the GCP
+  root's `assign_external_ip` and `advertise_public_address` make each
+  host give the service its public address, `control_source_ranges`
+  admits only the service's egress addresses to port 7443, and
+  `computeControl.hostsService` is a public `LoadBalancer` on a static
+  address whose name `hostUrl` gives. Hosts' public addresses change as
+  hosts are replaced, so the hosts endpoint takes connections from
+  anywhere: a caller without a certificate of the hosts' authority is
+  refused by every route but the one that issues a first certificate,
+  and that one needs an identity token of the configured project and host
+  account. A host's public address carries its traffic to the internet,
+  sandboxes' included, and the startup script blocks it to sandboxes
+  (`--block`).
 
 ## Capacity and cost
 

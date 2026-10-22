@@ -34,6 +34,7 @@ import {
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { presentTurnFailureText } from "./compaction-copy";
+import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -55,6 +56,7 @@ import type {
   TurnEndItem,
   TurnStepsItem,
   ToolCallItem,
+  ToolOutputPreview,
   ToolCallTruncation,
   UserMessageItem,
   WorkerItem,
@@ -170,6 +172,12 @@ export type BuildTimelineOptions = {
    * row even when none of its steps are in the browser.
    */
   turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+  /**
+   * Exact reads of tool outputs a step page delivered as previews, by output
+   * event. A previewed tool row carries its read's state and loader in
+   * `outputPreview`; without a reader it is still marked as a preview.
+   */
+  toolOutputs?: ToolOutputReader | undefined;
 };
 
 export function buildTimeline(
@@ -178,6 +186,11 @@ export function buildTimeline(
   options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  // Calls remain in insertion order while message bubbles can move. Keep the
+  // two existing lookup rules separate: creation merges only tool rows, while
+  // an output correlates to the latest tool or worker with that exact id.
+  const toolCallsById = new Map<string, ToolCallItem>();
+  const callsById = new Map<string, ToolCallItem | WorkerItem>();
   const allowanceNotices = new Set<string>();
   // One "not saved" notice per turn for the same refused change, however
   // often the agent retried it.
@@ -887,7 +900,7 @@ export function buildTimeline(
         ) {
           const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
           const title = spawn ? workerTitle(args) : null;
-          items.push({
+          const item: WorkerItem = {
             kind: "worker",
             id: event.id,
             turnId,
@@ -899,7 +912,9 @@ export function buildTimeline(
             failure: null,
             status: "running",
             occurredAt: event.occurredAt,
-          });
+          };
+          items.push(item);
+          if (callId) callsById.set(callId, item);
           break;
         }
         if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
@@ -910,11 +925,7 @@ export function buildTimeline(
         // `RunToolCallItem` share the same item id. Merge so mid-stream cards
         // do not duplicate when the step finally materializes.
         if (callId) {
-          const existing = [...items]
-            .reverse()
-            .find(
-              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
-            );
+          const existing = toolCallsById.get(callId);
           if (existing) {
             if (display) existing.display = display;
             if (args != null) {
@@ -927,7 +938,7 @@ export function buildTimeline(
             break;
           }
         }
-        items.push({
+        const item: ToolCallItem = {
           kind: "tool-call",
           id: event.id,
           turnId,
@@ -942,13 +953,18 @@ export function buildTimeline(
           raw: payload.raw,
           status: providerNativeToolStatus(payload.raw),
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(item);
+        if (callId) {
+          toolCallsById.set(callId, item);
+          callsById.set(callId, item);
+        }
         break;
       }
 
       case "agent.toolCall.output": {
         const callId = typeof payload.id === "string" ? payload.id : null;
-        const target = findOpenCall(items, callId);
+        const target = findOpenCall(items, callId, callsById);
         if (!target) {
           break;
         }
@@ -971,6 +987,22 @@ export function buildTimeline(
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
         const truncation = toolCallTruncation(payload);
+        const previewFact = toolOutputPreviewFact(payload);
+        const previewRead = previewFact
+          ? options.toolOutputs?.(event.id, event.sequence, event.turnId ?? null)
+          : undefined;
+        // An exact read that landed replaced this event; a forged fact on an
+        // exact output must not ask again.
+        const outputPreview: ToolOutputPreview | null =
+          previewFact && previewRead?.state !== "loaded"
+            ? {
+                shape: previewFact.shape,
+                originalBytes: previewFact.originalBytes,
+                previewBytes: previewFact.previewBytes,
+                state: previewRead?.state ?? "preview",
+                ...(previewRead ? { load: previewRead.load } : {}),
+              }
+            : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
@@ -978,12 +1010,14 @@ export function buildTimeline(
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        target.outputPreview = outputPreview;
         const sourceText = timelineAnnotationToolOutputText(
           Object.prototype.hasOwnProperty.call(payload, "output")
             ? payload.output
             : payload.preview,
         );
-        if (sourceText !== null) {
+        // Annotations anchor in the exact text, which a preview is not.
+        if (sourceText !== null && !outputPreview) {
           target.annotationSource = {
             kind: "tool_output",
             eventId: event.id,
@@ -3877,23 +3911,21 @@ function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncatio
 function findOpenCall(
   items: TimelineItem[],
   callId: string | null,
+  callsById: ReadonlyMap<string, ToolCallItem | WorkerItem>,
 ): ToolCallItem | WorkerItem | undefined {
-  const reversed = [...items].reverse();
-  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
-    item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
-    const byId = reversed.find((item) => isCall(item) && item.callId === callId);
-    if (byId) {
-      return byId as ToolCallItem | WorkerItem;
-    }
     // An explicit provider correlation id is authoritative. Falling back to
     // an unrelated running call corrupts its status/output when compact pages
     // or interleaved providers deliver an unmatched historical result.
-    return undefined;
+    return callsById.get(callId);
   }
-  return reversed.find(
-    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
-  );
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {

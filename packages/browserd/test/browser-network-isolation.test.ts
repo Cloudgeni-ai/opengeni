@@ -66,10 +66,15 @@ describe("browser network isolation", () => {
         trailingArguments: ["--disable-features=A,B"],
         stderrFifo: "/state/chrome-launch/id.stderr.fifo",
         stderrLog: "/state/chrome-launch/chrome-stderr.log",
+        stderrDone: "/state/chrome-launch/id.stderr.done",
         tail: "/usr/bin/tail",
         stderrBytes: 65_536,
       }),
     });
+    // The drain marks its log complete only after writing it.
+    expect(script).toContain(
+      ">'/state/chrome-launch/chrome-stderr.log' 2>/dev/null; : >'/state/chrome-launch/id.stderr.done'; } &",
+    );
     // The scope prologue runs before any namespace is entered.
     expect(script.indexOf("# scope entry")).toBeLessThan(script.indexOf("--map-root-user"));
     expect(script).toContain("'/usr/bin/unshare' --user --map-root-user --net --mount --");
@@ -122,7 +127,7 @@ test.skipIf(process.platform !== "linux")(
 
 const fallbackFixture = `
 import { mock } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 const isolation = new URL("./browser-network-isolation.ts", process.argv[1]).href;
@@ -131,24 +136,20 @@ mock.module(isolation, () => ({
   ...actual,
   linuxBrowserNetworkIsolation: async () => ({ kind: "unavailable", reason: "pasta is not installed" }),
 }));
-const { AgentBrowserJsonRunner } = await import(process.argv[1]);
+const { ManagedBrowserRunner } = await import(process.argv[1]);
 const root = await mkdtemp("/tmp/og-netns-fallback-");
 const browserPath = join(root, "chrome");
-const binaryPath = join(root, "agent-browser");
 await writeFile(browserPath, "#!/bin/sh\\nexit 0\\n", { mode: 0o700 });
-await writeFile(binaryPath, "#!" + process.execPath + "\\nconsole.log(JSON.stringify({ success: true, data: process.env.AGENT_BROWSER_EXECUTABLE_PATH, error: null }));\\n", { mode: 0o700 });
 let runner;
 try {
-  runner = await AgentBrowserJsonRunner.create({
-    namespace: "og", sessionName: "fallback",
-    socketDirectory: join(root, "socket"), profileDirectory: join(root, "profile"),
-    downloadDirectory: join(root, "downloads"), screenshotDirectory: join(root, "screenshots"),
+  runner = await ManagedBrowserRunner.create({ profileDirectory: join(root, "profile"),
     headed: true, systemdScope: false, browserExecutablePath: browserPath,
-    binary: { path: binaryPath, name: "agent-browser-linux-x64", version: "0.33.2", sha256: "fixture" },
   });
   assert.equal(runner.networkNotice, actual.BROWSER_SHARED_NETWORK_NOTICE);
-  const wrapper = await runner.run(["get", "cdp-url"]);
-  assert.ok(!(await readFile(wrapper, "utf8")).includes("unshare"));
+  const launch = join(root, "chrome-launch");
+  const wrapper = (await readdir(launch)).find((name) => name.endsWith(".sh"));
+  assert.ok(wrapper);
+  assert.ok(!(await readFile(join(launch, wrapper), "utf8")).includes("unshare"));
   console.log("plain launch with notice");
 } finally {
   if (runner) await runner.terminate();

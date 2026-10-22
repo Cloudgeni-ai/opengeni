@@ -18,9 +18,9 @@ import {
 } from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   TestAuthoritativeKernel,

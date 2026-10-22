@@ -16,7 +16,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -410,6 +410,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "billing_subscription_operations",
       // 0820 (retained browser downloads).
       "browser_session_retained_downloads",
+      // 0890 (model fact reconciliation progress and candidates).
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.

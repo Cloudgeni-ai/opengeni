@@ -11,7 +11,8 @@ mutable XLSX shadow or publish a sandbox workbook over user edits.
 The exception is a file the user sends to be changed, or a requested file
 format the artifact cannot export; see "Requested Excel or CSV files" below.
 
-Read [references/api.md](references/api.md) before editing.
+Read [references/api.md](references/api.md) before editing a workbook artifact; a
+sent or requested file (below) does not need it.
 When using `skill_read`, request that relative path from this Skill; reading
 does not materialize a local folder. Use an existing local copy only when the
 Skill was installed or explicitly checked out to the filesystem.
@@ -40,13 +41,16 @@ unavailable or does not list that format, the file itself is the deliverable:
 1. Make or edit it in the sandbox with ordinary tools (`openpyxl` for a new
    workbook, the `csv` module for CSV). openpyxl drops charts and images when it
    saves an existing workbook, so for a sent workbook that has them, edit the
-   cell XML inside the .xlsx package directly. Install a missing package with
-   `pip install <package>` if needed.
+   cell XML inside the .xlsx package directly. Managed sandboxes already
+   include openpyxl, so do not check first; run `pip install <package>` only
+   if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.
-4. Publish the file and reply with a short summary and its link. Do not also
-   build a native artifact of the same content.
+4. Publish the file with `sandbox_file_publish` and reply with a short summary
+   and its link. If that tool is not loaded yet, load it with `tool_search` in
+   the same batch as your first command. Do not also build a native artifact of
+   the same content.
 
 ## Edit and verify
 
@@ -84,6 +88,9 @@ unavailable or does not list that format, the file itself is the deliverable:
   dimension to its default. Never hide a gap by changing mutable truth
   back to a local XLSX.
 - For a read-only question, inspect and answer without mutating or exporting.
+- Compute every total, average or other figure you report with code or a
+  formula, never by adding numbers up yourself. Without `openpyxl`, read an
+  .xlsx with `pip install openpyxl` or Python's `zipfile` and sum in Python.
 
 ## Completion gate
 

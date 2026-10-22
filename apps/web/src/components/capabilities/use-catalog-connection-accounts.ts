@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { isWorkspacePermissionDenied } from "@/lib/permissions";
+import { isWorkspacePermissionDenied } from "@opengeni/react/app/lib/permissions";
 
 /** Settings inventory uses the same owning-human authority as the session picker,
  * with inactive accounts included for repair. It never feeds credential selection. */

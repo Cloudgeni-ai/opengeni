@@ -14,7 +14,7 @@ import {
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
   type SharedQueryKey,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 export type ClaudeUsageState = {
   value: ClaudeSubscriptionUsage | null;

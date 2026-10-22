@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { codexAccountsLackingTurnModel } from "./fixtures/legacy-codex/selection";
 
 const settings = testSettings({ codexSubscriptionEnabled: true });

@@ -1,7 +1,7 @@
 import { withLegacySessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { eq, sql } from "drizzle-orm";
 import {
   bootstrapWorkspace,

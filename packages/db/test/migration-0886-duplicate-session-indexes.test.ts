@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,

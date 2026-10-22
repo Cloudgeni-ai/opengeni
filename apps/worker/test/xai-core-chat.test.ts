@@ -26,7 +26,7 @@ import {
   xaiModelRequestEventPayload,
 } from "../src/activities/agent-turn/run";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 // SuperGrok on the shared core (design 5.3, SuperGrok track X1a), dormant
 // behind its provider route. No network: every upstream is scripted.

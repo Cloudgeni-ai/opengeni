@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 
-import { ProviderTile, type ModelProviderId } from "@/components/models/provider-mark";
+import {
+  ProviderTile,
+  type ModelProviderId,
+} from "@opengeni/react/app/components/models/provider-mark";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 
 /* ----------------------------------------------------------------------------
@@ -27,7 +30,8 @@ export type ProviderConnectChoice = {
 export function providerPaymentSummary(id: ModelProviderId, title: string): string {
   if (id === "codex") return "Pay with your ChatGPT plan";
   if (id === "supergrok") return "Pay with your SuperGrok plan";
-  return `Pay per token through ${title}`;
+  // "OpenAI API" pays through OpenAI.
+  return `Pay per token through ${title.replace(/ API$/, "")}`;
 }
 
 export function ProviderConnectList({

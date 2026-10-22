@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { captureHostWorkspaceArchive } from "../src/sandbox/host-archive-spool";
 import { establishSandboxSessionFromEnvelope } from "../src/sandbox/index";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 
 for (const corruptDestination of [false, true]) {

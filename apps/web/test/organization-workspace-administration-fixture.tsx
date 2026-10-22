@@ -16,14 +16,14 @@ import { Button } from "@opengeni/react/ui/button";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
 import { OrganizationPeoplePage } from "../src/components/organization/people-page";
 import { OrganizationWorkspacesPage } from "../src/components/organization/workspaces-page";
-import type { OrganizationAdminIdentity } from "../src/lib/organization-admin";
+import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationWorkspaceAccessMember,
   SdkPermission,
-} from "../src/types";
+} from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";

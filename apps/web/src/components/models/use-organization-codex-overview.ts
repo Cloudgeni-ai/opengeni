@@ -1,6 +1,6 @@
 import type { CodexAccount, CodexAccountOverview, CodexUsage } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 export function useOrganizationCodexOverview(
   client: OpenGeniBrowserClient,

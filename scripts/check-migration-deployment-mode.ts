@@ -60,6 +60,10 @@ function main(): void {
       "  -- deployment-mode: rolling",
       `  -- ${CONTRACT_STEP_KEY}: <migration or PR after which nothing reads/writes it>`,
       "",
+      "Post-release markers are only for rolling concurrent indexes and batched backfills.",
+      "Keep the execution directive on line 2 and put -- opengeni:post-release below it.",
+      "Never combine it with -- opengeni:pre-release (the automatic-index opt-out).",
+      "",
       `Guide: ${GUIDE_PATH} (${GUIDE_URL})`,
     ].join("\n"),
   );

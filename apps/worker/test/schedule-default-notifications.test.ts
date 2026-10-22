@@ -19,10 +19,10 @@ import {
 } from "@opengeni/db";
 import {
   acquireOwnerMigratedTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { migrate } from "../../../packages/db/src/migrate";
 import { provisionRoles } from "../../../packages/db/src/provision-roles";
 import {

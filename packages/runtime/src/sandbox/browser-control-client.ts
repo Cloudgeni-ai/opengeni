@@ -1906,14 +1906,21 @@ export class BrowserControlSessionClient {
   }
 
   async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
-    return BrowserRecordingSummary.parse(
-      await this.parent.requestForSession({
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
         method: "POST",
         path: this.path("recordings"),
         token: this.controlToken,
         body: BrowserRecordingStartRequest.parse({ targetId }),
-      }),
-    );
+      });
+    } catch (error) {
+      // A controller older than browser recording has no such route; say so
+      // instead of surfacing a bare "route not found".
+      if (isLegacyRouteMiss(error)) throw browserControllerCompatibilityError("browser recording");
+      throw error;
+    }
+    return BrowserRecordingSummary.parse(data);
   }
 
   async recording(recordingId: string): Promise<BrowserRecordingSummaryValue> {

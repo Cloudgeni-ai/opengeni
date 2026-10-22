@@ -40,7 +40,9 @@ const shellSource = [
 const workspaceShellSource = await Bun.file(
   `${import.meta.dir}/components/settings/workspace-settings-shell.tsx`,
 ).text();
-const workspacesLibSource = await Bun.file(`${import.meta.dir}/lib/workspaces.ts`).text();
+const workspacesLibSource = await Bun.file(
+  `${import.meta.dir}/../../../packages/react/src/app/lib/workspaces.tsx`,
+).text();
 // Which organization pages a person can use: one rule for the rail and the route.
 const accessSource = await Bun.file(
   `${import.meta.dir}/lib/organization-settings-access.ts`,
@@ -58,13 +60,13 @@ const organizationModelProviderSource = await Bun.file(
   `${import.meta.dir}/components/organization-model-provider-connection.tsx`,
 ).text();
 const workspaceCodexSource = await Bun.file(
-  `${import.meta.dir}/components/models/codex-models.tsx`,
+  `${import.meta.dir}/../../../apps/web/src/components/models/codex-models.tsx`,
 ).text();
 const organizationModelsSource = await Bun.file(
   `${import.meta.dir}/components/models/workspace-models-page.tsx`,
 ).text();
 const organizationCodexModelsSource = await Bun.file(
-  `${import.meta.dir}/components/models/organization-codex-models.tsx`,
+  `${import.meta.dir}/../../../apps/web/src/components/models/organization-codex-models.tsx`,
 ).text();
 const appSource = await Bun.file(`${import.meta.dir}/App.tsx`).text();
 const providerPageSource = await Bun.file(
@@ -82,7 +84,7 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
-  test("manages Gateway, OpenRouter and Opper as peer organization BYOK providers", () => {
+  test("manages Gateway, OpenRouter, Opper and Azure OpenAI as peer organization BYOK providers", () => {
     // One Models page, in Organization settings: a workspace's old Models URL
     // redirects to that workspace's page there.
     expect(routeSource).toContain("<OrganizationModelsSectionWithName");
@@ -91,6 +93,7 @@ describe("organization administration surface", () => {
     expect(organizationModelsSource).toContain('vercel: "vercel_gateway"');
     expect(organizationModelsSource).toContain('openrouter: "openrouter"');
     expect(organizationModelsSource).toContain('opper: "opper"');
+    expect(organizationModelsSource).toContain('azure_openai: "azure_openai"');
     expect(organizationCodexModelsSource).toContain("export function OrgCodexAccountPage");
     for (const method of [
       "getOrganizationModelProviderConnection",

@@ -7,7 +7,7 @@ import { OrganizationCreditBalance } from "@/components/organization-credit-bala
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
-import type { BillingSummary } from "@/types";
+import type { BillingSummary } from "@opengeni/react/app/types";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
 export const previewPlans: BillingSubscriptionCatalog["plans"] = [

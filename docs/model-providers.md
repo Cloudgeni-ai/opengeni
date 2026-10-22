@@ -129,7 +129,9 @@ JSON must not declare overlay kinds (`vercel-gateway-managed`,
 `opper-organization`, `xai-subscription`) or reserved provider ids (`openai`,
 `azure`, `codex-subscription`, `xai-subscription`, `opengeni-gateway`,
 `workspace-gateway`, `openrouter`, `workspace-openrouter`, `opper`,
-`workspace-opper`, `organization-opper`). `baseUrl` is origin + path (no userinfo, query,
+`workspace-opper`, `organization-opper`, `organization-openai`,
+`organization-azure-openai`; also the `direct-openai-organization` and
+`direct-azure-organization` kinds). `baseUrl` is origin + path (no userinfo, query,
 fragment). Put extra query/headers in `defaultQuery` / `defaultHeaders`;
 `Authorization` is SDK-managed. `publicDefaultQueryNames` /
 `publicDefaultHeaderNames` mark which of those appear in public definition
@@ -162,8 +164,9 @@ These connections are workspace-owned, including in the onboarding Personal
 workspace. The existing Connections API encrypts the key at rest and returns
 metadata only. Usage is externally billed to that provider account and consumes
 no Opengeni credits. Organization provider inheritance does not apply to these
-workspace connections. Replace a key, endpoint, or model by disconnecting and
-reconnecting; the new connection has a distinct model ID.
+workspace connections; to share OpenAI or Azure OpenAI across an organization's
+shared workspaces, use the organization rail below. Replace a key, endpoint, or model
+by disconnecting and reconnecting; the new connection has a distinct model ID.
 
 `directModelProvider` metadata declares the provider, model/deployment, and Azure
 endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
@@ -175,11 +178,69 @@ customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
 
+#### Organization OpenAI and Azure OpenAI
+
+Organization owners/admins can connect **OpenAI** and **Azure OpenAI once for
+the whole organization** in **Organization settings → Models**
+(`OrganizationModelProviderKind` `openai` and `azure_openai`).
+
+**OpenAI** stores only the encrypted API key and uses the official
+`https://api.openai.com/v1` Responses API with a bearer key. Admins add exact
+OpenAI model IDs as the organization's models; each is checked with the
+organization's key before it is saved (422 on failure, 409 when OpenAI is not
+connected). Products are `organization-openai/<model>` (provider
+`organization-openai`, kind `direct-openai-organization`) with the same
+conservative capabilities as workspace OpenAI, the same shared-workspace
+inheritance, organization billing and access policy
+(`/v1/organizations/:id/model-connections/openai/current/access`) as Azure
+below, and fail closed (`OrganizationOpenAIUnavailableError`) without a key.
+
+**Azure OpenAI** works the same way plus its resource endpoint
+(the same admin-only,
+same-origin browser routes as the other organization providers). The connection
+stores the encrypted API key plus the non-secret resource endpoint
+(`https://RESOURCE.openai.azure.com`, normalized to `…/openai/v1`; proxies are
+refused). The upsert request hash binds the key digest **and** the endpoint, so an
+idempotent replay that names another endpoint conflicts and changing the
+endpoint writes a new connection version. The endpoint is returned in
+connection responses; the key never is. Revocation clears the key and keeps the
+endpoint, so curated deployments stay listed as not ready.
+
+Admins then add **deployments** as the organization's custom models: the
+`upstreamModelId` is the exact Azure deployment name (same rule as workspace
+Azure). Before saving, the API runs the setup check above against the
+organization's endpoint and key; failures return a safe 422 (409 when Azure is
+not connected) and save nothing. Products are
+`organization-azure-openai/<deployment>` (provider `organization-azure-openai`,
+kind `direct-azure-organization`), use Responses with the `azure-openai` wire
+profile and the same conservative capabilities as workspace Azure (no reasoning
+control, no hosted web search), and send the key as Azure's `api-key` header on
+`<endpoint>/responses`. They inherit into current and future shared workspaces
+only (Personal workspaces stay local, by the same RLS rule as the other
+organization API-key rails), are billed to the organization's Azure account with
+no Opengeni credits, and are narrowed by
+`/v1/organizations/:id/model-connections/azure_openai/current/access`. The
+workspace catalog reads the endpoint without decrypting; the worker loads the
+active key and endpoint for the turn. A missing or revoked connection fails
+closed (`OrganizationAzureOpenAIUnavailableError`) and never falls back to the
+deployment's own OpenAI/Azure credentials. The endpoint is part of each model's
+definition version, so an accepted turn never silently moves to another
+resource.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
 `loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
 provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
+`withOrganizationDirectCredential` in `packages/config/src/index.ts`,
+`packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
+`loadOrganizationModelProviderCredential`), migration
+`packages/db/drizzle/0898_organization_direct_openai_model_providers.sql`,
+`settingsWithOrganizationProviderCredentials` in
+`packages/core/src/model-provider-credentials.ts`,
+`apps/api/src/routes/organization-model-providers.ts`, and the organization
+provider hook `apps/web/src/components/organization-model-provider-connection.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -549,15 +610,19 @@ derives both from the provider kind:
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |
+| Organization OpenAI                 | organization connection       | organization           | external         |
+| Organization Azure OpenAI           | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
 `organization_connection` is the peer organization-owned broker. Organization
-admins connect Vercel AI Gateway, OpenRouter, or Opper once in Organization
-settings and curate explicit custom model slugs. Active products use
-`organization-gateway/`, `organization-openrouter/`, or `organization-opper/`,
+admins connect Vercel AI Gateway, OpenRouter, Opper, OpenAI, or Azure OpenAI
+once in Organization settings and curate explicit custom model slugs (Azure:
+deployment names). Active products use `organization-gateway/`,
+`organization-openrouter/`, `organization-opper/`, `organization-openai/`, or
+`organization-azure-openai/`,
 are externally billed to
 the organization provider account, and inherit into current and future shared
 workspaces only. Canonical Personal workspaces remain local. Workspace provider
@@ -1296,19 +1361,47 @@ always-visible base set) so the model can discover them without preloading
 every schema. It does not search the public web and must not be presented as a
 fallback for native `web_search`.
 
-Progressive disclosure is selected explicitly per resolved provider:
+Native progressive-disclosure routes (`codex_native`, `openai_native`) retain
+hosted client `tool_search`, `tool_list`, native search output definitions and
+direct function calls. `generic_dispatch` retains ordinary search/list/invoke
+controls. Ranked discovery loads the strongest match per explicit query clause;
+generic receipts also return compact alternatives. Native search outputs cannot
+carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+operation-only queries and no matches disclose no schemas. Exact
+`names` loads complete schemas. An optional decision model handles ambiguous
+searches from a wider candidate set; strong lexical matches skip inference.
+Rank is not calibrated certainty: the agent should check a loaded match and can
+load an alternative by name. In generic receipts, with `schemasLoaded:true`, only the receipt's
+`tools` have loaded schemas; its `suggestions` remain compact.
+The original SDK tool objects remain in the execution registry; remembered names
+bind through `resolveMissingFunctionTool`, with approvals unchanged.
 
-- **Codex subscription — `codex_native`:** native client `tool_search`; deferred
-  schemas stay off the first-request tool block. A remembered authorized name
-  binds through `resolveMissingFunctionTool` without requiring another search.
-- **Built-in direct OpenAI/Azure Responses — `openai_native`:** the runtime keeps
-  the original tool objects available to that same hook with the SDK deferred
-  gate disabled, removes lazy schemas only from the provider request, and
-  returns those same objects from native client `tool_search`.
-- **Other ordinary function-calling providers — `generic_dispatch`:** the model
-  receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
-  protocol extension is required. This includes an OpenAI-compatible custom base
-  URL: configuring the built-in OpenAI slot does not prove native-search support.
+Selection is frozen on the search call. Native outputs retain the SDK's normal
+`tool_search_output` definitions; generic definitions are appended after their
+ordinary result. Native history is not migrated to text declarations or a
+different tool block. An execution-only native registration on generic routes
+can finish interrupted historical native calls after a provider change.
+Historical results are never rerun. Interaction-family disclosures keep their
+existing route-specific projection: the verified Codex route accepts
+`additional_tools`; other Responses routes use text plus native exact-name loading.
+No new live-provider compatibility claim is made.
+
+Static prompt/control-schema changes at upgrade invalidate the old cached prefix
+once for existing sessions; this is not a zero-cache-miss deployment. After that
+upgrade, catalogs/results never rewrite earlier items or grow the tool block.
+
+The optional [shared decision-model category](decision-models.md) serves both
+tool discovery and code search. `OPENGENI_DECISION_MODEL_PROVIDER/ID/API_KEY`
+select explicit deployment-owned Jev, OpenAI Decisions or OpenRouter Decisions
+inference, not an ordinary chat model. Embedders pass a `DecisionModel` as
+`BuildAgentOptions.toolSearchDecisionModel`. No new timeout, concurrency quota
+or request cap is added. `tool_discovery.*` records received tokens and reported
+or estimated provider cost, with unknown usage left unknown. These are telemetry,
+not customer-credit debits; discovery never invokes model-usage settlement.
+It never silently borrows a customer key/subscription. Unset, failed or invalid model selection uses the same
+best-match-first lexical path. If no match can be loaded, browse with `tool_list`
+and load exact names (`schemasLoaded:false` in generic receipts).
+Cancellation propagates rather than being mistaken for an outage.
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
@@ -1347,8 +1440,11 @@ descriptions, and ordering are constant, so adding, removing, or changing a
 deferred MCP tool does not change the request's top-level tool block. The live
 DeepSeek V4 Flash 0731 probe on 2026-08-07 reused 7,680 cached input tokens on
 both post-search requests while completing search → invoke → final output.
-Generic search results are also bounded before they enter ordinary tool-output
-handling, so schema JSON is never silently middle-truncated.
+Compact receipts and detached full-schema snapshots bypass ordinary output
+truncation during replay; the existing definition/disclosure byte budgets still
+apply. Catalog changes never rewrite earlier receipts or declarations. The
+group directory is an explicit `tool_list({view:"groups"})` result, never a
+catalog-dependent prefix inserted before earlier conversation items.
 
 The native tool uses the Agents SDK's bounded `medium` search-context setting
 and preserves provider URL-citation annotations in structured conversation

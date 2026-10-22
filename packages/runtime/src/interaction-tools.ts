@@ -114,13 +114,16 @@ import { guardedMcpFetch } from "./mcp-network";
 import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
 import {
   browserActionText,
+  browserObservationDiff,
   browserObservationText,
   browserOpenText,
   browserReadText,
   browserTabsText,
+  type BrowserTextObservation,
 } from "./browser-model-text";
 import {
   computerActionText,
+  computerObservationDiff,
   computerObservationText,
   computerOpenText,
   computerTargetsText,
@@ -1015,6 +1018,31 @@ export function createInteractionAttemptToolDefinitions(
   // A retried browser_act (same operation) must dispatch the same File IDs, so
   // each operation publishes a given path at most once.
   const publishedUploads = new Map<string, Promise<string>>();
+  // The latest reading of each computer window and browser tab this attempt
+  // showed the model (not a Code Mode program, whose results the model never
+  // reads). An action's receipt shows only what changed since (refs stay with
+  // their element), rendered once when the call returns, like every tool result.
+  const computerSeen = new Map<string, Parameters<typeof computerObservationText>[0]>();
+  const seenComputerKey = (observation: { computerSessionId: string; target: { id: string } }) =>
+    `${observation.computerSessionId}\u0000${observation.target.id}`;
+  const rememberComputerReading = (
+    observation: Parameters<typeof computerObservationText>[0] & { computerSessionId: string },
+  ) => {
+    const key = seenComputerKey(observation);
+    computerSeen.delete(key);
+    computerSeen.set(key, observation);
+    while (computerSeen.size > 32) computerSeen.delete(computerSeen.keys().next().value!);
+  };
+  const browserSeen = new Map<string, BrowserTextObservation>();
+  const rememberBrowserReading = (
+    context: AttemptToolExecutionContext,
+    observation: BrowserTextObservation | undefined,
+  ) => {
+    if (context.caller.kind !== "model" || !observation) return;
+    browserSeen.delete(observation.target.id);
+    browserSeen.set(observation.target.id, observation);
+    while (browserSeen.size > 32) browserSeen.delete(browserSeen.keys().next().value!);
+  };
   const publishUploadPath = (operationId: string, path: string): Promise<string> => {
     const key = `${operationId}\u0000${path}`;
     let published = publishedUploads.get(key);
@@ -1354,8 +1382,9 @@ export function createInteractionAttemptToolDefinitions(
     idempotent: boolean;
     approval?: "none" | "human" | "policy";
     /** The model's text view of a successful result. The complete typed value
-     * stays in structuredContent; without this the text is that value as JSON. */
-    modelText?: (output: z.output<TOutput>) => string;
+     * stays in structuredContent; without this the text is that value as JSON.
+     * `context.caller` says whether the model or a Code Mode program reads it. */
+    modelText?: (output: z.output<TOutput>, context: AttemptToolExecutionContext) => string;
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -1477,7 +1506,10 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
-    modelText: browserOpenText,
+    modelText: (output, context) => {
+      rememberBrowserReading(context, output.observation);
+      return browserOpenText(output);
+    },
     execute: async (value, context) => {
       const opened = await openBrowser(
         input.transport,
@@ -1531,7 +1563,10 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
-    modelText: browserTabsText,
+    modelText: (output, context) => {
+      rememberBrowserReading(context, output.mutationObservation);
+      return browserTabsText(output);
+    },
     execute: async (value, context) =>
       await onBrowser(value, context, async ({ browserSessionId }, progress) => {
         let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
@@ -1579,7 +1614,12 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserAgentObservation,
     readOnly: true,
     idempotent: true,
-    modelText: agentObservationText,
+    modelText: (output, context) => {
+      if ("agentView" in output) rememberBrowserReading(context, output);
+      // A complete view lists more than the model's last outline holds.
+      else if (context.caller.kind === "model") browserSeen.delete(output.target.id);
+      return agentObservationText(output);
+    },
     execute: async (value, context) =>
       await onTab(value, context, "replay", async ({ browserSessionId, targetId }) => {
         const observationRequest = input.transport.observeBrowserTarget(
@@ -1755,13 +1795,25 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
-    modelText: agentActionText,
+    modelText: (receipt, context) => {
+      if (context.caller.kind !== "model") return agentActionText(receipt);
+      if ("protocolVersion" in receipt) {
+        browserSeen.delete(receipt.targetId);
+        return agentActionText(receipt);
+      }
+      const observation = receipt.observation;
+      if (!observation) return agentActionText(receipt);
+      const base = browserSeen.get(observation.target.id);
+      rememberBrowserReading(context, observation);
+      const shown = base ? browserObservationDiff(base, observation) : null;
+      return browserActionText(shown ? { ...receipt, observation: shown } : receipt);
+    },
     // An action never runs on a page that reloaded since the agent saw it.
     execute: async (value, context) =>
       await onTab(value, context, "report", async ({ browserSessionId, targetId }) => {
@@ -2270,10 +2322,12 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
-    modelText: (output) =>
-      output.capturedFrame
+    modelText: (output, context) => {
+      if (context.caller.kind === "model") rememberComputerReading(output);
+      return output.capturedFrame
         ? computerObservationText(output)
-        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`,
+        : `${computerObservationText(output)}\nNo screenshot of an app target; observe one of its windows or the screen for pixels.`;
+    },
     execute: async (value) => {
       // The tree and the pixels are independent reads of the same target;
       // a generation mismatch below re-reads the tree once. An app target
@@ -2348,7 +2402,14 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     modelInputSchema: computerActModelInputSchema,
-    modelText: computerActionText,
+    modelText: (receipt, context) => {
+      const observation = receipt.observation;
+      if (!observation || context.caller.kind !== "model") return computerActionText(receipt);
+      const base = computerSeen.get(seenComputerKey(observation));
+      rememberComputerReading(observation);
+      const shown = base ? computerObservationDiff(base, observation) : null;
+      return computerActionText(shown ? { ...receipt, observation: shown } : receipt);
+    },
     execute: async (value, context) => {
       const action = value.action;
       if (action.type === "batch") {
@@ -3976,10 +4037,14 @@ function readBrowserObservation(
  * of a value that already passed its output schema; should it ever fail, the
  * model still gets the complete value rather than an error for a call that
  * succeeded. */
-function resultModelText<T>(output: T, modelText: ((output: T) => string) | undefined): string {
+function resultModelText<T>(
+  output: T,
+  modelText: ((output: T, context: AttemptToolExecutionContext) => string) | undefined,
+  context: AttemptToolExecutionContext,
+): string {
   if (modelText) {
     try {
-      return modelText(output);
+      return modelText(output, context);
     } catch {
       // Fall through to the complete value.
     }
@@ -4055,7 +4120,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
   readOnly: boolean,
-  modelText?: (output: z.output<TOutput>) => string,
+  modelText?: (output: z.output<TOutput>, context: AttemptToolExecutionContext) => string,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -4065,7 +4130,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     );
     const result = {
       content: [
-        { type: "text" as const, text: resultModelText(structuredContent, modelText) },
+        { type: "text" as const, text: resultModelText(structuredContent, modelText, context) },
         ...(executed instanceof InteractionExecutionResult ? executed.additionalContent : []),
       ],
       structuredContent: structuredContent as NonNullable<

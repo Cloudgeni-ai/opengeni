@@ -3,15 +3,18 @@ import { useState } from "react";
 import { ChatComposer, OpenGeniProvider } from "@opengeni/react";
 import type { MachineView } from "@opengeni/react/machines";
 import type { OpenGeniClient } from "@opengeni/sdk";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { RunsOnMenuBody, runsOnSummary } from "../src/components/session/new-session-settings-menu";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import {
+  RunsOnMenuBody,
+  runsOnSummary,
+} from "@opengeni/react/app/components/session/new-session-settings-menu";
 import {
   SessionRunsOnMenuBody,
   type SessionRunsOn,
-} from "../src/components/session/sandbox-switcher";
+} from "@opengeni/react/app/components/session/sandbox-switcher";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { idleComposer } from "../src/dev/composer-chrome-fixtures";
-import { emptySessionDraft } from "../src/lib/session-create";
+import { emptySessionDraft } from "@opengeni/react/app/lib/session-create";
 import "../src/styles.css";
 
 const params = new URLSearchParams(location.search);

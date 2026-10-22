@@ -2,12 +2,9 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { RunContext, type MCPServer, type Tool } from "@openai/agents";
 import postgres from "postgres";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   acquireLease,
   advanceWorkspaceGeneration,

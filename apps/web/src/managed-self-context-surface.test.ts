@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-const contextSource = await Bun.file(`${import.meta.dir}/context.tsx`).text();
+// The web shell (context.tsx) composes the shared state machine (app-state.tsx).
+const contextSource = [
+  await Bun.file(`${import.meta.dir}/context.tsx`).text(),
+  await Bun.file(`${import.meta.dir}/../../../packages/react/src/app/app-state.tsx`).text(),
+].join("\n");
 const switcherSource = await Bun.file(
   `${import.meta.dir}/components/rail/workspace-switcher.tsx`,
 ).text();

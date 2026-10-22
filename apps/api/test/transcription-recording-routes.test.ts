@@ -15,7 +15,7 @@ import {
 } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const SECRET = "test-delegation-secret";

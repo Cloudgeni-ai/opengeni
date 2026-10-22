@@ -23,9 +23,9 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission } from "@/lib/permissions";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
  * shape (the server is authoritative) — we just trim + uppercase what the user

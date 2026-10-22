@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { OrganizationAdminSection } from "@/lib/organization-admin";
+import type { OrganizationAdminSection } from "@opengeni/react/app/lib/organization-admin";
 
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;

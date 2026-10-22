@@ -63,6 +63,7 @@ export {
   pathDirname,
   plainToolRow,
   presentedToolKind,
+  presentsToolOutputPreview,
   runOnPresentation,
   toolRowPresentation,
   truncatePreview,
@@ -153,3 +154,17 @@ export {
   parseNotificationText,
 } from "./notification-text";
 export type { NotificationBlock, NotificationSpan } from "./notification-text";
+export {
+  ANNOTATION_MAX_NOTE_LENGTH,
+  ANNOTATION_MAX_QUOTE_BYTES,
+  ANNOTATION_SOURCE_CONTEXT_BYTES,
+  annotationDisplayOrdinal,
+  annotationFromSelection,
+  annotationHasNote,
+  bestQuoteOccurrence,
+  matchingQuoteInSource,
+  occurrenceOffsets,
+  truncateAnnotationQuote,
+} from "./timeline/annotation-model";
+export type { AnnotationSelection } from "./timeline/annotation-model";
+export { annotationNoteNeedsDisclosure } from "./components/timeline-annotation-layout";

@@ -4,7 +4,7 @@ import {
   WORKSPACE_CONTROL_REASON_MAX_BYTES,
   sessionEventJsonBytes,
 } from "@opengeni/contracts";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

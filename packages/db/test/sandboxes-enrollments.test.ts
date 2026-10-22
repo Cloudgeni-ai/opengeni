@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   clearEnrollmentWentOffline,
@@ -11,6 +11,7 @@ import {
   getEnrollment,
   getLiveEnrollmentConnection,
   getSandbox,
+  getSandboxForAttempt,
   getSession,
   ingestMachineMetricsSample,
   insertMachineMetricsSeries,
@@ -684,6 +685,31 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
 
     const fetched = await getSandbox(db, workspaceId, selfhosted.id);
     expect(fetched?.id).toBe(selfhosted.id);
+
+    // A name (or any other non-id) finds nothing instead of failing the uuid cast.
+    expect(await getSandbox(db, workspaceId, "my laptop")).toBeNull();
+    expect(
+      await getSandbox(
+        db,
+        { accountId, workspaceId, subjectId: `user:${crypto.randomUUID()}` },
+        "my laptop",
+      ),
+    ).toBeNull();
+    expect(
+      await getSandboxForAttempt(
+        db,
+        {
+          accountId,
+          workspaceId,
+          subjectId: null,
+          sessionId: crypto.randomUUID(),
+          turnId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+        },
+        "my laptop",
+      ),
+    ).toBeNull();
 
     const list = await listSandboxes(db, workspaceId);
     expect(list.length).toBe(2);

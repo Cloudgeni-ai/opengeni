@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { requireLimit } from "../src/billing/limits";
 import * as codexAvailability from "../src/codex-model-availability";
 import {

@@ -5,11 +5,8 @@ import { HTTPException } from "hono/http-exception";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerConnectionRoutes } from "../src/routes/connections";
 import { registerWorkspaceModelProviderRoutes } from "../src/routes/workspace-model-providers";
 import { registerClaudeSubscriptionAccountRoutes } from "../src/routes/claude-subscription-accounts";

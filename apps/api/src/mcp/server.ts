@@ -406,14 +406,11 @@ export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
   // tools use it only when no configured public base URL is available.
   requestOrigin?: string | null;
+  /** @deprecated Ignored compatibility input since Knowledge replaced agent Memory. */
   workspaceMemoryEnabled?: boolean | undefined;
+  /** @deprecated Ignored compatibility input since Knowledge replaced agent Memory. */
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
-  /**
-   * The bound session's typed Memory selector (migration 0427), resolved by
-   * the route from the session row. `off` registers no Memory tools; `user`
-   * and `session` read the workspace layer plus their own private layer and
-   * save into that private layer. Omitted/null keeps the workspace layer.
-   */
+  /** @deprecated Ignored compatibility input; Knowledge resolves scope at execution. */
   sessionMemory?: MemoryAgentScope | null | undefined;
   /**
    * Set by the route only when the bound session has admin access right now
@@ -985,7 +982,7 @@ export function slackBotFileContentResult(
  * The first-party server as seen by MCP protocol messages that touch no tool:
  * `initialize`, `ping` and notifications. It advertises exactly what the full
  * server does (the same name, version and tools capability) without the
- * workspace, catalog, Memory and admin reads that registering tools needs.
+ * catalog and admin reads that registering tools needs.
  * Never route `tools/*` here: it lists no tools.
  */
 export function buildOpenGeniMcpProtocolServer(grant: AccessGrant): McpServer {

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { applySkillLifecycle, bootstrapWorkspace, createDb, listSkillRecords } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";

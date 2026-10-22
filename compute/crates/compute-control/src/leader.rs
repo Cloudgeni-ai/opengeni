@@ -29,6 +29,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::group::{Fenced, GcpGroup, Member, Started};
+use crate::metrics::{GaveUp, GroupSeen, Metrics};
 use crate::store::{self, Store};
 use crate::view::{GroupHost, View};
 
@@ -106,6 +107,7 @@ pub async fn lead<S: Store>(
     view: Arc<View>,
     terms: LeaseTerms,
     scaling: Option<Scaling>,
+    metrics: Arc<Metrics>,
 ) {
     loop {
         let lead = match store.try_lead().await {
@@ -121,7 +123,9 @@ pub async fn lead<S: Store>(
             }
         };
         tracing::info!("this replica leads");
-        led(&store, &view, terms, scaling.as_ref(), lead).await;
+        metrics.leads(true);
+        led(&store, &view, terms, scaling.as_ref(), &metrics, lead).await;
+        metrics.leads(false);
         tracing::warn!("this replica no longer leads");
     }
 }
@@ -131,10 +135,12 @@ async fn led<S: Store>(
     view: &View,
     terms: LeaseTerms,
     scaling: Option<&Scaling>,
+    metrics: &Arc<Metrics>,
     mut lead: S::Lead,
 ) {
     let group = scaling.map(|scaling| Arc::clone(&scaling.group));
-    let mut leading = Leading::new(Arc::clone(store), terms, group);
+    let mut leading =
+        Leading::new(Arc::clone(store), terms, group).reporting_to(Arc::clone(metrics));
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scaled: Option<Instant> = None;
@@ -145,13 +151,20 @@ async fn led<S: Store>(
             return;
         }
         leading.tick(view).await;
+        metrics.still(leading.still());
         if let Some(scaling) = scaling
             && scaled.is_none_or(|when| when.elapsed() >= scaling.every)
         {
             scaled = Some(Instant::now());
             match scale(scaling, view, &mut boots).await {
-                Ok(prefix) => leading.prefix = Some(prefix),
-                Err(error) => tracing::warn!(%error, "sizing the host group failed"),
+                Ok((prefix, seen)) => {
+                    leading.prefix = Some(prefix);
+                    metrics.group(seen);
+                }
+                Err(error) => {
+                    metrics.group_failed();
+                    tracing::warn!(%error, "sizing the host group failed");
+                }
             }
         }
     }
@@ -168,10 +181,11 @@ pub struct Leading<L> {
     group: Option<Arc<GcpGroup>>,
     prefix: Option<String>,
     fences: JoinSet<FenceResult>,
-    /// The host each fence under way is for.
-    fencing: HashMap<tokio::task::Id, HostId>,
+    /// The host each fence under way is for, and whether it was draining.
+    fencing: HashMap<tokio::task::Id, (HostId, bool)>,
     /// Hosts whose last fence failed, and when the next may start.
     again_at: HashMap<HostId, Instant>,
+    metrics: Arc<Metrics>,
 }
 
 type FenceResult = (HostId, Result<Option<usize>, String>);
@@ -198,7 +212,20 @@ impl<L: Leases> Leading<L> {
             fences: JoinSet::new(),
             fencing: HashMap::new(),
             again_at: HashMap::new(),
+            metrics: Arc::default(),
         }
+    }
+
+    /// Counts what it gives up on and the fences that fail in `metrics`.
+    #[must_use]
+    pub fn reporting_to(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// How long each host's renewal count has stood still, as seen now.
+    pub fn still(&self) -> impl Iterator<Item = (HostId, Duration)> + '_ {
+        self.expiry.still(self.clock.now())
     }
 
     /// Reads every host's renewal count and gives up on, or fences, each
@@ -220,17 +247,18 @@ impl<L: Leases> Leading<L> {
         }
         let lapsed: Vec<_> = self.expiry.expired(now).collect();
         for (host, renewals) in lapsed {
+            let draining = view.draining(host);
             match self.lapse(host, view).await {
                 Lapse::GiveUp => {
                     let result = self.leases.give_up(host, renewals).await;
-                    self.given_up(host, result.map_err(|error| error.to_string()));
+                    self.given_up(host, draining, result.map_err(|error| error.to_string()));
                 }
                 Lapse::Fence(group, name) => {
                     let leases = Arc::clone(&self.leases);
                     let task = self
                         .fences
                         .spawn(fence_and_give_up(leases, group, host, name, renewals));
-                    self.fencing.insert(task.id(), host);
+                    self.fencing.insert(task.id(), (host, draining));
                 }
                 Lapse::Later => {}
             }
@@ -239,7 +267,7 @@ impl<L: Leases> Leading<L> {
 
     /// Whether `host` is fenced first, given up on now, or decided later.
     async fn lapse(&mut self, host: HostId, view: &View) -> Lapse {
-        if self.fencing.values().any(|fenced| *fenced == host)
+        if self.fencing.values().any(|(fenced, _)| *fenced == host)
             || self
                 .again_at
                 .get(&host)
@@ -284,14 +312,16 @@ impl<L: Leases> Leading<L> {
                 Ok((id, (_, result))) => (id, result),
                 Err(error) => (error.id(), Err(format!("the fence ended: {error}"))),
             };
-            if let Some(host) = self.fencing.remove(&id) {
-                self.given_up(host, result);
+            if let Some((host, draining)) = self.fencing.remove(&id) {
+                self.given_up(host, draining, result);
             }
         }
     }
 
-    /// Takes in how giving up on `host` went.
-    fn given_up(&mut self, host: HostId, result: Result<Option<usize>, String>) {
+    /// Takes in how giving up on `host`, `draining` or not, went. A
+    /// draining host given up on with no sandboxes left was removed as
+    /// planned; any other was lost.
+    fn given_up(&mut self, host: HostId, draining: bool, result: Result<Option<usize>, String>) {
         match result {
             Ok(given_up) => {
                 // Either way it starts afresh: a host that renewed is
@@ -299,11 +329,20 @@ impl<L: Leases> Leading<L> {
                 // up on is no longer listed.
                 self.expiry.forget(host);
                 self.again_at.remove(&host);
-                if let Some(sandboxes) = given_up {
-                    tracing::warn!(host = host.0, sandboxes, "gave up on a host");
+                match given_up {
+                    Some(0) if draining => {
+                        self.metrics.gave_up(GaveUp::Removed);
+                        tracing::info!(host = host.0, "a drained host is gone");
+                    }
+                    Some(sandboxes) => {
+                        self.metrics.gave_up(GaveUp::Lost);
+                        tracing::warn!(host = host.0, sandboxes, "gave up on a host");
+                    }
+                    None => {}
                 }
             }
             Err(error) => {
+                self.metrics.give_up_failed();
                 tracing::warn!(%error, host = host.0, "giving up on a host failed");
                 self.again_at.insert(host, Instant::now() + FENCE_AGAIN);
             }
@@ -484,22 +523,13 @@ fn bring(seen: &mut GroupView, host: &GroupHost, policy: &ScalePolicy) {
         seen.memory_rooms = seen
             .memory_rooms
             .saturating_add(policy.rooms(host.free_memory_mib, None));
-        if let (Some(cpu), Some(free)) = (host.cpu_millis, host.free_cpu_millis) {
-            seen.cpu_millis += cpu;
-            seen.free_cpu_millis += free;
-            seen.most_cpu_millis = seen.most_cpu_millis.max(cpu);
-            seen.host_cpu_millis = seen
-                .host_cpu_millis
-                .max(host.registered_cpu_millis.unwrap_or(cpu));
-            seen.rooms = seen
-                .rooms
-                .saturating_add(policy.rooms(host.free_memory_mib, Some(free)));
-        } else {
-            seen.cpu_unreported += 1;
-            seen.rooms = seen
-                .rooms
-                .saturating_add(policy.rooms(host.free_memory_mib, None));
-        }
+        seen.cpu_millis += host.cpu_millis;
+        seen.free_cpu_millis += host.free_cpu_millis;
+        seen.most_cpu_millis = seen.most_cpu_millis.max(host.cpu_millis);
+        seen.host_cpu_millis = seen.host_cpu_millis.max(host.registered_cpu_millis);
+        seen.rooms = seen
+            .rooms
+            .saturating_add(policy.rooms(host.free_memory_mib, Some(host.free_cpu_millis)));
     }
 }
 
@@ -516,7 +546,13 @@ fn grown_size(target_size: u32, seen: &GroupView, usable: u32, max_hosts: u32) -
 /// as booting for [`Scaling::boot_within`]; one stalled past that keeps
 /// its place in the group but brings nothing, so the group grows past it.
 /// Returns the prefix of its instances' names.
-async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Result<String> {
+/// Sizes the group once; answers its instances' name prefix and how it
+/// looked.
+async fn scale(
+    scaling: &Scaling,
+    view: &View,
+    boots: &mut Boots,
+) -> anyhow::Result<(String, GroupSeen)> {
     let described = scaling.group.describe().await?;
     let prefix = format!("{}-", described.base_instance_name);
     let members = scaling.group.members().await?;
@@ -551,7 +587,12 @@ async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Res
         }
         ScaleDecision::Hold => {}
     }
-    Ok(prefix)
+    let seen = GroupSeen {
+        view: seen,
+        size: described.target_size,
+        max: scaling.policy.max_hosts,
+    };
+    Ok((prefix, seen))
 }
 
 #[cfg(test)]
@@ -683,9 +724,9 @@ mod tests {
             draining: false,
             memory_mib: 64 * GIB,
             free_memory_mib: free_gib * GIB,
-            cpu_millis: None,
-            free_cpu_millis: None,
-            registered_cpu_millis: None,
+            cpu_millis: 30_000,
+            free_cpu_millis: 30_000,
+            registered_cpu_millis: 30_000,
         }
     }
 
@@ -803,9 +844,9 @@ mod tests {
     #[tokio::test]
     async fn spare_in_slivers_across_hosts_holds_no_room_and_grows_the_group() {
         let sliver = GroupHost {
-            cpu_millis: Some(7500),
-            free_cpu_millis: Some(1500),
-            registered_cpu_millis: Some(7500),
+            cpu_millis: 7500,
+            free_cpu_millis: 1500,
+            registered_cpu_millis: 7500,
             ..live(64)
         };
         let members = [
@@ -838,9 +879,9 @@ mod tests {
     #[tokio::test]
     async fn hosts_guaranteeing_no_processor_time_now_grow_the_group() {
         let none = GroupHost {
-            cpu_millis: Some(0),
-            free_cpu_millis: Some(0),
-            registered_cpu_millis: Some(7500),
+            cpu_millis: 0,
+            free_cpu_millis: 0,
+            registered_cpu_millis: 7500,
             ..live(64)
         };
         let members = [
@@ -858,13 +899,12 @@ mod tests {
         let seen = Boots::default().count(4, &members, &registered, BOOTING, &POLICY);
         assert_eq!(
             (
-                seen.cpu_unreported,
                 seen.cpu_millis,
                 seen.host_cpu_millis,
                 seen.most_cpu_millis,
                 seen.rooms
             ),
-            (0, 0, 7500, 0, 0),
+            (0, 7500, 0, 0),
             "{seen:?}"
         );
         assert_eq!(POLICY.decide(&seen), ScaleDecision::Grow { to: 5 });

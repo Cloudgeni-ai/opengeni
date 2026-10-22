@@ -16,6 +16,9 @@ import {
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const DropdownMenuContainedPortal = containedPortal(DropdownMenuPrimitive.Portal);
 
 const MENU_MOTION_CLASS =
   "data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95";
@@ -27,7 +30,7 @@ function DropdownMenu({ ...props }: React.ComponentProps<typeof DropdownMenuPrim
 function DropdownMenuPortal({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Portal>) {
-  return <DropdownMenuPrimitive.Portal data-slot="dropdown-menu-portal" {...props} />;
+  return <DropdownMenuContainedPortal data-slot="dropdown-menu-portal" {...props} />;
 }
 
 function DropdownMenuTrigger({
@@ -42,7 +45,7 @@ function DropdownMenuContent({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   return (
-    <DropdownMenuPrimitive.Portal>
+    <DropdownMenuContainedPortal>
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
@@ -54,7 +57,7 @@ function DropdownMenuContent({
         )}
         {...props}
       />
-    </DropdownMenuPrimitive.Portal>
+    </DropdownMenuContainedPortal>
   );
 }
 
@@ -66,8 +69,10 @@ function DropdownMenuItem({
   className,
   inset,
   variant = "default",
+  disabled,
   ...props
-}: React.ComponentProps<typeof DropdownMenuPrimitive.Item> & {
+}: Omit<React.ComponentProps<typeof DropdownMenuPrimitive.Item>, "disabled"> & {
+  disabled?: boolean | undefined;
   inset?: boolean | undefined;
   variant?: "default" | "destructive" | undefined;
 }) {
@@ -77,6 +82,7 @@ function DropdownMenuItem({
       data-inset={inset}
       data-variant={variant}
       className={cn(MENU_ITEM_CLASS, "data-[inset]:pl-9", className)}
+      {...(disabled === undefined ? {} : { disabled })}
       {...props}
     />
   );
@@ -114,12 +120,16 @@ function DropdownMenuRadioGroup({
 function DropdownMenuRadioItem({
   className,
   children,
+  disabled,
   ...props
-}: React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem>) {
+}: Omit<React.ComponentProps<typeof DropdownMenuPrimitive.RadioItem>, "disabled"> & {
+  disabled?: boolean | undefined;
+}) {
   return (
     <DropdownMenuPrimitive.RadioItem
       data-slot="dropdown-menu-radio-item"
       className={cn(MENU_ITEM_CLASS, className)}
+      {...(disabled === undefined ? {} : { disabled })}
       {...props}
     >
       {children}
@@ -165,8 +175,11 @@ function DropdownMenuSeparator({
 function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
+      // The item carries the key in aria-keyshortcuts; glyphs like "⇧⌘,"
+      // would only garble its accessible name.
+      aria-hidden
       data-slot="dropdown-menu-shortcut"
-      className={cn(MENU_META_CLASS, "tracking-widest", className)}
+      className={cn(MENU_META_CLASS, "tracking-widest pointer-coarse:hidden", className)}
       {...props}
     />
   );

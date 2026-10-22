@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type DelegatedAccessTokenPayload } from "@opengeni/contracts";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { integrationCommitGrant } from "../src/integrations/integration-commit-authority";
 
 const secret = "integration-commit-authority-test-secret";

@@ -990,6 +990,7 @@ fn attach_browser_controller(
         Ok(manager) => {
             let manager = Arc::new(manager.with_update_drain(update_drain));
             manager.spawn_empty_controller_reaper();
+            manager.spawn_detached_browser_sweep();
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),

@@ -3,11 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createConnectionIdempotently, ConnectionCreateIdempotencyError } from "../src/index";
 import {

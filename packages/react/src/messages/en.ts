@@ -1303,7 +1303,7 @@ export const englishMessages = {
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
-    "Out of credits for this model. Add credits to continue; the conversation is preserved.",
+    "Your remaining credits don't cover this model. Choose a model they cover or add credits. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
@@ -1331,7 +1331,7 @@ export const englishMessages = {
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.",
+    "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -1795,6 +1795,9 @@ export const englishMessages = {
     "Billed to the organization Anthropic API account",
   "modelPolicy.billedToTheOrganizationOpenrouter": "Billed to the organization OpenRouter account",
   "modelPolicy.billedToTheOrganizationOpper": "Billed to the organization Opper account",
+  "modelPolicy.billedToTheOrganizationOpenai": "Billed to the organization OpenAI API account",
+  "modelPolicy.billedToTheOrganizationAzureOpenai":
+    "Billed to the organization Azure OpenAI account",
   "modelPolicy.billedToTheOrganizationProvider": "Billed to the organization provider account",
   "modelPolicy.billedToTheOrganizationVercel": "Billed to the organization Vercel account",
   "modelPolicy.billedToTheWorkspaceAnthropic": "Billed to the workspace Anthropic API account",
@@ -1822,7 +1825,7 @@ export const englishMessages = {
   "modelPolicy.freeCredits": "Free credits",
   "modelPolicy.freeInThisDeployment": "Free in this deployment",
   "modelPolicy.models": "Models",
-  "modelPolicy.needsCredits": "Needs credits",
+  "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",
@@ -2002,6 +2005,13 @@ export const englishMessages = {
     "results folded into model context — no list available.",
   "native.timeline.activity.thinking": "Thinking",
   "native.timeline.activity.thought": "Thought",
+  "native.timeline.annotations.done": "Done",
+  "native.timeline.annotations.removeAllTitle_one": "Remove this annotation?",
+  "native.timeline.annotations.removeAllTitle_other": "Remove {count} annotations?",
+  "native.timeline.annotations.removeAllMessage_one": "Your note will be lost.",
+  "native.timeline.annotations.removeAllMessage_other": "Your notes will be lost.",
+  "native.timeline.annotations.removeAllConfirm": "Remove",
+  "native.timeline.annotations.cancel": "Cancel",
   "native.timeline.composer.errorDismiss": "{error} Dismiss",
   "native.timeline.composer.fast": "Fast",
   "native.timeline.composer.ultrafast": "Ultrafast",
@@ -2678,6 +2688,74 @@ export const englishMessages = {
   "secretRefChip.secret": "Secret:",
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
+  "sessionAdmission.cantRecheckNote":
+    "Someone with permission to control this session can recheck after the issue is resolved.",
+  "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
+  "sessionAdmission.chooseMachine": "Choose machine",
+  "sessionAdmission.copyRequestTo": "Copy request to {owner}",
+  "sessionAdmission.genericBody":
+    "{product} couldn't start the next step. Your queued work is saved.",
+  "sessionAdmission.genericNext":
+    "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
+  "sessionAdmission.genericTitle": "Couldn't start",
+  "sessionAdmission.grantBody":
+    "A personal resource needed by this chat hasn't been authorized. Your queued work is saved.",
+  "sessionAdmission.grantNext":
+    "Ask its owner to grant access, or choose a resource you can use. Then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.grantTitle": "Resource permission needed",
+  "sessionAdmission.machineChangeFailed":
+    "The machine change could not be confirmed. Refresh and try again.",
+  "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
+  "sessionAdmission.machineChangedNext":
+    "Recheck access to try it on the selected machine. It will not retry automatically.",
+  "sessionAdmission.machineChangedTitle": "Machine changed",
+  "sessionAdmission.membershipBody":
+    "The person who started this work needs workspace access. Your queued work is saved.",
+  "sessionAdmission.membershipNext":
+    "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.membershipTitle": "Workspace access needed",
+  "sessionAdmission.moving": "Moving…",
+  "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
+  "sessionAdmission.noMachineChoices":
+    "No workspace or cloud machine is available for this chat right now.",
+  "sessionAdmission.otherMachineDraftNext":
+    "Your draft stays here. Choose a machine you can use, or ask {owner} about sharing this machine with the workspace.",
+  "sessionAdmission.otherMachineExplanation":
+    "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
+  "sessionAdmission.otherMachineQueuedNext":
+    "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownMachineDraftNext":
+    "Your draft stays here. Choose a workspace or cloud machine, or ask a workspace admin to share this machine.",
+  "sessionAdmission.ownMachineExplanation":
+    "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
+  "sessionAdmission.ownMachineQueuedNext":
+    "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownerRequest":
+    "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
+  "sessionAdmission.pausedNote":
+    "This workstream is also paused. Use the existing Resume controls when you are ready; rechecking does not clear that pause.",
+  "sessionAdmission.permissionBody":
+    "The next step was blocked by a permission check. Your queued work is saved.",
+  "sessionAdmission.permissionNext":
+    "Check access to this chat's machine and resources with their owner or a workspace admin. After access changes, recheck to continue. It will not retry automatically.",
+  "sessionAdmission.permissionTitle": "Permission needed",
+  "sessionAdmission.preSendTitle": "Choose a machine before sending",
+  "sessionAdmission.recheckAccess": "Recheck access",
+  "sessionAdmission.recheckFailed":
+    "The recheck could not be confirmed. Check the session status before trying again.",
+  "sessionAdmission.rechecking": "Rechecking…",
+  "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
+  "sessionAdmission.refreshRequiredNote":
+    "Session controls changed. Refresh the status before rechecking.",
+  "sessionAdmission.refreshSessionStatus": "Refresh session status",
+  "sessionAdmission.refreshing": "Refreshing…",
+  "sessionAdmission.requestCopied": "Request copied",
+  "sessionAdmission.requestCopiedNote":
+    "Paste it into a message to the owner. Nothing has been sent.",
+  "sessionAdmission.savedMessageMachineNote":
+    "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
+  "sessionAdmission.theMachineOwner": "the machine owner",
+  "sessionAdmission.tryAgain": "Try again",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
   "sessionAgentsModel.idle": "Idle",
@@ -3474,8 +3552,12 @@ export const englishMessages = {
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",
+  "timeline.shared.loadingFullOutput": "Loading the full output…",
   "timeline.shared.noOutput": "(no output)",
   "timeline.shared.outputBoundedAt": "Output bounded at",
+  "timeline.shared.outputPreviewFailed": "Showing a preview. The full output didn't load.",
+  "timeline.shared.outputPreviewOnly": "Showing a preview of this output.",
+  "timeline.shared.retryFullOutput": "Retry",
   "timeline.shared.screenshot": "Screenshot",
   "timeline.shared.showFullOutputLengthLines": "show full output ({length} lines)",
   "timeline.shared.truncationReason": "reason",
@@ -3645,6 +3727,7 @@ export const englishMessages = {
   "timeline.toolRenderers.isNotAFile": "is not a file",
   "timeline.toolRenderers.isNotASupportedImage": "is not a supported image",
   "timeline.toolRenderers.loadingImage": "loading image…",
+  "timeline.toolRenderers.loadingOutput": "Loading output…",
   "timeline.toolRenderers.loadingRetainedNoun": "loading retained {noun}…",
   "timeline.toolRenderers.loadingTheGeneratedImage": "Loading the generated image…",
   "timeline.toolRenderers.loadingTheRetainedNoun": "Loading the retained {noun}…",

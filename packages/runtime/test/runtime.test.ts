@@ -108,6 +108,7 @@ import {
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
   SESSION_TITLE_GENERATION_INSTRUCTIONS,
   mcpToolErrorOutput,
+  mcpUnavailableReason,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
@@ -191,9 +192,9 @@ import {
 import {
   ScriptedModel,
   functionCall as scriptedFunctionCall,
-  startTestMcpServer,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -12978,6 +12979,12 @@ describe("runtime event normalization", () => {
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
         expect(toolNames.some((name) => name.startsWith("flaky__"))).toBe(false);
+        // Tool discovery can say which integration is missing and why, from the
+        // same public projection: never the provider's response text.
+        expect([...prepared.unavailableMcpServers.keys()]).toEqual(["flaky"]);
+        expect(prepared.unavailableMcpServers.get("flaky")).toMatch(
+          /^connected but could not list its tools \(.+\)/,
+        );
       } finally {
         await prepared.close();
       }
@@ -12994,11 +13001,170 @@ describe("runtime event normalization", () => {
       );
       expect(warned).toBe(true);
       expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
+      // The warning names the failure's structural cause so operators can tell
+      // a provider error from a protocol mismatch, still without message text.
+      const listFailure = warnings
+        .flat()
+        .find(
+          (arg) =>
+            typeof arg === "object" &&
+            arg !== null &&
+            (arg as { errorCode?: unknown }).errorCode === "mcp_tools_list_failed",
+        ) as Record<string, unknown> | undefined;
+      expect(listFailure).toBeDefined();
+      expect(
+        listFailure!.causeName !== undefined ||
+          listFailure!.causeCode !== undefined ||
+          listFailure!.causeNumber !== undefined,
+      ).toBe(true);
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
       healthy.close();
     }
+  });
+
+  test("an unavailable integration's MCP SDK 401 asks for sign-in at connect and list", async () => {
+    // The SDK's HTTP transport reports a 401 as a numeric `code` with no
+    // `status`, which is also how an expired connection credential surfaces.
+    const connectUnauthorized = startTestMcpServer({ unauthorizedForMethods: ["initialize"] });
+    const listUnauthorized = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "connect-auth", url: connectUnauthorized.url, cacheToolsList: false },
+            { id: "list-auth", url: listUnauthorized.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "connect-auth", optional: true },
+          { kind: "mcp", id: "list-auth", optional: true },
+        ],
+      );
+      try {
+        await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        expect(Object.fromEntries(prepared.unavailableMcpServers)).toEqual({
+          "connect-auth":
+            "could not connect (HTTP 401, Error); its connection may need to be signed in again",
+          "list-auth":
+            "connected but could not list its tools (HTTP 401, Error); its connection may need to be signed in again",
+        });
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      connectUnauthorized.close();
+      listUnauthorized.close();
+    }
+  });
+
+  test("an unavailable integration's positive JSON-RPC error code is not read as an HTTP status", async () => {
+    // A server may answer HTTP 200 with a JSON-RPC error whose application code
+    // is positive. The SDK surfaces it as McpError with that code; it is not an
+    // HTTP status, so it must not claim one or suggest signing in again.
+    const jsonRpcError = (method: string) =>
+      Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: async (request) => {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          const message = (await request.json()) as { id?: unknown; method?: string };
+          if (message.id === undefined) return new Response(null, { status: 202 });
+          if (message.method === method) {
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              error: { code: method === "initialize" ? 401 : 403, message: "provider text" },
+            });
+          }
+          if (message.method === "initialize") {
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "json-rpc-error", version: "1.0.0" },
+              },
+            });
+          }
+          return Response.json({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32_601, message: "method not found" },
+          });
+        },
+      });
+    const connectError = jsonRpcError("initialize");
+    const listError = jsonRpcError("tools/list");
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "connect-rpc",
+              url: `http://127.0.0.1:${connectError.port}/mcp`,
+              cacheToolsList: false,
+            },
+            {
+              id: "list-rpc",
+              url: `http://127.0.0.1:${listError.port}/mcp`,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "connect-rpc", optional: true },
+          { kind: "mcp", id: "list-rpc", optional: true },
+        ],
+      );
+      try {
+        await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        expect(Object.fromEntries(prepared.unavailableMcpServers)).toEqual({
+          "connect-rpc": "could not connect (McpError code 401)",
+          "list-rpc": "connected but could not list its tools (McpError code 403)",
+        });
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      connectError.stop(true);
+      listError.stop(true);
+    }
+  });
+
+  test("unavailable reasons read only HTTP-range numeric codes as a status", () => {
+    const failure = (fields: Record<string, unknown>) =>
+      Object.assign(new Error("provider body that must not be quoted"), fields);
+    expect(mcpUnavailableReason(failure({ code: 403 }), "list")).toBe(
+      "connected but could not list its tools (HTTP 403, Error); its connection may need to be signed in again",
+    );
+    // JSON-RPC error codes stay codes.
+    expect(mcpUnavailableReason(failure({ code: -32_603 }), "list")).toBe(
+      "connected but could not list its tools (Error code -32603)",
+    );
+    // An explicit status wins, and a different numeric code is still shown.
+    expect(mcpUnavailableReason(failure({ status: 400, code: 7 }), "connect")).toBe(
+      "could not connect (HTTP 400, Error code 7)",
+    );
+    expect(mcpUnavailableReason(failure({ status: 401, code: 401 }), "connect")).toBe(
+      "could not connect (HTTP 401, Error); its connection may need to be signed in again",
+    );
+    // McpError's code is the server's JSON-RPC code, never an HTTP status, even
+    // when positive and in the HTTP range, including from another SDK copy.
+    expect(mcpUnavailableReason(new McpError(403, "provider text"), "list")).toBe(
+      "connected but could not list its tools (McpError code 403)",
+    );
+    expect(mcpUnavailableReason(failure({ name: "McpError", code: 401 }), "connect")).toBe(
+      "could not connect (McpError code 401)",
+    );
   });
 
   test("REQUIRED server whose tools/list throws at RUN time still fails the turn", async () => {

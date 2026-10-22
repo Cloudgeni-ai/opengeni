@@ -1,6 +1,12 @@
+import {
+  WORKSPACE_CONTROL_REASON_MAX_BYTES,
+  workspaceControlUtf8Bytes,
+} from "./workspace-control-event";
+export * from "./workspace-control-event";
 import { defineSchema } from "./define-schema";
 export * from "./session-target";
 export * from "./turn-serving-policy";
+import { AzureOpenAIEndpoint } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -427,7 +433,12 @@ export type CapabilityDescriptor = {
   };
   portExposure: { kind: PortExposureKind; supportsOnDemandPorts: boolean }; // runloop=false; blaxel only true
   workspaceRoot: string; // os-overridable; per-backend default (providers owns; os defers)
-  nativeBucketMount: boolean; // modal true -> mount/signed-download branch
+  /**
+   * How file resources in object storage can reach the box: the provider's own
+   * bucket mount (modal), an in-box rclone FUSE mount, or not at all. A "none"
+   * backend always receives files as pre-signed downloads.
+   */
+  bucketMount: "native" | "in-container" | "none";
   persistable: boolean;
   supportsRunAs: boolean;
 };
@@ -470,7 +481,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-fs", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: true,
+    bucketMount: "native",
     persistable: true,
     supportsRunAs: true,
   },
@@ -495,7 +506,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -520,7 +531,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // CR9: pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -545,7 +556,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/home/user",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -570,7 +581,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true }, // only on-demand backend
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -595,7 +606,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -621,7 +632,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/vercel/sandbox",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -646,7 +657,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -673,7 +684,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: false,
     supportsRunAs: false,
   },
@@ -698,7 +709,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "none", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -745,7 +756,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -775,7 +786,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -809,7 +820,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: true,
     // The box agent runs as root on Linux; each request still gates on the
     // live agent's Hello `run_as` capability.
@@ -2816,61 +2827,6 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Model defaults an organization owner or admin sets once for every workspace
- * in the organization. Each workspace follows them until it sets its own
- * value; a workspace value always wins, field by field and model by model.
- * Subscriptions and keys are not defaults: they stay organization resources
- * that are shared with workspaces.
- */
-export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    /** Model and reasoning for new chats and schedules; null leaves it automatic. */
-    sessionDefaults: WorkspaceSessionDefaults.nullable(),
-    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
-    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
-    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
-    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
-    /** Automatic compaction trigger by exact model id. */
-    modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
-    updatedAt: z.string().nullable(),
-  }),
-);
-export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
-
-export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
-  sessionDefaults: null,
-  allowedProviders: null,
-  allowedModels: null,
-  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
-  updatedAt: null,
-});
-
-/**
- * PATCH body for organization model defaults. Each field is independent:
- * omitted keeps it, `sessionDefaults: null` makes it automatic again,
- * `modelPolicy` replaces both allowlists at once (null allows everything),
- * and compaction merges by exact model id (null resets just that model).
- */
-export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
-      modelPolicy: z
-        .object({
-          allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
-          allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
-        })
-        .nullable()
-        .optional(),
-      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
-    })
-    .strict(),
-);
-export type UpdateOrganizationModelDefaultsRequest = z.infer<
-  typeof UpdateOrganizationModelDefaultsRequest
->;
-
-/**
  * Whether owners and admins may give an agent session admin access. Off by
  * default; turning it off ends every session's admin access.
  */
@@ -2967,6 +2923,24 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** Realtime voice models a voice conversation can run on. */
+export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "opengeni-azure/gpt-live-1",
+    "gpt-live-1-boulder-alpha",
+    "supergrok/grok-voice-think-fast-2.0",
+    "opengeni-gateway/openai/gpt-realtime-2.1",
+    "opengeni-gateway/openai/gpt-realtime-mini",
+    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-gateway/openai/gpt-realtime-2.1",
+    "workspace-gateway/openai/gpt-realtime-mini",
+    "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
+  ]),
+);
+export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
 /** How readily a realtime voice model decides the speaker is done and answers. */
 export const RealtimeTurnEagerness = /* @__PURE__ */ defineSchema(() =>
   z.enum(["low", "medium", "high"]),
@@ -3012,6 +2986,78 @@ export const WorkspaceRealtimeVoicePatch = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoicePatch>;
 
 /**
+ * Model defaults an organization owner or admin sets once for every workspace
+ * in the organization. Each workspace follows them until it sets its own
+ * value; a workspace value always wins, field by field and model by model.
+ * Subscriptions and keys are not defaults: they stay organization resources
+ * that are shared with workspaces.
+ */
+export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Model and reasoning for new chats and schedules; null leaves it automatic. */
+    sessionDefaults: WorkspaceSessionDefaults.nullable(),
+    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
+    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
+    /** Automatic compaction trigger by exact model id. */
+    modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
+    /**
+     * Voice settings by realtime model id. A workspace uses its own settings
+     * for a model when it has saved some, and these otherwise.
+     */
+    realtimeVoice: z.record(z.string().min(1).max(128), RealtimeVoiceSettings),
+    /**
+     * The realtime voice model new voice conversations start with in workspaces
+     * without their own choice, while the person hasn't picked one; null
+     * leaves it automatic.
+     */
+    realtimeDefaultModel: z.string().min(1).max(128).nullable(),
+    updatedAt: z.string().nullable(),
+  }),
+);
+export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
+
+export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
+  sessionDefaults: null,
+  allowedProviders: null,
+  allowedModels: null,
+  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
+  realtimeVoice: Object.freeze({}) as Record<string, RealtimeVoiceSettings>,
+  realtimeDefaultModel: null,
+  updatedAt: null,
+});
+
+/**
+ * PATCH body for organization model defaults. Each field is independent:
+ * omitted keeps it, `sessionDefaults: null` makes it automatic again,
+ * `modelPolicy` replaces both allowlists at once (null allows everything),
+ * compaction and voice settings merge by exact model id (null resets just
+ * that model), and `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
+ */
+export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+      modelPolicy: z
+        .object({
+          allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+          allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
+      realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
+    })
+    .strict(),
+);
+export type UpdateOrganizationModelDefaultsRequest = z.infer<
+  typeof UpdateOrganizationModelDefaultsRequest
+>;
+
+/**
  * The workspace's saved voice settings for one realtime model, or null when
  * none are saved. Read leniently: a malformed entry reads as unset.
  */
@@ -3028,6 +3074,36 @@ export function resolveWorkspaceRealtimeVoiceSettings(
   }
   const parsed = RealtimeVoiceSettings.safeParse((byModel as Record<string, unknown>)[model]);
   return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : null;
+}
+
+/**
+ * The voice settings a realtime model uses in a workspace: the workspace's
+ * own saved settings for it, else its organization's default for it, else
+ * null (the provider's defaults).
+ */
+export function resolveRealtimeVoiceSettings(
+  workspaceSettings: unknown,
+  organizationDefaults: Pick<OrganizationModelDefaults, "realtimeVoice"> | null | undefined,
+  model: string,
+): RealtimeVoiceSettings | null {
+  const own = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model);
+  if (own) return own;
+  const byModel = organizationDefaults?.realtimeVoice;
+  if (!byModel || !Object.hasOwn(byModel, model)) return null;
+  const inherited = byModel[model];
+  return inherited && Object.keys(inherited).length > 0 ? inherited : null;
+}
+
+/**
+ * The workspace's own default realtime voice model, or null when it follows
+ * its organization. Read leniently: a malformed value reads as unset.
+ */
+export function resolveWorkspaceRealtimeDefaultModel(settings: unknown): string | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { realtimeDefaultModel?: unknown }).realtimeDefaultModel
+      : undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
 }
 
 /** Placement inherited by new top-level chats and schedules that follow the workspace. */
@@ -3110,6 +3186,9 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // Realtime voice settings by realtime model id. Read leniently per model
       // through resolveWorkspaceRealtimeVoiceSettings.
       realtimeVoice: z.record(z.string(), z.unknown()).optional().catch(undefined),
+      // The workspace's default realtime voice model; null or absent follows
+      // the organization. Read leniently.
+      realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3310,6 +3389,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       busySend: WorkspaceBusySend.optional(),
       // Voice settings by realtime model id, merged per model; null removes one.
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      // Default realtime voice model; null follows the organization again.
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
     })
     .passthrough(),
 );
@@ -3490,7 +3571,16 @@ export type OrganizationProviderCustomModelsResponse = z.infer<
 >;
 
 export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["vercel_gateway", "openrouter", "anthropic", "claude_subscription", "opper"]),
+  z.enum([
+    "vercel_gateway",
+    "openrouter",
+    "anthropic",
+    "claude_subscription",
+    "opper",
+    "elevenlabs",
+    "openai",
+    "azure_openai",
+  ]),
 );
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defineSchema(() =>
@@ -3498,6 +3588,11 @@ export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defin
     providerKind: OrganizationModelProviderKind,
     status: z.enum(["active", "revoked"]),
     version: z.number().int().positive(),
+    /**
+     * Azure OpenAI only: the non-secret resource endpoint, normalized to
+     * `https://<resource>.openai.azure.com/openai/v1`. Absent for other kinds.
+     */
+    endpoint: z.string().url().optional(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   }),
@@ -3511,6 +3606,12 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
       operationId: z.string().uuid(),
       expectedVersion: z.number().int().nonnegative().optional(),
       apiKey: z.string().trim().min(1).max(8192),
+      /**
+       * Required for `azure_openai` and refused for every other kind: the
+       * official `https://<resource>.openai.azure.com` resource endpoint (or
+       * its `/openai/v1` URL). Arbitrary proxy endpoints are refused.
+       */
+      endpoint: AzureOpenAIEndpoint.optional(),
       claudeIdentity: z
         .object({
           accountUuid: z.string().uuid(),
@@ -8655,23 +8756,6 @@ export const SyncSessionRealtimeLedgerResponse = /* @__PURE__ */ defineSchema(()
 );
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
-export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
-  z.enum([
-    "opengeni-azure/gpt-live-1",
-    "gpt-live-1-boulder-alpha",
-    "supergrok/grok-voice-think-fast-2.0",
-    "opengeni-gateway/openai/gpt-realtime-2.1",
-    "opengeni-gateway/openai/gpt-realtime-mini",
-    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-gateway/openai/gpt-realtime-2.1",
-    "workspace-gateway/openai/gpt-realtime-mini",
-    "workspace-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-elevenlabs/eleven_realtime_v1_max",
-    "workspace-elevenlabs/eleven_realtime_v1_mini",
-  ]),
-);
-export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
-
 export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionRealtimeModel,
@@ -8710,6 +8794,18 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
     voiceDefaults: RealtimeVoiceSettings.optional(),
     /** The workspace's saved voice settings for this model. */
     workspaceVoiceSettings: RealtimeVoiceSettings.optional(),
+    /**
+     * The organization's default voice settings for this model, used while
+     * the workspace has none of its own.
+     */
+    organizationVoiceSettings: RealtimeVoiceSettings.optional(),
+    /** True on the model this workspace chose to start voice conversations with. */
+    workspaceDefault: z.boolean().optional(),
+    /**
+     * True on the model the organization chose to start voice conversations
+     * with. A workspace's own choice wins over it.
+     */
+    organizationDefault: z.boolean().optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -9751,10 +9847,6 @@ export const SaveNewSessionDraftRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
 
-export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
-export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
-export const WORKSPACE_CONTROL_EVENT_MAX_BYTES = 16 * 1024;
-
 const WorkspaceControlReason = /* @__PURE__ */ defineSchema(() =>
   z
     .string()
@@ -9873,133 +9965,6 @@ export const WorkspaceControlEvent = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type WorkspaceControlEvent = z.infer<typeof WorkspaceControlEvent>;
-
-export type WorkspaceControlBoundarySurface = WorkspaceControlEventTruncation["surface"];
-
-export type BoundWorkspaceControlEventOptions = {
-  surface?: WorkspaceControlBoundarySurface;
-  reasonOriginalBytes?: number | null;
-  actorOriginalBytes?: number | null;
-};
-
-/** UTF-8 byte count used by workspace-control storage and transport guards. */
-export function workspaceControlUtf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-/**
- * Canonical bounded invalidation event. The event is not a full evidence store:
- * when a producer or legacy row exceeds a field cap, the retained head carries
- * a visible marker and structured exact byte-loss facts.
- */
-export function boundWorkspaceControlEvent(
-  event: WorkspaceControlEvent,
-  options: BoundWorkspaceControlEventOptions = {},
-): WorkspaceControlEvent {
-  const existingFields = new Map(
-    (event.truncation?.fields ?? []).map((field) => [field.field, field] as const),
-  );
-  const reason =
-    event.reason === null
-      ? null
-      : boundWorkspaceControlText(event.reason, WORKSPACE_CONTROL_REASON_MAX_BYTES);
-  const actor = boundWorkspaceControlText(event.actor, WORKSPACE_CONTROL_ACTOR_MAX_BYTES);
-  const reasonBytes = reason === null ? 0 : workspaceControlUtf8Bytes(reason);
-  const actorBytes = workspaceControlUtf8Bytes(actor);
-  const reasonOriginalBytes =
-    event.reason === null
-      ? null
-      : Math.max(
-          workspaceControlUtf8Bytes(event.reason),
-          normalizedWorkspaceControlOriginalBytes(options.reasonOriginalBytes),
-          existingFields.get("reason")?.originalBytes ?? 0,
-        );
-  const actorOriginalBytes = Math.max(
-    workspaceControlUtf8Bytes(event.actor),
-    normalizedWorkspaceControlOriginalBytes(options.actorOriginalBytes),
-    existingFields.get("actor")?.originalBytes ?? 0,
-  );
-  const fields: WorkspaceControlEventTruncation["fields"] = [];
-  if (reasonOriginalBytes !== null && reasonOriginalBytes > reasonBytes) {
-    fields.push({
-      field: "reason",
-      originalBytes: reasonOriginalBytes,
-      deliveredBytes: reasonBytes,
-      omittedBytes: reasonOriginalBytes - reasonBytes,
-    });
-  }
-  if (actorOriginalBytes > actorBytes) {
-    fields.push({
-      field: "actor",
-      originalBytes: actorOriginalBytes,
-      deliveredBytes: actorBytes,
-      omittedBytes: actorOriginalBytes - actorBytes,
-    });
-  }
-  if (fields.length === 0 && event.truncation == null) {
-    if (sessionEventJsonBytes(event) > WORKSPACE_CONTROL_EVENT_MAX_BYTES) {
-      throw new RangeError("Workspace control event exceeds its bounded envelope");
-    }
-    return event;
-  }
-
-  const truncation: WorkspaceControlEventTruncation = {
-    truncated: true,
-    surface: event.truncation?.surface ?? options.surface ?? "durable_control",
-    deliveredBytes: 0,
-    fields,
-    fullEvidence: { available: false, reason: "not_retained" },
-  };
-  const bounded: WorkspaceControlEvent = {
-    ...event,
-    reason,
-    actor,
-    truncation,
-  };
-  settleWorkspaceControlDeliveredBytes(bounded, truncation);
-  const deliveredBytes = sessionEventJsonBytes(bounded);
-  if (deliveredBytes > WORKSPACE_CONTROL_EVENT_MAX_BYTES) {
-    throw new RangeError(
-      `Bounded workspace control event exceeds its final envelope (${deliveredBytes} > ${WORKSPACE_CONTROL_EVENT_MAX_BYTES} bytes)`,
-    );
-  }
-  return bounded;
-}
-
-function boundWorkspaceControlText(value: string, maxBytes: number): string {
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-  const bytes = encoder.encode(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  const marker = "…[truncated]";
-  const prefixBudget = Math.max(0, maxBytes - encoder.encode(marker).byteLength);
-  let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
-  while (prefixEnd > 0 && prefixEnd < bytes.byteLength && (bytes[prefixEnd]! & 0xc0) === 0x80) {
-    prefixEnd -= 1;
-  }
-  return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
-}
-
-function normalizedWorkspaceControlOriginalBytes(value: number | null | undefined): number {
-  return value === null || value === undefined || !Number.isFinite(value)
-    ? 0
-    : Math.max(0, Math.floor(value));
-}
-
-function settleWorkspaceControlDeliveredBytes(
-  event: WorkspaceControlEvent,
-  truncation: WorkspaceControlEventTruncation,
-): void {
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const deliveredBytes = sessionEventJsonBytes(event);
-    if (truncation.deliveredBytes === deliveredBytes) return;
-    truncation.deliveredBytes = deliveredBytes;
-  }
-  const deliveredBytes = sessionEventJsonBytes(event);
-  if (truncation.deliveredBytes !== deliveredBytes) {
-    throw new RangeError("Workspace control event byte accounting did not converge");
-  }
-}
 
 export const SystemUpdateClassification = /* @__PURE__ */ defineSchema(() =>
   z.enum(["success", "failure", "action_required", "info"]),

@@ -12,6 +12,7 @@ export default defineConfig({
   root: path.resolve(dirname, "office"),
   base: "/office/",
   envDir: dirname,
+  // The pane renders the published session app with its published stylesheet.
   plugins: [viteReact()],
   build: {
     outDir: path.resolve(dirname, "dist/office"),

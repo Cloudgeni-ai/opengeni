@@ -6,10 +6,18 @@ import {
   useModelAccessPolicy,
 } from "../../../src/components/model-access-policy";
 import { ModelCompactionPage } from "../../../src/components/models/model-compaction-page";
+import {
+  ElevenLabsVoiceConnection,
+  OrganizationElevenLabsVoiceConnection,
+} from "../../../src/components/models/elevenlabs-voice-connection";
+import {
+  OrganizationRealtimeVoiceSettingsRows,
+  RealtimeVoiceSettingsRows,
+} from "../../../src/components/models/realtime-voice-settings";
 import { OrganizationDefaultsSection } from "../../../src/components/models/organization-models-list";
 import { useOrganizationModelDefaults } from "../../../src/components/models/use-organization-model-defaults";
 import { WorkspaceDefaultsSection } from "../../../src/components/models/workspace-models-page";
-import { SectionStack } from "@opengeni/react/ui/section";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
 import "../../../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);
@@ -69,9 +77,41 @@ function OrganizationPage({ page }: { page: "allowed" | "compaction" }) {
   );
 }
 
+// The Voice sections as the organization and workspace Models pages compose them.
+function OrganizationVoice() {
+  const defaults = useOrganizationModelDefaults("acme", true);
+  return (
+    <SectionStack>
+      <Section
+        title="Voice"
+        description="Connect ElevenLabs once for every workspace, and choose how each voice model sounds and listens. A workspace can choose its own."
+      >
+        <OrganizationElevenLabsVoiceConnection organizationId="acme" organizationName="Acme" />
+        <OrganizationRealtimeVoiceSettingsRows anchorWorkspaceId="sample" defaults={defaults} />
+      </Section>
+    </SectionStack>
+  );
+}
+
+function WorkspaceVoice() {
+  return (
+    <SectionStack>
+      <Section
+        title="Voice"
+        description="How each voice model sounds and listens in this workspace. Anything not set here follows Acme's defaults."
+      >
+        <ElevenLabsVoiceConnection workspaceId="sample" canManage organizationName="Acme" />
+        <RealtimeVoiceSettingsRows workspaceId="sample" canManage organizationName="Acme" />
+      </Section>
+    </SectionStack>
+  );
+}
+
 const pages: Record<string, React.ReactNode> = {
   workspace: <Workspace />,
   organization: <Organization />,
+  "organization-voice": <OrganizationVoice />,
+  "workspace-voice": <WorkspaceVoice />,
   "workspace-allowed": (
     <AllowedModelsFormPage workspaceId="sample" canManage onClose={closed} organizationName="Acme" />
   ),

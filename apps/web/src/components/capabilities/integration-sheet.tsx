@@ -13,9 +13,9 @@ import {
   type IntegrationOption,
   type IntegrationToolsBlock,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { Button } from "@opengeni/react/ui/button";
-import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
+import { CapabilityDialogContent } from "@opengeni/react/app/components/capabilities/detail-dialog";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Select } from "@opengeni/react/ui/select";
 import {
@@ -24,7 +24,7 @@ import {
   DialogHeader as SheetHeader,
   DialogTitle as SheetTitle,
 } from "@opengeni/react/ui/dialog";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /** Stable element id for a disclosure so affordances can aria-describedby it. */
 export function integrationDisclosureElementId(disclosureId: string): string {

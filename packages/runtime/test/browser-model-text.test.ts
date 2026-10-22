@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   browserActionText,
   browserNodeLine,
+  browserObservationDiff,
   browserObservationText,
   browserOpenText,
   browserReadText,
@@ -114,9 +115,9 @@ describe("browser model text", () => {
         'Open prompt dialog: "Your name?" default "Guest"',
         "Page reported 2 console errors, 1 failed request",
         "Focused element: e0000000c",
-        "Changed elements:",
+        "Changed elements since your last reading of this page; elements not listed are unchanged and keep their refs:",
         '- textbox "Password" [e0000000c] value=<redacted>',
-        "(1 earlier element removed; 3 long fields clipped)",
+        "(1 element from your last reading is gone or no longer listed; 3 long fields clipped)",
       ].join("\n"),
     );
   });
@@ -233,5 +234,37 @@ describe("browser model text", () => {
     ).toBe(
       'Tab T1: 2 matches (accessibility)\n- text "Free shipping" [e0000000e]\n(1 match not shown)',
     );
+  });
+
+  test("a page diff falls back to the whole outline when it would not help or could mislead", () => {
+    const node = (ref: string, value = "") => ({
+      ref,
+      role: "textbox",
+      depth: 2,
+      name: ref,
+      ...(value ? { value } : {}),
+    });
+    const page = (nodes: ReturnType<typeof node>[], documentGeneration = "d1") => ({
+      target: { ...target, documentGeneration },
+      agentView: { sourceKind: "snapshot", nodes, omittedNodeCount: 40 },
+    });
+    const base = page([node("e1"), node("e2"), node("e3"), node("e4")]);
+    const diff = browserObservationDiff(base, page([node("e1", "x"), node("e2"), node("e3")]));
+    expect(diff?.agentView).toEqual({
+      sourceKind: "diff",
+      nodes: [{ ...node("e1", "x"), depth: 0 }],
+      omittedNodeCount: 40,
+      removedRefCount: 1,
+    });
+    // The page's other elements are not news to the model.
+    expect(browserObservationText(diff!)).not.toContain("not shown");
+    // Another document, most of the page changed, or no outline: the whole outline.
+    expect(browserObservationDiff(base, page(base.agentView.nodes, "d2"))).toBeNull();
+    expect(
+      browserObservationDiff(base, page([node("e1", "a"), node("e2", "b"), node("e5")])),
+    ).toBeNull();
+    expect(
+      browserObservationDiff(base, { ...page([]), agentView: { sourceKind: "none", nodes: [] } }),
+    ).toBeNull();
   });
 });

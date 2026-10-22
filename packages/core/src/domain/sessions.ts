@@ -48,6 +48,9 @@ import {
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   ORGANIZATION_OPPER_MODEL_ID_PREFIX,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  organizationDirectModelProviderOf,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
@@ -250,6 +253,7 @@ import {
   lockActiveCustomModelForAdmission,
   resolveWorkspaceCatalogSettings,
   workspaceCustomModelReference,
+  type WorkspaceCustomModelReference,
 } from "../model-catalog";
 import {
   resolveDefaultSessionModel,
@@ -259,6 +263,7 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -326,6 +331,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
+    organizationDirectModelProviderOf(modelId) !== null ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
         modelId?.startsWith(claudeProviderId(kind, scope as "workspace" | "organization") + "/"),
@@ -1189,23 +1195,35 @@ export async function createAndStartSessionWithOutcome(input: {
             });
           }
           if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
-            const reference = {
-              scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
-                ? ("organization" as const)
-                : ("workspace" as const),
-              providerKind:
-                CLAUDE_CONNECTION_KINDS.find(
-                  (kind) =>
-                    claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
-                    claudeProviderId(kind, "workspace") === input.turnExecutionPolicy.providerId,
-                ) ??
-                (input.turnExecutionPolicy.providerId.includes("openrouter")
-                  ? ("openrouter" as const)
-                  : input.turnExecutionPolicy.providerId.endsWith("-opper")
-                    ? ("opper" as const)
-                    : ("vercel_gateway" as const)),
-              upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
-            };
+            const reference: WorkspaceCustomModelReference =
+              input.turnExecutionPolicy.providerId === ORGANIZATION_AZURE_OPENAI_PROVIDER_ID ||
+              input.turnExecutionPolicy.providerId === ORGANIZATION_OPENAI_PROVIDER_ID
+                ? {
+                    scope: "organization",
+                    providerKind:
+                      input.turnExecutionPolicy.providerId === ORGANIZATION_OPENAI_PROVIDER_ID
+                        ? "openai"
+                        : "azure_openai",
+                    upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
+                  }
+                : {
+                    scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
+                      ? ("organization" as const)
+                      : ("workspace" as const),
+                    providerKind:
+                      CLAUDE_CONNECTION_KINDS.find(
+                        (kind) =>
+                          claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
+                          claudeProviderId(kind, "workspace") ===
+                            input.turnExecutionPolicy.providerId,
+                      ) ??
+                      (input.turnExecutionPolicy.providerId.includes("openrouter")
+                        ? ("openrouter" as const)
+                        : input.turnExecutionPolicy.providerId.endsWith("-opper")
+                          ? ("opper" as const)
+                          : ("vercel_gateway" as const)),
+                    upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
+                  };
             const active = await lockActiveCustomModelForAdmission(tx, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -3255,7 +3273,7 @@ async function createSessionForRequestInFileScope(
   // independently intersected with the exact model-visible selection and the
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
-  const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
   const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
@@ -3578,6 +3596,7 @@ async function createSessionForRequestInFileScope(
     toolPolicy,
     productServerIds: [],
   }).firstPartyMcpTools;
+  tools = newSessionKnowledgeSearchTools(tools, agentConfig, firstPartyMcpTools);
   const googleDrivePublicationEnabled =
     firstPartyMcpTools.includes("editable_artifact_export") &&
     firstPartyMcpTools.includes("editable_artifact_export_status") &&

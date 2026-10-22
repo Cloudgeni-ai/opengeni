@@ -36,6 +36,64 @@ afterEach(() => {
 });
 
 describe("migration deployment-mode guard", () => {
+  test("release markers are supported alongside execution directives", () => {
+    for (const unique of ["", "UNIQUE "]) {
+      const sql = `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+-- opengeni:post-release
+CREATE ${unique}INDEX CONCURRENTLY IF NOT EXISTS widgets_id ON widgets (id);`;
+      expect(kinds("5000_index.sql", sql)).toEqual([]);
+      expect(kinds("5000_index.sql", sql.replace("post-release", "pre-release"))).toEqual([]);
+    }
+    expect(
+      kinds(
+        "5000_backfill.sql",
+        `-- deployment-mode: rolling
+-- opengeni:batched-backfill batch-size=10 lock-timeout=1s statement-timeout=10s
+-- opengeni:post-release
+WITH batch AS (SELECT id FROM widgets LIMIT 10)
+UPDATE widgets SET color = 'blue' FROM batch WHERE widgets.id = batch.id RETURNING widgets.id;`,
+      ),
+    ).toEqual([]);
+  });
+
+  test("post-release rejects ordinary DDL, maintenance, invalid parser bodies and conflicting markers", () => {
+    expect(
+      kinds("5000_ordinary.sql", "-- deployment-mode: rolling\n-- opengeni:pre-release\nSELECT 1;"),
+    ).toEqual(["ineligible-pre-release"]);
+    for (const body of [
+      "CREATE TABLE widgets (id int);",
+      "ALTER TABLE widgets ADD COLUMN color text;",
+      "GRANT SELECT ON widgets TO app;",
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';",
+      "CREATE INDEX widgets_id ON widgets (id);",
+    ]) {
+      expect(
+        kinds("5000_ddl.sql", `-- deployment-mode: rolling\n-- opengeni:post-release\n${body}`),
+      ).toContain("ineligible-post-release");
+    }
+    const special = `-- deployment-mode: rolling
+-- opengeni:concurrent-index lock-timeout=5s
+-- opengeni:post-release
+CREATE INDEX CONCURRENTLY IF NOT EXISTS widgets_id ON widgets (id);`;
+    expect(kinds("5000_index.sql", special + "\nCREATE TABLE bad (id int);")).toContain(
+      "ineligible-post-release",
+    );
+    expect(kinds("5000_index.sql", special.replace("rolling", "maintenance"))).toContain(
+      "ineligible-post-release",
+    );
+    expect(
+      kinds(
+        "5000_index.sql",
+        special.replace(
+          "-- opengeni:post-release",
+          "-- opengeni:post-release\n-- opengeni:pre-release",
+        ),
+      ),
+    ).toEqual(["conflicting-release-directives"]);
+    expect(kinds("4999_frozen.sql", special.replace("rolling", "maintenance"))).toEqual([]);
+  });
+
   test("a rolling expand migration passes", () => {
     const directory = ledger({
       "5000_widget_color.sql":

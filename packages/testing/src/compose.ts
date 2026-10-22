@@ -1,7 +1,3 @@
-import { migrate } from "@opengeni/db/migrate";
-import { provisionRoles } from "@opengeni/db/provision-roles";
-import { Connection } from "@temporalio/client";
-import { connect as connectNats } from "nats";
 import postgres from "postgres";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,7 +12,6 @@ import {
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
   OBJECT_STORAGE_FIXTURE_BUCKET,
 } from "./object-storage-fixture";
-import { provisionGarage } from "../../../scripts/dev-native-storage";
 
 export type TestServices = {
   projectName: string;
@@ -139,6 +134,8 @@ async function startTestServicesAttempt(
         }
       : {}),
     migrate: async () => {
+      const { migrate } = await import("@opengeni/db/migrate");
+      const { provisionRoles } = await import("@opengeni/db/provision-roles");
       await migrate(services.databaseUrl);
       await provisionRoles(services.databaseUrl, {
         appRole: "opengeni_app",
@@ -157,6 +154,7 @@ async function startTestServicesAttempt(
     }
     if (options.objectStorage ?? false) {
       await waitForGarage(services.objectStorageEndpoint!);
+      const { provisionGarage } = await import("../../../scripts/dev-native-storage");
       await provisionGarage({
         port: ports.minio,
         bucket: OBJECT_STORAGE_FIXTURE_BUCKET,
@@ -508,6 +506,7 @@ async function waitForPostgres(databaseUrl: string): Promise<void> {
 }
 
 async function waitForNats(natsUrl: string): Promise<void> {
+  const { connect: connectNats } = await import("nats");
   await waitFor(
     async () => {
       const nc = await connectNats({ servers: natsUrl, timeout: 1_000 });
@@ -519,6 +518,7 @@ async function waitForNats(natsUrl: string): Promise<void> {
 }
 
 async function waitForTemporal(address: string): Promise<void> {
+  const { Connection } = await import("@temporalio/client");
   await waitFor(
     async () => {
       const connection = await Connection.connect({

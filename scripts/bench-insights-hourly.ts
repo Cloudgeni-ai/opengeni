@@ -6,7 +6,7 @@
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "../packages/db/src/schema";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { InsightsUsageQuery } from "@opengeni/contracts/insights-usage";
 import {
   createDb,

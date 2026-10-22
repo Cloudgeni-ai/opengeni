@@ -50,7 +50,8 @@ import {
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,

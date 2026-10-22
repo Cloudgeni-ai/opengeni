@@ -81,9 +81,9 @@ const context = {
     reviewAgentInstruction,
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 // The modal renders through a portal happy-dom doesn't lay out; keep its contract.
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   showUndoToast: () => 0,
   DestructiveConfirm: (props: {
     open: boolean;

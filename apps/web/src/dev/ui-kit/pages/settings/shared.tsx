@@ -5,7 +5,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
 import { Notice } from "@opengeni/react/ui/notice";
 import { formatAbsoluteTime, formatRelativeTime } from "@opengeni/react/ui/relative-time";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 
 import { KIT_NOW, KIT_TIME_ZONE } from "../../fixtures";
 import { ADMIN_ONLY_REASON } from "./data";

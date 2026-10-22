@@ -1,4 +1,4 @@
-import { SESSION_GROUP_VISIBLE_STEP } from "../../apps/web/src/lib/session-group-window";
+import { SESSION_GROUP_VISIBLE_STEP } from "../../packages/react/src/app/lib/session-group-window";
 
 type ReadShape = Readonly<{
   /** Every key the read must carry, with its admissible values. */

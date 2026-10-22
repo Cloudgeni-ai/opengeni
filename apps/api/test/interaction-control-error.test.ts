@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
 import { BrowserControlRequestError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import {

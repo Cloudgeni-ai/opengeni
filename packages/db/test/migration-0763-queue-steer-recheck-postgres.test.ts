@@ -5,7 +5,7 @@ import postgres from "postgres";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   armSubscriptionCoreCodexCapacityWait,
   blockSessionWorkBeforeAttemptClaim,
@@ -44,8 +44,9 @@ beforeAll(async () => {
     // Keep the repair-era schema plus the additive xid writer migration needed
     // by current adapters. They also name the 0793 Site audience columns.
     await stageSiteSessionAudienceColumns(database.ownerUrl);
-    // Likewise, current event readers project 0810's nullable usage source key.
-    await owner`alter table session_events add column usage_source_key text`;
+    // Likewise, current event readers project 0810's nullable usage source key
+    // and 0889's nullable tool name.
+    await owner`alter table session_events add column usage_source_key text, add column tool_name text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();

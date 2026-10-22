@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use compute_link::{HostToken, Hub, HubConfig, Timing, Tokens};
-use compute_protocol::fleet::{LINK_TOKENS_PATH, LinkTokens, LinkTokensAsked};
+use compute_protocol::fleet::{LINK_TOKENS_PATH, LinkTokens, LinkTokensAsked, METRICS_PATH};
 use futures::future::BoxFuture;
 use rustls::{ClientConfig, RootCertStore};
 
@@ -18,6 +18,26 @@ use super::{FleetConfig, Tls, tls};
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl FleetConfig {
+    /// Where the host's metrics go when the control service passes them on
+    /// ([`METRICS_PATH`]), with a client that reaches it over the same
+    /// mutual TLS as the lease, and the name the metrics must call the
+    /// host by: its name in the fleet, which its certificate holds.
+    pub fn metrics_route(&self, timeout: Duration) -> anyhow::Result<MetricsRoute> {
+        let tls = Tls::load(&self.tls)?;
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(tls.client)
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .build()
+            .context("building the control service client for metrics")?;
+        Ok(MetricsRoute {
+            url: format!("{}{METRICS_PATH}", self.control.trim_end_matches('/')),
+            client,
+            name: self.info.name.clone(),
+        })
+    }
+
     /// Starts the host's agent links. Must run inside a Tokio runtime.
     pub fn agent_links(&self) -> anyhow::Result<Hub> {
         let tls = Tls::load(&self.tls)?;
@@ -44,6 +64,16 @@ impl FleetConfig {
             timing: Timing::default(),
         }))
     }
+}
+
+/// The control service's route for a host's metrics (see
+/// [`FleetConfig::metrics_route`]).
+#[derive(Clone, Debug)]
+pub struct MetricsRoute {
+    pub url: String,
+    pub client: reqwest::Client,
+    /// The host's name in the fleet.
+    pub name: String,
 }
 
 /// What the host trusts a gateway's certificate by: `ca` alone, or the

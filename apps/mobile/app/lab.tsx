@@ -3,14 +3,21 @@
 // (/dev/session-timeline). Deep link: opengeni://lab?scenario=working&scheme=dark&chrome=0
 import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { MessageTimeline, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import {
+  AnnotationsChip,
+  AnnotationsSheet,
+  MessageTimeline,
+  useNativeTimelineTheme,
+  type AnnotationReveal,
+} from "@opengeni/react-native/timeline";
+import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import { useAccount } from "@/account";
 import { copyText } from "@/clipboard";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppThemeProvider } from "@/theme";
@@ -45,6 +52,18 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
   const scenarioId = params.scenario ?? "working";
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
   const showChrome = params.chrome !== "0";
+  // Add note on selected text, held locally: the composer's draft annotations.
+  const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>([]);
+  const [review, setReview] = useState<{ open: boolean; focusId: string | null }>({
+    open: false,
+    focusId: null,
+  });
+  const reveal = useRef<AnnotationReveal | null>(null);
+  const addAnnotation = useCallback((annotation: DraftTimelineAnnotation) => {
+    setAnnotations((current) => [...current, annotation]);
+    setReview({ open: true, focusId: annotation.id });
+  }, []);
+  const selectAnnotation = useCallback((id: string) => setReview({ open: true, focusId: id }), []);
   const set = (next: Partial<Params>) =>
     router.setParams({ scenario: scenarioId, scheme, chrome: params.chrome ?? "1", ...next });
   return (
@@ -82,6 +101,35 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
         renderMarkdown={renderMarkdown}
         onCopy={(text) => void copyText(text)}
         contentInsetTop={showChrome ? 16 : 64 - insets.top}
+        onAnnotate={addAnnotation}
+        draftAnnotations={annotations}
+        onDraftAnnotationSelect={selectAnnotation}
+        annotationRevealRef={reveal}
+      />
+      {annotations.length > 0 ? (
+        <View style={{ padding: 12, paddingBottom: insets.bottom + 12 }}>
+          <AnnotationsChip
+            annotations={annotations}
+            onPress={() => setReview({ open: true, focusId: null })}
+            onClear={() => setAnnotations([])}
+          />
+        </View>
+      ) : null}
+      <AnnotationsSheet
+        open={review.open}
+        onClose={() => setReview({ open: false, focusId: null })}
+        annotations={annotations}
+        editable
+        focusId={review.focusId}
+        onFocusConsumed={() => setReview((current) => ({ ...current, focusId: null }))}
+        onUpdate={(id, note) =>
+          setAnnotations((current) =>
+            current.map((item) => (item.id === id ? { ...item, note } : item)),
+          )
+        }
+        onRemove={(id) => setAnnotations((current) => current.filter((item) => item.id !== id))}
+        onReveal={(source) => reveal.current?.(source) ?? false}
+        onCommit={() => setReview({ open: false, focusId: null })}
       />
     </View>
   );

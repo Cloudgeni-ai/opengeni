@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { ScheduleNotFoundError, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import {
   deleteLegacyMaintenanceSchedules,

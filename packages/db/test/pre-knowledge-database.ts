@@ -1,4 +1,4 @@
-import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
@@ -11,6 +11,7 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
  * guards; this historical fixture withholds them and adds only the session
  * columns current adapters project. */
 const sessionStorageMigrationTail = [
+  "0888_session_list_invalidation.sql",
   "0649_session_content_archive.sql",
   "0650_session_archive_activity.sql",
   "0651_session_event_delta_folding.sql",

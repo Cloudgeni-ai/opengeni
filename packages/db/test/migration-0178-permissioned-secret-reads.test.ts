@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { bootstrapWorkspace, createApiKey, createDb, createSession, type DbClient } from "../src";
 
 const migrationUrl = new URL("../drizzle/0178_permissioned_secret_reads.sql", import.meta.url);

@@ -18,7 +18,7 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { EnvPastePreview, SecretOnce, parseEnvText } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { Alternative, Fork, KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {
   apiKeyExpiryOptions,

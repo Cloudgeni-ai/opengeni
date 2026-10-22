@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 const FACT_AUTHORITIES = [
   "visible_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",

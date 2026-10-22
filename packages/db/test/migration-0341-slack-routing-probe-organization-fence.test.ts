@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(

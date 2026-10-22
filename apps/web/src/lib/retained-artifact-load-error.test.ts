@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import { ApiError } from "../api";
-import { retainedArtifactLoadErrorPresentation } from "./retained-artifact-load-error";
+import { retainedArtifactLoadErrorPresentation } from "@opengeni/react/app/lib/retained-artifact-load-error";
 
 const unavailableCopy = {
   title: "Artifact unavailable",

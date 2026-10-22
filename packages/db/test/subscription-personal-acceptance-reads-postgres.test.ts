@@ -16,7 +16,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -507,8 +507,9 @@ beforeAll(async () => {
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
     await stageSiteSessionAudienceColumns(database.ownerUrl);
-    // Current event readers also project 0810's nullable usage source key.
-    await staging`alter table session_events add column usage_source_key text`;
+    // Current event readers also project 0810's nullable usage source key and
+    // 0889's nullable tool name.
+    await staging`alter table session_events add column usage_source_key text, add column tool_name text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -703,6 +704,9 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "billing_subscription_operations",
       // 0820 (retained browser downloads).
       "browser_session_retained_downloads",
+      // 0890 reconciliation tables are absent from this historical schema.
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.

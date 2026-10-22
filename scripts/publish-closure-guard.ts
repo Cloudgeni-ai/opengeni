@@ -10,8 +10,9 @@
  *   (b) a publishable package is missing npm-public package metadata or a build.
  *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
  *       the SDK depends only on contracts and headless Connect, React depends
- *       only on SDK and Connect, and its browser-safe artifact engine is an optional peer
- *       for the isolated artifact subpaths.
+ *       only on SDK, contracts (already in the SDK's closure) and Connect, and
+ *       its browser-safe artifact engine is an optional peer for the isolated
+ *       artifact subpaths.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
  *   (e) the BUILT runtime leaves OpenAI Agents or Zod externally resolved,
  *       allowing an embedding host to change their runtime schema identity.
@@ -333,20 +334,25 @@ if (
   );
 }
 
-// (b) React uses the client SDK and headless Connect. The artifact
-// engine stays an optional peer so ordinary React/session consumers do not
-// install its format codecs or native rasterizer.
+// (b) React uses the client SDK, the shared contracts the SDK already installs
+// (the session app layer reads them directly) and headless Connect. The
+// artifact engine stays an optional peer so ordinary React/session consumers do
+// not install its format codecs or native rasterizer.
 const reactPkg = readPkg("packages/react");
 const reactOpengeniDeps = opengeniRuntimeDeps(reactPkg);
-const allowedReactOpengeniDeps = new Set(["@opengeni/sdk", "@opengeni/connect"]);
+const allowedReactOpengeniDeps = new Set([
+  "@opengeni/sdk",
+  "@opengeni/contracts",
+  "@opengeni/connect",
+]);
 const reactForbidden = reactOpengeniDeps.filter((name) => !allowedReactOpengeniDeps.has(name));
 if (reactForbidden.length > 0) {
   failures.push(
-    `@opengeni/react may only depend on SDK and Connect among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
+    `@opengeni/react may only depend on SDK, contracts and Connect among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
   );
 }
 if ([...allowedReactOpengeniDeps].some((name) => !reactOpengeniDeps.includes(name))) {
-  failures.push(`@opengeni/react must keep SDK and Connect as runtime dependencies.`);
+  failures.push(`@opengeni/react must keep SDK, contracts and Connect as runtime dependencies.`);
 }
 const connectPkg = readPkg("packages/connect");
 if (

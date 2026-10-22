@@ -12,7 +12,7 @@ import {
 import {
   mapOrganizationModelProviderCustomModel,
   type OrganizationModelProviderCustomModel,
-  type OrganizationModelProviderKind,
+  type OrganizationModelCatalogProviderKind,
 } from "./organization-model-providers";
 import * as schema from "./schema";
 
@@ -21,9 +21,14 @@ export type ModelProviderExecutionInputs = {
   claudeSubscriptionEnabled: boolean;
   loadOrganizationCredentials: boolean;
   workspaceModels: Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>;
-  organizationModels: Record<OrganizationModelProviderKind, OrganizationModelProviderCustomModel[]>;
+  organizationModels: Record<
+    OrganizationModelCatalogProviderKind,
+    OrganizationModelProviderCustomModel[]
+  >;
   workspaceConnections: ConnectionMetadataWithVerification[];
-  encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  encryptedCredentials: Partial<Record<OrganizationModelCatalogProviderKind, string>>;
+  /** Azure OpenAI's non-secret resource endpoint, beside its encrypted key. */
+  organizationEndpoints: Partial<Record<"azure_openai", string>>;
 };
 
 /**
@@ -63,8 +68,12 @@ export async function loadModelProviderExecutionInputs(
       opper: [],
       anthropic: [],
       claude_subscription: [],
+      openai: [],
+      azure_openai: [],
     };
-    for (const providerKind of kinds) {
+    // Organization-only kinds: a workspace's own OpenAI or Azure key is a
+    // direct connection, not a custom-model provider.
+    for (const providerKind of [...kinds, "openai" as const, "azure_openai" as const]) {
       const rows = await scopedDb
         .select()
         .from(schema.organizationModelProviderCustomModels)
@@ -78,11 +87,13 @@ export async function loadModelProviderExecutionInputs(
       organizationModels[providerKind] = rows.map(mapOrganizationModelProviderCustomModel);
     }
     const encryptedCredentials: ModelProviderExecutionInputs["encryptedCredentials"] = {};
+    const organizationEndpoints: ModelProviderExecutionInputs["organizationEndpoints"] = {};
     if (input.loadOrganizationCredentials) {
       const rows = await scopedDb
         .select({
           providerKind: schema.organizationModelProviderConnections.providerKind,
           credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
+          endpoint: schema.organizationModelProviderConnections.endpoint,
         })
         .from(schema.organizationModelProviderConnections)
         .where(
@@ -94,10 +105,19 @@ export async function loadModelProviderExecutionInputs(
               "openrouter",
               "opper",
               "anthropic",
+              "openai",
+              "azure_openai",
             ]),
           ),
         );
-      for (const row of rows) encryptedCredentials[row.providerKind] = row.credentialEncrypted;
+      for (const row of rows) {
+        if (row.providerKind !== "elevenlabs") {
+          encryptedCredentials[row.providerKind] = row.credentialEncrypted;
+        }
+        if (row.providerKind === "azure_openai" && row.endpoint) {
+          organizationEndpoints.azure_openai = row.endpoint;
+        }
+      }
     }
     return {
       claudeSubscriptionEnabled: input.claudeSubscriptionEnabled,
@@ -106,6 +126,7 @@ export async function loadModelProviderExecutionInputs(
       workspaceConnections,
       organizationModels,
       encryptedCredentials,
+      organizationEndpoints,
     };
   });
 }

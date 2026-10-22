@@ -37,7 +37,7 @@ import { OpenGeniProvider } from "../src/provider";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 test("read activity follows matching mounted reads, refresh failures and client changes", async () => {
   const scope = {};

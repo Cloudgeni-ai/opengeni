@@ -9,6 +9,7 @@ import type {
 import {
   pathBasename,
   pathDirname,
+  presentsToolOutputPreview,
   sandboxRowTitle,
   startupDuration,
   startupPhaseTitle,
@@ -24,7 +25,7 @@ import {
   type WebSearchResult,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
 import {
@@ -39,6 +40,7 @@ import {
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { annotationSourceTestId } from "./text-selection";
 
 /* ----------------------------------------------------------------------------
    Native activity rows. Tool rows draw from the shared presentation model
@@ -388,9 +390,12 @@ function PatchView({
 export function PresentedToolRow({
   presentation: p,
   compact = false,
+  outputPreview,
 }: {
   presentation: ToolRowPresentation;
   compact?: boolean;
+  /** The row's output preview, when its output is not exact. */
+  outputPreview?: ToolCallItem["outputPreview"];
 }) {
   return (
     <ActivityDisclosure
@@ -405,6 +410,7 @@ export function PresentedToolRow({
       compact={compact}
       preview={p.preview ? previewContent(p.preview, compact) : undefined}
       expandable={p.body.kind !== "none"}
+      outputPreview={outputPreview}
     >
       <ToolBodyView body={p.body} />
     </ActivityDisclosure>
@@ -422,12 +428,53 @@ function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }
     ? item.name.slice(item.name.lastIndexOf("__") + 2)
     : item.name;
   const custom = options.toolRenderers?.[item.name] ?? options.toolRenderers?.[leaf];
-  for (const renderer of [custom, options.renderTool]) {
-    if (!renderer) continue;
-    const node = renderer({ item, presentation, compact });
-    if (node != null) return <>{node}</>;
+  const outputPreview = item.outputPreview ?? null;
+  // Custom renderers and presentations that parse their result need the
+  // exact output first; a failed read falls back to the built-in row, which
+  // says it is a preview.
+  const exactFirst =
+    outputPreview !== null &&
+    (custom !== undefined || options.renderTool !== undefined || !presentsToolOutputPreview(item));
+  if (exactFirst && outputPreview.load && outputPreview.state !== "error") {
+    return <ToolOutputExactRow item={item} preview={outputPreview} compact={compact} />;
   }
-  return <PresentedToolRow presentation={presentation} compact={compact} />;
+  if (!exactFirst) {
+    for (const renderer of [custom, options.renderTool]) {
+      if (!renderer) continue;
+      const node = renderer({ item, presentation, compact });
+      if (node != null) return <>{node}</>;
+    }
+  }
+  return (
+    <PresentedToolRow presentation={presentation} compact={compact} outputPreview={outputPreview} />
+  );
+}
+
+/** A tool row reading its exact output before it renders. */
+function ToolOutputExactRow({
+  item,
+  preview,
+  compact,
+}: {
+  item: ToolCallItem;
+  preview: NonNullable<ToolCallItem["outputPreview"]>;
+  compact: boolean;
+}) {
+  const t = useOpenGeniText();
+  const pending = preview.state === "preview";
+  const load = preview.load;
+  useEffect(() => {
+    if (pending) load?.();
+  }, [pending, load]);
+  return (
+    <ActivityDisclosure
+      icon="wrench"
+      title={toolDisplayName(t, item.name)}
+      preview={t("timeline.toolRenderers.loadingOutput")}
+      compact={compact}
+      expandable={false}
+    />
+  );
 }
 
 function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean }) {
@@ -473,20 +520,23 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
       accessibilityLabel={item.streaming ? m.thinking : m.thought}
       preview={plain || undefined}
     >
-      {options.renderMarkdown ? (
-        options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
-      ) : (
-        <Text
-          style={{
-            ...fontStyle(theme),
-            fontSize: theme.size.base,
-            lineHeight: 24,
-            color: theme.colors["fg-muted"],
-          }}
-        >
-          {item.text}
-        </Text>
-      )}
+      <View testID={annotationSourceTestId(undefined)} collapsable={false}>
+        {options.renderMarkdown ? (
+          options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
+        ) : (
+          <Text
+            selectable
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.base,
+              lineHeight: 24,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {item.text}
+          </Text>
+        )}
+      </View>
     </ActivityDisclosure>
   );
 }
@@ -671,11 +721,16 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
       <View style={{ marginTop: 4 }}>
         <Icon name="message-square-text" size={14} color={theme.colors["fg-subtle"]} />
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
+      <View
+        testID={annotationSourceTestId(item.annotationSource?.eventId)}
+        collapsable={false}
+        style={{ flex: 1, minWidth: 0 }}
+      >
         {options.renderMarkdown ? (
           options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
         ) : (
           <Text
+            selectable
             style={{
               ...fontStyle(theme),
               fontSize: theme.size.sm,
