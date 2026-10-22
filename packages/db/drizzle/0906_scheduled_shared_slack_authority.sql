@@ -224,4 +224,3 @@ BEGIN
   EXECUTE replace(definition, anchor, replacement);
 END
 $patch$;
-
