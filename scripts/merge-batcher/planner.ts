@@ -1,6 +1,7 @@
 import {
   bindingKey,
   compareText,
+  canonical,
   ejectionKey,
   type BatchSpec,
   type Candidate,
@@ -29,6 +30,27 @@ export function latestRun(candidate: Candidate, config: Config): Run | undefined
         r.workflow === config.workflow,
     )
     .sort((a, b) => b.id - a.id || b.attempt - a.attempt)[0];
+}
+export function infrastructureRetryReason(candidate: Candidate, run: Run, config: Config) {
+  if (
+    run.status !== "completed" ||
+    run.attempt !== 1 ||
+    !Number.isSafeInteger(run.id) ||
+    run.id < 1 ||
+    run.workflow !== ".github/workflows/batch-ci.yml" ||
+    run.workflow !== config.workflow ||
+    candidate.branch !== `${config.branchPrefix}${candidate.manifest.batchId}` ||
+    run.branch !== candidate.branch ||
+    run.headSha !== candidate.manifest.tipSha ||
+    candidate.manifest.pulls.some((p) => p.headRef === "changeset-release/main")
+  )
+    return null;
+  const reason = run.infrastructureRetryReason;
+  if (reason === "verified-infrastructure" && run.trusted && run.outcome === "infrastructure")
+    return reason;
+  if (reason === "provider-cancelled" && run.outcome === "cancelled") return reason;
+  if (reason === "no-job-logs" && run.outcome === "infrastructure") return reason;
+  return null;
 }
 export function fifo(pulls: Pull[], cap: number): Pull[] {
   const ordered = [...pulls].sort(
@@ -127,6 +149,48 @@ export function plan(o: Observation, c: Config): Action {
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
+  if (c.mode === "active") {
+    const base =
+      o.baseCI?.sha === o.baseSha
+        ? o.baseCI
+        : {
+            sha: o.baseSha,
+            status: "unknown" as const,
+            runId: null,
+            attempt: null,
+            reason: "Exact-base full main CI evidence unavailable",
+          };
+    if (
+      ledger.baseHold?.status === "red" &&
+      ledger.baseHold.sha === o.baseSha &&
+      base.status !== "red"
+    )
+      return {
+        kind: "wait",
+        reason: "base_broken: require a later green main tip, not a rerun of the broken base",
+      };
+    if (base.status !== "green") {
+      if (canonical(ledger.baseHold ?? null) !== canonical(base)) {
+        ledger.baseHold = structuredClone(base);
+        return record(
+          base.status === "red"
+            ? "base_broken: hold queue; alert parent/F; no member ejection"
+            : "base_unknown: hold landing and culprit decisions",
+        );
+      }
+      return {
+        kind: "wait",
+        reason:
+          base.status === "red"
+            ? "base_broken: awaiting green main tip"
+            : "base_unknown: awaiting exact full main CI success",
+      };
+    }
+    if (ledger.baseHold) {
+      delete ledger.baseHold;
+      return record("base_recovered: exact current main tip has full CI success");
+    }
+  }
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
   if (root) {
     const run = latestRun(root, c);
@@ -147,31 +211,18 @@ export function plan(o: Observation, c: Config): Action {
           return record("code-red predecessor invalidates descendants; running CI preserved");
         }
       }
-      const codeReds = new Set([
-        ...(ledger.codeFailures[root.manifest.batchId] ?? []),
-        ...root.runs
-          .filter(
-            (r) =>
-              r.trusted &&
-              r.outcome === "code_failure" &&
-              r.status === "completed" &&
-              r.headSha === root.manifest.tipSha &&
-              r.branch === root.branch &&
-              r.workflow === c.workflow,
-          )
-          .map((r) => `${r.id}/${r.attempt}`),
-      ]).size;
-      if (run.trusted && run.outcome === "code_failure" && (codeReds >= 2 || !run.retryable)) {
+      if (run.trusted && run.outcome === "code_failure") {
         ledger.invalidated = [
           ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
         ];
-        const pulls: Pull[] = root.manifest.pulls.map(({ mergeSha: _, ...p }) => p);
+        const pulls: Pull[] = root.manifest.pulls.map(({ mergeSha, ...p }) => {
+          void mergeSha;
+          return p;
+        });
         if (pulls.length === 1)
           ledger.ejected.push({
             pull: pulls[0]!,
-            reason: !run.retryable
-              ? "non-retryable exact-candidate code failure (process leak)"
-              : "two exact-candidate code failures (including one whole-candidate retry)",
+            reason: "non-retryable exact-candidate code failure; no automatic code/test retry",
             batchId: root.manifest.batchId,
             announced: false,
           });
@@ -187,23 +238,18 @@ export function plan(o: Observation, c: Config): Action {
         );
       }
       const intent = ledger.retries[root.manifest.batchId];
-      if (intent && intent.runId === run.id && intent.fromAttempt >= run.attempt)
+      if (intent)
+        return {
+          kind: "wait",
+          reason: "single infrastructure retry already requested; reconcile or hold, no duplicate",
+        };
+      if (!infrastructureRetryReason(root, run, c))
         return {
           kind: "wait",
           reason:
-            "retry intent awaiting provider reconciliation; no blind duplicate after unknown outcome",
+            "not an eligible first-attempt infrastructure-only candidate; hold without PR blame",
         };
-      const attempts = root.runs.length;
-      if (attempts >= 8 && !(run.trusted && run.outcome === "code_failure"))
-        return {
-          kind: "wait",
-          reason:
-            "infrastructure retry budget exhausted; operator investigation required, no PR incriminated",
-        };
-      const backoff =
-        run.trusted && run.outcome === "code_failure"
-          ? 0
-          : Math.min(3600, 60 * 2 ** Math.min(6, attempts - 1));
+      const backoff = 60;
       if (
         !run.completedAt ||
         Date.parse(o.now) < Date.parse(run.completedAt) + backoff * 1000 ||

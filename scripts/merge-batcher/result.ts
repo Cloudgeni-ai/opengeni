@@ -4,6 +4,7 @@ export interface VerifiedResult {
   outcome: Outcome;
   retryable: boolean;
   reason: string;
+  infrastructureOnly?: true;
 }
 interface Task {
   schemaVersion: 1;
@@ -117,5 +118,15 @@ export function verifyResult(
       reason: "Verified cancellation wins over all code verdicts",
     };
   if (data.outcome !== outcome || data.retryable !== retryable) return null;
-  return { outcome, retryable, reason: data.reason.slice(0, 2000) };
+  return {
+    outcome,
+    retryable,
+    reason: data.reason.slice(0, 2000),
+    ...(outcome === "infrastructure" &&
+    !incomplete &&
+    verified.some((t) => t.outcome === "infrastructure") &&
+    verified.every((t) => t.outcome === "success" || t.outcome === "infrastructure")
+      ? { infrastructureOnly: true as const }
+      : {}),
+  };
 }

@@ -150,6 +150,8 @@ not feed these manifests into live admission or represent them as ready labels.
 # This command WRITES queue/state refs. It was not run against GitHub in this task.
 # Set TRAFFIC_SHADOW_RUNNER_BUDGET and TRAFFIC_SHADOW_MAIN_RESERVE to measured,
 # operator-allocated repository capacity and full-main demand, respectively.
+# Optional: TRAFFIC_SHADOW_PROVIDER_JOB_LIMIT (default 60) and
+# TRAFFIC_SHADOW_OTHER_REPOSITORY_ALLOWANCE (default 28); invalid values hold.
 bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --once --lookback-hours 24 \
   --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
 ```
@@ -210,7 +212,19 @@ exhausting them backs off and holds. Any active Batch CI or incomplete capacity
 scan blocks publication,
 and unpublished or no-run traffic candidates keep their own occupancy hold. The
 budget is an operator allocation, not a discovered GitHub/custom quota; reserve for
-other organization consumers outside this repository separately. Actions
+other organization consumers outside this repository separately.
+
+The traffic reader applies the same pool checks as the batcher (see the
+headroom section of [merge-batcher.md](merge-batcher.md)). It holds while any active
+full-main run is before its fan-out (at most the 3 pre-plan jobs and not proven
+approval-only) or has jobs `queued` or `requested`. It also requires observed
+repository demand plus the other-repository allowance (default 28, a measured
+maximum, not an observation of other repositories) plus 18 to fit the hosted job
+limit (default 60). The report's `publication.headroom.capacity` records the
+limit, allowance, required total, hold reason, `mainQueuedJobs`,
+`preFanoutMainRuns` and newest-main queue waits.
+
+Actions
 scheduling is not transactionally fenced by the Git CAS, so this observation is
 not a provider capacity reservation. Waiting, pending and job-less runs can start
 requesting runners after observation; that race is bounded by the same caveat.
