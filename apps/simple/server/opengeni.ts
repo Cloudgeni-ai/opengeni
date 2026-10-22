@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
-import { opengeniApiUrl } from "./config";
+import { opengeniApiKey, opengeniApiUrl } from "./config";
 import { getProfile, getPrefs, listProfiles, upsertProfile, type AgentProfile } from "./db";
 import {
   agentIdentity,
@@ -12,8 +12,14 @@ import {
 
 const caller = new AsyncLocalStorage<Record<string, string>>();
 
-/** The browser's own credentials, so Opengeni sees the real person (and their permissions). */
+const apiKey = opengeniApiKey();
+
+/**
+ * The browser's own credentials, so Opengeni sees the real person (and their
+ * permissions), or the configured API key when this instance runs as one.
+ */
 export function callerHeaders(request: Request): Record<string, string> {
+  if (apiKey) return { authorization: `Bearer ${apiKey}` };
   const headers: Record<string, string> = {};
   for (const name of ["cookie", "authorization"]) {
     const value = request.headers.get(name);
@@ -29,7 +35,7 @@ export function asCaller<T>(request: Request, work: () => Promise<T>): Promise<T
 
 export const api = new OpenGeniClient({
   baseUrl: opengeniApiUrl(),
-  headers: () => caller.getStore() ?? {},
+  headers: () => caller.getStore() ?? (apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
 });
 
 /** Opengeni metadata stamped on every session the simple app owns. */
@@ -309,4 +315,18 @@ function clean(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, max) : null;
+}
+
+/**
+ * The full bytes of a retained image. The content route answers in bounded
+ * ranges, so a plain fetch only returns the first slice of a large image.
+ */
+export async function downloadImage(workspaceId: string, artifactId: string) {
+  const metadata = await api.getRetainedArtifact(workspaceId, artifactId);
+  if (!metadata.available) return null;
+  const { bytes } = await api.downloadRetainedArtifact(
+    workspaceId,
+    metadata as Parameters<typeof api.downloadRetainedArtifact>[1],
+  );
+  return { bytes, contentType: metadata.contentType };
 }

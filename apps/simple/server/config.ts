@@ -37,3 +37,15 @@ export function opengeniWebUrl(): string | null {
 export const dataDirectory = resolve(
   process.env.OPENGENI_SIMPLE_DATA_DIR ?? join(import.meta.dirname, "../data"),
 );
+
+/**
+ * An Opengeni API key to act with instead of the browser's own credentials, for
+ * pointing a dev instance at a remote deployment (staging) without a sign-in
+ * flow. Every visitor then acts as that key, so keep such an instance private.
+ */
+export function opengeniApiKey(): string | null {
+  if (process.env.OPENGENI_SIMPLE_API_KEY) return process.env.OPENGENI_SIMPLE_API_KEY.trim();
+  const file = process.env.OPENGENI_SIMPLE_API_KEY_FILE;
+  if (file && existsSync(file)) return readFileSync(file, "utf8").trim() || null;
+  return null;
+}

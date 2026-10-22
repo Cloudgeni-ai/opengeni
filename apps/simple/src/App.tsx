@@ -337,6 +337,13 @@ export function App({
           onTheme={setTheme}
           defaultEffort={defaultEffort}
           onDefaultEffort={(value) => setPref("defaultEffort", value)}
+          avatarThemes={boot?.config.avatarThemes ?? []}
+          avatarTheme={prefs.avatarTheme ?? boot?.config.defaultAvatarTheme ?? ""}
+          onAvatarTheme={(value) => {
+            setPref("avatarTheme", value);
+            // The server repaints every agent; pick up the pending states.
+            setTimeout(() => void refreshState(), 500);
+          }}
           replyLength={replyLength}
           onReplyLength={(value) => setPref("replyLength", value)}
           notifications={notifications}

@@ -13,7 +13,7 @@ import type {
 } from "@opengeni/sdk";
 import { ArrowLeft, ExternalLink, Pause, Play, Trash2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { client, EFFORT_LABELS, type EffortLevel } from "../lib/app-api";
+import { client, EFFORT_LABELS, type AvatarThemeOption, type EffortLevel } from "../lib/app-api";
 import type { ReplyLength } from "../lib/context";
 import { CodexConnect } from "./CodexConnect";
 
@@ -47,6 +47,9 @@ export type SettingsDialogProps = {
   onTheme: (theme: Theme) => void;
   defaultEffort: EffortLevel;
   onDefaultEffort: (effort: EffortLevel) => void;
+  avatarThemes: AvatarThemeOption[];
+  avatarTheme: string;
+  onAvatarTheme: (theme: string) => void;
   replyLength: ReplyLength;
   onReplyLength: (length: ReplyLength) => void;
   notifications: boolean;
@@ -245,7 +248,54 @@ function General(props: SettingsDialogProps) {
           ]}
         />
       </Row>
+      <AvatarStyles {...props} />
     </Section>
+  );
+}
+
+/** Sample agents painted in each style (`public/themes`), so the choice is visual. */
+const THEME_SAMPLES = ["geni", "coach", "finance", "meals"];
+
+function AvatarStyles(props: SettingsDialogProps) {
+  return (
+    <div className="py-3">
+      <div className="text-sm font-medium">Avatar style</div>
+      <div className="text-xs text-[var(--app-muted)]">
+        Every agent is painted in the same style. Changing it repaints them all.
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {props.avatarThemes.map((theme) => {
+          const selected = theme.id === props.avatarTheme;
+          return (
+            <button
+              key={theme.id}
+              type="button"
+              onClick={() => props.onAvatarTheme(theme.id)}
+              aria-pressed={selected}
+              className={`rounded-xl border p-2.5 text-left transition-colors ${
+                selected
+                  ? "border-[var(--app-accent)] bg-[var(--app-hover)]"
+                  : "border-[var(--app-border)] hover:bg-[var(--app-hover)]"
+              }`}
+            >
+              <div className="flex gap-1.5">
+                {THEME_SAMPLES.map((sample) => (
+                  <img
+                    key={sample}
+                    src={`/themes/${theme.id}-${sample}.webp`}
+                    alt=""
+                    loading="lazy"
+                    className="h-11 w-11 rounded-[14px] bg-[var(--app-hover)] object-cover"
+                  />
+                ))}
+              </div>
+              <div className="mt-2 text-sm font-medium">{theme.name}</div>
+              <div className="text-xs text-[var(--app-muted)]">{theme.blurb}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

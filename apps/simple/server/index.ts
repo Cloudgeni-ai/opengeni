@@ -1,7 +1,14 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { resumeAvatarJobs, startAvatarJob } from "./avatars";
-import { opengeniApiUrl, opengeniWebUrl, SIMPLE_SERVER_PORT, SIMPLE_WEB_PORT } from "./config";
+import { repaintAvatars, resumeAvatarJobs, startAvatarJob } from "./avatars";
+import {
+  dataDirectory,
+  opengeniApiKey,
+  opengeniApiUrl,
+  opengeniWebUrl,
+  SIMPLE_SERVER_PORT,
+  SIMPLE_WEB_PORT,
+} from "./config";
 import {
   claimBlock,
   getAppliedBlock,
@@ -15,12 +22,13 @@ import {
   upsertProfile,
   usageSummary,
 } from "./db";
+import { AVATAR_THEMES, avatarTheme, DEFAULT_AVATAR_THEME } from "./themes";
 import {
   api,
   applyProfileUpdate,
   asCaller,
-  callerHeaders,
   createAgent,
+  downloadImage,
   DEFAULT_EFFORT,
   EFFORT_LEVELS,
   ensureMainAgent,
@@ -32,6 +40,7 @@ import {
 const serveDist = process.argv.includes("--serve-dist");
 const distDirectory = resolve(import.meta.dirname, "../dist");
 const apiUrl = opengeniApiUrl();
+const apiKey = opengeniApiKey();
 
 class HttpError extends Error {
   constructor(
@@ -68,6 +77,8 @@ const config = () => ({
   fullAppUrl: opengeniWebUrl(),
   effortLevels: Object.keys(EFFORT_LEVELS),
   defaultEffort: DEFAULT_EFFORT,
+  avatarThemes: AVATAR_THEMES.map(({ id, name, blurb }) => ({ id, name, blurb })),
+  defaultAvatarTheme: DEFAULT_AVATAR_THEME,
 });
 
 /** Opengeni refuses new chats until some model can run them. */
@@ -183,17 +194,24 @@ async function applyBlock(input: BlockRequest) {
   return getAppliedBlock(input.key);
 }
 
-async function avatar(request: Request, sessionId: string) {
+const avatarCache = join(dataDirectory, "avatars");
+mkdirSync(avatarCache, { recursive: true });
+
+/** Avatars are immutable artifacts, so each is downloaded once and kept on disk. */
+async function avatar(sessionId: string) {
   const profile = getProfile(sessionId);
   if (!profile?.avatarArtifactId) return new Response(null, { status: 404 });
-  const response = await fetch(
-    `${apiUrl}/v1/workspaces/${profile.workspaceId}/artifacts/${profile.avatarArtifactId}/content`,
-    { headers: callerHeaders(request) },
-  );
-  if (!response.ok || !response.body) return new Response(null, { status: 404 });
-  return new Response(response.body, {
+  const cached = join(avatarCache, `${profile.avatarArtifactId}.png`);
+  if (!existsSync(cached)) {
+    const image = await downloadImage(profile.workspaceId, profile.avatarArtifactId).catch(
+      () => null,
+    );
+    if (!image) return new Response(null, { status: 404 });
+    writeFileSync(cached, image.bytes);
+  }
+  return new Response(Bun.file(cached), {
     headers: {
-      "content-type": response.headers.get("content-type") ?? "image/png",
+      "content-type": "image/png",
       "cache-control": "private, max-age=31536000, immutable",
     },
   });
@@ -217,7 +235,17 @@ async function route(request: Request): Promise<Response> {
       workspaceId: string;
       values: Record<string, string | null>;
     }>(request);
-    return json(setPrefs(requireString(input.workspaceId, "workspaceId"), input.values ?? {}));
+    const workspaceId = requireString(input.workspaceId, "workspaceId");
+    const values = input.values ?? {};
+    const theme = values.avatarTheme;
+    if (theme && !AVATAR_THEMES.some((entry) => entry.id === theme)) {
+      throw new HttpError(400, "Unknown avatar style");
+    }
+    const before = avatarTheme(getPrefs(workspaceId).avatarTheme).id;
+    const prefs = setPrefs(workspaceId, values);
+    // One house style for every agent: switching it repaints them all.
+    if (theme && theme !== before) repaintAvatars(workspaceId);
+    return json(prefs);
   }
   if (path === "/app/agents" && method === "POST") {
     const input = await body<{
@@ -260,7 +288,7 @@ async function route(request: Request): Promise<Response> {
     return json({ ok: true });
   }
   const avatarMatch = /^\/app\/avatar\/([0-9a-f-]{36})$/.exec(path);
-  if (avatarMatch && method === "GET") return await avatar(request, avatarMatch[1]!);
+  if (avatarMatch && method === "GET") return await avatar(avatarMatch[1]!);
 
   const agentMatch = /^\/app\/agents\/([0-9a-f-]{36})\/(profile|avatar|usage)$/.exec(path);
   if (agentMatch && method !== "GET") {
@@ -297,6 +325,10 @@ async function route(request: Request): Promise<Response> {
 async function proxyToApi(request: Request, url: URL) {
   const headers = new Headers(request.headers);
   headers.delete("host");
+  if (apiKey) {
+    headers.delete("cookie");
+    headers.set("authorization", `Bearer ${apiKey}`);
+  }
   const upstream = await fetch(`${apiUrl}${url.pathname}${url.search}`, {
     method: request.method,
     headers,

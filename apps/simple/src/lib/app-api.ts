@@ -75,8 +75,12 @@ export type Bootstrap = AppState & {
     fullAppUrl: string | null;
     effortLevels: EffortLevel[];
     defaultEffort: EffortLevel;
+    avatarThemes: AvatarThemeOption[];
+    defaultAvatarTheme: string;
   };
 };
+
+export type AvatarThemeOption = { id: string; name: string; blurb: string };
 
 export type AppliedBlock = {
   key: string;

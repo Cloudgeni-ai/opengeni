@@ -1,7 +1,9 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import { opengeniApiUrl, SIMPLE_SERVER_PORT } from "./server/config";
+import { opengeniApiKey, opengeniApiUrl, SIMPLE_SERVER_PORT } from "./server/config";
+
+const apiKey = opengeniApiKey();
 
 // The simple app talks to Opengeni through this origin: `/v1` goes to the
 // Opengeni API, `/app` to the small companion server that keeps agent profiles,
@@ -14,7 +16,19 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: true,
     proxy: {
-      "/v1": { target: opengeniApiUrl(), changeOrigin: true, ws: true },
+      "/v1": {
+        target: opengeniApiUrl(),
+        changeOrigin: true,
+        ws: true,
+        // Acting as an API key: the browser's own cookies mean nothing upstream.
+        ...(apiKey
+          ? {
+              headers: { authorization: `Bearer ${apiKey}` },
+              configure: (proxy) =>
+                proxy.on("proxyReq", (proxyRequest) => proxyRequest.removeHeader("cookie")),
+            }
+          : {}),
+      },
       "/app": { target: `http://127.0.0.1:${SIMPLE_SERVER_PORT}`, changeOrigin: true },
     },
   },

@@ -1,13 +1,12 @@
-import { getProfile, listProfiles, upsertProfile } from "./db";
+import { getPrefs, getProfile, listProfiles, upsertProfile } from "./db";
 import { api } from "./opengeni";
 import { avatarPrompt } from "./prompts";
+import { generatedImageIds } from "./receipts";
+import { avatarTheme } from "./themes";
 
 const POLL_MS = 4000;
 const TIMEOUT_MS = 6 * 60 * 1000;
 const running = new Set<string>();
-
-const RECEIPT =
-  /"kind"\s*:\s*"generated_image"[^{}]*?"artifactId"\s*:\s*"([0-9a-f-]{36})"|"artifactId"\s*:\s*"([0-9a-f-]{36})"[^{}]*?"kind"\s*:\s*"generated_image"/;
 
 /**
  * Paints an agent's avatar in a hidden one-off session that may only generate
@@ -38,6 +37,7 @@ export async function startAvatarJob(workspaceId: string, sessionId: string, hin
         name,
         description: profile?.description ?? null,
         hint: hint ?? profile?.avatarPrompt ?? null,
+        theme: avatarTheme(getPrefs(workspaceId).avatarTheme),
       }),
     } as Parameters<typeof api.createSession>[1]);
     upsertProfile(workspaceId, sessionId, { avatarJobSessionId: studio.id });
@@ -66,19 +66,13 @@ async function waitForImage(workspaceId: string, studioSessionId: string): Promi
       api.listEvents(workspaceId, studioSessionId, { limit: 200 } as never),
       api.getSession(workspaceId, studioSessionId),
     ]);
-    const match = RECEIPT.exec(JSON.stringify(events));
-    if (match) return match[1] ?? match[2] ?? null;
+    const found = generatedImageIds(events).at(-1);
+    if (found) return found;
     if (session.status === "failed" || session.status === "cancelled") return null;
     if (session.status === "idle" && session.lastSequence > 3 && !session.activeTurnId) {
       // The turn ended without an image (no image route, or the model declined).
-      const final = RECEIPT.exec(
-        JSON.stringify(
-          await api.listEvents(workspaceId, studioSessionId, {
-            limit: 500,
-          } as never),
-        ),
-      );
-      return final ? (final[1] ?? final[2] ?? null) : null;
+      const latest = await api.listEvents(workspaceId, studioSessionId, { limit: 500 } as never);
+      return generatedImageIds(latest).at(-1) ?? null;
     }
   }
   return null;
@@ -92,5 +86,12 @@ export function resumeAvatarJobs(workspaceId: string, { retryFailed = false } = 
     if (due && !running.has(profile.sessionId)) {
       void startAvatarJob(workspaceId, profile.sessionId);
     }
+  }
+}
+
+/** Paints every agent again, after the workspace switched avatar style. */
+export function repaintAvatars(workspaceId: string) {
+  for (const profile of listProfiles(workspaceId)) {
+    if (!running.has(profile.sessionId)) void startAvatarJob(workspaceId, profile.sessionId);
   }
 }

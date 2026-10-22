@@ -1,3 +1,4 @@
+import { type AvatarTheme, themeStyle } from "./themes";
 /**
  * Instructions for agents in the simple app. Bump INSTRUCTIONS_VERSION when the
  * shared text changes: the server re-applies it to every existing agent.
@@ -97,12 +98,14 @@ export function avatarPrompt(input: {
   name: string;
   description?: string | null;
   hint?: string | null;
+  theme: AvatarTheme;
 }) {
   const subject = input.hint?.trim() || input.description?.trim() || input.name;
   return [
     `Generate exactly one image with generate_image, then reply with only the word "done".`,
     `The image is a square app avatar for an AI agent called "${input.name}"${input.description ? ` (${input.description.trim()})` : ""}.`,
-    `Theme: ${subject}.`,
-    "Style: a single bold, friendly emblem or character centered on a rich soft gradient background, clean modern illustration, soft lighting, high contrast, simple shapes that read well at 40 pixels, no text, no letters, no watermark, no border.",
+    `Subject: ${subject}.`,
+    `House style, shared by every agent so they read as one set: ${themeStyle(input.theme, input.name)}.`,
+    "One clear subject, simple shapes that read well at 40 pixels. The background is opaque and fills the whole square: no transparency, no text, no letters, no watermark, no border.",
   ].join("\n");
 }
