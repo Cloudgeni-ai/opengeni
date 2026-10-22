@@ -169,6 +169,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     workDiscoveryAutomaticNudgesEnabled: false,
     environmentsEncryptionKey: undefined,
     onePasswordFakeTokens: false,
+    googleConnectorSetupEnabled: true,
+    googleDriveMcpEnabled: false,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,

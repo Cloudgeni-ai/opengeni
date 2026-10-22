@@ -1,3 +1,4 @@
+import { assertGoogleConnectorSetupEnabled } from "./google-connector-availability";
 import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
 import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
@@ -79,6 +80,7 @@ import { requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
@@ -169,7 +171,7 @@ type OAuthClientDeps = {
 
 export type OAuthStartContext = {
   /** Server-selected dedicated adapter identity; never copied from request metadata. */
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   accountId: string;
@@ -205,7 +207,7 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
@@ -468,6 +470,19 @@ export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
+  const startTarget = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  if (
+    context.integrationKey === "google-drive" &&
+    (startTarget !== OFFICIAL_DRIVE_MCP_URL || context.payload.ownership !== "personal")
+  ) {
+    throw new HTTPException(422, {
+      message: "Google Drive setup requires its exact MCP endpoint and personal ownership",
+    });
+  }
+  assertGoogleMcpSetupEnabled(
+    deps.settings,
+    builtInOAuthProfileFor({ mcpUrl: startTarget }) ?? DEFAULT_OAUTH_PROFILE,
+  );
   await withOrganizationIntegrationAcquisition(
     deps.db,
     context,
@@ -619,7 +634,7 @@ async function startMcpOAuthWithinDeadline(
       "configuration_missing",
       new HTTPException(503, {
         message:
-          "Gmail OAuth requires a registered Google Web application client with a secret and supported token authentication",
+          "Google connector OAuth requires a registered Google Web application client with a secret and supported token authentication",
       }),
     );
   }
@@ -719,6 +734,18 @@ export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): 
   return builtInOAuthProfileFor({ mcpUrl, providerDomain })?.key === "hosted-slack-mcp";
 }
 
+function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {
+  if (profile.key === "official-gmail" || profile.key === "official-drive") {
+    assertGoogleConnectorSetupEnabled(settings);
+  }
+  if (profile.key === "official-drive" && !settings.googleDriveMcpEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Drive MCP is unavailable until this deployment has completed Google's preview and OAuth setup.",
+    });
+  }
+}
+
 /** Start-time payload fences declared by the resolved profile. */
 function assertOAuthStartProfile(
   settings: Settings,
@@ -726,6 +753,7 @@ function assertOAuthStartProfile(
   mcpUrl: string,
   profile: OAuthProviderProfile,
 ): void {
+  assertGoogleMcpSetupEnabled(settings, profile);
   if (profile.rejectCallerOAuthClient && payload.oauthClient) {
     throw new HTTPException(422, { message: profile.rejectCallerOAuthClient.message });
   }
@@ -827,21 +855,29 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = await resolveMcpOAuthState(db, settings, input.state, deadline);
+    assertGoogleMcpSetupEnabled(settings, builtInOAuthProfileFor(state) ?? DEFAULT_OAUTH_PROFILE);
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
-      // Native Gmail setup uses its own provider id, but shares this callback.
-      // Bind that id to the exact reviewed Gmail destination before
-      // claiming an operation (including receipt replay), not to arbitrary MCP.
+      // Dedicated Google setup shares this callback. Bind each trusted provider
+      // id to its exact reviewed endpoint before claiming an operation or replay.
       const gmailAttemptMatches =
         stored.attempt.providerId === "gmail" &&
         state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
         state.providerDomain === "gmailmcp.googleapis.com" &&
         builtInOAuthProfileFor(state)?.key === "official-gmail" &&
         personalOwnerStateAccepted(state);
+      const driveAttemptMatches =
+        stored.attempt.providerId === "google-drive" &&
+        state.integrationKey === "google-drive" &&
+        state.mcpUrl === OFFICIAL_DRIVE_MCP_URL &&
+        state.providerDomain === "drivemcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-drive" &&
+        personalOwnerStateAccepted(state);
       if (
         (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
-          !gmailAttemptMatches) ||
+          !gmailAttemptMatches &&
+          !driveAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
@@ -967,7 +1003,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "client_lookup",
         "invalid_client",
-        new Error("Gmail OAuth client is unavailable"),
+        new Error("Google connector OAuth client is unavailable"),
       );
     }
     const token = await deadline.run("token_exchange", (signal) =>
@@ -989,7 +1025,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "token_exchange",
         "offline_access_unavailable",
-        new Error("Google did not grant offline access. Start a new Gmail connection attempt."),
+        new Error("Google did not grant offline access. Start a new connector connection attempt."),
       );
     }
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile);
@@ -1000,7 +1036,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "token_exchange",
         "insufficient_scope",
-        new Error("Google did not grant the reviewed Gmail permissions."),
+        new Error("Google did not grant the requested connector permissions."),
       );
     }
     const verification = await verifyMcpToolsListNonFatal(
@@ -1212,9 +1248,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
                     : staged.reason === "account_already_connected"
                       ? "This Slack account is already connected. Reconnect the existing account instead."
                       : staged.reason === "offline_access_unavailable"
-                        ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Gmail connection attempt."
+                        ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
                         : staged.reason === "insufficient_scope"
-                          ? "Google did not grant all required Gmail permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                          ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
                           : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
                 retryable: true,
               },
@@ -1903,6 +1939,7 @@ function operatorClientEntryFor(
 
 /** Secret-free readiness for the exact registered client used by Gmail setup. */
 export function gmailOAuthClientConfigured(settings: Settings): boolean {
+  if (!settings.googleConnectorSetupEnabled) return false;
   const entry = operatorClientEntryFor(settings, ["https://accounts.google.com"]);
   return Boolean(
     entry &&
@@ -1914,6 +1951,11 @@ export function gmailOAuthClientConfigured(settings: Settings): boolean {
       ),
     }),
   );
+}
+
+/** Drive also requires preview readiness; sharing an issuer client is not verification. */
+export function googleDriveOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleDriveMcpEnabled && gmailOAuthClientConfigured(settings);
 }
 
 function isConfidentialOAuthClient(client: {
@@ -2160,6 +2202,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (
     payload.integrationKey !== undefined &&
     payload.integrationKey !== "gmail" &&
+    payload.integrationKey !== "google-drive" &&
     payload.integrationKey !== "slack-personal"
   ) {
     throw new HTTPException(400, { message: "invalid OAuth integration identity" });
@@ -2225,7 +2268,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     ...(payload.integrationKey
-      ? { integrationKey: payload.integrationKey as "gmail" | "slack-personal" }
+      ? { integrationKey: payload.integrationKey as "gmail" | "google-drive" | "slack-personal" }
       : {}),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
@@ -2287,6 +2330,16 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
   assertProfileOwnership(builtInOAuthProfileFor(parsed), parsed.ownership);
+  if (
+    parsed.integrationKey === "google-drive" &&
+    (parsed.mcpUrl !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.resource !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.providerDomain !== "drivemcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-drive")
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth integration identity" });
+  }
   if (Boolean(connectionId) !== Boolean(connectionVersion)) {
     throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
   }
@@ -2720,6 +2773,7 @@ async function verifyMcpToolsList(
   resource: string,
   token: TokenResponse,
   signal: AbortSignal,
+  verification?: OAuthProviderProfile["remoteToolVerification"],
 ): Promise<Array<{ name: string; description?: string }>> {
   const listed = await withMcpStreamableHttpClient(
     {
@@ -2738,15 +2792,24 @@ async function verifyMcpToolsList(
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
     },
-    (client) =>
-      client
-        .listTools(undefined, {
-          timeout: 10_000,
-          maxTotalTimeout: 10_000,
-        })
+    async (client) => {
+      const toolsResult = await client
+        .listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 })
         .catch((error: unknown) => {
           throw legacyMcpClientError(error);
-        }),
+        });
+      if (verification) {
+        if (!toolsResult.tools.some((tool) => tool.name === verification.toolName))
+          throw new Error("Required connector verification tool is unavailable");
+        const result = await client.callTool(
+          { name: verification.toolName, arguments: verification.arguments },
+          { timeout: 10_000, maxTotalTimeout: 10_000 },
+        );
+        if (result.isError) throw new Error("Authenticated connector verification failed");
+        // Discard file metadata. Setup retains only the successful proof and tool descriptors.
+      }
+      return toolsResult;
+    },
   );
   return listed.tools.map((tool) => ({
     name: tool.name,
@@ -2775,7 +2838,13 @@ async function verifyMcpToolsListNonFatal(
     let providerIdentity: Record<string, string> | undefined;
     const tools = await deadline.run("tools_list", async (signal) => {
       if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
-        return verifyMcpToolsList(settings, state.mcpUrl, token, signal);
+        return verifyMcpToolsList(
+          settings,
+          state.mcpUrl,
+          token,
+          signal,
+          profile?.remoteToolVerification,
+        );
       }
       const response = await fetchOAuth(local.url, settings, {
         method: local.method ?? "POST",
@@ -2821,7 +2890,8 @@ async function verifyMcpToolsListNonFatal(
     if (staged.reason === "timeout" && deadline.signal.aborted) {
       throw staged;
     }
-    if (builtInOAuthProfileFor(state)?.localToolVerification?.required) throw staged;
+    const profile = builtInOAuthProfileFor(state);
+    if (profile?.localToolVerification?.required || profile?.remoteToolVerification) throw staged;
     logOAuthVerificationWarning(observability, staged, state);
     return {
       metadata: {

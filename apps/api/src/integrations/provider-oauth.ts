@@ -1,3 +1,4 @@
+import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { Buffer } from "node:buffer";
@@ -582,6 +583,8 @@ function providerClientForDefinition(
   settings: Settings,
   definition: IntegrationDefinition,
 ): ProviderOAuthClient {
+  if (definition.id === "google-drive")
+    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const candidates = providerClientKeys(definition);
   let entry: IntegrationOAuthClientConfig | undefined;
@@ -594,18 +597,6 @@ function providerClientForDefinition(
     entry = Object.entries(configured).find(([key]) =>
       normalized.has(key.replace(/\/+$/, "")),
     )?.[1];
-  }
-  if (
-    !entry &&
-    definition.provider.id === "google" &&
-    settings.googleDriveClientId?.trim() &&
-    settings.googleDriveClientSecret?.trim()
-  ) {
-    return {
-      clientId: settings.googleDriveClientId.trim(),
-      clientSecret: settings.googleDriveClientSecret.trim(),
-      tokenEndpointAuthMethod: "client_secret_post",
-    };
   }
   if (!entry) {
     throw new HTTPException(503, {

@@ -538,6 +538,7 @@ export type DispatchScheduledTaskRunResult =
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "atlassian_native_retired"
+        | "google_drive_native_retired"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";

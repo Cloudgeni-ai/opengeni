@@ -43,6 +43,12 @@ export const OFFICIAL_GMAIL_MCP_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify",
 ] as const;
 
+export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
+export const OFFICIAL_DRIVE_MCP_SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+] as const;
+
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 const GOOGLE_OAUTH_ISSUER_ORIGIN = "https://accounts.google.com";
@@ -128,6 +134,8 @@ export type OAuthProviderProfile = {
   confidentialClientRequired?: boolean;
   /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
   providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  /** Built-in read-only remote proof; discovery alone may be publicly accessible. */
+  remoteToolVerification?: { toolName: string; arguments: Record<string, unknown> };
   localToolVerification?: {
     url: string;
     method?: "GET" | "POST";
@@ -236,7 +244,7 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   postDiscoveryProviderDomain: {
     domain: "gmailmcp.googleapis.com",
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL} or ${OFFICIAL_DRIVE_MCP_URL}`,
   },
   // Google's OAuth endpoints do not implement RFC 8707's `resource` parameter.
   sendResourceParameter: false,
@@ -284,9 +292,54 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
 };
 
+/** Remote discovery remains authoritative; no synthetic Drive tool verification. */
+const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
+  key: "official-drive",
+  match: { mcpUrls: [OFFICIAL_DRIVE_MCP_URL] },
+  canonicalProviderDomain: "drivemcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_DRIVE_MCP_URL,
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Drive connections must be personal-owned",
+  },
+  exactMcpBinding: true,
+  connectionSelection: "first_active",
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Drive MCP authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "drivemcp.googleapis.com",
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  remoteToolVerification: {
+    toolName: "list_recent_files",
+    arguments: { pageSize: 1, excludeContentSnippets: true },
+  },
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
+  OFFICIAL_DRIVE_PROFILE,
 ];
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */
@@ -299,18 +352,18 @@ export function builtInOAuthProfileByKey(key: string): OAuthProviderProfile {
 }
 
 /**
- * Authorization servers reserved for exactly one profile: discovering one of
+ * Authorization servers reserved for explicitly reviewed profiles: discovering one of
  * these identities on any other flow is rejected before registration.
  */
 const RESERVED_AUTHORIZATION_SERVERS: readonly {
   issuerOrigins: readonly string[];
-  allowedProfileKey: string;
+  allowedProfileKeys: readonly string[];
   message: string;
 }[] = [
   {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
-    allowedProfileKey: OFFICIAL_GMAIL_PROFILE.key,
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    allowedProfileKeys: [OFFICIAL_GMAIL_PROFILE.key, OFFICIAL_DRIVE_PROFILE.key],
+    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL} or ${OFFICIAL_DRIVE_MCP_URL}`,
   },
   {
     // A URL variant that dodges the hosted-Slack profile match (for example a
@@ -318,7 +371,7 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
     // Slack's authorization server as a default-profile flow: that would mint
     // a workspace-ownable Slack identity with the deployment client.
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
-    allowedProfileKey: HOSTED_SLACK_PROFILE.key,
+    allowedProfileKeys: [HOSTED_SLACK_PROFILE.key],
     message: `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
   },
 ];
@@ -415,7 +468,7 @@ export function assertAuthorizationServerNotReserved(
 ): void {
   const identities = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
   for (const guard of RESERVED_AUTHORIZATION_SERVERS) {
-    if (profile.key === guard.allowedProfileKey) {
+    if (guard.allowedProfileKeys.includes(profile.key)) {
       continue;
     }
     if (identities.some((origin) => guard.issuerOrigins.includes(origin))) {

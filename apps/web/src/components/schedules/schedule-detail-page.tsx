@@ -1,4 +1,8 @@
 import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
+import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianTask,
 } from "@opengeni/contracts/atlassian-native-retirement";
@@ -439,7 +443,7 @@ export function ScheduleDetailPage({
                 ) : null}
                 {task.status === "paused" &&
                 perms.canPauseOrDelete &&
-                !isRetiredNativeAtlassianTask(task) ? (
+                !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -450,7 +454,8 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun && !isRetiredNativeAtlassianTask(task) ? (
+                ) : perms.canRun &&
+                  !(isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task)) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -667,8 +672,11 @@ function Overview({
           </Notice>
         ) : null}
         {retired ? (
-          <Notice tone="muted" title="Jira and Confluence sync retired">
-            {ATLASSIAN_NATIVE_RETIRED_MESSAGE} Imported documents and previous runs remain.
+          <Notice tone="muted" title="Previous source sync retired">
+            {isRetiredNativeGoogleDriveTask(task)
+              ? GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE
+              : ATLASSIAN_NATIVE_RETIRED_MESSAGE}{" "}
+            Imported documents and previous runs remain.
           </Notice>
         ) : (
           <SettingRow

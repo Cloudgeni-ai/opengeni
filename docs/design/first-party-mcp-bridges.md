@@ -59,11 +59,11 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
   `packages/db/src/slack-api-rate-limits.ts` coordinates history/replies and
   provider cooldowns across replicas, bot/personal tokens, and Opengeni tenants
   sharing one Slack app/workspace. Search is absent. See [Slack](../slack-bot.md).
-- **Google Drive** already uses the immutable Integration Definition compiler
-  and local OpenAPI MCP adapter. It remains functional as one Integration row
-  with its provider-specific facet/source authority unchanged, but does not
-  claim the new static bridge descriptor. A duplicate Connector row would be
-  incorrect.
+- **Google Drive** composes Google's remote MCP server with reviewed REST extensions
+  under one personal connection. It does not replace provider tool discovery. Unknown
+  writes never replay; its token binding permits only the reviewed Drive API routes.
+  See [Google Drive](../google-drive.md).
+
 - **Square Cash App** already has a streamable-HTTP provider endpoint in the
   committed catalog (`https://connect.squareup.com/v2/mcp/cash-app`). It needs
   no local bridge. A broader Square bridge requires a separately reviewed tool

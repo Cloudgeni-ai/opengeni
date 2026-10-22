@@ -1,4 +1,9 @@
 import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeGoogleDriveSource,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
+import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
 } from "@opengeni/db";
@@ -12,7 +17,6 @@ import {
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
 } from "@opengeni/contracts";
 import {
-  allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   type FirstPartyMcpToolPolicySettings,
@@ -261,30 +265,16 @@ export async function scheduledConnectionTools(
   }).toolRefs;
 }
 
+/** Native publication surfaces are retired; MCP uses the ordinary selected-tool policy. */
 export function scheduledConnectionSurfaceEligibility(
-  settings: Settings,
-  target:
+  _settings: Settings,
+  _target:
     | (Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> &
         Partial<Pick<Session, "toolPolicy" | "agent">>)
     | null,
-  workspaceSettings: unknown = {},
+  _workspaceSettings: unknown = {},
 ): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  const tools = target?.toolPolicy
-    ? resolveSessionFirstPartyMcpTools(
-        settings,
-        { ...target, toolPolicy: target.toolPolicy },
-        workspaceSettings,
-      )
-    : allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
-  const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
-  return {
-    googleDrivePublicationEnabled:
-      tools.includes("editable_artifact_export") &&
-      tools.includes("editable_artifact_export_status") &&
-      permissions.includes("artifacts:read") &&
-      permissions.includes("artifacts:publish"),
-    atlassianEnabled: false,
-  };
+  return { googleDrivePublicationEnabled: false, atlassianEnabled: false };
 }
 
 /**
@@ -1006,6 +996,8 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    if (isRetiredNativeGoogleDriveTask(input.task))
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     if (isRetiredNativeAtlassianTask(input.task))
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     // The worker never runs a paused schedule. Refuse here so the caller is
@@ -1579,6 +1571,11 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     expectedExecutionDigest: input.existing.executionDigest,
   };
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  if (
+    isRetiredNativeGoogleDriveTask(input.existing) &&
+    (input.payload.status === "active" || requestedKnowledgeSource)
+  )
+    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
   if (
     isRetiredNativeAtlassianTask(input.existing) &&
     (input.payload.status === "active" || requestedKnowledgeSource)
@@ -2173,6 +2170,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   grant: AccessGrant;
   action: KnowledgeSourceSyncAction;
 }): Promise<void> {
+  if (isRetiredNativeGoogleDriveSource(input.action))
+    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
   if (isRetiredNativeAtlassianSource(input.action))
     throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   if (input.action.initiatingSubjectId !== input.grant.subjectId) {

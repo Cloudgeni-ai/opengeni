@@ -3602,12 +3602,6 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
-  const googleDrivePublicationEnabled =
-    firstPartyMcpTools.includes("editable_artifact_export") &&
-    firstPartyMcpTools.includes("editable_artifact_export_status") &&
-    (!firstPartyMcpPermissions?.length ||
-      (firstPartyMcpPermissions.includes("artifacts:read") &&
-        firstPartyMcpPermissions.includes("artifacts:publish")));
   const atlassianEnabled =
     firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
@@ -3633,7 +3627,6 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
-        googleDrivePublicationEnabled,
         atlassianEnabled,
       }),
     );
@@ -4609,11 +4602,6 @@ async function acceptSessionUserMessageInFileScope(
         connectionWorkspace.settings,
       ),
     });
-    const existingEffectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
-      settings,
-      existingSession,
-      connectionWorkspace.settings,
-    );
     const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
       await freezeConnectionAccounts({
         db,
@@ -4624,12 +4612,6 @@ async function acceptSessionUserMessageInFileScope(
         resources: [...existingSession.resources, ...requestedResources],
         source: connectionDelegationSource,
         targetSessionId: sessionId,
-        googleDrivePublicationEnabled:
-          existingEffectiveFirstPartyTools.includes("editable_artifact_export") &&
-          existingEffectiveFirstPartyTools.includes("editable_artifact_export_status") &&
-          (!existingSession.firstPartyMcpPermissions?.length ||
-            (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
-              existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
         atlassianEnabled:
           existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
           (!existingSession.firstPartyMcpPermissions?.length ||

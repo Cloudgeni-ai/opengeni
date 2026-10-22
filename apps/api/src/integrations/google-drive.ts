@@ -1,4 +1,8 @@
 import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+} from "@opengeni/contracts/google-drive-native-retirement";
+import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
@@ -167,8 +171,8 @@ type GoogleDriveOAuthState = {
 };
 
 export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
-  deps: ApiRouteDeps,
-  input: {
+  _deps: ApiRouteDeps,
+  _input: {
     accountId: string;
     workspaceId: string;
     connectionId: string;
@@ -177,84 +181,8 @@ export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
     driveId: string | null;
   },
 ): Promise<{ enabled: boolean; triggered: number }> {
-  if (deps.settings.googleDriveWorkspaceEventsEnabled !== true) {
-    return { enabled: false, triggered: 0 };
-  }
-  const eventId = input.eventId.trim();
-  if (eventId.length < 1 || eventId.length > 1024) {
-    throw new Error("google_drive_workspace_event_id_invalid");
-  }
-  const connection = await getConnectionMetadata(
-    deps.db,
-    input.workspaceId,
-    input.connectionId,
-    input.connectionOwnerSubjectId,
-  );
-  if (!connection || connection.accountId !== input.accountId) {
-    throw new Error("google_drive_workspace_event_connection_not_found");
-  }
-  const metadata = requireGoogleDriveConnection(connection, input.connectionOwnerSubjectId);
-  if (effectiveGoogleDriveLifecycle(connection, metadata).state !== "active") {
-    return { enabled: true, triggered: 0 };
-  }
-  const selectedSources =
-    metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
-  const selectedById = new Map(selectedSources.map((source) => [source.id, source]));
-  const tasks = await listKnowledgeSourceSyncTasksForConnection(
-    deps.db,
-    input.workspaceId,
-    input.connectionId,
-  );
-  let triggered = 0;
-  for (const task of tasks) {
-    if (!scheduledTaskKnowledgeSource(task) || task.status !== "active") continue;
-    const externalSourceId =
-      typeof task.metadata.externalSourceId === "string" ? task.metadata.externalSourceId : null;
-    const selectedSource = externalSourceId ? selectedById.get(externalSourceId) : null;
-    if (
-      !selectedSource ||
-      !selectedSource.syncEnabled ||
-      selectedSource.driveId !== input.driveId
-    ) {
-      continue;
-    }
-    const token = createHash("sha256")
-      .update(`google-drive-workspace-event:${task.id}:${eventId}`)
-      .digest("hex")
-      .slice(0, 48);
-    await deps.workflowClient.triggerScheduledTask({
-      task,
-      agentRunUsageIdempotencyKey: `knowledge-source-sync:provider-event:${task.id}:${token}`,
-      triggerWorkflowId: manualScheduledTaskTriggerWorkflowId(task.id, `provider-event-${token}`),
-      initiator: { kind: "service", subjectId: "google-drive-workspace-events" },
-      triggerType: "provider_event",
-    });
-    triggered += 1;
-  }
-  return { enabled: true, triggered };
+  return { enabled: false, triggered: 0 };
 }
-
-type GoogleTokenResponse = {
-  accessToken: string;
-  refreshToken?: string;
-  tokenType: string;
-  expiresAt: Date | null;
-  scopes: string[];
-};
-
-type GoogleDriveConnectionRecord = NonNullable<Awaited<ReturnType<typeof getConnectionMetadata>>>;
-
-type GoogleDriveApiConnection =
-  | {
-      kind: "legacy";
-      connection: GoogleDriveConnectionRecord;
-      metadata: GoogleDriveConnectionMetadata;
-    }
-  | {
-      kind: "integration";
-      connection: GoogleDriveConnectionRecord;
-      metadata: ApiIntegrationOAuthConnectionMetadata;
-    };
 
 export async function startGoogleDriveOAuth(
   deps: ApiRouteDeps,
@@ -268,6 +196,7 @@ export async function startGoogleDriveOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<GoogleDriveOAuthStartResponse> {
+  assertNativeGoogleDriveAvailable();
   await withOrganizationIntegrationAcquisition(deps.db, input, ["google-drive"], async () => {});
   requireGoogleDriveSettings(deps.settings);
   const existing = input.payload.connectionId
@@ -412,20 +341,11 @@ export async function completeGoogleDriveOAuthCallback(
         Boolean(input.code && !input.error),
       );
       if (claim.status === "replayed") {
-        // A first-stage receipt retains its continuation even after final
-        // completion or cancellation. Reopen only the still-current action.
-        const latest = await getConnectAttempt(deps.db, state, state.connectAttemptId);
-        if (
-          claim.attempt.nextAction.type === "authorize" &&
-          latest.attempt.nextAction.type === "authorize" &&
-          latest.attempt.nextAction.url === claim.attempt.nextAction.url
-        ) {
-          return { redirectTo: claim.attempt.nextAction.url };
-        }
         return { redirectTo: exactReturnUrl, exactReturn: true };
       }
       operationClaimed = true;
     }
+    refuseRetiredGoogleDriveCallback();
     await requireGoogleDriveCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -703,6 +623,7 @@ export async function completeGoogleDriveOAuthCallback(
       !operationSettlementStarted &&
       error instanceof GoogleDriveCallbackError &&
       [
+        GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
         "state_replayed",
         "scope_not_granted",
         "connection_conflict",
@@ -730,7 +651,10 @@ export async function completeGoogleDriveOAuthCallback(
             nextAction: { type: "none" },
             error: {
               code: error.reason,
-              message: "Authorization was not completed. Start a new connection attempt.",
+              message:
+                error.reason === GOOGLE_DRIVE_NATIVE_RETIRED_REASON
+                  ? GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE
+                  : "Authorization was not completed. Start a new connection attempt.",
               retryable: false,
             },
           }),
@@ -764,6 +688,7 @@ export async function transitionGoogleDriveLifecycle(
     payload: GoogleDriveLifecycleActionRequest;
   },
 ) {
+  if (input.payload.action === "resume") assertNativeGoogleDriveAvailable();
   const existing = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -1030,6 +955,7 @@ export async function browseGoogleDrive(
     pageToken?: string | undefined;
   },
 ) {
+  assertNativeGoogleDriveAvailable();
   const connection = await getConnectionMetadata(
     deps.db,
     input.workspaceId,
@@ -1103,6 +1029,7 @@ export async function browseGoogleDriveFacetSource(
     pageToken?: string | undefined;
   },
 ) {
+  assertNativeGoogleDriveAvailable();
   const context = await requireGoogleDriveIntegrationFacet(deps, input);
   return await browseGoogleDrive(deps, {
     workspaceId: input.workspaceId,
@@ -1128,6 +1055,7 @@ export async function saveGoogleDriveFacetSource(
     canManagePersonalDestination: boolean;
   },
 ): Promise<IntegrationFacetMutationResult> {
+  assertNativeGoogleDriveAvailable();
   const parsedPayload = SaveGoogleDriveIntegrationSourceRequest.safeParse(input.payload);
   if (!parsedPayload.success) {
     throw new HTTPException(400, { message: "invalid Google Drive source selection" });
@@ -1301,6 +1229,7 @@ export async function saveGoogleDriveSource(
     canManagePersonalDestination: boolean;
   },
 ) {
+  assertNativeGoogleDriveAvailable();
   const parsedPayload = SaveGoogleDriveSourceRequest.safeParse(input.payload);
   if (!parsedPayload.success) {
     throw new HTTPException(400, { message: "invalid Google Drive source selection" });
@@ -2162,19 +2091,11 @@ async function resolveGoogleDriveBoundaryItem(
   });
 }
 
-function requireGoogleDriveSettings(settings: Settings): {
+function requireGoogleDriveSettings(_settings: Settings): {
   clientId: string;
   clientSecret: string;
 } {
-  const clientId = settings.googleDriveClientId?.trim();
-  const clientSecret = settings.googleDriveClientSecret?.trim();
-  if (!clientId || !clientSecret) {
-    throw new HTTPException(503, {
-      message:
-        "Google Drive requires OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET",
-    });
-  }
-  return { clientId, clientSecret };
+  throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
 }
 
 function requireGoogleDriveOAuthCallbackUrl(settings: Settings): string {
@@ -2937,4 +2858,12 @@ function numberValue(value: unknown): number | undefined {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function assertNativeGoogleDriveAvailable(): void {
+  throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
+}
+
+function refuseRetiredGoogleDriveCallback(): void {
+  throw new GoogleDriveCallbackError(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
 }

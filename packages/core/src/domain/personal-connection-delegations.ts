@@ -15,8 +15,6 @@ import type {
 import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-  GoogleDriveConnectionMetadata,
-  googleDriveScopesAllowCapability,
 } from "@opengeni/contracts/google-drive";
 import {
   isPersonalGitHubConnection,
@@ -407,6 +405,7 @@ export function personalConnectionDelegationsFromParent(input: {
     const delegation = input.parentDelegations.find(
       (candidate) =>
         candidate.connectionType !== "atlassian" &&
+        candidate.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
         candidate.serverId === server.id &&
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || !candidate.kind || candidate.kind === ref.kind),
@@ -417,10 +416,7 @@ export function personalConnectionDelegationsFromParent(input: {
     ...mcp,
     ...input.parentDelegations
       .filter(
-        (item) =>
-          item.connectionType === "social" ||
-          item.connectionType === "github_personal" ||
-          item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+        (item) => item.connectionType === "social" || item.connectionType === "github_personal",
       )
       .map((item) => ({ ...item })),
   ];
@@ -462,78 +458,13 @@ export function personalConnectionDelegationsFromParent(input: {
   return inherited;
 }
 
-/**
- * Freezes Google Drive publishing only when one exact subject-owned connection
- * is eligible. Multiple writable Google accounts are intentionally ambiguous:
- * callers must narrow the connection before a later turn can advertise or use
- * the private publication tool.
- */
-export function googleDrivePublicationDelegationFromVisibleConnections(input: {
+/** Historical native Drive credentials never become new publication authority. */
+export function googleDrivePublicationDelegationFromVisibleConnections(_input: {
   subjectId: string;
   connections: ConnectionMetadata[];
   authoritySelection?: McpConnectionAccountSelection;
 }): McpPersonalConnectionDelegation | null {
-  const selection = input.authoritySelection;
-  const eligible = input.connections.filter((connection) => {
-    if (
-      connection.subjectId !== input.subjectId ||
-      connection.status !== "active" ||
-      !connection.authorityId ||
-      connection.kind !== "oauth2" ||
-      !sameProviderDomain(connection.providerDomain, GOOGLE_DRIVE_PROVIDER_DOMAIN) ||
-      !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
-    ) {
-      return false;
-    }
-    const metadata = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
-    return Boolean(
-      metadata.success &&
-      metadata.data.outputDestination &&
-      metadata.data.lifecycle?.state !== "paused" &&
-      (!metadata.data.lifecycle || metadata.data.lifecycle.state === "active"),
-    );
-  });
-  const selectedEligible = selection
-    ? eligible.filter((connection) => connection.id === selection.connectionId)
-    : eligible;
-  if (selection && selectedEligible.length !== 1) {
-    throw new ConnectionAccountSelectionError(
-      "Google Drive publication authority selection is unavailable",
-      {
-        version: 1,
-        reason: "selected_account_unavailable",
-        accounts: [
-          {
-            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-            connectionId: selection.connectionId,
-            reason: "selection_unavailable",
-          },
-        ],
-      },
-    );
-  }
-  if (!selection && selectedEligible.length !== 1) return null;
-  const connection = selectedEligible[0]!;
-  if (selection && selection.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID) {
-    throw new Error("Google Drive publication account selection is invalid");
-  }
-  // Freeze the exact output destination on the accepted delegation: a later
-  // connection-settings change must never redirect an already-accepted turn's
-  // publication. Eligibility above already proved the metadata parses and the
-  // destination exists.
-  const frozenMetadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
-  if (!frozenMetadata.outputDestination) {
-    throw new Error("Google Drive publication destination disappeared during acceptance");
-  }
-  return {
-    serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-    connectionId: connection.id,
-    originWorkspaceId: connection.workspaceId,
-    ownerSubjectId: input.subjectId,
-    providerDomain: connection.providerDomain,
-    kind: connection.kind,
-    outputDestination: frozenMetadata.outputDestination,
-  };
+  return null;
 }
 
 /** Native Atlassian credentials remain stored but are not new turn authority. */
@@ -852,7 +783,7 @@ export async function freezeConnectionAccounts(
         : {}),
     });
   }
-  // Dedicated first-party publication/repository/social surfaces keep their
+  // Dedicated first-party repository/social surfaces keep their
   // existing selection and authority contracts; they are not generic MCP routes.
   const special = await freezePersonalConnectionDelegations({
     ...input,
@@ -988,13 +919,29 @@ export async function freezePersonalConnectionDelegations(input: {
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAccountSelection[];
-  /** Exact first-party export tool + permission gate, not broad opengeni attachment. */
+  /** @deprecated Native Drive publishing is retired; this flag grants no authority. */
   googleDrivePublicationEnabled?: boolean;
   /** Exact first-party Atlassian tool + permission gate. */
   atlassianEnabled?: boolean;
   /** Exact target for successor-mode projection (`session` never crosses it). */
   targetSessionId?: string;
 }): Promise<McpPersonalConnectionDelegation[]> {
+  const retiredSelections = (input.authoritySelections ?? []).filter(
+    (selection) => selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+  );
+  if (retiredSelections.length > 0) {
+    throw new ConnectionAccountSelectionError(
+      "Native Google Drive publishing has been retired; select the Google Drive MCP connection",
+      {
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: retiredSelections.map((selection) => ({
+          ...selection,
+          reason: "connector_unavailable",
+        })),
+      },
+    );
+  }
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
   const includeFirstPartyConnections = input.tools.some((tool) => tool.id === "opengeni");
   const personalGitHubResources = personalGitHubRepositoryResources(input.resources ?? []);
@@ -1033,7 +980,7 @@ export async function freezePersonalConnectionDelegations(input: {
     });
     return inherited.filter((item) => {
       if (item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID) {
-        return input.googleDrivePublicationEnabled === true;
+        return false;
       }
       if (item.connectionType === "atlassian") {
         return false;
@@ -1069,9 +1016,6 @@ export async function freezePersonalConnectionDelegations(input: {
   });
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
   const supportedSelectionIds = new Set(selectedMcpServerIds);
-  if (input.googleDrivePublicationEnabled) {
-    supportedSelectionIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
-  }
   if (personalGitHubResources.length > 0) {
     supportedSelectionIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
   }
@@ -1136,24 +1080,9 @@ export async function freezePersonalConnectionDelegations(input: {
         connections: visibleConnections,
       })
     : [];
-  const googleDriveAuthoritySelection = input.googleDrivePublicationEnabled
-    ? (input.authoritySelections ?? []).find(
-        (selection) => selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      )
-    : undefined;
-  const googleDrivePublication = input.googleDrivePublicationEnabled
-    ? googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: ownerSubjectId,
-        connections: visibleConnections,
-        ...(googleDriveAuthoritySelection
-          ? { authoritySelection: googleDriveAuthoritySelection }
-          : {}),
-      })
-    : null;
   return [
     ...mcp,
     ...(personalGitHub ? [personalGitHub] : []),
-    ...(googleDrivePublication ? [googleDrivePublication] : []),
     ...[...latest.values()].map((connection) => ({
       serverId: `social:${connection.provider}`,
       connectionId: connection.id,

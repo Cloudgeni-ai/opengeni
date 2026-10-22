@@ -34,7 +34,7 @@ describe("provider OAuth callback failure copy", () => {
           expect(message(reason)).toBe(ATLASSIAN_NATIVE_RETIRED_MESSAGE);
         }
       } else {
-        expect(message("http_503")).toContain("configuration");
+        expect(message("http_503")).toContain("retired");
       }
     });
   }
