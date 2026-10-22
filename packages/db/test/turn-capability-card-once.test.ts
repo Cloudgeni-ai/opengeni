@@ -111,6 +111,7 @@ async function seedSession() {
     capabilityId: string,
     executionGeneration = 1,
     requestedSandboxId: string | null = null,
+    purpose: string | null = null,
   ) =>
     appendTurnCapabilityCardOnce(
       db,
@@ -129,6 +130,7 @@ async function seedSession() {
           reason: "missing_connection",
           capability: { id: capabilityId, name: capabilityId, action: "connect" },
           ...(requestedSandboxId ? { requestedSandboxId } : {}),
+          ...(purpose ? { purpose } : {}),
         },
       },
       requestedSandboxId,
@@ -212,6 +214,21 @@ describe("appendTurnCapabilityCardOnce", () => {
     expect(again.existingEventId).toBe(first.events[0]!.id);
     expect(other.existingEventId).toBeNull();
     expect(other.events).toHaveLength(1);
+    expect(await chat.cards(turn.turnId)).toHaveLength(2);
+  });
+
+  test("the Chrome setup card is not hidden by a plain machine card in the same turn", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const turn = await chat.startTurn();
+    const machine = await chat.card(turn, "api:connected-machine");
+    const chrome = await chat.card(turn, "api:connected-machine", 1, null, "chrome");
+    const chromeAgain = await chat.card(turn, "api:connected-machine", 1, null, "chrome");
+    const machineAgain = await chat.card(turn, "api:connected-machine");
+    expect(chrome.existingEventId).toBeNull();
+    expect(chrome.events).toHaveLength(1);
+    expect(chromeAgain.existingEventId).toBe(chrome.events[0]!.id);
+    expect(machineAgain.existingEventId).toBe(machine.events[0]!.id);
     expect(await chat.cards(turn.turnId)).toHaveLength(2);
   });
 

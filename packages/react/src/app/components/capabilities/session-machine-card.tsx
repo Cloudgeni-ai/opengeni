@@ -237,7 +237,9 @@ export function SessionMachineCapabilityCard({
     null;
   const chrome = useAttachedChrome(
     workspaceId,
-    fleet.canRead ? (chromeMachine?.enrollmentId ?? null) : null,
+    fleet.canRead && chromeMachine?.enrollmentId
+      ? { enrollmentId: chromeMachine.enrollmentId }
+      : null,
   );
   const fresh = justConnected
     ? (machines.find((machine) => machine.sandboxId === justConnected) ?? null)
@@ -478,11 +480,13 @@ export function SessionMachineCapabilityCard({
  * An earlier Connected Machine card whose request the agent made again further
  * down. The newer card is the live one, so this stays a single quiet line.
  */
-export function RepeatedMachineRequestNote() {
+export function RepeatedMachineRequestNote({ chrome = false }: { chrome?: boolean }) {
   return (
     <p className="flex items-center gap-2 text-xs text-fg-muted">
       <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
-      The agent asked to use a machine. It asked again below.
+      {chrome
+        ? "The agent asked to connect Chrome. It asked again below."
+        : "The agent asked to use a machine. It asked again below."}
     </p>
   );
 }
@@ -562,26 +566,34 @@ function MachineRow({
   );
 }
 
-type ChromeState = {
+export type ChromeState = {
   connected: { name: string } | null;
   /** Start checking for the extension (after the person opens the store). */
   watch: () => void;
+  /** Checking for the extension after the person opened the store. */
+  watching: boolean;
 };
+
+/** Which Chrome to look for: one on an exact machine, or any the person connected. */
+export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
 
 /**
  * Whether the Opengeni Browser extension linked a Chrome profile on this exact
- * machine. Reads once; polls only after the person opens the store, stops once
- * linked, after a bounded time, or when the inventory is not available to them.
+ * machine (or, with "any", on any machine). Reads once; polls only after the
+ * person opens the store, stops once linked, after a bounded time, or when the
+ * inventory is not available to them.
  */
-function useAttachedChrome(workspaceId: string, enrollmentId: string | null): ChromeState {
+export function useAttachedChrome(workspaceId: string, scope: AttachedChromeScope): ChromeState {
   const { client } = useAppContext();
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
   const [connected, setConnected] = useState<{ name: string } | null>(null);
   const [watchSince, setWatchSince] = useState<number | null>(null);
+  const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
   const linked = connected !== null;
+  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
 
   useEffect(() => {
     setConnected(null);
@@ -596,7 +608,9 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
         const result = await clientRef.current.listAttachedBrowsers(workspaceId);
         if (cancelled) return;
         const device = result.devices.find(
-          (candidate) => candidate.state === "connected" && candidate.enrollmentId === enrollmentId,
+          (candidate) =>
+            candidate.state === "connected" &&
+            (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
         );
         setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
       } catch (failure) {
@@ -616,6 +630,7 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
     const timer = window.setInterval(() => {
       if (Date.now() - watchSince > CHROME_POLL_LIMIT_MS) {
         window.clearInterval(timer);
+        setExpired(true);
         return;
       }
       if (document.visibilityState !== "hidden") void read();
@@ -626,8 +641,11 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
     };
   }, [denied, enrollmentId, linked, watchSince, workspaceId]);
 
-  const watch = useCallback(() => setWatchSince(Date.now()), []);
-  return { connected, watch };
+  const watch = useCallback(() => {
+    setExpired(false);
+    setWatchSince(Date.now());
+  }, []);
+  return { connected, watch, watching: watchSince !== null && !linked && !expired && !denied };
 }
 
 /** How long to keep checking for the new consent, or a granted Mac permission. */

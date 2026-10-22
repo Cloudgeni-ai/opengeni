@@ -87236,7 +87236,8 @@ export async function appendSessionEventsForTurnAttempt(
 /**
  * Append a capability card for the calling turn unless that turn already shows
  * a current card for the same capability (and, for a card that names the
- * machine it asks for, the same machine). The lookup runs inside the attempt
+ * machine it asks for, the same machine, and for a card with a purpose such as
+ * the Chrome setup card, the same purpose). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
  */
@@ -87252,6 +87253,8 @@ export async function appendTurnCapabilityCardOnce(
   requestedSandboxId: string | null = null,
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
+  const payloadPurpose = (input.payload as { purpose?: unknown } | undefined)?.purpose;
+  const purpose = typeof payloadPurpose === "string" ? payloadPurpose : "";
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -87275,6 +87278,7 @@ export async function appendTurnCapabilityCardOnce(
             and (turn_association is null or turn_association = 'current')
             and payload -> 'capability' ->> 'id' = ${capabilityId}
             and coalesce(payload ->> 'requestedSandboxId', '') = ${requestedSandboxId ?? ""}
+            and coalesce(payload ->> 'purpose', '') = ${purpose}
           order by sequence
           limit 1
         `,

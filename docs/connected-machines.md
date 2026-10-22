@@ -1476,6 +1476,22 @@ the owner, or not the owner's turn) and every other failure stay plain
 refusals, and callers without an exact agent attempt get no card. If the card
 cannot be posted, the original refusal is returned unchanged.
 
+The same happens for the person's own Chrome. When `browser_open` with
+`placement: {kind: "attached_device"}` finds no Chrome profile connected
+(`attached_browser_unavailable`), the worker posts the **Chrome setup card** in
+the calling turn: the Connected Machine card with `purpose: "chrome"`
+(`apps/worker/src/activities/agent-turn/chrome-setup-card.ts`), at most once per
+turn (the once-per-turn key includes the purpose, so a plain machine card does
+not hide it). The error the agent reads says the card is in the chat and tells
+it to point the person to it in one sentence instead of repeating the steps.
+The card (`session-chrome-card.tsx`) shows one step at a time: **Connect this
+computer** when no online machine with a display exists, then **Add to Chrome**
+(the Opengeni Browser extension), then **Continue** once a Chrome profile
+connects, which sends `Chrome is connected. Continue.` When Connected Machines
+are off on the deployment, or the card cannot be posted, the error instead
+tells the agent to post the card with `capability_authorization_request`, or to
+explain the two steps when that tool isn't available.
+
 The card (`packages/react/src/app/components/capabilities/session-machine-card.tsx`):
 
 - lists the workspace's enrolled machines with **Use in this chat**, which swaps

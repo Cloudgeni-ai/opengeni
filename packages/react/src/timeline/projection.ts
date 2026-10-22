@@ -1498,6 +1498,7 @@ export function buildTimeline(
           capability,
           setupRequest,
           requestedSandboxId: stringValue(payload.requestedSandboxId) || null,
+          ...(payload.purpose === "chrome" ? { purpose: "chrome" as const } : {}),
           occurredAt: event.occurredAt,
         });
         break;
@@ -2197,14 +2198,15 @@ const CONNECTED_MACHINE_CARD_ID = "api:connected-machine";
  * An agent that is refused a machine often asks again in later turns. Only the
  * newest Connected Machine card for the same request stays a full card; earlier
  * ones become a short note, so a chat never piles up copies of the same card.
- * Cards that name different machines are separate requests.
+ * Cards that name different machines, or ask for Chrome rather than a machine,
+ * are separate requests.
  */
 function markRepeatedMachineRequests(items: TimelineItem[]): void {
   const seen = new Set<string>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
     if (item.kind !== "auth-needed" || item.capability?.id !== CONNECTED_MACHINE_CARD_ID) continue;
-    const key = item.requestedSandboxId ?? "";
+    const key = `${item.purpose ?? ""}:${item.requestedSandboxId ?? ""}`;
     if (seen.has(key)) item.askedAgainLater = true;
     else seen.add(key);
   }

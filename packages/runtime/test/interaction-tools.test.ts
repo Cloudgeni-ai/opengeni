@@ -1727,7 +1727,10 @@ describe("interaction attempt tools", () => {
         updatedAt,
       };
     };
-    const open = async (devices: ReturnType<typeof profile>[]) => {
+    const open = async (
+      devices: ReturnType<typeof profile>[],
+      postChromeSetupCard?: () => Promise<boolean>,
+    ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
         transport: partialTransport({
@@ -1742,6 +1745,7 @@ describe("interaction attempt tools", () => {
         sessionId,
         selectedTools: ["browser_open"],
         permissions: ["sessions:control"],
+        ...(postChromeSetupCard ? { postChromeSetupCard } : {}),
       });
       const result = await definitions[0]!.execute(
         { placement: { kind: "attached_device" } },
@@ -1785,6 +1789,54 @@ describe("interaction attempt tools", () => {
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
       expect(JSON.stringify(result.structuredContent)).toContain("attached_browser_unavailable");
+      // Without a card poster, the model is told to post the card itself.
+      expect(JSON.stringify(result.structuredContent)).toContain(
+        "capability_authorization_request (capabilityId api:connected-machine)",
+      );
+    });
+
+    test("posts the Chrome setup card on the first failed open and says so", async () => {
+      let posts = 0;
+      const { result, createRequest } = await open([], async () => {
+        posts += 1;
+        return true;
+      });
+      expect(posts).toBe(1);
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result.structuredContent);
+      expect(text).toContain("attached_browser_unavailable");
+      expect(text).toContain("A Chrome setup card is now in this chat");
+      expect(text).toContain("do not post another card");
+      expect(text).not.toContain("capability_authorization_request");
+    });
+
+    test("asks the model to post the card when posting it fails", async () => {
+      for (const poster of [
+        async () => false,
+        async () => {
+          throw new Error("turn replaced");
+        },
+      ]) {
+        const { result } = await open([], poster);
+        expect(result.isError).toBe(true);
+        const text = JSON.stringify(result.structuredContent);
+        expect(text).toContain("attached_browser_unavailable");
+        expect(text).not.toContain("setup card is now in this chat");
+        expect(text).toContain(
+          "capability_authorization_request (capabilityId api:connected-machine)",
+        );
+      }
+    });
+
+    test("does not post the setup card when a profile is connected", async () => {
+      let posts = 0;
+      const { result } = await open([profile("Personal", "2026-10-15T10:00:00.000Z")], async () => {
+        posts += 1;
+        return true;
+      });
+      expect(result.isError).toBeFalsy();
+      expect(posts).toBe(0);
     });
   });
 

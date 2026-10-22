@@ -1007,6 +1007,13 @@ export type CreateInteractionAttemptToolsInput = {
   selectedTools?: readonly FirstPartyMcpToolName[];
   permissions?: readonly Permission[];
   interventionResume?: InteractionInterventionResume | null;
+  /**
+   * Put the Chrome setup card (the Connected Machine card for the person's own
+   * Chrome) in this chat. browser_open calls it when no Chrome profile is
+   * connected, so the person sees how to connect on the first attempt. Resolves
+   * true once the card is in the chat (including one this turn already posted).
+   */
+  postChromeSetupCard?: (() => Promise<boolean>) | undefined;
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -1432,7 +1439,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
+    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, call browser_open with placement={kind:'attached_device'}: it puts the Chrome setup card in the chat, which walks the person through a Connected Machine and then the Opengeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}). Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -1501,7 +1508,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, browser_open itself puts a Chrome setup card in the chat (a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}); point the person to that card instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1511,13 +1518,21 @@ export function createInteractionAttemptToolDefinitions(
       return browserOpenText(output);
     },
     execute: async (value, context) => {
-      const opened = await openBrowser(
-        input.transport,
-        input.workspaceId,
-        input.sessionId,
-        value,
-        context,
-      );
+      let opened: Awaited<ReturnType<typeof openBrowser>>;
+      try {
+        opened = await openBrowser(
+          input.transport,
+          input.workspaceId,
+          input.sessionId,
+          value,
+          context,
+        );
+      } catch (error) {
+        if (error instanceof OpenGeniApiError && error.code === ATTACHED_BROWSER_UNAVAILABLE) {
+          throw await attachedBrowserSetupFailure(input.postChromeSetupCard);
+        }
+        throw error;
+      }
       const openedTargetId =
         opened.observation?.target.id ??
         opened.targets.find((target) => target.selected)?.id ??
@@ -2743,6 +2758,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
     selectedTools,
     permissions,
     ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
+    ...(input.postChromeSetupCard ? { postChromeSetupCard: input.postChromeSetupCard } : {}),
   });
 }
 
@@ -3270,10 +3286,39 @@ function chooseAttachedProfile(
     throw new OpenGeniApiError(
       409,
       `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
-      { code: "attached_browser_unavailable", retryable: false },
+      { code: ATTACHED_BROWSER_UNAVAILABLE, retryable: false },
     );
   }
   return { chosen, others };
+}
+
+const ATTACHED_BROWSER_UNAVAILABLE = "attached_browser_unavailable";
+
+/**
+ * The person's own Chrome isn't connected. Put the setup card in the chat right
+ * away, so the person sees how to connect it on the first attempt instead of
+ * having to ask, and tell the model the card is there so it neither repeats its
+ * steps nor posts another. Without a card (no poster, or posting failed), tell
+ * the model to post it.
+ */
+async function attachedBrowserSetupFailure(
+  postChromeSetupCard: (() => Promise<boolean>) | undefined,
+): Promise<OpenGeniApiError> {
+  let posted = false;
+  if (postChromeSetupCard) {
+    try {
+      posted = await postChromeSetupCard();
+    } catch {
+      posted = false;
+    }
+  }
+  return new OpenGeniApiError(
+    409,
+    posted
+      ? "No Chrome profile is connected through the Opengeni Browser extension. A Chrome setup card is now in this chat: it shows the person how to connect their computer and add the extension, so do not repeat its steps or links and do not post another card. Tell them in one short sentence to use the card above, then call browser_open again once they say Chrome is connected. Do not switch to a managed browser."
+      : `No Chrome profile is connected through the Opengeni Browser extension. Post the setup card now with capability_authorization_request (capabilityId api:connected-machine) so the person sees how to connect; if that tool isn't available, tell them they need a Connected Machine, then the extension (${OPENGENI_BROWSER_EXTENSION_URL}). Do not switch to a managed browser.`,
+    { code: ATTACHED_BROWSER_UNAVAILABLE, retryable: false },
+  );
 }
 
 function agentAttachedProfile(

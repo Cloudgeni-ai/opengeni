@@ -17183,6 +17183,13 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
        * nothing.
        */
       requestedSandboxId: z.string().uuid().optional(),
+      /**
+       * Why a Connected Machine card was posted, when it is for something
+       * narrower than running this chat on a machine. `chrome`: the agent needs
+       * the person's own Chrome, so the card leads with connecting a computer
+       * and adding the Opengeni Browser extension. Grants nothing.
+       */
+      purpose: z.literal("chrome").optional(),
     })
     .superRefine((payload, context) => {
       if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {

@@ -25,6 +25,7 @@ import {
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
   type SocialConnection,
+  ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -1887,6 +1888,34 @@ export function nativeConnectionCapabilityRecommendations(
     );
   }
   return items;
+}
+
+/**
+ * The `tool.auth_needed` payload for the Connected Machine card set up for the
+ * person's own Chrome. A tool that finds no connected Chrome profile posts it
+ * itself, so the person sees how to connect on the first attempt instead of
+ * only reading that Chrome isn't connected.
+ */
+export function chromeSetupCardPayload(toolName: string): ToolAuthNeededPayload {
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
+  )!;
+  return ToolAuthNeededPayload.parse({
+    serverId: "opengeni",
+    toolName,
+    providerDomain: item.providerDomain,
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: "connect",
+      rationale: "Connect your Chrome so the agent can use it.",
+      requiredVariables: [],
+    },
+    purpose: "chrome",
+  });
 }
 
 function socialConnectionCounts(
