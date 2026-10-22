@@ -74,7 +74,7 @@ describe("toolDisplayName", () => {
   });
 
   test("built-in tool names read as plain steps; other bare names are de-slugged", () => {
-    expect(toolDisplayName(englishText, "session_create")).toBe("Got help from another assistant");
+    expect(toolDisplayName(englishText, "session_create")).toBe("Started a worker");
     expect(toolDisplayName(englishText, "bash")).toBe("Bash");
   });
 
@@ -1928,6 +1928,37 @@ describe("buildTimeline", () => {
     expect(item.status).toBe("complete");
     expect(item.workerSessionId).toBe(workerId);
     expect(item.failure).toBeNull();
+  });
+
+  test("a worker started through tool_invoke is the same worker item", () => {
+    reset();
+    const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0001";
+    const receipt = {
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_create",
+      resource: { type: "session", id: workerId, state: "queued" },
+    };
+    const items = buildTimeline(englishText, [
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "tool_invoke",
+        arguments: JSON.stringify({
+          name: "opengeni__session_create",
+          arguments: { title: "Drift check", initialMessage: "Run the drift check on prod" },
+        }),
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: JSON.stringify(receipt) }] },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    const item = items[0] as WorkerItem;
+    expect(item.kind).toBe("worker");
+    expect(item.action).toBe("spawn");
+    expect(item.title).toBe("Drift check");
+    expect(item.prompt).toBe("Run the drift check on prod");
+    expect(item.workerSessionId).toBe(workerId);
   });
 
   test("session_create keeps the manager's title for the spawned agent", () => {
