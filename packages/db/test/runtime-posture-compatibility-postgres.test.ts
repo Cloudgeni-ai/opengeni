@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
@@ -49,6 +50,31 @@ afterAll(async () => {
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
+
+realTest("readiness inspects both namespaces once without caching posture", async () => {
+  const driver = (client!.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  try {
+    // Warm the driver before counting protocol statements.
+    await assertRuntimeDatabasePosture(client!.db, options);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const statements: string[] = [];
+      driver.options.debug = (_connection, query) => statements.push(query);
+      const posture = await assertRuntimeDatabasePosture(client!.db, options);
+      expect(posture.tables.length).toBeGreaterThan(0);
+      expect(posture.privateTables.length).toBeGreaterThan(0);
+      expect(posture.targetRoutines.length).toBeGreaterThan(0);
+      expect(posture.privateRoutines.length).toBeGreaterThan(0);
+      expect(statements).toHaveLength(13);
+      expect(
+        statements.filter((query) => query.includes("row_security_active(c.oid)")),
+      ).toHaveLength(1);
+      expect(statements.filter((query) => query.includes("as trigger_callable"))).toHaveLength(1);
+    }
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+});
 
 realTest(
   "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
