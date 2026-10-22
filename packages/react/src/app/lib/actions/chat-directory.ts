@@ -7,6 +7,7 @@
  */
 import { useSyncExternalStore } from "react";
 import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
+import { chatStatusKey } from "./chat-status";
 
 export type ChatRecord = {
   id: string;
@@ -17,6 +18,8 @@ export type ChatRecord = {
   archived: boolean;
   /** Present when the app holds a full or list row, needed for pin and archive. */
   row: SessionListRow | null;
+  /** When `row` was last read from the server (ms), so its status is known to be current. */
+  readAt: number;
 };
 
 type WorkspaceOrder = { sidebarOrder: string[]; pinnedOrder: string[] };
@@ -112,6 +115,7 @@ function directory(subjectId: string): DirectoryState {
             pinned: false,
             archived: false,
             row: null,
+            readAt: 0,
           },
         ]),
       ),
@@ -145,7 +149,7 @@ function persistRecent(subjectId: string, state: DirectoryState): void {
   }
 }
 
-export function chatRecordFromRow(row: SessionListRow): ChatRecord {
+export function chatRecordFromRow(row: SessionListRow, readAt: number = Date.now()): ChatRecord {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -154,6 +158,7 @@ export function chatRecordFromRow(row: SessionListRow): ChatRecord {
     pinned: Boolean(row.pinned),
     archived: Boolean(row.archived),
     row,
+    readAt,
   };
 }
 
@@ -161,10 +166,14 @@ export function chatRecordFromRow(row: SessionListRow): ChatRecord {
 export function rememberChats(subjectId: string, rows: readonly SessionListRow[]): void {
   if (rows.length === 0) return;
   const state = directory(subjectId);
+  const now = Date.now();
   let changed = false;
   for (const row of rows) {
-    const next = chatRecordFromRow(row);
+    const next = chatRecordFromRow(row, now);
     const current = state.rows.get(row.id);
+    // The newest read always replaces the row (it carries the live status);
+    // only a change people can see re-renders the menus.
+    state.rows.set(row.id, next);
     if (
       current?.row === row ||
       (current &&
@@ -172,11 +181,11 @@ export function rememberChats(subjectId: string, rows: readonly SessionListRow[]
         current.title === next.title &&
         current.updatedAt === next.updatedAt &&
         current.pinned === next.pinned &&
-        current.archived === next.archived)
+        current.archived === next.archived &&
+        chatStatusKey(current.row) === chatStatusKey(row))
     ) {
       continue;
     }
-    state.rows.set(row.id, next);
     changed = true;
   }
   if (changed) emit(subjectId);

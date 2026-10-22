@@ -62,6 +62,8 @@ import { DialogOverlay, DialogPortal } from "../../../ui/dialog";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
 import { WorkspaceTag } from "./workspace-tag";
+import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
+import { currentChatStatus, type ChatStatus } from "../../lib/actions/chat-status";
 
 type Item = {
   key: string;
@@ -79,6 +81,8 @@ type Item = {
   chord?: Chord | undefined;
   /** Present on chat rows: Tab opens their actions, chat chords act on them. */
   chat?: ChatRecord | undefined;
+  /** The chat's sidebar status marks, while its status is known to be current. */
+  status?: ChatStatus | null | undefined;
   run(options: { newTab: boolean }): void;
 };
 
@@ -397,6 +401,7 @@ function CommandMenuDialog(props: {
     const now = Date.now();
     const directory = readChatDirectory(subjectId, workspaceId);
     const current = env.currentChat;
+    const sidebarIds = new Set([...directory.sidebarOrder, ...directory.pinnedOrder]);
 
     const chatItem = (record: ChatRecord, group: string, highlight?: string): Item => ({
       key: `chat:${record.id}`,
@@ -408,6 +413,7 @@ function CommandMenuDialog(props: {
       workspaceTag:
         record.workspaceId === workspaceId ? undefined : workspaceNames.get(record.workspaceId),
       chat: record,
+      status: currentChatStatus(record, sidebarIds, now),
       run: ({ newTab }) => openChat(record, newTab),
     });
 
@@ -689,6 +695,11 @@ function CommandMenuDialog(props: {
   ]);
 
   const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
+  const listedChatIds = useMemo(
+    () => items.flatMap((item) => (item.chat ? [item.chat.id] : [])),
+    [items],
+  );
+  useChatStatusRefresh({ subjectId, workspaceId, ids: listedChatIds, active: props.open });
   const activeIndex = items.length === 0 ? -1 : Math.min(active, items.length - 1);
   const activeItem = activeIndex >= 0 ? items[activeIndex] : undefined;
   const searching = Boolean(query.trim()) && !focusChat && !pickingWorkspace && server.loading;
@@ -985,6 +996,7 @@ function CommandMenuDialog(props: {
                             <Highlighted text={item.title} query={item.highlight} />
                           </span>
                           {item.workspaceTag ? <WorkspaceTag name={item.workspaceTag} /> : null}
+                          <ChatStatusMarks status={item.status ?? null} />
                           {item.meta ? (
                             <span className="shrink-0 text-xs text-fg-muted tabular-nums">
                               {item.meta}

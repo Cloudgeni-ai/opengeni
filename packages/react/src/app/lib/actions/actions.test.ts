@@ -226,6 +226,7 @@ describe("chat switcher", () => {
     pinned: false,
     archived: false,
     row: null,
+    readAt: 0,
     ...extra,
   });
   const directory = (recent: string[], records: ChatRecord[] = recent.map((id) => record(id))) => ({

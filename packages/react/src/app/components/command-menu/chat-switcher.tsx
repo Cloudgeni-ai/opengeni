@@ -8,12 +8,14 @@ import { MessageSquareIcon, PinIcon, type LucideIcon } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ChatRecord } from "../../lib/actions/chat-directory";
-import { readChatDirectory } from "../../lib/actions/chat-directory";
+import { readChatDirectory, useChatDirectoryVersion } from "../../lib/actions/chat-directory";
 import type { ChatSwitcherState } from "../../lib/actions/chat-switcher";
 import type { ChordPlatform } from "../../lib/actions/chords";
 import type { WorkspaceChoice } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../../ui/relative-time";
+import { currentChatStatus } from "../../lib/actions/chat-status";
+import { ChatStatusMarks, useChatStatusRefresh } from "./chat-status";
 import { Keycaps } from "./keycaps";
 import { WorkspaceTag } from "./workspace-tag";
 
@@ -34,6 +36,14 @@ export default function ChatSwitcher(props: {
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const { index, visible } = props.state;
+  // Read statuses as soon as Control+Tab is pressed, before the list shows.
+  useChatStatusRefresh({
+    subjectId: props.subjectId,
+    workspaceId: props.workspaceId,
+    ids: props.state.ids,
+    active: true,
+  });
+  useChatDirectoryVersion(props.subjectId);
   useEffect(() => {
     if (!visible) return;
     listRef.current
@@ -43,6 +53,7 @@ export default function ChatSwitcher(props: {
   if (!visible || typeof document === "undefined") return null;
   const directory = readChatDirectory(props.subjectId, props.workspaceId);
   const now = Date.now();
+  const sidebarIds = new Set([...directory.sidebarOrder, ...directory.pinnedOrder]);
   const workspaceNames = new Map(
     props.workspaces.map((workspace) => [workspace.id, workspace.name]),
   );
@@ -116,6 +127,9 @@ export default function ChatSwitcher(props: {
                 />
                 <span className="min-w-0 flex-1 truncate">{record?.title ?? "Untitled chat"}</span>
                 {elsewhere ? <WorkspaceTag name={elsewhere} /> : null}
+                <ChatStatusMarks
+                  status={record ? currentChatStatus(record, sidebarIds, now) : null}
+                />
                 {meta ? (
                   <span className="shrink-0 text-xs text-fg-muted tabular-nums">{meta}</span>
                 ) : null}
