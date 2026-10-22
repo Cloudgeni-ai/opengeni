@@ -1,5 +1,19 @@
 # @opengeni/sdk
 
+## 4.5.0
+
+### Minor Changes
+
+- d0bc2d6: Sites with conversations are rows in the sidebar. Each Site row shows how many conversations it has and their status, sorts by latest activity with other rows and stays in its project. Its conversations are nested under it, collapsed by default, and no longer appear or disappear depending on which session is open. Session lists take a `siteConversations` option: `group` returns complete `siteGroups` for a root page, and `include` lists Site conversations as ordinary rows. Workspace list hints report the viewer's changed Site conversations separately in `siteSessionIds`.
+
+### Patch Changes
+
+- debd64e: When something you can fix blocks the agent, the setup card now appears in the same reply, so you no longer have to ask the agent how. The first case is your own Chrome: if the agent needs it and it isn't connected, a Chrome card shows one step at a time: connect a computer, add the Opengeni Browser extension, then continue. The existing card for allowing a chat to use your personal machine now goes through the same path.
+- e38f20d: The packaged session app opens its workspace for external users behind a session proxy. Their access inventory is empty, so the proxy's `access/me` now carries the workspace's effective grant instead of filtering the inventory, which had left the app showing "This workspace isn't available".
+- Updated dependencies [d0bc2d6]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/connect@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

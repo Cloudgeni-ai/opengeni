@@ -1,5 +1,12 @@
 # @opengeni/vaults
 
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [d0bc2d6]
+  - @opengeni/contracts@4.5.0
+
 ## 4.4.1
 
 ### Patch Changes

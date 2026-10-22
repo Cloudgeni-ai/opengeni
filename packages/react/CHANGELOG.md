@@ -1,5 +1,26 @@
 # @opengeni/react
 
+## 4.5.0
+
+### Minor Changes
+
+- d0bc2d6: Sites with conversations are rows in the sidebar. Each Site row shows how many conversations it has and their status, sorts by latest activity with other rows and stays in its project. Its conversations are nested under it, collapsed by default, and no longer appear or disappear depending on which session is open. Session lists take a `siteConversations` option: `group` returns complete `siteGroups` for a root page, and `include` lists Site conversations as ordinary rows. Workspace list hints report the viewer's changed Site conversations separately in `siteSessionIds`.
+- 0b3b079: Opening a Site from the sidebar shows the Site with its conversations beside it. The newest conversation is open, the others are listed to switch between, and New starts another one in the Site. Opening one of a Site's conversations from the sidebar or from a chat's Site link shows the same view with that conversation selected.
+
+### Patch Changes
+
+- 6f9b6f5: An embedded session app (the `embed` preset) no longer shows Opengeni branding a product did not ask for. The mobile header respects the `brand` switch. A new `starters` switch, off in `embed`, hides Opengeni's suggested first tasks (connect Slack, GitHub, Linear and so on). Someone without GitHub access in the workspace no longer gets a "GitHub status unavailable" toast every time the window regains focus.
+- 7e5e08f: Every first-party tool step in the timeline now draws an icon that matches its words (a globe for the browser, a monitor for the screen, a spreadsheet for Excel, an hourglass for waiting, and so on) instead of the generic wrench. The mapping lives in one shared table keyed by tool step, so the web app, React Native and embedded chats all get the same icons; a new step without an icon fails to compile. Connector and custom tools keep their family icon or the wrench.
+- debd64e: When something you can fix blocks the agent, the setup card now appears in the same reply, so you no longer have to ask the agent how. The first case is your own Chrome: if the agent needs it and it isn't connected, a Chrome card shows one step at a time: connect a computer, add the Opengeni Browser extension, then continue. The existing card for allowing a chat to use your personal machine now goes through the same path.
+- 0910456: Holding ⌘ (Ctrl on Windows and Linux) for a moment in the desktop app shows each pinned chat's ⌘1 to ⌘9 key in place of its time, so the shortcut is discoverable. The numbers follow the order the Pinned section shows. Browsers keep ⌘1 to ⌘9 for their own tabs, so the hint appears only where those keys work.
+- d8179be: The timeline step for starting a worker now reads "Started a worker" instead of "Got help from another assistant", which claimed the help had arrived when the worker had only started. A worker started through `tool_invoke` now shows as the same worker card (title, status, link to the worker) as one started directly.
+- Updated dependencies [debd64e]
+- Updated dependencies [e38f20d]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/sdk@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/connect@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

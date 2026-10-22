@@ -1,5 +1,44 @@
 # @opengeni/worker-bundle
 
+## 4.5.0
+
+### Patch Changes
+
+- f818ef2: Turns on an owned sandbox start the model sooner. Repository clones, rig setup and credential hooks now run alongside file delivery and model-input preparation instead of after them, and the first model request waits only for whichever finishes last. What the model sees, and its order, is unchanged.
+- Updated dependencies [6c7b552]
+- Updated dependencies [cfefee3]
+- Updated dependencies [65fc9ab]
+- Updated dependencies [e142b9e]
+- Updated dependencies [debd64e]
+- Updated dependencies [e38f20d]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/runtime@4.5.0
+  - @opengeni/codemode@4.5.0
+  - @opengeni/db@4.5.0
+  - @opengeni/interaction@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/core@4.5.0
+  - @opengeni/documents@4.5.0
+  - @opengeni/events@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/github@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/storage@4.5.0
+  - @opengeni/tool-gateway@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/vaults-keeper@4.5.0
+  - @opengeni/vaults-onepassword@4.5.0
+  - @opengeni/vaults-protonpass@4.5.0
+  - @opengeni/agent-proto@4.5.0
+  - @opengeni/decisions@4.5.0
+  - @opengeni/jev@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes
