@@ -41414,8 +41414,10 @@ function retainedRowTurnId(
  * mutate conversation truth.
  *
  * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
- * retained message (or retained reply) came from, so a later compaction can
- * still pair a request with its own turn's answer. An id that is not a turn of
+ * retained message came from, so a later compaction can still pair a request
+ * with its own turn's answer. (Retained reply copies are passed as null and
+ * record their turn in the item, so turn-keyed readers such as message forks
+ * never see two rows of one reply.) An id that is not a turn of
  * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(

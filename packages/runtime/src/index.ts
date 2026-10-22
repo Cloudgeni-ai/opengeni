@@ -773,6 +773,7 @@ export {
   repairHistoryProtocolItems,
   sanitizeHistoryItemsForModel,
   stripInternalModelMetadata,
+  RETAINED_REPLY_TURN_FIELD,
   hasOpaqueProviderArtifact,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,

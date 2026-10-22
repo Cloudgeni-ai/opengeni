@@ -14,6 +14,7 @@
 import {
   TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
   hasOpaqueProviderArtifact,
+  RETAINED_REPLY_TURN_FIELD,
   projectRejectedReasoningArtifact,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -1723,6 +1724,22 @@ function knownTurnId(turns: CompactionTurnContext | undefined, index: number): s
 }
 
 /**
+ * The turn that gave an assistant reply: its row's turn id, or for a reply copy
+ * an earlier compaction retained (stored without a turn id) the turn recorded
+ * on the copy itself.
+ */
+function replyTurnId(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext,
+  index: number,
+): string | null {
+  const known = knownTurnId(turns, index);
+  if (known !== null) return known;
+  const recorded = items[index]![RETAINED_REPLY_TURN_FIELD];
+  return typeof recorded === "string" && recorded.length > 0 ? recorded : null;
+}
+
+/**
  * Person message index → index of the last assistant message its own turn
  * gave, matched by the turn id each history row was written with. The turn
  * running the compaction is skipped, since its request may still be open, and
@@ -1740,10 +1757,9 @@ function finishedTurnReplies(
   const activeTurnId = turns.activeTurnId ?? null;
   const lastReplyByTurn = new Map<string, number>();
   for (let index = 0; index < items.length; index += 1) {
-    const turnId = knownTurnId(turns, index);
-    if (turnId !== null && turnId !== activeTurnId && isAssistantReply(items[index]!)) {
-      lastReplyByTurn.set(turnId, index);
-    }
+    if (!isAssistantReply(items[index]!)) continue;
+    const turnId = replyTurnId(items, turns, index);
+    if (turnId !== null && turnId !== activeTurnId) lastReplyByTurn.set(turnId, index);
   }
   const pairedTurns = new Set<string>();
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -1761,9 +1777,15 @@ function finishedTurnReplies(
 /**
  * The retained copy of a reply: its text only (middle-truncated to the budget,
  * at most {@link RETAINED_REPLY_MAX_TOKENS}), without provider ids or
- * provider data that belonged to the dropped response.
+ * provider data that belonged to the dropped response. The copy records the
+ * turn that gave the reply in {@link RETAINED_REPLY_TURN_FIELD} (stripped at
+ * the model wire); its row is stored without a turn id, so the original reply
+ * stays the only row of that turn with that text.
  */
-function retainedReply(item: CompactionItem): { item: CompactionItem; tokens: number } {
+function retainedReply(
+  item: CompactionItem,
+  turnId: string | null,
+): { item: CompactionItem; tokens: number } {
   const text = messageText(item);
   const kept = truncateMiddleByEstimatedTokens(text, RETAINED_REPLY_MAX_TOKENS);
   const phase = (item as { phase?: unknown }).phase;
@@ -1773,6 +1795,7 @@ function retainedReply(item: CompactionItem): { item: CompactionItem; tokens: nu
       role: "assistant",
       ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
       content: [{ type: "output_text", text: kept }],
+      ...(turnId !== null ? { [RETAINED_REPLY_TURN_FIELD]: turnId } : {}),
     },
     tokens: estimateTextTokens(kept),
   };
@@ -1845,8 +1868,9 @@ export function buildCompactionReplacementHistory(
 
 /**
  * {@link buildCompactionReplacementHistory} plus the turn each rebuilt item
- * belongs to: a retained message and its retained reply keep their original
- * turn, so a later compaction can pair them again.
+ * belongs to: a retained message keeps its original turn, and a retained reply
+ * copy is null and records its turn in the item instead, so a later compaction
+ * can pair them again.
  */
 export function buildCompactionReplacement(
   items: readonly CompactionItem[],
@@ -1883,9 +1907,9 @@ export function buildCompactionReplacement(
     const turnId = knownTurnId(turns, index);
     const reply = prepared.reply(index);
     if (reply) {
-      const kept = retainedReply(reply);
+      const kept = retainedReply(reply, turnId);
       retainedReversed.push(kept.item);
-      retainedTurnIdsReversed.push(turnId);
+      retainedTurnIdsReversed.push(null);
       remaining = Math.max(0, remaining - kept.tokens);
     }
     retainedReversed.push(message);
@@ -1997,9 +2021,9 @@ export function buildRemoteV2Replacement(
     const turnId = knownTurnId(turns, index);
     const reply = prepared.reply(index);
     if (reply) {
-      const kept = retainedReply(reply);
+      const kept = retainedReply(reply, turnId);
       retainedReversed.push(kept.item);
-      retainedTurnIdsReversed.push(turnId);
+      retainedTurnIdsReversed.push(null);
       remaining = Math.max(0, remaining - kept.tokens);
     }
     retainedReversed.push(message);

@@ -13,7 +13,7 @@ import {
   type CompactionItem,
   type CompactionTurnContext,
 } from "../src/context-compaction";
-import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
+import { RETAINED_REPLY_TURN_FIELD, sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 
 // Turn ids as the worker reads them from session_history_items.turn_id.
 const T0 = "00000000-0000-4000-8000-000000000a00";
@@ -123,14 +123,19 @@ describe("compaction pairs a retained request only with its own turn's reply", (
         "system: ci is green",
         "<checkpoint>",
       ]);
-      // Only the text survives: no provider ids or provider data of the dropped response.
-      expect(history[1]).toEqual({
+      // Only the text survives: no provider ids or provider data of the dropped
+      // response. The copy records its turn for later compactions; the model
+      // wire never sees that field.
+      const reply = {
         type: "message",
         role: "assistant",
         phase: "final_answer",
         content: [{ type: "output_text", text: "We kept one key per session." }],
-      });
-      expect(sanitizeHistoryItemsForModel(history)).toEqual(history);
+      };
+      expect(history[1]).toEqual({ ...reply, [RETAINED_REPLY_TURN_FIELD]: T1 });
+      const wire = sanitizeHistoryItemsForModel(history);
+      expect(wire[1]).toEqual(reply);
+      expect(JSON.stringify(wire)).not.toContain(RETAINED_REPLY_TURN_FIELD);
     });
 
     test(`${mode}: the running turn's request stays open after updates arrive mid-turn (layout A)`, () => {
@@ -258,7 +263,9 @@ describe("compaction pairs a retained request only with its own turn's reply", (
         if (history[index]!.role !== "user" || isCompactionSummary(history[index])) continue;
         const number = /^q(\d+) /.exec(itemText(history[index]!))![1];
         expect(itemText(history[index + 1]!)).toEndWith(` end${number}`);
-        expect(turnIds[index + 1]).toBe(turnIds[index]!);
+        // The copy's row has no turn id; the copy records its turn instead.
+        expect(turnIds[index + 1]).toBeNull();
+        expect(history[index + 1]![RETAINED_REPLY_TURN_FIELD]).toBe(turnIds[index]!);
         expect(turnIds[index]).toBe(turns[Number(number)]!);
       }
     });
@@ -275,6 +282,44 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       expect(estimateTextTokens(itemText(reply!))).toBeLessThanOrEqual(RETAINED_REPLY_MAX_TOKENS);
     });
 
+    test(`${mode}: a request made after its turn's reply is not paired with that earlier reply`, () => {
+      const { items, itemTurnIds } = rows([
+        [T1, user("first ask")],
+        [T1, assistant("First answer.", "final_answer")],
+        [T1, user("a follow-up the turn never answered")],
+        [T2, user("next")],
+      ]);
+      expect(shape(rebuildHistory(mode, items, { itemTurnIds, activeTurnId: T2 }))).toEqual([
+        "user: first ask",
+        "assistant: First answer.",
+        "user: a follow-up the turn never answered",
+        "user: next",
+        "<checkpoint>",
+      ]);
+    });
+
+    test(`${mode}: a recorded reply copy pairs only with a request of its own turn`, () => {
+      const copy = (turnId: string, text: string): CompactionItem => ({
+        ...assistant(text, "final_answer"),
+        [RETAINED_REPLY_TURN_FIELD]: turnId,
+      });
+      const { items, itemTurnIds } = rows([
+        [T0, user("set up staging")],
+        [null, copy(T0, "Staging is up.")],
+        [T1, user("deploy the fix")],
+        // A copy recorded for another turn is not borrowed by T1.
+        [null, copy(T0, "Unrelated copy.")],
+        [T2, user("status?")],
+      ]);
+      expect(shape(rebuildHistory(mode, items, { itemTurnIds, activeTurnId: T2 }))).toEqual([
+        "user: set up staging",
+        "assistant: Unrelated copy.",
+        "user: deploy the fix",
+        "user: status?",
+        "<checkpoint>",
+      ]);
+    });
+
     test(`${mode}: turn ids align with the rebuilt history`, () => {
       const { items, itemTurnIds } = rows([
         [T1, user("ask")],
@@ -284,7 +329,8 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       ]);
       const { history, turnIds } = rebuild(mode, items, { itemTurnIds, activeTurnId: T2 });
       expect(history).toEqual(rebuildHistory(mode, items, { itemTurnIds, activeTurnId: T2 }));
-      expect(turnIds).toEqual([T1, T1, T2, null]);
+      expect(turnIds).toEqual([T1, null, T2, null]);
+      expect(history[1]![RETAINED_REPLY_TURN_FIELD]).toBe(T1);
     });
   }
 
@@ -312,7 +358,7 @@ describe("compaction pairs a retained request only with its own turn's reply", (
     const persistedOne = one.turnIds.map((turnId, index) =>
       isCompactionSummary(one.history[index]) ? T1 : turnId,
     );
-    expect(persistedOne).toEqual([T0, T0, T1, T1]);
+    expect(persistedOne).toEqual([T0, null, T1, T1]);
 
     // T1 finishes after the checkpoint, then T2 starts and compacts again.
     const secondItems = [
@@ -334,7 +380,15 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       "user: and production?",
       "<checkpoint>",
     ]);
-    expect(two.turnIds).toEqual([T0, T0, T1, T1, T2, null]);
+    expect(two.turnIds).toEqual([T0, null, T1, null, T2, null]);
+    expect(two.history.map((item) => item[RETAINED_REPLY_TURN_FIELD] ?? null)).toEqual([
+      null,
+      T0,
+      null,
+      T1,
+      null,
+      null,
+    ]);
 
     // A third compaction (remote v2) in a later turn still keeps both pairs once.
     const thirdItems = [...two.history, user("status?")];
@@ -352,6 +406,6 @@ describe("compaction pairs a retained request only with its own turn's reply", (
       "user: status?",
       "<checkpoint>",
     ]);
-    expect(three.turnIds).toEqual([T0, T0, T1, T1, T2, T3, null]);
+    expect(three.turnIds).toEqual([T0, null, T1, null, T2, T3, null]);
   });
 });

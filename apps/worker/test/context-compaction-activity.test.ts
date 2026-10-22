@@ -15,6 +15,8 @@ import {
   createDb,
   createSession,
   createSessionGoal,
+  ensureManagedAccessForUser,
+  forkSessionContent,
   getActiveSessionHistoryItems,
   getActiveSessionHistoryItemsPaged,
   getLatestRunState,
@@ -44,6 +46,7 @@ import {
   CompactionProviderResponseError,
   createProductionAgentRuntime,
   EmptyCompactionSummaryError,
+  RETAINED_REPLY_TURN_FIELD,
   SUMMARY_PREFIX,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -248,24 +251,33 @@ describe("standalone context compaction execution", () => {
 
   for (const mode of ["portable", "remote_v2"] as const) {
     test(`${mode} pairs retained requests with their own turn's reply and keeps their turn ids`, async () => {
-      const suffix = crypto.randomUUID();
-      const access = await bootstrapWorkspace(client.db, {
-        accountExternalSource: "test",
-        accountExternalId: `account-${suffix}`,
-        accountName: "Turn reply compaction test",
-        workspaceExternalSource: "test",
-        workspaceExternalId: `workspace-${suffix}`,
-        workspaceName: "Turn reply compaction test",
-        subjectId: `subject-${suffix}`,
+      // A managed owner, so the retained answer can also be a message fork point.
+      const userId = `turn-replies-${crypto.randomUUID()}`;
+      const subjectId = `user:${userId}`;
+      await shared.admin`insert into auth_users(id, name, email)
+        values (${userId}, 'Turn reply owner', ${`${userId}@example.test`})`;
+      const access = await ensureManagedAccessForUser(client.db, {
+        userId,
+        email: `${userId}@example.test`,
+        name: "Turn reply owner",
       });
-      const grant = access.workspaceGrants[0]!;
+      const grant = access.workspaceGrants.find(
+        (value) => value.workspaceId === access.defaultWorkspaceId,
+      )!;
       const workspaceId = grant.workspaceId!;
+      await shared.admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
+        values (${grant.accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)}, 'turn-replies-test')
+        on conflict (account_id) do nothing`;
+      const suffix = crypto.randomUUID();
       const session = await createSession(client.db, {
         accountId: grant.accountId,
         workspaceId,
+        visibility: "workspace_shared",
         initialMessage: "",
         resources: [],
         metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        subjectId,
         model: "scripted-compactor",
         reasoningEffort: "medium",
         latencyMode: "standard",
@@ -315,6 +327,17 @@ describe("standalone context compaction execution", () => {
           })),
         );
       });
+      // The finished turn's answer as the timeline shows it (a fork point).
+      const answerEventId = crypto.randomUUID();
+      await shared.admin`insert into session_events
+        (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        select ${answerEventId}, ${grant.accountId}, ${workspaceId}, ${session.id},
+          ${finished!.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
+          ${shared.admin.json({ text: "We kept one key per session." })}
+        from session_events where session_id = ${session.id}`;
+      await shared.admin`update sessions set last_sequence = (
+          select max(sequence) from session_events where session_id = ${session.id})
+        where id = ${session.id}`;
       const update = await addSessionSystemUpdate(client.db, {
         accountId: grant.accountId,
         workspaceId,
@@ -389,6 +412,7 @@ describe("standalone context compaction execution", () => {
           )
           .map((row) => ({
             turnId: row.turnId,
+            replyTurn: row.item[RETAINED_REPLY_TURN_FIELD] ?? null,
             role: row.item.role,
             text:
               typeof row.item.content === "string"
@@ -396,10 +420,21 @@ describe("standalone context compaction execution", () => {
                 : (row.item.content as Array<{ text: string }>).map((part) => part.text).join(""),
           }));
       const expected = [
-        { turnId: null, role: "user", text: "Legacy request" },
-        { turnId: finished!.id, role: "user", text: "What did we decide about the cache key?" },
-        { turnId: finished!.id, role: "assistant", text: "We kept one key per session." },
-        { turnId: turn.id, role: "user", text: "Run the migration" },
+        { turnId: null, replyTurn: null, role: "user", text: "Legacy request" },
+        {
+          turnId: finished!.id,
+          replyTurn: null,
+          role: "user",
+          text: "What did we decide about the cache key?",
+        },
+        // The reply copy's row has no turn id; its turn is recorded on the item.
+        {
+          turnId: null,
+          replyTurn: finished!.id,
+          role: "assistant",
+          text: "We kept one key per session.",
+        },
+        { turnId: turn.id, replyTurn: null, role: "user", text: "Run the migration" },
       ];
       expect((await compact()).compacted).toBe(true);
       expect(await retained()).toEqual(expected);
@@ -416,6 +451,34 @@ describe("standalone context compaction execution", () => {
         (row) => row.item.role === "system" && String(row.item.content).includes(update.update.id),
       );
       expect(batch?.turnId).toBe(turn.id);
+      // Forking at the finished turn's answer still finds exactly one reply
+      // row of that turn and copies the history live then, after both
+      // compactions retained a copy of the answer.
+      const fork = await forkSessionContent(client.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId: session.id,
+        actorSubjectId: subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        sourceEventId: answerEventId,
+        operationKey: crypto.randomUUID(),
+      });
+      const forked = await shared.admin<Array<{ item: Record<string, unknown> }>>`
+        select item from session_history_items
+        where session_id = ${fork.sessionId} order by position`;
+      expect(
+        forked.map(({ item }) =>
+          typeof item.content === "string"
+            ? item.content
+            : (item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+        ),
+      ).toEqual([
+        "Legacy request",
+        "Legacy answer",
+        "What did we decide about the cache key?",
+        "We kept one key per session.",
+      ]);
     });
   }
 

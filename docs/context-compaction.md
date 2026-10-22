@@ -263,9 +263,12 @@ Both rebuilds (portable and remote v2) keep the answer of a retained request.
   - A message whose turn is unknown: rows an earlier compaction rewrote before
     turn ids were kept, and deferred rows.
 - **Duplicates.** A turn's reply follows only its last retained request.
-- **Repeated compactions.** Retained messages and reply copies keep their
-  original turn id in `session_history_items.turn_id`, so a later compaction
-  pairs them again. The summary row keeps the compacting turn, and deferred
+- **Repeated compactions.** Retained messages keep their original turn id in
+  `session_history_items.turn_id`. A reply copy is stored with a null turn id
+  and records its turn in `opengeni_retained_reply_turn` on the item, which is
+  stripped at the model wire. A later compaction pairs them again from these,
+  while turn-keyed readers such as a message fork's reply boundary see only the
+  original reply row. The summary row keeps the compacting turn, and deferred
   rows stay unattributed.
 
 Explicit compaction is a new accepted logical turn and therefore composes the
