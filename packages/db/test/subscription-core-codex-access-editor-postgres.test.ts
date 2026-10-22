@@ -7,7 +7,6 @@ import {
   getSubscriptionCoreCodexModelConnectionAccess,
   getSubscriptionCoreCodexWorkspaceProjection,
   getSubscriptionCoreOrganizationCodexAccount,
-  getSubscriptionCoreOrganizationCodexProjection,
   listOrganizationAdministrationMembers,
   listSubscriptionCoreCodexServingConnections,
   ModelConnectionWorkspaceNotInOrganizationError,
@@ -624,20 +623,6 @@ async function personalConnection(org: Org, owner: { subjectId: string; membersh
       ${authorityId}::uuid, 'subscription_connection', 1, ${`chatgpt-${connectionId}`},
       ${shared!.admin.json({ isFedramp: false })}::jsonb)`;
   return connectionId;
-}
-
-async function source(
-  org: Org,
-  workspaceId: string,
-  inferenceSource: "workspace" | "organization" | "automatic",
-) {
-  await shared!.admin`delete from subscription_settings
-    where account_id = ${org.accountId}::uuid and workspace_id = ${workspaceId}::uuid`;
-  // Automatic is the absence of a saved choice.
-  if (inferenceSource === "automatic") return;
-  await shared!.admin`insert into subscription_settings (account_id, workspace_id, providers)
-    values (${org.accountId}::uuid, ${workspaceId}::uuid,
-      ${shared!.admin.json({ codex: { inferenceSource } })}::jsonb)`;
 }
 
 /** Every subscription row of the organization, in every table that carries one. */
