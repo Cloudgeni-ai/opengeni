@@ -346,11 +346,10 @@ fn is_macos_app_bundle_executable(binary: &Path) -> bool {
     let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     matches!(
         parts.as_slice(),
-        [.., bundle, "Contents", "MacOS", executable]
-            if !executable.is_empty()
-                && Path::new(bundle)
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        [.., bundle, "Contents", "MacOS", _executable]
+            if Path::new(bundle)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
     )
 }
 
