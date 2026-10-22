@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ConnectAdvance, ConnectAttempt, ConnectController } from "@opengeni/connect";
+import { copyTextToClipboard } from "./lib/clipboard";
 import { useConnect } from "./hooks/use-connect";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
@@ -56,6 +57,45 @@ export function curatedAutoAdvance(attempt: ConnectAttempt): ConnectAdvance | nu
       operationIds: next.operations.map((operation) => operation.id),
     };
   return null;
+}
+
+const MICROSOFT_APPROVAL_LINK = /https:\/\/login\.microsoftonline\.com\/[^\s]+/;
+
+/** Microsoft said, or may have said, that an administrator must approve the app first. */
+export function adminApprovalLink(
+  attempt: Pick<ConnectAttempt, "error">,
+): { url: string; required: boolean } | null {
+  const error = attempt.error;
+  if (!error || !["admin_consent_required", "provider_denied"].includes(error.code)) return null;
+  const match = MICROSOFT_APPROVAL_LINK.exec(error.message)?.[0];
+  if (!match) return null;
+  try {
+    const url = new URL(match);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    return { url: url.toString(), required: error.code === "admin_consent_required" };
+  } catch {
+    return null;
+  }
+}
+
+function CopyLinkButton({ url }: { url: string }) {
+  const t = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="og-connect-setup-secondary"
+      onClick={() =>
+        void copyTextToClipboard(url).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        })
+      }
+    >
+      {copied ? t("copyButton.copied") : t("connectSetup.copyAdminApprovalLink")}
+    </button>
+  );
 }
 
 function deviceVerificationUrl(action: ConnectAttempt["nextAction"]): string | null {
@@ -154,6 +194,7 @@ function ScopedSetup({
     !view.error &&
     (curatedAutoAdvance(attempt) !== null ||
       (attempt.state === "installing" && isCuratedDefinitionAttempt(attempt) && !attempt.error));
+  const adminApproval = adminApprovalLink(attempt);
   const offersGitHubRequest =
     action.type === "select_account" &&
     attempt.providerId.startsWith("github") &&
@@ -242,7 +283,26 @@ function ScopedSetup({
           <p>{t("connectSetup.nothingIsConnectedUntilThen")}</p>
         </div>
       )}
-      {(localError || view.error || (attempt.error && !awaitingOwner)) && (
+      {adminApproval && (
+        <div className="og-connect-setup-pending" role="alert">
+          <p>
+            {adminApproval.required
+              ? t("connectSetup.microsoftAdminApprovalRequired")
+              : t("connectSetup.microsoftAdminApprovalMaybe")}
+          </p>
+          <ol>
+            <li>{t("connectSetup.sendTheApprovalLinkTo")}</li>
+            <li>{t("connectSetup.afterTheyApproveConnectAgain")}</li>
+          </ol>
+          <p className="og-connect-setup-approval-link">
+            <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
+              {t("connectSetup.adminApprovalLink")}
+            </a>
+            <CopyLinkButton url={adminApproval.url} />
+          </p>
+        </div>
+      )}
+      {(localError || view.error || (attempt.error && !awaitingOwner && !adminApproval)) && (
         <p role="alert">
           {attempt.error?.code === "source_changed"
             ? t("connectSetup.theIntegrationSourceChangedReview")

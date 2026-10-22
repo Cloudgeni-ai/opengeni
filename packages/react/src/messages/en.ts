@@ -881,6 +881,8 @@ export const englishMessages = {
   "connectSetup.addingSelectedTools": "Adding selected tools…",
   "connectSetup.finishingSetup": "Finishing setup…",
   "connectSetup.addSelectedTools": "Add selected tools",
+  "connectSetup.adminApprovalLink": "Admin approval link",
+  "connectSetup.afterTheyApproveConnectAgain": "After they approve, connect again.",
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
   "connectSetup.anOwnerThenConnectsThe":
@@ -906,12 +908,17 @@ export const englishMessages = {
   "connectSetup.connectionSetupCouldNotContinue":
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
+  "connectSetup.copyAdminApprovalLink": "Copy admin approval link",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
     'Don\'t see your organization? Only its owners can connect it. Choose "Install on another GitHub account" and pick the organization: GitHub lets you send its owners a request to approve.',
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
+  "connectSetup.microsoftAdminApprovalMaybe":
+    "Microsoft didn't grant access. If it said your organization needs an admin to approve {product}, a Microsoft 365 admin can approve it for everyone.",
+  "connectSetup.microsoftAdminApprovalRequired":
+    "Your organization needs a Microsoft 365 admin to approve {product} before you can connect.",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
@@ -921,6 +928,7 @@ export const englishMessages = {
   "connectSetup.openProviderVerificationPageNew": "Open provider verification page (new tab)",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
+  "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
   "connectSetup.setupExpired": "Setup expired",

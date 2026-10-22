@@ -14517,6 +14517,17 @@
   display: grid;
   gap: 6px;
 }
+:where(.og-root).og-connect-setup .og-connect-setup-approval-link,:where(.og-root) .og-connect-setup .og-connect-setup-approval-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-link a,:where(.og-root) .og-connect-setup .og-connect-setup-approval-link a {
+  color: var(--og-color-fg,inherit);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 :where(.og-root).og-connect-setup .og-connect-setup-hint,:where(.og-root) .og-connect-setup .og-connect-setup-hint {
   margin: 0;
   color: var(--og-color-fg-muted,inherit);
