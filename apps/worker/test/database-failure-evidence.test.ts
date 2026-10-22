@@ -26,6 +26,11 @@ test("unwrapped database failures retain SQLSTATE and identifiers without expand
       routine: "exec_stmt_raise",
       detail: "private nested query values",
       hint: "private nested hint",
+      where: [
+        "PL/pgSQL function accept_turn_authority(uuid) line 12 at RAISE",
+        "SQL statement \"SELECT accept_turn_authority('private literal')\"",
+        "PL/pgSQL function claim_turn_attempt() line 4 at PERFORM",
+      ].join("\n"),
     },
   );
   const outer = Object.assign(
@@ -46,8 +51,11 @@ test("unwrapped database failures retain SQLSTATE and identifiers without expand
       table: "session_turns",
       constraint: "accepted_authority",
       routine: "exec_stmt_raise",
+      // The refusing check is identifiable after the fact, without its SQL.
+      plpgsql: ["accept_turn_authority:12", "claim_turn_attempt:4"],
     },
   });
+  expect(JSON.stringify(agentRunFailurePayload(outer))).not.toContain("private literal");
 });
 
 test("plain domain failures and provider retry classification stay unchanged", () => {
