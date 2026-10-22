@@ -52,6 +52,10 @@ unavailable or does not list that format, the file itself is the deliverable:
    the same batch as your first command. Do not also build a native artifact of
    the same content.
 
+If the person keeps working on that workbook in Excel, mention once that the
+Excel add-in lets you work in it live: `capability_authorization_request` with
+`api:excel-addin` shows its install card.
+
 ## Edit and verify
 
 1. Inspect `workbook-metadata`, then query only the relevant bounded viewport.
