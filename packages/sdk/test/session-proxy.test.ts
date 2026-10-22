@@ -2426,6 +2426,47 @@ describe("createSessionProxyHandler sessionApp", () => {
     expect(workspaces.map((workspace) => workspace.id)).toEqual([WORKSPACE_ID]);
   });
 
+  test("bootstraps an external actor, whose access inventory is empty, from its effective grant", async () => {
+    const upstream = upstreamServer();
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === "/v1/access/me") {
+          return Response.json({
+            mode: "configured",
+            subjectId: "subject-u42",
+            accountGrants: [],
+            workspaceGrants: [],
+            defaultAccountId: null,
+            defaultWorkspaceId: null,
+          });
+        }
+        return await upstream.fetch(request);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
+      sessionApp: true,
+    });
+    const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(access.subjectId).toBe("subject-u42");
+    expect(access.workspaceGrants).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        accountId: "acct-1",
+        subjectId: "subject-u42",
+        permissions: ["sessions:read", "artifacts:read"],
+      },
+    ]);
+    expect(access.defaultWorkspaceId).toBe(WORKSPACE_ID);
+    expect(access.defaultAccountId).toBe("acct-1");
+  });
+
   test("reads pass through as the resolved user, streams included", async () => {
     const { handler, upstream } = setup({ sessionApp: true });
     const capabilities = await send(handler, `${ws}/capabilities?view=composer`);
