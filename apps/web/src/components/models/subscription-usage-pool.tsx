@@ -210,7 +210,7 @@ export function ProviderGroupHeading({
             className="shrink-0 pt-0.5"
             percent={shown?.remainingPercent ?? null}
             loading={pool.loading}
-            window="available now"
+            window="now"
             fallback="No limits reported yet"
           />
         ) : null}

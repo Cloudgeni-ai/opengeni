@@ -147,6 +147,24 @@ test("the real Claude rows and pool agree in the six-account regression preview"
   expect(container.textContent).not.toContain("No capacity available.");
 });
 
+test("the provider heading reads the pool total as capacity left now", async () => {
+  const pool = pooledLimitsFixture("workspace");
+  const total = Math.round(pool.windows.find((item) => item.id === "weekly")!.remainingPercent!);
+  await act(async () =>
+    root.render(
+      <ul>
+        <ProviderGroupHeading
+          title="Claude"
+          facts={["2 accounts"]}
+          pool={{ pool, loading: false }}
+        />
+      </ul>,
+    ),
+  );
+  expect(container.textContent).toContain(`${total}% left now`);
+  expect(container.textContent).not.toContain("left available now");
+});
+
 test("a projected run-out whose time passed does not declare a positive observed pool exhausted", async () => {
   const pool = pooledLimitsFixture("workspace", false, true);
   const weekly = pool.windows[0]!;
