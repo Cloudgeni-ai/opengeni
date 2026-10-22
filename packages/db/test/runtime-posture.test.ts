@@ -1753,10 +1753,10 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 0909 session message search texts: read-only, FORCE RLS; the owner's
-          // trigger writes them.
+          // 0909 session message search texts: read and insert, FORCE RLS; an
+          // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
@@ -1813,7 +1813,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
-        1; // 0909 session message search texts: read-only, FORCE-RLS.
+        1; // 0909 session message search texts: read and insert, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");

@@ -20,9 +20,14 @@
 -- its own policies. Without a pattern set the table shows nothing.
 --
 -- Rows are written only by the AFTER INSERT trigger on session_events (and
--- the 0910 backfill), both as the schema owner; the application role can only
--- read. Session events are append-only, so a row never goes stale; deleting
--- the event deletes its row.
+-- the 0910 backfill as the schema owner). The trigger runs with the inserting
+-- role's own rights: introducing a SECURITY DEFINER trigger would be rejected
+-- by the previous release's runtime posture check during a rolling deploy.
+-- An insert is admitted only as an exact mirror of a message event the
+-- inserting role can already see (same key, message type and text), so the
+-- application role can never add text that is not a visible message. Session
+-- events are append-only, so a row never goes stale; deleting the event
+-- deletes its row.
 SET LOCAL lock_timeout = '5s';
 
 -- Trusted extensions: a database owner with CREATE may install them.
@@ -66,7 +71,9 @@ CREATE POLICY session_message_search_pattern ON "session_message_search_texts" A
       ''
     )
   );
--- Only the schema owner writes, through the trigger below and the backfill.
+-- The schema owner may write any row (the 0910 backfill and owner data
+-- migrations); any other role only an exact mirror of a message event it can
+-- see, which is what the trigger below writes.
 CREATE POLICY session_message_search_owner_insert ON "session_message_search_texts"
   FOR INSERT
   WITH CHECK (
@@ -76,6 +83,24 @@ CREATE POLICY session_message_search_owner_insert ON "session_message_search_tex
       WHERE relation.oid = 'session_message_search_texts'::regclass
     )
   );
+CREATE POLICY session_message_search_event_mirror_insert ON "session_message_search_texts"
+  FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1
+      FROM session_events event
+      WHERE event.workspace_id = session_message_search_texts.workspace_id
+        AND event.session_id = session_message_search_texts.session_id
+        AND event.sequence = session_message_search_texts.sequence
+        AND event.account_id = session_message_search_texts.account_id
+        AND event.type IN ('user.message', 'agent.message.completed')
+        AND jsonb_typeof(event.payload->'text') = 'string'
+        AND event.payload->>'text' = session_message_search_texts.text
+        AND session_message_search_texts.encoded = starts_with(
+          event.payload->>'text', 'opengeni_lossless_json_string_v2_81f06e15:'
+        )
+    )
+  );
 
 REVOKE ALL ON TABLE "session_message_search_texts" FROM PUBLIC;
 DO $grants$
@@ -83,13 +108,15 @@ DECLARE target_schema text := current_schema();
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     EXECUTE format('REVOKE ALL ON TABLE %I.session_message_search_texts FROM opengeni_app', target_schema);
-    EXECUTE format('GRANT SELECT ON TABLE %I.session_message_search_texts TO opengeni_app', target_schema);
+    EXECUTE format('GRANT SELECT, INSERT ON TABLE %I.session_message_search_texts TO opengeni_app', target_schema);
   END IF;
 END
 $grants$;
 
+-- Invoker rights: the row is written as the role that inserted the event,
+-- through the mirror policy above.
 CREATE FUNCTION opengeni_private.index_session_message_search_text()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT AS $$
 BEGIN
   INSERT INTO session_message_search_texts
     (account_id, workspace_id, session_id, sequence, encoded, text)
