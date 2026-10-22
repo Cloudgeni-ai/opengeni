@@ -790,27 +790,35 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
 and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Run the full relevant suites
-on the VM (not only the fast queue checks), with bounded workers and isolated
-services. Obtain an independent agent review of the exact candidate head. Post
+Run the repository-prescribed full validation on the VM, including the relevant
+integration, browser and package-contract suites, not only fast queue checks.
+Use the Verification section and package scripts for the required services and
+fixtures; missing services or skipped tests are not passes. On a shared VM, start
+with at most two test workers and isolated fixtures, then increase only with
+measured host headroom. Keep budgets and coverage intact. Obtain an independent
+agent review of the exact candidate head. Post
 one PR evidence comment containing that head SHA, commands/results, reviewer
-session and any limitations. Recheck the evidence after substantive head changes.
+session and any limitations. Record failures, skipped suites and untested provider
+behavior explicitly; investigate failures rather than silently rerunning them to
+green or calling a subset a full pass. Recheck evidence after any head change.
 
 Admission is ordered: complete the relevant full VM suites, obtain genuine
-independent review of that exact head, then post the real evidence and apply
-`queue-ready` only when the rollout owner has enabled intake. Never fabricate a
+independent review of that exact head, then post the real evidence. Only then may
+the PR owner apply `queue-ready`, and only when the rollout owner has enabled
+intake and no explicit hold applies. Never fabricate a
 test/reviewer receipt, copy evidence from another head, or treat a green provider
 check as independent review. A changed head revokes the old admission; repeat
 tests/review for the new head before signalling readiness again. Version PRs
 need the same human-readable exact-head evidence, not a bot exemption.
 
-Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
-enforcement and vendor installation stay off. The batcher starts in read-only
-shadow mode; only the rollout owner's explicit go permits activation.
+The in-house batcher is the supported queue. GitHub native queue enforcement and
+vendor installation stay off. New deployments default to read-only shadow;
+only the rollout owner's explicit go permits activation.
 Candidate-only CI shadow permission is not permission to control main or change
 rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
-does not activate anything; keep main control inactive until the release hold is
-cleared and the rollout owner gives a separate explicit go.
+does not activate anything; activation requires release coordination and the
+rollout owner's separate explicit go. Determine the current merge path below,
+not from this default or a historical rollout status.
 Merge mode follows **readable current GitHub rules**, not an owner-local receipt
 or whether a controller happens to be running. Read
 `gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
@@ -841,7 +849,10 @@ create/update/delete queue or batcher-state refs or manually rerun/cancel Batch 
 Stopping the controller alone does **not** restore the manual merge path. The
 authorized operator's one-command OFF must prove writer stop and restore the exact
 prior rules, then publish its verified manual-mode receipt for the audit. Agents
-independently confirm restoration through the same readable GitHub rules; the
+must not run an older active controller against a parked ledger as rollback.
+The exact command and operator ownership are documented under
+[Rollback](docs/merge-batcher.md#rollback). Agents independently confirm
+restoration through the same readable GitHub rules; the
 owner's local receipt is not their only source. A ruleset name alone is never
 proof of mode, identity or bypass scope. Organization-admin
 policy changes are emergency/turn-off operations, never routine queue bypass;
@@ -858,7 +869,8 @@ when full-main CI is red or unknown; full main CI remains an independent backsto
 not a candidate admission gate. Full relevant VM suites and independent review
 remain required before readiness. Failed candidate code never triggers a retry:
 split the cohort and durably park failing singleton heads without blame or ejection,
-while other ready heads proceed. A new ready event or main advancement does not
+with a durable non-blaming PR comment, while other ready heads proceed. A new
+ready event or main advancement does not
 retry a parked head; a changed head may re-enter. Comparable base evidence remains
 unavailable, and full-main CI success is not a substitute. Current receipts lack
 trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.

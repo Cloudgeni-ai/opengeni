@@ -660,6 +660,23 @@ Portable placement options, without deployment by this task:
   continuous background CPU, runtime secrets and equivalent probes. Keep the
   same Git-backed state protocol; do not introduce Azure-only state authority.
 
+### Rollback
+
+The rollout owner coordinates rollback with the runtime owner; one operator owns
+STOP and the administration plan to avoid competing service changes. With the
+reviewed operator bound to the current deployment and the original policy retained,
+the authorized operator runs from the repository root:
+
+```bash
+bun docs/merge-batcher-admin/off.ts run "$ADMIN_DIR" --apply-after-go
+```
+
+`ADMIN_DIR` is that deployment's retained administration attempt, not a new empty
+directory or a consumed earlier plan. Follow the
+[administration procedure](merge-batcher-admin/README.md) for binding, permissions,
+receipts and uncertain-outcome recovery. The flag does not itself grant authority.
+Never restart an older active controller against a parked ledger as a rollback.
+
 With exclusive main policy enabled, changing `BATCHER_MODE=shadow` or stopping a
 service alone is **not** complete rollback: it leaves normal manual merges blocked.
 Use the administration bundle's reviewed one-command OFF, which first proves
@@ -674,3 +691,7 @@ force-reset main or rotate credentials.
 Full VM/monorepo testing, exact-head independent agent review and the repository's
 evidence comment remain required before this batcher itself lands. Focused core
 tests do not replace that parent-owned admission requirement.
+For every queued PR, the PR owner signals readiness only after the prescribed VM
+validation and independent exact-head review, with commands, failures, skips and
+scope stated honestly. A green impact-selected batch subset is neither a full VM
+suite pass nor release proof; full main CI remains the independent backstop.
