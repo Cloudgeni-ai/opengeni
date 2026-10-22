@@ -391,6 +391,9 @@ type TargetState = {
   frameGeneration: string;
   accessibility: CdpAccessibilitySnapshot | null;
   dialog: BrowserDialog | null;
+  /** Hit-target guards a JavaScript dialog kept from being read back. Page
+   * scripts are paused under the dialog, so they are removed once it closes. */
+  unsettledHitTargetGuards: string[];
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
@@ -1740,6 +1743,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             // this action reads the page, ends the batch here: the page
             // cannot answer until the dialog is handled.
             await this.untilDialog(state, async () => {
+              await this.settleUnsettledHitTargetGuards(state);
               if (
                 completedActions > 0 &&
                 command.action.type === "batch" &&
@@ -2654,6 +2658,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
       documentGeneration: documentGeneration(
@@ -5075,26 +5080,123 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
-    await this.sendActionTarget(
-      state,
-      "Input.dispatchMouseEvent",
-      { type: "mouseMoved", x, y },
-      input,
-    );
-    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+    const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
+    let blocked: string | null = null;
+    let dialogOpened = false;
+    try {
       await this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
-        { type: "mousePressed", x, y, button, clickCount },
+        { type: "mouseMoved", x, y },
         input,
       );
-      await this.sendActionTarget(
-        state,
-        "Input.dispatchMouseEvent",
-        { type: "mouseReleased", x, y, button, clickCount },
-        input,
+      for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x, y, button, clickCount },
+          input,
+        );
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x, y, button, clickCount },
+          input,
+        );
+      }
+    } catch (error) {
+      // Page scripts are paused under a JavaScript dialog, so the guard cannot
+      // be read back now. The next action removes it once the dialog is
+      // handled, and it disarms itself after a few seconds regardless.
+      if (error instanceof DialogOpenedSignal) {
+        dialogOpened = true;
+        if (guard !== null) state.unsettledHitTargetGuards.push(guard);
+      }
+      throw error;
+    } finally {
+      if (guard !== null && !dialogOpened) blocked = await this.settleHitTargetGuard(state, guard);
+    }
+    if (blocked !== null) {
+      // The pointer did move there, so whatever its arrival did stands, and
+      // the refusal is reported as an unknown outcome.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser element is covered by ${blocked.slice(0, 160)} at its center; the click was not delivered`,
+        true,
       );
     }
+  }
+
+  /**
+   * Installs the hit-target guard for one click and returns a handle to it, or
+   * null when the target's window cannot take one. When the target's frame is
+   * known the listeners live in an isolated world, out of page scripts' reach.
+   */
+  private async installHitTargetGuard(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    frameId: string | undefined,
+  ): Promise<string | null> {
+    if (this.engine === "lightpanda" || backendDOMNodeId === null) return null;
+    let executionContextId: number | undefined;
+    if (frameId !== undefined) {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
+        state,
+        "Page.createIsolatedWorld",
+        { frameId, worldName: "opengeni-hit-target-guard" },
+      );
+      if (Number.isSafeInteger(world.executionContextId))
+        executionContextId = world.executionContextId as number;
+    }
+    const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+      backendNodeId: backendDOMNodeId,
+      ...(executionContextId === undefined ? {} : { executionContextId }),
+    });
+    if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") return null;
+    const nodeObjectId = resolved.object.objectId;
+    try {
+      const installed = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        { objectId: nodeObjectId, functionDeclaration: HIT_TARGET_GUARD_FUNCTION },
+      );
+      if (installed.exceptionDetails || !isRecord(installed.result)) return null;
+      return typeof installed.result.objectId === "string" ? installed.result.objectId : null;
+    } finally {
+      await this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  /** Removes the guard's listeners and returns what it held back, if anything. */
+  private async settleHitTargetGuard(
+    state: TargetState,
+    guardObjectId: string,
+  ): Promise<string | null> {
+    try {
+      const settled = await this.sendTarget<{ result?: unknown }>(state, "Runtime.callFunctionOn", {
+        objectId: guardObjectId,
+        functionDeclaration: "function () { return this.settle(); }",
+        returnByValue: true,
+      });
+      const value = isRecord(settled.result) ? settled.result.value : null;
+      return typeof value === "string" && value ? value : null;
+    } catch {
+      // The click navigated or replaced the document, taking the guard with it.
+      return null;
+    } finally {
+      await this.sendTarget(state, "Runtime.releaseObject", { objectId: guardObjectId }).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  /** Removes guards a dialog left armed, so they cannot hold back later input. */
+  private async settleUnsettledHitTargetGuards(state: TargetState): Promise<void> {
+    if (state.dialog) return;
+    const guards = state.unsettledHitTargetGuards.splice(0);
+    for (const guard of guards) await this.settleHitTargetGuard(state, guard);
   }
 
   /**
@@ -5302,6 +5404,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           potentialEffect: true,
         },
       );
+      // Layout that reacts to the scroll, such as a popover that follows its
+      // anchor, catches up on the next frames. Test the hit after it has.
+      await this.callOnNode(state, backendDOMNodeId, SETTLE_FRAMES_FUNCTION, [], {
+        isolatedFrameId: frameId,
+      });
       if (await this.hitsAtCenter(state, backendDOMNodeId)) {
         return await this.centerPoint(state, backendDOMNodeId);
       }
@@ -7180,30 +7287,102 @@ const HIT_TEST_FUNCTION = `function() {
   return Boolean(hit && owns(element, hit));
 }`;
 
-// Describes the element on top at the target's centre by its nearest
-// labelled ancestor: role (or tag) and accessible label. Text content is
-// read only from non-editable elements and bounded; input values never are.
+// Describes an element by its nearest labelled ancestor: role (or tag) and
+// accessible label. Text content is read only from non-editable elements and
+// bounded; input values never are.
+const DESCRIBE_HELPER = `
+  const describe = (hit) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    let node = hit instanceof Element ? hit : hit && hit.parentElement;
+    if (!(node instanceof Element)) return "another element";
+    const start = node;
+    for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
+      const role = node.getAttribute("role");
+      const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+      if (role || label) {
+        const kind = role || node.tagName.toLowerCase();
+        return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+      }
+      node = node.parentElement;
+    }
+    const editable = start.closest("input, textarea, select, [contenteditable]");
+    const text = editable ? "" : clean(start.textContent).slice(0, 60);
+    return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+  };`;
+
+// Describes the element on top at the target's centre, or null when nothing
+// else is there.
 const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
   const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
   if (!hit || owns(element, hit) || owns(hit, element)) return null;
-  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-  let node = hit;
-  for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
-    const role = node.getAttribute("role");
-    const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
-    if (role || label) {
-      const kind = role || node.tagName.toLowerCase();
-      return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+  return describe(hit);
+}`;
+
+// Guards one pointer click on the target. Hit-testing happens before input is
+// sent, and the page can still move something over the target in between: a
+// popover following its anchor after a scroll, or a card the pointer's arrival
+// opens. Capture listeners on the target's window see each press first; one
+// that would reach anything other than the target (or its descendants) is
+// cancelled and stopped there, as are the release and clicks that follow it,
+// and the guard records what was in the way. Releases and clicks are not
+// judged by their own target: pointer capture can retarget a release, and a
+// label forwards its click to its control.
+// Returns the guard object; its settle() removes the listeners and
+// reports what was held back. A guard that is never settled (a JavaScript
+// dialog interrupted the click) disarms itself after a few seconds.
+const HIT_TARGET_GUARD_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const view = element.ownerDocument && element.ownerDocument.defaultView;
+  if (!view) return null;
+  ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
+  const presses = ["pointerdown", "mousedown"];
+  const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  const types = [...presses, ...followers];
+  const guard = { blocked: null };
+  const expiresAt = Date.now() + 5000;
+  const listener = (event) => {
+    if (Date.now() > expiresAt) {
+      guard.settle();
+      return;
     }
-    node = node.parentElement;
-  }
-  const editable = hit.closest("input, textarea, select, [contenteditable]");
-  const text = editable ? "" : clean(hit.textContent).slice(0, 60);
-  return hit.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+    if (!event.isTrusted) return;
+    if (presses.includes(event.type)) {
+      const hit = event.composedPath()[0];
+      if (hit instanceof Node && owns(element, hit)) return;
+      // Seen from outside a closed shadow root, a press on the target is
+      // retargeted to that root's host.
+      if (hit instanceof Element && hit.shadowRoot === null && owns(hit, element) && element.getRootNode() !== hit.getRootNode()) return;
+      if (guard.blocked === null) guard.blocked = describe(hit);
+    } else if (guard.blocked === null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of types) view.addEventListener(type, listener, true);
+  guard.settle = () => {
+    for (const type of types) view.removeEventListener(type, listener, true);
+    return guard.blocked;
+  };
+  return guard;
+}`;
+
+// Resolves after the page has rendered two more frames, so layout that reacts
+// to a scroll (scroll listeners, anchored popovers) has caught up. Bounded,
+// because a hidden tab may not render frames at all.
+const SETTLE_FRAMES_FUNCTION = `function() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 100);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      clearTimeout(timer);
+      resolve(true);
+    }));
+  });
 }`;
 
 // Whether pointer input at the target's centre falls through it to one of its
