@@ -47,6 +47,7 @@ async function fixture(
   mode: "automatic" | "review_first" | "off" = "automatic",
   contentType = "application/pdf",
   hostDeniesSource = false,
+  personal = false,
 ) {
   const id = crypto.randomUUID();
   const subjectId = `user:${id}`;
@@ -83,6 +84,7 @@ async function fixture(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       initialMessage: "What are Acme's renewal terms?",
+      ...(personal ? { memoryScope: "user" as const, scopeSubjectId: subjectId } : {}),
       resources: [],
       metadata: {},
       model: "codex/gpt-5.6-sol",
@@ -129,20 +131,33 @@ async function fixture(
     })}`;
   const fileId = crypto.randomUUID();
   const bytes = new TextEncoder().encode("original PDF bytes");
-  const uploaded = await createFileUpload(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    fileId,
-    filename: "Acme.pdf",
-    safeFilename: "Acme.pdf",
-    contentType,
-    sizeBytes: bytes.length,
-    sha256: null,
-    bucket: "test",
-    objectKey: fileId,
-    expiresAt: new Date(Date.now() + 60_000),
-  });
-  await completeFileUpload(client.db, grant.workspaceId, uploaded.uploadId);
+  const uploaded = await withSessionRlsActorContext(
+    {
+      subjectId,
+      privateFileOwnerSubjectId: personal ? subjectId : null,
+    },
+    () =>
+      createFileUpload(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        fileId,
+        filename: "Acme.pdf",
+        safeFilename: "Acme.pdf",
+        contentType,
+        sizeBytes: bytes.length,
+        sha256: null,
+        bucket: "test",
+        objectKey: fileId,
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+  );
+  await withSessionRlsActorContext(
+    {
+      subjectId,
+      privateFileOwnerSubjectId: personal ? subjectId : null,
+    },
+    () => completeFileUpload(client.db, grant.workspaceId, uploaded.uploadId),
+  );
   const calls: string[] = [];
   let parserFails = false;
   const app = new Hono();
@@ -248,6 +263,27 @@ describe("chat file to retained source through the public API", () => {
       });
       expect(result.isError).toBe(true);
       expect(f.calls).toEqual([]);
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  });
+  test("MCP preparation reads an ordinary private upload for its verified personal agent", async () => {
+    const f = await fixture("automatic", "application/pdf", false, true);
+    const server = new McpServer({ name: "knowledge-personal-file-test", version: "1" });
+    registerKnowledgeEntryTools(server, f.deps, f.agentGrant, f.session.id);
+    const mcp = new McpClient({ name: "agent", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await server.connect(right);
+    await mcp.connect(left);
+    try {
+      const result = await mcp.callTool({
+        name: "knowledge_retain_file",
+        arguments: { fileId: f.fileId },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(f.calls).toContain(`read:${f.fileId}`);
+      expect(f.calls).toContain("parse");
     } finally {
       await mcp.close();
       await server.close();

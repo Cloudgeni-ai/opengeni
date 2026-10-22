@@ -27,6 +27,7 @@ import {
   learningSaveCorrection,
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
+  freezeAgentLearningPolicy,
   getKnowledgeEntry,
   listKnowledgeEntries,
   nestedAuthorityRefusalMessage,
@@ -120,11 +121,14 @@ export function registerKnowledgeEntryTools(
           executionGeneration: attempt.executionGeneration,
         },
       };
+      const learning = await freezeAgentLearningPolicy(deps.db, context);
       const result = await withSessionRlsActorContext(
         {
           subjectId: attempt.subjectId,
           initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
           agentRootSessionId: attempt.callerRootSessionId,
+          privateFileOwnerSubjectId:
+            learning.defaultScope === "personal" ? learning.subjectId : null,
         },
         () => fn(context),
       );

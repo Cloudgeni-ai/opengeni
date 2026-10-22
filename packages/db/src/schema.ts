@@ -3357,7 +3357,7 @@ export const slackInteractions = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     connectionId: uuid("connection_id")
       .notNull()
-      .references(() => connections.id, { onDelete: "cascade" }),
+      .references(() => connections.id),
     slackTeamId: text("slack_team_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     slackThreadTs: text("slack_thread_ts").notNull(),
@@ -7195,6 +7195,9 @@ export const documents = pgTable(
     fileId: uuid("file_id")
       .notNull()
       .references(() => files.id, { onDelete: "restrict" }),
+    sourceFileHasInheritedAudience: boolean("source_file_has_inherited_audience")
+      .notNull()
+      .default(false),
     status: text("status").notNull().default("queued"),
     title: text("title").notNull(),
     parser: text("parser").notNull().default("liteparse"),
@@ -7359,6 +7362,9 @@ export const documentChunks = pgTable(
     fileId: uuid("file_id")
       .notNull()
       .references(() => files.id, { onDelete: "restrict" }),
+    sourceFileHasInheritedAudience: boolean("source_file_has_inherited_audience")
+      .notNull()
+      .default(false),
     chunkIndex: integer("chunk_index").notNull(),
     text: text("text").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

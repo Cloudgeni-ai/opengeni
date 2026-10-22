@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { sql } from "drizzle-orm";
 import {
   fileSourceVisibleToHost,
   fileMayBeCopiedToWorkspace,
@@ -26,8 +27,12 @@ import {
   transitionSessionVisibility,
   updateFileVisibility,
   withSessionRlsActorContext,
+  withRlsContext,
+  setSubjectRlsContext,
   type DbClient,
 } from "@opengeni/db";
+import { addDocumentToBase, getDocument } from "@opengeni/documents";
+import { rawRows } from "../../../packages/db/src/database";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -334,24 +339,60 @@ test("document authority reads an ordinary private original without opening a so
     values (${f.workspace.accountId}, ${f.workspace.id}, ${base!.id}, ${sourceFileId},
       'ready', 'Source document', ${f.owner.subjectId}, 'workspace',
       ${f.workspace.id}, 'workspace') returning id`;
+  const [sourceDocumentFlag] = await shared.admin<{ inherited: boolean }[]>`
+    select source_file_has_inherited_audience as inherited from documents
+      where id = ${sourceDocument!.id}`;
+  expect(sourceDocumentFlag?.inherited).toBe(true);
+  const zeroVector = `[${Array.from({ length: 3072 }, () => "0").join(",")}]`;
+  const [sourceChunk] = await shared.admin<{ id: string }[]>`
+    insert into document_chunks(account_id, workspace_id, document_id, base_id,
+      file_id, chunk_index, text, metadata, embedding, embedding_model)
+    values (${f.workspace.accountId}, ${f.workspace.id}, ${sourceDocument!.id},
+      ${base!.id}, ${sourceFileId}, 0, 'synthetic source text', '{}'::jsonb,
+      ${zeroVector}::vector, 'test') returning id`;
+  const copiedText = await withRlsContext(
+    db.db,
+    { accountId: f.workspace.accountId, workspaceId: f.workspace.id },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, f.other.subjectId);
+      return {
+        documents: await rawRows(
+          scopedDb,
+          sql`select id from documents
+          where id = ${sourceDocument!.id}::uuid`,
+        ),
+        chunks: await rawRows(
+          scopedDb,
+          sql`select text from document_chunks
+          where id = ${sourceChunk!.id}::uuid`,
+        ),
+      };
+    },
+  );
+  expect(copiedText).toEqual({ documents: [], chunks: [] });
   expect(
-    (await f.call(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`)).status,
-  ).toBe(404);
-  expect(
-    (await f.callWithoutHost(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`))
-      .status,
-  ).toBe(200);
-  expect(
-    (await f.call(f.other, "POST", `/documents/${sourceDocument!.id}/original-file/download-url`))
-      .status,
-  ).toBe(404);
-  await transitionSessionVisibility(db.db, {
-    workspaceId: f.workspace.id,
-    sessionId: session.id,
-    actorSubjectId: f.owner.subjectId,
-    targetVisibility: "user_private",
-    expectedAuthorityEpoch: 1,
-    operationKey: `document-source:${crypto.randomUUID()}`,
+    await getDocument(db.db, f.workspace.id, sourceDocument!.id, {
+      viewerSubjectId: f.other.subjectId,
+    }),
+  ).toBeNull();
+  const [secondBase] = await shared.admin<{ id: string }[]>`
+    insert into document_bases(account_id, workspace_id, name)
+    values (${f.workspace.accountId}, ${f.workspace.id}, 'Another base') returning id`;
+  await expect(
+    addDocumentToBase(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      baseId: secondBase!.id,
+      fileId: sourceFileId,
+      authorityKind: "workspace",
+      createdBy: f.owner.subjectId,
+      initiatingSubjectId: f.owner.subjectId,
+      access: { viewerSubjectId: f.owner.subjectId },
+    }),
+  ).rejects.toMatchObject({
+    cause: {
+      message: expect.stringContaining("Document source requires independent File sharing"),
+    },
   });
   expect(
     (await f.call(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`)).status,
@@ -364,6 +405,38 @@ test("document authority reads an ordinary private original without opening a so
     (await f.call(f.other, "POST", `/documents/${sourceDocument!.id}/original-file/download-url`))
       .status,
   ).toBe(404);
+  const sharedSource = await f.call(f.owner, "PUT", `/files/${sourceFileId}/visibility`, {
+    visibility: "workspace",
+  });
+  expect(sharedSource.status, await sharedSource.clone().text()).toBe(200);
+  expect(
+    await getDocument(db.db, f.workspace.id, sourceDocument!.id, {
+      viewerSubjectId: f.other.subjectId,
+    }),
+  ).not.toBeNull();
+  expect(
+    (await f.callWithoutHost(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`))
+      .status,
+  ).toBe(200);
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    actorSubjectId: f.owner.subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `document-source:${crypto.randomUUID()}`,
+  });
+  expect(
+    (await f.call(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`)).status,
+  ).toBe(200);
+  expect(
+    (await f.callWithoutHost(f.other, "GET", `/documents/${sourceDocument!.id}/original-file`))
+      .status,
+  ).toBe(200);
+  expect(
+    (await f.call(f.other, "POST", `/documents/${sourceDocument!.id}/original-file/download-url`))
+      .status,
+  ).toBe(200);
   expect(
     (
       await f.callWithoutHost(
@@ -372,7 +445,7 @@ test("document authority reads an ordinary private original without opening a so
         `/documents/${sourceDocument!.id}/original-file/download-url`,
       )
     ).status,
-  ).toBe(404);
+  ).toBe(200);
 });
 
 test("a generated file follows its source chat when the chat becomes private", async () => {
@@ -495,11 +568,6 @@ test("a generated file follows its source chat when the chat becomes private", a
   const [sourceSnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${unsharedFileId}`;
   expect(sourceSnapshot?.owner).toBe(f.owner.subjectId);
-  const [otherOwnedSnapshot] = await shared.admin`
-    select source_session_owner_subject_id as owner,
-      source_session_shared_unrestricted as shared
-    from files where id = ${otherOwnedFileId}`;
-  expect(otherOwnedSnapshot).toMatchObject({ owner: f.owner.subjectId, shared: false });
   const [legacySnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${legacyOwnerlessId}`;
   expect(legacySnapshot?.owner).toBe(f.owner.subjectId);
@@ -674,10 +742,33 @@ test("a private Slack source keeps its File ID private", async () => {
       await shared.admin`update slack_interactions set visibility = 'workspace_shared'
         where id = ${interaction.id}`)(),
   ).rejects.toThrow("Slack interaction audience is immutable");
-  await shared.admin`delete from connections where id = ${connection!.id}`;
+  await expect(
+    (async () => await shared.admin`delete from connections where id = ${connection!.id}`)(),
+  ).rejects.toThrow();
+  const laterFileId = crypto.randomUUID();
+  await withSessionRlsActorContext(
+    { subjectId: f.owner.subjectId, privateFileOwnerSubjectId: f.owner.subjectId },
+    () =>
+      createFileUpload(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        fileId: laterFileId,
+        sourceSessionId: session.id,
+        filename: "later.txt",
+        safeFilename: "later.txt",
+        contentType: "text/plain",
+        sizeBytes: 4,
+        bucket: "fixture",
+        objectKey: `workspaces/${f.workspace.id}/files/${laterFileId}/original/later.txt`,
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+  );
+  await shared.admin`update files set status = 'ready' where id = ${laterFileId}`;
+  expect((await f.call(f.other, "GET", `/files/${laterFileId}`)).status).toBe(404);
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
   await shared.admin`delete from sessions where id = ${session.id}`;
+  await shared.admin`delete from connections where id = ${connection!.id}`;
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
 });

@@ -15,8 +15,31 @@ ALTER TABLE files ADD COLUMN source_session_shared_unrestricted boolean NOT NULL
 ALTER TABLE video_generation_operations ADD COLUMN source_session_id_snapshot uuid;
 ALTER TABLE video_generation_operations ADD COLUMN source_session_owner_subject_id text;
 ALTER TABLE video_generation_operations ADD COLUMN source_session_shared_unrestricted boolean NOT NULL DEFAULT false;
+ALTER TABLE documents ADD COLUMN source_file_has_inherited_audience boolean NOT NULL DEFAULT false;
+ALTER TABLE document_chunks ADD COLUMN source_file_has_inherited_audience boolean NOT NULL DEFAULT false;
 CREATE INDEX files_source_session_idx ON files(workspace_id, source_session_id)
   WHERE source_session_id IS NOT NULL;
+
+-- A hard connection deletion must not erase a private Slack audience while
+-- its session survives. Normal disconnect revokes credentials in place.
+DO $slack_connection_fk$
+DECLARE prior_constraint text;
+BEGIN
+  SELECT constraint_row.conname INTO prior_constraint FROM pg_constraint constraint_row
+    JOIN pg_attribute column_row ON column_row.attrelid = constraint_row.conrelid
+      AND column_row.attnum = ANY(constraint_row.conkey)
+    WHERE constraint_row.conrelid = 'slack_interactions'::regclass
+      AND constraint_row.confrelid = 'connections'::regclass
+      AND constraint_row.contype = 'f' AND column_row.attname = 'connection_id'
+    LIMIT 1;
+  IF prior_constraint IS NULL THEN
+    RAISE EXCEPTION 'Slack connection foreign key unavailable' USING ERRCODE='55000';
+  END IF;
+  EXECUTE format('ALTER TABLE slack_interactions DROP CONSTRAINT %I', prior_constraint);
+END $slack_connection_fk$;
+ALTER TABLE slack_interactions ADD CONSTRAINT slack_interactions_connection_guard_fkey
+  FOREIGN KEY (connection_id) REFERENCES connections(id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 -- Intersect every private source owner. A missing or conflicting owner leaves
 -- retained bytes unavailable rather than selecting one weaker audience.
@@ -42,6 +65,8 @@ ALTER TABLE browser_session_retained_downloads NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE browser_session_associations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE video_generation_operations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE audit_events NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_chunks NO FORCE ROW LEVEL SECURITY;
 CREATE TEMP TABLE session_file_sources_0913 ON COMMIT DROP AS
   SELECT account_id, workspace_id, file_id, min(session_id::text)::uuid AS session_id,
     count(DISTINCT session_id) AS source_count
@@ -275,6 +300,15 @@ UPDATE files f SET owner_subject_id = a.owner_subject_id
     AND f.source_session_provenance_missing;
 ALTER TABLE files ENABLE TRIGGER files_personal_owner_immutable;
 
+-- Existing indexed text follows the originating File. The two independent
+-- tables need the same flag because chunks can be read without their parent.
+UPDATE documents d SET source_file_has_inherited_audience = true
+  FROM files f WHERE d.account_id = f.account_id AND d.file_id = f.id
+    AND (f.source_session_id IS NOT NULL OR f.source_session_provenance_missing);
+UPDATE document_chunks c SET source_file_has_inherited_audience = true
+  FROM documents d WHERE c.account_id = d.account_id AND c.document_id = d.id
+    AND d.source_file_has_inherited_audience;
+
 -- A source chat can become private after an ownerless shared File was made.
 -- Its verified source owner may explicitly share that File, acquiring the
 -- durable File owner in the same change so they can later limit it again.
@@ -348,6 +382,90 @@ ALTER TABLE browser_session_associations FORCE ROW LEVEL SECURITY;
 ALTER TABLE video_generation_operations FORCE ROW LEVEL SECURITY;
 ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE files FORCE ROW LEVEL SECURITY;
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_chunks FORCE ROW LEVEL SECURITY;
+
+-- Runtime File provenance is fixed at insert. Owner-run maintenance may repair
+-- it, and the companion trigger then narrows any already indexed Document.
+CREATE FUNCTION freeze_file_source_provenance_0914() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+BEGIN
+  IF (OLD.source_session_id IS DISTINCT FROM NEW.source_session_id
+    OR OLD.source_session_provenance_missing IS DISTINCT FROM NEW.source_session_provenance_missing)
+    AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper)
+  THEN RAISE EXCEPTION 'File source provenance is immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
+END $body$;
+CREATE TRIGGER freeze_file_source_provenance_0914
+  BEFORE UPDATE OF source_session_id, source_session_provenance_missing ON files
+  FOR EACH ROW EXECUTE FUNCTION freeze_file_source_provenance_0914();
+
+CREATE FUNCTION sync_document_file_source_0914() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+DECLARE source_row record;
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.file_id IS DISTINCT FROM OLD.file_id THEN
+    RAISE EXCEPTION 'Document source File is immutable' USING ERRCODE='55000';
+  END IF;
+  SELECT source_session_id, source_session_provenance_missing,
+    source_session_audience_explicit INTO source_row
+    FROM files WHERE account_id = NEW.account_id AND id = NEW.file_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Document source File unavailable' USING ERRCODE='42501'; END IF;
+  NEW.source_file_has_inherited_audience :=
+    source_row.source_session_id IS NOT NULL OR source_row.source_session_provenance_missing;
+  IF NEW.source_file_has_inherited_audience
+    AND NOT source_row.source_session_audience_explicit
+    AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper)
+  THEN RAISE EXCEPTION 'Document source requires independent File sharing'
+    USING ERRCODE='42501'; END IF;
+  RETURN NEW;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION sync_document_file_source_0914() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+CREATE TRIGGER sync_document_file_source_0914
+  BEFORE INSERT OR UPDATE OF file_id, source_file_has_inherited_audience ON documents
+  FOR EACH ROW EXECUTE FUNCTION sync_document_file_source_0914();
+
+CREATE FUNCTION sync_document_chunk_file_source_0914() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+DECLARE inherited boolean;
+BEGIN
+  SELECT source_file_has_inherited_audience INTO inherited FROM documents
+    WHERE account_id = NEW.account_id AND id = NEW.document_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Document chunk source unavailable' USING ERRCODE='42501'; END IF;
+  NEW.source_file_has_inherited_audience := inherited;
+  RETURN NEW;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION sync_document_chunk_file_source_0914() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+CREATE TRIGGER sync_document_chunk_file_source_0914
+  BEFORE INSERT OR UPDATE OF document_id, file_id, source_file_has_inherited_audience ON document_chunks
+  FOR EACH ROW EXECUTE FUNCTION sync_document_chunk_file_source_0914();
+
+CREATE FUNCTION sync_documents_for_file_source_0914() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+BEGIN
+  UPDATE documents SET source_file_has_inherited_audience =
+    (NEW.source_session_id IS NOT NULL OR NEW.source_session_provenance_missing)
+    WHERE account_id = NEW.account_id AND file_id = NEW.id;
+  UPDATE document_chunks SET source_file_has_inherited_audience =
+    (NEW.source_session_id IS NOT NULL OR NEW.source_session_provenance_missing)
+    WHERE account_id = NEW.account_id AND file_id = NEW.id;
+  RETURN NEW;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION sync_documents_for_file_source_0914() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+CREATE TRIGGER sync_documents_for_file_source_0914
+  AFTER UPDATE OF source_session_id, source_session_provenance_missing ON files
+  FOR EACH ROW WHEN (OLD.source_session_id IS DISTINCT FROM NEW.source_session_id
+    OR OLD.source_session_provenance_missing IS DISTINCT FROM NEW.source_session_provenance_missing)
+  EXECUTE FUNCTION sync_documents_for_file_source_0914();
 
 -- Maintenance cutover: a pre-upgrade process must fail closed if restarted
 -- after provenance enforcement, including for ordinary-looking originals.
@@ -367,7 +485,7 @@ CREATE TRIGGER require_file_provenance_writer_0913
 -- A shared chat can later become private (or vice versa). Keep the final
 -- owner snapshot for retained files when the source chat is deleted.
 CREATE FUNCTION sync_file_source_session_owner_0913() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 BEGIN
   UPDATE files SET source_session_owner_subject_id = file_source_owner_snapshot_0913(
     CASE WHEN NEW.visibility = 'user_private' THEN coalesce(NEW.owner_subject_id,'') END,
@@ -509,17 +627,105 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
           nullif(current_setting('opengeni.subject_id', true), '')
         OR source_session.root_session_id::text =
           nullif(current_setting('opengeni.agent_root_session_id', true), '')))
-  OR (source_session_owner_subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+  OR ((source_session_owner_subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+      OR (source_session_owner_subject_id =
+          nullif(current_setting('opengeni.private_file_owner', true), '')
+        AND source_session_owner_subject_id = ANY(private_owner_subject_ids)))
+    AND NOT source_session_shared_unrestricted
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND (source_session_id IS NULL OR NOT file_source_session_exists_0913(
       account_id, workspace_id, source_session_id)))
+  -- A private File row can be invisible to the session-update trigger's
+  -- invoker. After deletion, never trust its stale shared snapshot.
   OR (source_session_id IS NOT NULL AND source_session_shared_unrestricted
+    AND (private_owner_subject_ids IS NULL
+      OR (cardinality(private_owner_subject_ids) = 1
+        AND private_owner_subject_ids[1] =
+          nullif(current_setting('opengeni.private_file_owner', true), '')))
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND NOT file_source_session_exists_0913(account_id, workspace_id, source_session_id))
 );
 
+CREATE POLICY documents_file_source_visible ON documents AS RESTRICTIVE FOR SELECT USING (
+  NOT source_file_has_inherited_audience OR EXISTS (
+    SELECT 1 FROM files source_file WHERE source_file.account_id = documents.account_id
+      AND source_file.id = documents.file_id AND source_file.status = 'ready'
+      AND source_file.source_session_audience_explicit
+      AND source_file.private_owner_subject_ids IS NULL)
+);
+CREATE POLICY document_chunks_file_source_visible ON document_chunks AS RESTRICTIVE FOR SELECT USING (
+  NOT source_file_has_inherited_audience OR EXISTS (
+    SELECT 1 FROM files source_file WHERE source_file.account_id = document_chunks.account_id
+      AND source_file.id = document_chunks.file_id AND source_file.status = 'ready'
+      AND source_file.source_session_audience_explicit
+      AND source_file.private_owner_subject_ids IS NULL)
+);
+
+-- The original-file resolver is a definer and bypasses Document RLS. Preserve
+-- its authority checks, then apply the same independent-share condition.
+ALTER FUNCTION resolve_document_original_file(uuid, uuid, text, uuid)
+  RENAME TO resolve_document_original_file_authority_0914;
+REVOKE ALL ON FUNCTION resolve_document_original_file_authority_0914(uuid, uuid, text, uuid)
+  FROM PUBLIC;
+DO $document_resolver_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    REVOKE ALL ON FUNCTION resolve_document_original_file_authority_0914(uuid, uuid, text, uuid)
+      FROM opengeni_app;
+  END IF;
+END $document_resolver_grant$;
+CREATE FUNCTION resolve_document_original_file(
+  p_account_id uuid, p_request_workspace_id uuid, p_actor_id text, p_document_id uuid
+) RETURNS SETOF files LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+  SELECT original_file.*
+  FROM resolve_document_original_file_authority_0914(
+    p_account_id, p_request_workspace_id, p_actor_id, p_document_id
+  ) original_file
+  JOIN documents source_document ON source_document.id = p_document_id
+    AND source_document.account_id = original_file.account_id
+    AND source_document.file_id = original_file.id
+  WHERE NOT source_document.source_file_has_inherited_audience
+    OR (original_file.status = 'ready'
+      AND original_file.source_session_audience_explicit
+      AND original_file.private_owner_subject_ids IS NULL)
+$body$;
+REVOKE ALL ON FUNCTION resolve_document_original_file(uuid, uuid, text, uuid) FROM PUBLIC;
+DO $document_resolver_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION resolve_document_original_file(uuid, uuid, text, uuid)
+      TO opengeni_app;
+  END IF;
+END $document_resolver_grant$;
+
 -- Knowledge stores a durable text copy. A source-chat File may be retained
 -- there only after the File owner explicitly gives it independent access.
+CREATE OR REPLACE FUNCTION knowledge_document_visible(p_document uuid) RETURNS boolean
+LANGUAGE sql VOLATILE SET search_path FROM CURRENT AS $body$
+  SELECT EXISTS(SELECT 1 FROM documents d
+    WHERE d.id=p_document AND d.account_id=nullif(current_setting('opengeni.account_id',true),'')::uuid
+      AND d.status='ready'
+      AND (NOT d.source_file_has_inherited_audience OR EXISTS (
+        SELECT 1 FROM files source_file WHERE source_file.account_id=d.account_id
+          AND source_file.id=d.file_id AND source_file.status='ready'
+          AND source_file.source_session_audience_explicit
+          AND source_file.private_owner_subject_ids IS NULL))
+      AND ((current_setting('opengeni.knowledge_actor_kind',true)='human' OR (current_setting('opengeni.knowledge_actor_kind',true)='source_preparation' AND d.id::text=current_setting('opengeni.knowledge_prepared_document',true))) OR d.agent_access)
+      AND (d.authority_kind='organization'
+        OR (d.authority_kind='workspace' AND d.authority_workspace_id=nullif(current_setting('opengeni.workspace_id',true),'')::uuid)
+        OR (d.authority_kind='personal' AND d.authority_subject_id=nullif(current_setting('opengeni.subject_id',true),'')
+          AND ((d.authority_id IS NULL AND d.authority_workspace_id=nullif(current_setting('opengeni.workspace_id',true),'')::uuid)
+            OR (d.authority_id IS NOT NULL AND ((current_setting('opengeni.knowledge_actor_kind',true)='human' OR (current_setting('opengeni.knowledge_actor_kind',true)='source_preparation' AND d.id::text=current_setting('opengeni.knowledge_prepared_document',true)))
+              OR d.id IN (SELECT resolve_session_attempt_personal_document_reads(d.account_id,
+                nullif(current_setting('opengeni.workspace_id',true),'')::uuid,
+                nullif(current_setting('opengeni.knowledge_session_id',true),'')::uuid,
+                nullif(current_setting('opengeni.knowledge_attempt_id',true),'')::uuid)))))))
+      AND ((current_setting('opengeni.knowledge_actor_kind',true)='source_preparation'
+        AND d.id::text=current_setting('opengeni.knowledge_prepared_document',true))
+        OR google_drive_file_authorized(d.account_id,nullif(current_setting('opengeni.workspace_id',true),'')::uuid,
+          nullif(current_setting('opengeni.subject_id',true),''),d.file_id)))
+$body$;
+
 CREATE OR REPLACE FUNCTION knowledge_source_visible(p_account uuid,p_body jsonb) RETURNS boolean
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $body$
 <<knowledge_source_visible>>
