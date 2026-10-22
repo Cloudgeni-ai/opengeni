@@ -17,7 +17,8 @@ export type SessionAttentionClientLike = {
 export type UseSessionReadAcknowledgementInput = {
   client: SessionAttentionClientLike;
   workspaceId: string;
-  sessionId: string;
+  /** `null` while the host is still creating the session: nothing to acknowledge. */
+  sessionId: string | null;
   /** The session row as last read. A row for another session is ignored. */
   session:
     | {

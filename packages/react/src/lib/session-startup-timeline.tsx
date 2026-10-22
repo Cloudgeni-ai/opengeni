@@ -167,6 +167,43 @@ export function sessionStartupTimeline(items: TimelineItem[], input: StartupInpu
 }
 
 type Bridge = { scope: string; id: string; turnId: string | null; since: string; sequence: number };
+
+/** A prompt the host already sent while its session is still being created or loaded. */
+export type PendingPrompt = {
+  /** The prompt exactly as the person sent it. */
+  text: string;
+  /** When the person sent it (ISO 8601). Anchors the startup row's clock. */
+  sentAt: string;
+};
+
+const PENDING_SCOPE = "pending-prompt";
+/** The startup row keeps this id from the pending prompt through the live projection. */
+export const PENDING_PROMPT_STARTUP_ID = "pending-prompt-startup";
+
+function pendingPromptItems(prompt: PendingPrompt): TimelineItem[] {
+  return [
+    {
+      kind: "user-message",
+      id: "pending-prompt-message",
+      text: prompt.text,
+      resources: [],
+      tools: [],
+      occurredAt: prompt.sentAt,
+    },
+    {
+      kind: "startup-phase",
+      id: PENDING_PROMPT_STARTUP_ID,
+      turnId: PENDING_SCOPE,
+      phase: "queue",
+      status: "running",
+      startedAt: prompt.sentAt,
+      occurredAt: prompt.sentAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: null,
+    },
+  ];
+}
 /**
  * Keep the current loading visual while a session-only wake acquires a turn ID.
  * The web app's session page and the embeddable conversation both project
@@ -177,15 +214,36 @@ export function useSessionStartupTimeline(
   items: TimelineItem[],
   input: Omit<StartupInput, "fallbackStartedAt" | "session"> & {
     session: (StartupInput["session"] & SessionStartupSource) | null;
+    /**
+     * A prompt sent before the session or its history is readable. Until
+     * `historyReady`, the timeline is that prompt and a running startup row;
+     * the live row then keeps the same id and clock, so nothing remounts.
+     */
+    pendingPrompt?: PendingPrompt | null | undefined;
+    historyReady?: boolean | undefined;
   },
 ): TimelineItem[] {
   const startup = useSessionStartupState(input.session);
   const bridgeRef = useRef<Bridge | null>(null);
+  const { pendingPrompt } = input;
+  if (pendingPrompt && (!input.session || input.historyReady === false)) {
+    bridgeRef.current = {
+      scope: PENDING_SCOPE,
+      id: PENDING_PROMPT_STARTUP_ID,
+      turnId: null,
+      since: pendingPrompt.sentAt,
+      sequence: 0,
+    };
+    return [...items, ...pendingPromptItems(pendingPrompt)];
+  }
   if (!input.session) {
     bridgeRef.current = null;
     return items;
   }
   const scope = `${input.session.workspaceId}:${input.session.id}`;
+  // The pending prompt's row becomes this session's row.
+  if (bridgeRef.current?.scope === PENDING_SCOPE)
+    bridgeRef.current = { ...bridgeRef.current, scope };
   if (
     bridgeRef.current?.scope !== scope ||
     input.hasNewer ||

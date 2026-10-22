@@ -1,8 +1,9 @@
 import type { SendMessageInput } from "@opengeni/sdk";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { projectPendingApprovals } from "../approvals";
 import { conversationTimeline } from "../conversation-timeline";
-import { useSessionStartupTimeline } from "../lib/session-startup-timeline";
+import { useSessionStartupTimeline, type PendingPrompt } from "../lib/session-startup-timeline";
+import { admissionRecheckControl } from "../session-admission-model";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
@@ -42,7 +43,18 @@ export type UseSessionConversationOptions = ClientOverride & {
         | "offerQueue"
       >
     | undefined;
+  /**
+   * The first prompt, when the host sent it before this conversation could
+   * read it back (for example while the host's server creates the session).
+   * The conversation shows it with the startup row from the first frame,
+   * keeps them while the session id is still `null` and history loads, and
+   * then hands over to the live timeline without a blank frame or a second
+   * loading style. Read once per conversation; later changes are ignored.
+   */
+  pendingPrompt?: PendingPrompt | null | undefined;
 };
+
+export type { PendingPrompt };
 
 export type SessionConversationController = ReturnType<typeof useSessionConversation>;
 
@@ -54,9 +66,12 @@ export type SessionConversationController = ReturnType<typeof useSessionConversa
  * The ordinary SessionConversation component uses this exact implementation.
  */
 export function useSessionConversation(
-  sessionId: string,
+  /** `null` while the host is still creating the session; pass `pendingPrompt` with it. */
+  sessionId: string | null,
   options: UseSessionConversationOptions = {},
 ) {
+  // Captured once: hosts often drop the prompt after the first render.
+  const [pendingPrompt] = useState(() => options.pendingPrompt ?? null);
   const context = useOpenGeni(options);
   const scope = { client: context.client, workspaceId: context.workspaceId };
   const config = useClientConfigFlags(context.client);
@@ -74,7 +89,10 @@ export function useSessionConversation(
   const attachmentSession = useRef(sessionId);
   useLayoutEffect(() => {
     if (attachmentSession.current === sessionId) return;
+    const created = attachmentSession.current === null;
     attachmentSession.current = sessionId;
+    // A session the host just created keeps what the person attached meanwhile.
+    if (created) return;
     // Upload transport is workspace-scoped; these unsent cards belong to one
     // conversation. Retiring them also makes late settlements no-ops because
     // their local attachment identities no longer exist in the queue.
@@ -115,6 +133,7 @@ export function useSessionConversation(
       };
     },
     sendBlocked: () =>
+      sessionId === null ||
       terminal ||
       importedArchive ||
       (uploadsEnabled && files.hasUnresolved) ||
@@ -135,16 +154,28 @@ export function useSessionConversation(
   );
   // The same startup row as the web app's session page: from the accepted
   // prompt until the turn's own work row, one loading state, never a gap.
-  // A partial session (no control state yet) shows no startup row rather than
+  // A session without control state yet shows no startup row rather than
   // guessing whether it is active.
   const session = detail.session;
-  const startupControl = queue.effectiveControl ?? session?.effectiveControl;
+  const sessionControl = session?.effectiveControl;
   const timeline = useSessionStartupTimeline(conversation, {
-    session: session && startupControl ? { ...session, effectiveControl: startupControl } : null,
+    session:
+      session && sessionControl
+        ? {
+            ...session,
+            effectiveControl: admissionRecheckControl(
+              sessionControl,
+              queue.effectiveControl,
+              composer.effectiveControl,
+            ),
+          }
+        : null,
     events: feed.events,
     optimisticMessages: composer.optimisticMessages,
     hasNewer: feed.hasNewer,
     queue: queue.snapshot,
+    pendingPrompt,
+    historyReady: sessionId !== null && feed.initialHistoryReady,
   });
   const error = detail.error ?? feed.error ?? human.error;
   const loadFailed = Boolean(feed.error) && !feed.initialHistoryReady;
