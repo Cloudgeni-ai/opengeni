@@ -106,7 +106,13 @@ async function seedSession() {
     });
     return { turnId, attemptId };
   };
-  const card = (turn: Turn, capabilityId: string, executionGeneration = 1) =>
+  const card = (
+    turn: Turn,
+    capabilityId: string,
+    executionGeneration = 1,
+    requestedSandboxId: string | null = null,
+    purpose: string | null = null,
+  ) =>
     appendTurnCapabilityCardOnce(
       db,
       workspaceId,
@@ -123,8 +129,11 @@ async function seedSession() {
           providerDomain: "opengeni.local",
           reason: "missing_connection",
           capability: { id: capabilityId, name: capabilityId, action: "connect" },
+          ...(requestedSandboxId ? { requestedSandboxId } : {}),
+          ...(purpose ? { purpose } : {}),
         },
       },
+      requestedSandboxId,
     );
   const cards = async (turnId: string) =>
     (
@@ -190,6 +199,37 @@ describe("appendTurnCapabilityCardOnce", () => {
     ]);
     expect(posted.filter((row) => row.capabilityId === "api:connected-machine")).toHaveLength(1);
     expect(posted).toHaveLength(58);
+  });
+
+  test("a card names one machine: another machine in the same turn gets its own card", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const turn = await chat.startTurn();
+    const mac = crypto.randomUUID();
+    const server = crypto.randomUUID();
+    const first = await chat.card(turn, "api:connected-machine", 1, mac);
+    const again = await chat.card(turn, "api:connected-machine", 1, mac);
+    const other = await chat.card(turn, "api:connected-machine", 1, server);
+    expect(first.events).toHaveLength(1);
+    expect(again.existingEventId).toBe(first.events[0]!.id);
+    expect(other.existingEventId).toBeNull();
+    expect(other.events).toHaveLength(1);
+    expect(await chat.cards(turn.turnId)).toHaveLength(2);
+  });
+
+  test("the Chrome setup card is not hidden by a plain machine card in the same turn", async () => {
+    if (!available) return;
+    const chat = await seedSession();
+    const turn = await chat.startTurn();
+    const machine = await chat.card(turn, "api:connected-machine");
+    const chrome = await chat.card(turn, "api:connected-machine", 1, null, "chrome");
+    const chromeAgain = await chat.card(turn, "api:connected-machine", 1, null, "chrome");
+    const machineAgain = await chat.card(turn, "api:connected-machine");
+    expect(chrome.existingEventId).toBeNull();
+    expect(chrome.events).toHaveLength(1);
+    expect(chromeAgain.existingEventId).toBe(chrome.events[0]!.id);
+    expect(machineAgain.existingEventId).toBe(machine.events[0]!.id);
+    expect(await chat.cards(turn.turnId)).toHaveLength(2);
   });
 
   test("a later turn gets its own machine card", async () => {

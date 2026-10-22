@@ -1481,7 +1481,6 @@ async function withServer(
   const directory = await mkdtemp("/tmp/ogb-server-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "sockets"),
     createDriver: async (context) => {
       options.onBrowserContext?.(context);
       return fakeDriver(context, options);

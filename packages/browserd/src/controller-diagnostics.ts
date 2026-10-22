@@ -8,6 +8,7 @@ import {
   renameSync,
 } from "node:fs";
 import { join } from "node:path";
+import { interactionDriverDiagnostic, redactInteractionDriverMessage } from "@opengeni/contracts";
 
 /** Keep two bounded, owner-only diagnostic files even under a service manager
  * that discards stderr. The controller root is already private and owned. */
@@ -46,4 +47,32 @@ export function retainControllerDiagnostic(
       closeSync(next);
     }
   }
+}
+
+/**
+ * Log a dispatch error that no driver classified. The action's caller only sees
+ * outcome_unknown, so without this line the cause of such a failure is lost.
+ * Like request diagnostics it names the error class, the failing function and
+ * the redacted head of its message; never page text or the action's values.
+ */
+export function reportUnexpectedDispatchError(
+  resource: "browser" | "computer",
+  error: unknown,
+  command: unknown,
+): void {
+  const diagnostic = interactionDriverDiagnostic(error);
+  const action = (command as { action?: { type?: unknown } | null } | null)?.action?.type;
+  console.error(
+    JSON.stringify({
+      service: "opengeni-browserd",
+      event: "unexpected_dispatch_error",
+      resource,
+      ...(typeof action === "string" && /^[a-z_]{1,32}$/u.test(action) ? { action } : {}),
+      error: {
+        name: diagnostic.errorClass,
+        ...(diagnostic.frame ? { frame: diagnostic.frame } : {}),
+        message: error instanceof Error ? redactInteractionDriverMessage(error.message) : "",
+      },
+    }),
+  );
 }

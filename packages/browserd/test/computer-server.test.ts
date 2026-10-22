@@ -297,11 +297,11 @@ describe("Computer routes on the placement interaction server", () => {
   });
 
   test.each([
-    ["physical seat", undefined, true],
-    ["isolated virtual seat", 5901, false],
+    ["physical seat", undefined, "computer_recent_use"],
+    ["isolated virtual seat", 5901, "computer_virtual_seat"],
   ] as const)(
     "update idle proof with an open computer controller on a %s",
-    async (_seat, rfbPort, openIsIdle) => {
+    async (_seat, rfbPort, blocker) => {
       await withServer(
         async ({ server, reference }) => {
           const idle = async () =>
@@ -317,10 +317,22 @@ describe("Computer routes on the placement interaction server", () => {
             ).status,
           ).toBe(201);
           // A physical seat keeps nothing a restart would lose; the next
-          // request recreates its controller. A virtual seat owns its desktop.
-          // Either way an open session means the controller is not empty, so
-          // its parent keeps it running.
-          expect((await idle()).data).toEqual({ idle: openIsIdle, empty: false });
+          // request recreates its controller, but a session just used is
+          // mid-task, so an update waits for a pause. A virtual seat owns its
+          // desktop. Either way an open session means the controller is not
+          // empty, so its parent keeps it running.
+          expect((await idle()).data).toEqual({ idle: false, empty: false });
+          const update = await json(
+            await request(server, "/v1/runtime/update", {
+              method: "POST",
+              token: adminToken,
+              body: { operationId: "44444444-4444-4444-8444-444444444444" },
+            }),
+          );
+          expect(update.data).toMatchObject({
+            idle: false,
+            blockers: [{ kind: blocker, count: 1 }],
+          });
           expect(
             (
               await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
@@ -943,7 +955,6 @@ async function withServer(
   const directory = await mkdtemp("/tmp/og-computer-server-");
   const browserSupervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "browser-state"),
-    socketRootDirectory: join(directory, "browser-sockets"),
     createDriver: async () => {
       throw new Error("browser driver must not be used by computer routes");
     },

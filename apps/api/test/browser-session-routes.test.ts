@@ -707,6 +707,45 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("a controller resource that is gone for good is a conflict with its guidance, not a retry", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const reconnected = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message:
+        "The browser profile reconnected to Opengeni, so this browser session can no longer control it; open a new browser session",
+      retryable: false,
+    });
+    const transient = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "browser controller is stopping",
+      retryable: true,
+    });
+    app.get("/v1/test/reconnected", () => {
+      throw browserTabDiagnosisError(reconnected);
+    });
+    const response = await app.request("http://localhost/v1/test/reconnected", {
+      headers: { "x-opengeni-correlation-id": "reconnected-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: reconnected.error.message,
+        retryable: false,
+        requestId: "reconnected-request",
+      },
+    });
+    // A transient outage keeps its retryable envelope.
+    expect(browserTabDiagnosisError(transient)).toBe(transient);
+  });
+
   test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
     const app = createApp({
       settings: testSettings(),

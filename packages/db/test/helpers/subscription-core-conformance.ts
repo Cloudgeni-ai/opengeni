@@ -2673,6 +2673,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         subjectId: org.ownerSubjectId,
       });
       expect(organizationPool!.rows.map((row) => row.id).sort()).toEqual([a, b].sort());
+      // The list says who each account reaches, without reading its access.
+      expect(organizationPool!.reach.get(a)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: true,
+        workspaceIds: [],
+        personalWorkspaces: true,
+        people: null,
+      });
+      expect(organizationPool!.reach.get(b)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: false,
+        workspaceIds: [org.sharedWorkspaceId],
+        personalWorkspaces: false,
+        people: null,
+      });
       const workspacePool = await withRlsContext(
         db(),
         { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
@@ -2685,13 +2700,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         },
       );
       expect(workspacePool.connections.map((entry) => entry.row.id).sort()).toEqual([a, b].sort());
-      // Rename through the workspace route (which resolves through the pool)
-      // and the organization route; the foreign provider's rows are not found.
+      // An organization account that reaches the workspace is managed on the
+      // organization's route only; the workspace route does not find it. The
+      // foreign provider's rows are found on neither route.
       expect(
         await renameSubscriptionCoreConnection(db(), provider, {
           ...workspaceRoute,
           connectionId: b,
           label: "renamed in workspace",
+        }),
+      ).toBeNull();
+      expect(
+        await renameSubscriptionCoreConnection(db(), provider, {
+          ...organizationRoute,
+          connectionId: b,
+          label: "renamed by the organization",
         }),
       ).toBe(b);
       for (const route of [workspaceRoute, organizationRoute])
@@ -2902,7 +2925,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("organization access and reach are edited for exactly this provider's connections of its kind", async () => {
+    test("SUB-SET-07 organization access and reach are edited for exactly this provider's connections of its kind", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `access-${crypto.randomUUID()}`);
       const route = (connectionId: string) => ({

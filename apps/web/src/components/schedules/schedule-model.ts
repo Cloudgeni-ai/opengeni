@@ -421,25 +421,12 @@ export function mergeSchedulePinnedAccounts(
     )
   )
     eligible.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
-  const chat = destination.chat;
-  const permissions = chat?.firstPartyMcpPermissions;
-  // New chats retain the stored publication choice under the server's defaults.
-  // A bound chat instead supplies the exact first-party tool/permission policy.
-  if (
-    !chat ||
-    (chat.firstPartyMcpTools.includes("editable_artifact_export") &&
-      chat.firstPartyMcpTools.includes("editable_artifact_export_status") &&
-      (permissions === null ||
-        permissions === undefined ||
-        (permissions.includes("artifacts:read") && permissions.includes("artifacts:publish"))))
-  )
-    eligible.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
   const replaced = new Set(editableServerIds);
   return [
     ...saved.filter(
       (selection) => eligible.has(selection.serverId) && !replaced.has(selection.serverId),
     ),
-    ...selections,
+    ...selections.filter((selection) => selection.serverId !== GOOGLE_DRIVE_PUBLICATION_SERVER_ID),
   ];
 }
 

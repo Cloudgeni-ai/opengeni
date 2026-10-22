@@ -1,3 +1,5 @@
+export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
@@ -355,6 +357,7 @@ import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
+import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   composeModularAgentInstructions,
@@ -894,11 +897,17 @@ export type {
 
 ensureReadableStreamFrom();
 
-type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
+  SlackRestMcpBridgeContext &
+  DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
   BuiltInMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
+>[] = Object.freeze([
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  DRIVE_MCP_BRIDGE_ADAPTER,
+]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2277,6 +2286,8 @@ export type BuildAgentOptions = {
   // the account's ACTUALLY-connected sources (codex-rs parity). Only meaningful
   // on the codex tool-search path.
   codexConnectorNamespaces?: ReadonlySet<string>;
+  /** Live: best-effort MCP servers unavailable this attempt (PreparedAgentTools.unavailableMcpServers). */
+  unavailableMcpServers?: ReadonlyMap<string, string>;
   // Stable per-session routing key for provider-side prompt prefix caches. The
   // worker passes this only for transports whose docs/API surface accept
   // prompt_cache_key; registry providers that use a different affinity field stay
@@ -3348,6 +3359,7 @@ export function buildOpenGeniAgent(
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
+    baseInstructions: sandboxBaseInstructions(),
     defaultManifest: buildManifest(
       settings,
       resources,
@@ -3553,6 +3565,7 @@ function maybeInstallLazyToolTransport(
     options.toolSearchDecisionModel
       ? createToolSelector(options.toolSearchDecisionModel)
       : undefined,
+    () => options.unavailableMcpServers ?? new Map(),
   );
 }
 
@@ -4707,6 +4720,13 @@ export type PreparedAgentTools = {
   // credential selection.
   codexConnectorNamespaces: Set<string>;
   /**
+   * Live, by-reference: each best-effort MCP server whose connect or tools/list
+   * failed during this preparation, with a short public reason. Progressive
+   * discovery reports it in its own results, so an empty search is not
+   * mistaken for "this integration has no such tool".
+   */
+  unavailableMcpServers: ReadonlyMap<string, string>;
+  /**
    * Optional completion fence for non-eager MCP discovery. Only session-marked
    * eager servers are connected/listed before this handle is returned. Search,
    * deferred invocation, Codemode activation, and final cleanup may join this
@@ -5189,6 +5209,7 @@ export async function prepareAgentTools(
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
+  const unavailableMcpServers = new Map<string, string>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
@@ -5450,6 +5471,28 @@ export async function prepareAgentTools(
         // auth misses are logged, not published: Apps is discovered on every
         // turn, so a setup card would repeat on each one (see codexAppsAuthFetch).
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
+        const remoteRequestInit = await mcpServerRequestInit(settings, config);
+        const createRemoteServer = () =>
+          new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            // This logger spans tool invocation as well as setup. Only the
+            // connect/list lifecycle wrappers may add setup-safe recovery facts.
+            logger: mcpTransportLogger(config.id),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
+            ...remoteRequestInit,
+            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
+            ...mcpSessionTimeoutOptions(config),
+          });
         // First-party bridges are ordinary in-process MCP servers selected by
         // adapter-owned matchers. Adding another provider extends this registry;
         // generic transport/catalog code never branches on provider identity.
@@ -5463,6 +5506,7 @@ export async function prepareAgentTools(
             ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
           },
           {
+            createRemoteServer,
             workspaceId: options.workspaceId ?? "",
             ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
             serverId: config.id,
@@ -5494,28 +5538,7 @@ export async function prepareAgentTools(
               : {}),
           },
         );
-        const innerServer =
-          bridge ??
-          new MCPServerStreamableHttp({
-            url,
-            name: config.name ?? config.id,
-            cacheToolsList: config.cacheToolsList,
-            // The upstream transport logger receives raw thrown errors, whose
-            // messages may contain response bodies, URLs, headers, or echoed
-            // credentials. Keep its diagnostic surface structural only.
-            // This logger spans tool invocation as well as setup. Only the
-            // connect/list lifecycle wrappers may add setup-safe recovery facts.
-            logger: mcpTransportLogger(config.id),
-            // codex_apps returns connector tools with empty `outputSchema: {}` that the
-            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-            // sanitize the response on the wire before validation. The namespace Set
-            // also captures each tool's original connector namespace (P4 Part B.1).
-            fetch: fetchImpl,
-            ...mcpStreamableHttpClientOptions({ firstParty }),
-            ...(await mcpServerRequestInit(settings, config)),
-            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
-            ...mcpSessionTimeoutOptions(config),
-          });
+        const innerServer = bridge ?? createRemoteServer();
         if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
           new PrefixedMcpServer(
@@ -5574,6 +5597,11 @@ export async function prepareAgentTools(
   // first request, and its other schemas stay deferred.
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
+  for (const entry of servers) {
+    if (entry.bestEffort && entry.server instanceof PrefixedMcpServer) {
+      entry.server.unavailableSink = unavailableMcpServers;
+    }
+  }
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
   const deferredEntries = deferNonEager ? servers.filter((entry) => !joinsBarrier(entry)) : [];
   const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
@@ -5617,6 +5645,10 @@ export async function prepareAgentTools(
     for (const failed of connected.failed) {
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
+        unavailableMcpServers.set(
+          failed.registryId,
+          mcpUnavailableReason(connected.errors.get(failed), "connect"),
+        );
       }
       if (
         !(failed instanceof PrefixedMcpServer) ||
@@ -5782,6 +5814,7 @@ export async function prepareAgentTools(
           if (firstError !== undefined) throw firstError;
         },
         codexConnectorNamespaces,
+        unavailableMcpServers,
       };
     } catch (error) {
       // In deferred mode the eager and in-process servers have already been
@@ -5908,6 +5941,7 @@ export async function prepareAgentTools(
       await prepared.close();
     },
     codexConnectorNamespaces,
+    unavailableMcpServers,
     ready,
     startDeferredPreparation,
   };
@@ -7498,6 +7532,50 @@ function mcpErrorFields(
   return fields;
 }
 
+/**
+ * Why a best-effort server's tools are missing this turn, for the model. Built
+ * only from the public diagnostic projection: status, error class and code,
+ * never provider message text.
+ */
+export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"): string {
+  const fields = mcpErrorFields(
+    error,
+    phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
+  );
+  // The MCP SDK's HTTP transports (StreamableHTTPError, SseError) report the
+  // response status as a numeric `code`, with no `status`. McpError's `code` is
+  // the server's JSON-RPC error code, which can be any integer (including
+  // positive ones such as 403) and is never an HTTP status. Match McpError by
+  // name, which its subclasses inherit, so duplicate SDK copies are covered.
+  const status =
+    fields.status ??
+    (fields.causeName !== "McpError" &&
+    fields.causeNumber !== undefined &&
+    fields.causeNumber >= 100 &&
+    fields.causeNumber <= 599
+      ? fields.causeNumber
+      : undefined);
+  const code =
+    fields.causeCode ??
+    (fields.causeNumber === undefined || fields.causeNumber === status
+      ? undefined
+      : `code ${fields.causeNumber}`);
+  const detail = [
+    status === undefined ? undefined : `HTTP ${status}`,
+    [fields.causeName, code].filter(Boolean).join(" ") || undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
+  const next =
+    status === 401 || status === 403
+      ? "; its connection may need to be signed in again"
+      : fields.retryable
+        ? "; this may be temporary"
+        : "";
+  return `${what}${detail ? ` (${detail})` : ""}${next}`;
+}
+
 type McpTransportError = Error & {
   status?: number;
   code?: number;
@@ -8566,6 +8644,8 @@ export class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
+  /** Where a best-effort server records that its tools are unavailable this attempt. */
+  unavailableSink: Map<string, string> | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
@@ -8889,6 +8969,7 @@ export class PrefixedMcpServer implements MCPServer {
           mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
         );
       }
+      this.unavailableSink?.set(this.registryId, mcpUnavailableReason(error, "list"));
       this.releaseAggregateBudget();
       return [];
     }

@@ -101,6 +101,32 @@ describe("session event persistence failure truth", () => {
     expect(JSON.stringify(facts)).not.toContain("insert into");
   });
 
+  test("names the PL/pgSQL functions and lines that raised, never the SQL or message", () => {
+    // The exact `where` shape postgres.js exposes for a RAISE two calls deep.
+    const error = databaseError({
+      cause: {
+        code: "42501",
+        severity: "ERROR",
+        routine: "exec_stmt_raise",
+        message: `refused for ${syntheticValue}`,
+        where: [
+          "PL/pgSQL function pg_temp_3.inner_fence(uuid,text) line 7 at RAISE",
+          `SQL statement "SELECT pg_temp.inner_fence(gen_random_uuid(), '${syntheticValue}')"`,
+          "PL/pgSQL function admit_turn_resources() line 31 at PERFORM",
+        ].join("\n"),
+      },
+    });
+    const facts = safeDatabaseErrorFacts(error);
+    expect(facts).toEqual({
+      severity: "ERROR",
+      routine: "exec_stmt_raise",
+      table: "session_events",
+      plpgsql: ["inner_fence:7", "admit_turn_resources:31"],
+    });
+    expect(JSON.stringify(facts)).not.toContain(syntheticValue);
+    expect(safeDatabaseErrorFacts({ where: 'SQL statement "SELECT 1"' })).toEqual({});
+  });
+
   test("retries only the persistence closure with stable correlation", async () => {
     let providerCalls = 0;
     let persistenceAttempts = 0;

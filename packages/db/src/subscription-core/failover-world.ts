@@ -435,13 +435,6 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         : rows.flatMap((connection) => {
             if (connection.ownership.kind === "personal") return [connection];
             if (pool !== "workspace" && pool !== "organization") return [];
-            if (connection.assignmentPolicies !== undefined) {
-              const assignments = connection.assignmentPolicies.filter(
-                (policy) =>
-                  policy.workspaceId === identity.workspaceId && policy.inferencePool === pool,
-              );
-              return assignments.length ? [{ ...connection, assignmentPolicies: assignments }] : [];
-            }
             const managedHere = connection.ownership.managedByWorkspaceId === identity.workspaceId;
             return (pool === "workspace" ? managedHere : !managedHere) ? [connection] : [];
           });

@@ -6,6 +6,7 @@ export function useOrganizationCodexOverview(
   client: OpenGeniBrowserClient,
   organizationId: string,
   account: CodexAccount,
+  enabled = true,
 ) {
   return useSharedQuery<CodexAccountOverview>(
     client,
@@ -15,7 +16,7 @@ export function useOrganizationCodexOverview(
         "GET",
         `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(account.id)}/overview`,
       ),
-    { enabled: account.status === "active", staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+    { enabled: enabled && account.status === "active", staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
 }
 
@@ -23,10 +24,11 @@ export function useOrganizationCodexUsage(
   client: OpenGeniBrowserClient,
   organizationId: string,
   account: CodexAccount,
+  enabled = true,
 ) {
   // Usage and reset inventory come from the same independently-settled read:
   // prefetching the detail never makes a second live provider usage request.
-  const query = useOrganizationCodexOverview(client, organizationId, account);
+  const query = useOrganizationCodexOverview(client, organizationId, account, enabled);
   const usage = query.data?.usage;
   const data: CodexUsage | null = usage
     ? { status: usage.error ? "error" : (usage.value?.status ?? "no-data"), usage: usage.value }

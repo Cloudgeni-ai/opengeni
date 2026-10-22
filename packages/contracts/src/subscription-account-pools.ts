@@ -2,6 +2,24 @@ import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ClaudeSubscriptionUsage } from "./claude-subscription-usage";
 
+/**
+ * Who an account in the organization's list reaches: the workspace that owns
+ * it (its own account, used only there), every workspace including new ones,
+ * chosen shared workspaces, Personal workspaces, or chosen people.
+ */
+export const SubscriptionAccountReach = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      ownerWorkspaceId: z.string().uuid().nullable(),
+      everyWorkspace: z.boolean(),
+      workspaceIds: z.array(z.string().uuid()),
+      personalWorkspaces: z.boolean(),
+      people: z.number().int().nonnegative().nullable(),
+    })
+    .strict(),
+);
+export type SubscriptionAccountReach = z.infer<typeof SubscriptionAccountReach>;
+
 /** Shared, secret-free account list contract for native subscription pools. */
 export const SubscriptionAccountSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -19,6 +37,8 @@ export const SubscriptionAccountSummary = /* @__PURE__ */ defineSchema(() =>
     allocatorEnabled: z.boolean(),
     allocatorVersion: z.number().int().positive(),
     allocatorUpdatedAt: z.string().datetime().nullable(),
+    /** The organization's list only. */
+    reach: SubscriptionAccountReach.optional(),
   }),
 );
 export type SubscriptionAccountSummary = z.infer<typeof SubscriptionAccountSummary>;

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  SiteOpenedResponse,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
@@ -11,7 +12,11 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import { digestAttemptToolCatalog } from "@opengeni/codemode";
-import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
+import {
+  withSiteSessionOrigin,
+  type ApiRouteDeps,
+  type ObjectStorageDependency,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
@@ -854,6 +859,54 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         })
       ).status,
     ).toBe(409);
+  }, 60_000);
+
+  test("records a person opening a Site, which orders its sidebar row", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Opened board",
+            html: "<!doctype html><h1>Opened</h1>",
+            idempotencyKey: "opened-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/opened`;
+    const first = await requestAsCanonicalLocalHuman(path, { method: "POST" });
+    expect(first.status).toBe(200);
+    const opened = SiteOpenedResponse.parse(await first.json());
+    const again = SiteOpenedResponse.parse(
+      await (await requestAsCanonicalLocalHuman(path, { method: "POST" })).json(),
+    );
+    expect(Date.parse(again.openedAt)).toBeGreaterThanOrEqual(Date.parse(opened.openedAt));
+
+    // A Site page (a request inside a Site origin) cannot record an open.
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Opened board" },
+      () => requestAsCanonicalLocalHuman(path, { method: "POST" }),
+    );
+    expect(fromSite.status).toBe(403);
+
+    // Reading is enough; without it, or from another workspace, nothing is recorded.
+    expect((await request(grant, ["sessions:read"], path, { method: "POST" })).status).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/opened`,
+          { method: "POST" },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (await request(grant, ["artifacts:read"], `${base}/not-a-site/opened`, { method: "POST" }))
+        .status,
+    ).toBe(422);
   }, 60_000);
 
   test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {

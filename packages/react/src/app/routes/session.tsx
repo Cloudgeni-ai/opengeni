@@ -27,7 +27,7 @@ import {
   createFailedSessionRetry,
   type FailedSessionRetryInput,
 } from "../lib/failed-session-retry";
-import { useSessionStartupTimeline } from "../lib/session-startup-timeline";
+import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { isPaymentRequiredError } from "../lib/model-access";
@@ -44,6 +44,10 @@ import {
   recheckSessionAdmission,
   SessionAdmissionNotice,
 } from "../components/session/session-admission-notice";
+import {
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "../../session-admission-model";
 import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
@@ -130,7 +134,8 @@ import {
 } from "react";
 import { toast } from "../lib/toast";
 
-import { isApiErrorStatus, useAppApi } from "../lib/app-api";
+import { useAppApi } from "../lib/app-api";
+import { useSessionFailureToasts } from "../lib/session-failure-toasts";
 import { apiErrorFacts, userErrorText } from "../../ui/api-error";
 import { ConsoleComposer } from "../components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "../lib/allowance-labels";
@@ -217,8 +222,8 @@ import { UnavailableModelNotice } from "../components/session/unavailable-model-
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
+  focusSessionComposerWhenReady,
   sessionComposerFocusIntentIsEligible,
-  shouldFocusSessionComposer,
   type SessionComposerFocusIntent,
 } from "../lib/session-focus";
 import {
@@ -268,6 +273,7 @@ import type {
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 
 const InlineChatArtifact = lazy(() =>
@@ -853,18 +859,7 @@ export function SessionRoute({
     },
     [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
-  useEffect(() => {
-    if (streamError && !isApiErrorStatus(streamError, 404)) {
-      toast.error("Event stream disconnected", {
-        description: streamError.message,
-      });
-    }
-  }, [streamError]);
-  useEffect(() => {
-    if (loadError && !isApiErrorStatus(loadError, 404)) {
-      toast.error("Failed to load session", { description: String(loadError) });
-    }
-  }, [loadError]);
+  useSessionFailureToasts(loadError, streamError);
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -1272,6 +1267,7 @@ export function SessionRoute({
             workspaceId={workspaceId}
             sessionId={sessionId}
             loadError={loadError}
+            onRetry={() => void refreshSession()}
           />
         </Suspense>
       );
@@ -2144,13 +2140,37 @@ function SessionChatPane(props: {
     focusEvents.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
     return () => focusEvents.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
   }, [focusEvents, props.session.id, props.session.workspaceId]);
+  // Opening a chat (a sidebar click, ⌘K, Control+Tab, a link or a reload)
+  // puts the cursor in its composer, since typing is what comes next. Without
+  // an explicit intent, only the first effect run for a chat may do this, and
+  // only while nothing else has focus.
+  const loadFocusSessionRef = useRef<string | null>(null);
+  // The wait outlives effect re-runs (status, approvals) but not the chat.
+  const composerFocusWaitRef = useRef<{ sessionId: string; cancel: () => void } | null>(null);
+  useEffect(
+    () => () => {
+      composerFocusWaitRef.current?.cancel();
+      composerFocusWaitRef.current = null;
+    },
+    [],
+  );
   useEffect(() => {
+    if (
+      composerFocusWaitRef.current &&
+      composerFocusWaitRef.current.sessionId !== props.session.id
+    ) {
+      composerFocusWaitRef.current.cancel();
+      composerFocusWaitRef.current = null;
+    }
     const intent = consumeSessionComposerFocusIntent(
       focusEvents,
       props.session.workspaceId,
       props.session.id,
     );
-    if (!intent) return;
+    const firstRunForChat = loadFocusSessionRef.current !== props.session.id;
+    loadFocusSessionRef.current = props.session.id;
+    const source = intent?.source ?? (firstRunForChat ? "load" : null);
+    if (!source) return;
     if (
       !sessionComposerFocusIntentIsEligible({
         viewportWidth: globalThis.innerWidth,
@@ -2163,25 +2183,15 @@ function SessionChatPane(props: {
     ) {
       return;
     }
-    const frame = globalThis.requestAnimationFrame(() => {
-      const textarea = composerRegionRef.current?.querySelector("textarea");
-      if (!textarea || textarea.disabled) return;
-      const dialogOpen = Boolean(
-        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
-      );
-      if (
-        !shouldFocusSessionComposer(
-          document.activeElement instanceof HTMLElement ? document.activeElement : null,
-          props.session.id,
-          document.body,
-          dialogOpen,
-        )
-      ) {
-        return;
-      }
-      textarea.focus();
-    });
-    return () => globalThis.cancelAnimationFrame(frame);
+    composerFocusWaitRef.current?.cancel();
+    composerFocusWaitRef.current = {
+      sessionId: props.session.id,
+      cancel: focusSessionComposerWhenReady({
+        textarea: () => composerRegionRef.current?.querySelector("textarea"),
+        sessionId: props.session.id,
+        source,
+      }),
+    };
   }, [
     composerFocusSignal,
     focusEvents,
@@ -2706,6 +2716,7 @@ function SessionChatPane(props: {
     },
     onDeliveryError: (error, input, delivery) => {
       personalAttachment.onDeliveryError(error, input, delivery);
+      connectionAccounts.onSelectionError(error);
       // Retrying cannot help: re-read the catalog so the composer offers a
       // replacement, and open the picker so the next step is visible.
       if (isModelUnavailableSubmissionError(error)) {
@@ -3202,6 +3213,26 @@ function SessionChatPane(props: {
     context.authSession !== null &&
     Boolean(props.session.tenancy) &&
     mayRate;
+  // "Fork chat" from the ⌘K menu or the desktop menu bar forks from the latest
+  // message, as the fork button under that message does.
+  const forkRequests = useUiEventTarget("document");
+  const eventsRef = useRef(props.events);
+  eventsRef.current = props.events;
+  useEffect(() => {
+    if (!mayForkMessage) return;
+    const fork = () => {
+      const events = eventsRef.current;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]!;
+        if (event.type === "agent.message.completed" || event.type === "user.message") {
+          setForkEventId(event.id);
+          return;
+        }
+      }
+    };
+    forkRequests.addEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+    return () => forkRequests.removeEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+  }, [forkRequests, mayForkMessage]);
   const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
     setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
   }, []);
@@ -3790,10 +3821,9 @@ function SessionChatPane(props: {
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
                     <>
-                      {!(
-                        props.session.admissionBlock?.reason === "database_claim_rejected" &&
-                        props.session.admissionBlock.sqlState === "42501" &&
-                        machineAccess?.queuedTurnBlocked
+                      {!sessionAdmissionNeedsDifferentMachine(
+                        sessionAdmissionReason(props.session),
+                        machineAccess,
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}

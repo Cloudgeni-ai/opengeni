@@ -203,6 +203,14 @@
       "reason": "no_self_registration",
       "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
       "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://drivemcp.googleapis.com/mcp/v1",
+      "name": "Google Drive",
+      "issuer": "https://accounts.google.com",
+      "reason": "no_self_registration",
+      "evidence": "Google requires a pre-registered AI-agent OAuth web client; configure-mcp-server documents drive.readonly and drive.file.",
+      "checkedAt": "2026-10-22"
     }
   ]
 }

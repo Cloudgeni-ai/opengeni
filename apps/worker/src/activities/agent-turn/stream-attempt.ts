@@ -49,8 +49,6 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
-  withRunCredentialsSession,
-  runOwnedSandboxSetup,
   modelResponseHasVisibleText,
   ModelStepHandover,
   isPreemptedModelResponse,
@@ -94,7 +92,6 @@ import {
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
-  recordSandboxSharedPreparation,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
@@ -195,7 +192,7 @@ import {
   latestDurableTurnMessageText,
 } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
-import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
@@ -287,6 +284,8 @@ export type TurnStreamAttemptDeps = {
   modelUsageDispatchId: string;
   workerPreparationStartedAt: number;
   fileDownloadsMaterializedForRun: boolean;
+  /** Eager owned-box platform setup, possibly already started by the worker. */
+  eagerOwnedSandboxSetup?: EagerOwnedSandboxSetup;
   unavailableSandboxFilesNote: string | undefined;
   runCredentialsNote: string | undefined;
   mcpAvailabilityNote: string | undefined;
@@ -374,11 +373,9 @@ export async function runTurnStreamAttempt(
     claimedResult,
     flushRuntimeBatcher,
     finalizeTurnOpStreamOps,
-    runWorkspaceMutationForSandbox,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
     setLastInputTokensFenced,
-    attachGitCredentialRenewal,
     attachCodemodeTokenRenewal,
     attachRunCredentialRenewal,
     withProviderRequestContext,
@@ -418,11 +415,9 @@ export async function runTurnStreamAttempt(
     modelHistoryProjector,
     compactionModeOptions,
     initialRunCredentialMaterial,
-    initialGitCredentials,
     sandboxEnvironment,
     sandboxCodemodeToken,
     sandboxCodemodeTokenExpiresAt,
-    fileResourceDownloads,
     runCredentialResolver,
     videoGenerationAcceptancesByCallId,
   } = deps;
@@ -911,98 +906,19 @@ export async function runTurnStreamAttempt(
       });
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
+    const eagerOwnedSandboxSetup =
+      deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
-      const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
       // would remain in flight for the entire turn and suppress every
       // heartbeat capture. Lazy setup already runs under the same wrapper in
-      // its first-operation provisioner above.
-      if (eagerResolvedSandbox && !sandboxState.lazyOwnedSandbox && ownedEstablished) {
-        const ownedSandboxSetupStartedAt = performance.now();
-        let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";
-        try {
-          const eagerSetupSession = sandboxState.setupBoxSession ?? ownedEstablished.session;
-          // `deferredSetup: true` below tells the runtime that the worker owns
-          // platform setup, so the runtime intentionally skips its credential
-          // session callback. Materialize host-managed run credentials here
-          // before any setup command (including provider login hooks), then
-          // decorate setup commands so they source the active generation.
-          await attachRunCredentialRenewal(
-            eagerSetupSession as RunCredentialCommandSession,
-            initialRunCredentialMaterial,
-            eagerResolvedSandbox,
-          );
-          const eagerCredentialSetupSession = initialRunCredentialMaterial
-            ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
-            : eagerSetupSession;
-          await runWorkspaceMutationForSandbox(
-            eagerResolvedSandbox,
-            "eagerOwnedSandboxSetup",
-            async () =>
-              await runOwnedSandboxSetup(
-                agent,
-                ownedEstablished.session as never,
-                eagerCredentialSetupSession as never,
-                {
-                  settings: runSettings,
-                  environment: sandboxEnvironment,
-                  preparedInput: runInput!,
-                  ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
-                  onRuntimeEvent: async (event) => {
-                    await leases.renewServing("runtime_event");
-                    if (leases.servingLost()) {
-                      throw new Error("Provider credential lease expired during sandbox setup");
-                    }
-                    await eventing.publish!([{ type: event.type, payload: event.payload }], true);
-                  },
-                  ...(eventing.toolCancellationFenceRef.current
-                    ? {
-                        commandRunner:
-                          eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            eventing.toolCancellationFenceRef.current,
-                          ),
-                      }
-                    : {}),
-                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
-                    ? {
-                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                          db,
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sandboxGroupId: sandboxState.sandboxGroupId,
-                          attemptId: input.attemptId,
-                          holderId: sandboxState.sandboxHolderId,
-                          sandbox: eagerResolvedSandbox,
-                          ...(runtimeCancellationSignal
-                            ? { signal: runtimeCancellationSignal }
-                            : {}),
-                          observe: (measurement) =>
-                            recordSandboxSharedPreparation(observability, measurement),
-                        }),
-                      }
-                    : {}),
-                },
-              ),
-          );
-          await attachGitCredentialRenewal(
-            eagerSetupSession as GitCredentialTokenWriterSession,
-            initialGitCredentials,
-          );
-        } catch (error) {
-          ownedSandboxSetupOutcome = "failed";
-          throw error;
-        } finally {
-          recordTurnStartupPhase(observability, {
-            phase: "owned_sandbox_setup",
-            provider: turnExecutionPolicy.providerId,
-            backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: ownedSandboxSetupOutcome,
-            durationSeconds: (performance.now() - ownedSandboxSetupStartedAt) / 1_000,
-            count: fileResourceDownloads.length,
-          });
-        }
-      }
+      // its first-operation provisioner above. The first stream may join a
+      // setup the worker started alongside file delivery and input preparation.
+      await eagerOwnedSandboxSetup.beforeModelStream({
+        preparedInput: runInput!,
+        fileDownloadsMaterialized: fileDownloadsMaterializedForRun,
+      });
       // Conservative request boundary: once control enters runStream, the
       // provider may have accepted work even if no response/event follows.
       // Escaped MCP setup timeouts are automatically recoverable only

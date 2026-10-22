@@ -839,11 +839,6 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         if (!current?.extraCreditsEnabled) return false;
         // The exact accepted lease remains usable after allocator pause.
         current.allocatorEnabled = true;
-        if (current.assignmentPolicies)
-          current.assignmentPolicies = current.assignmentPolicies.map((policy) => ({
-            ...policy,
-            allocatorEnabled: true,
-          }));
         current.quota = {
           modelCooldowns: {},
           exhaustedUntil: null,

@@ -14,9 +14,15 @@ import {
   type PullSnapshot,
 } from "./github";
 import {
+  ACTIVE_RUN_SCAN_DEADLINE_MS,
+  approvalOnlyRun,
   config,
   digest,
   emptyLedger,
+  MAX_RUNNER_RELEVANT_RUNS,
+  MAX_SCANNED_ACTIVE_RUNS,
+  runnerJobDemand,
+  scanRunnerDemand,
   type Ledger,
   type Manifest,
   type Pull,
@@ -96,6 +102,16 @@ async function fixture() {
   });
   let clock = Date.parse(NOW);
   class MockGitHub extends GitHubReader {
+    baseStatus: "green" | "red" | "unknown" = "green";
+    override async baseCI(sha: string) {
+      return {
+        sha,
+        status: this.baseStatus,
+        runId: 50,
+        attempt: 1,
+        reason: "fixture exact-base CI",
+      };
+    }
     pulls = [makePull()];
     snapshot: PullSnapshot = {
       number: 1,
@@ -253,6 +269,9 @@ async function fixture() {
       outcome,
       trusted: true,
       retryable: outcome === "code_failure",
+      ...(outcome === "infrastructure"
+        ? { infrastructureRetryReason: "verified-infrastructure" as const }
+        : {}),
       completedAt: NOW,
     };
     api.workflowRuns.push(run);
@@ -449,7 +468,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await f.state()).sha).toBeNull();
     f.api.busy = false;
     const m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "infrastructure");
+    f.advance(61);
     f.api.busy = true;
     expect((await f.controller().step()).action.kind).toBe("wait");
     expect(f.api.calls).toHaveLength(0);
@@ -461,8 +481,12 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("whole-run retry lost response is observed by attempt after restart, never duplicated", async () => {
     const f = await fixture(),
       m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "infrastructure");
+    f.advance(61);
     expect((await f.controller().step()).action.kind).toBe("retry");
+    const persistedRetry = (await f.state()).ledger.retries[m.batchId]!;
+    expect(persistedRetry.reason).toBe("verified-infrastructure");
+    expect((await f.state()).ledger.stages[m.batchId]?.retry).toEqual(persistedRetry);
     f.api.response = "lost";
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(1);
@@ -472,6 +496,142 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
+  test.each(["main-advance", "invalidated", "after-claim"] as const)(
+    "R8 obsolete retry %s never submits",
+    async (change) => {
+      const f = await fixture(),
+        m = await f.publish();
+      f.verdict(m, "infrastructure");
+      f.advance(61);
+      expect((await f.controller().step()).action.kind).toBe("retry");
+      if (change === "invalidated")
+        await f.seed((l) => {
+          l.invalidated.push(m.batchId);
+        });
+      else if (change === "main-advance")
+        await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      else
+        f.git.beforePush = async () => {
+          await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+        };
+      await f.executor().maintain();
+      expect(f.api.calls).toEqual([]);
+      expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+      f.advance(61);
+      if (change === "invalidated") await f.executor().maintain();
+      else {
+        await f.controller().step();
+        expect((await f.state()).ledger.invalidated).toContain(m.batchId);
+      }
+      expect(f.api.calls).toEqual([]);
+    },
+  );
+  test("unknown retry outcome remains reconciliation-only after main advances", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    await f.controller().step();
+    f.api.response = "unknown";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+    f.advance(180);
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("uncertain");
+  });
+  test.each(["live", "invalidated-parent", "obsolete-parent"] as const)(
+    "predecessor retry chain %s is checked exactly",
+    async (parentState) => {
+      const f = await fixture(),
+        root = await f.publish();
+      f.verdict(root);
+      const p = f.makePull(f.newer);
+      f.api.pulls = [p];
+      const child = await f.git.build({
+        schemaVersion: 1,
+        baseSha: root.tipSha,
+        predecessor: root.batchId,
+        recoveryOf: null,
+        createdAt: NOW,
+        pulls: [p],
+      });
+      const prior = await f.state();
+      const next = await f.git.stateCommit(prior.ledger, prior.sha, NOW);
+      await f.writer.transaction([
+        { ref: f.cfg.stateRef, expected: prior.sha, next },
+        {
+          ref: `refs/heads/${f.cfg.branchPrefix}${child.batchId}`,
+          expected: null,
+          next: child.tipSha,
+        },
+      ]);
+      const r = f.verdict(child, "infrastructure");
+      r.id = 101;
+      await f.seed((l) => {
+        l.retries[child.batchId] = {
+          runId: r.id,
+          fromAttempt: 1,
+          requestedAt: NOW,
+          reason: "verified-infrastructure",
+        };
+        Object.assign(l, f.executor().prepareLedger(l, { kind: "retry", run: r }, NOW));
+        if (parentState === "invalidated-parent") l.invalidated.push(root.batchId);
+      });
+      if (parentState === "obsolete-parent")
+        await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      f.advance(61);
+      await f.executor().maintain();
+      expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(
+        parentState === "live" ? 1 : 0,
+      );
+    },
+  );
+  test("a stale code-failure retry intent cannot submit, even if a prior controller persisted it", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    const observed = f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    observed.outcome = "code_failure";
+    observed.retryable = true;
+    delete observed.infrastructureRetryReason;
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(0);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+  });
+  test("once retried infrastructure holds after second terminal failure without ejecting", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    await f.executor().maintain();
+    const second = f.api.workflowRuns.at(-1)!;
+    second.status = "completed";
+    second.completedAt = NOW;
+    f.advance(61);
+    await f.executor().maintain();
+    expect((await f.controller().step()).action.kind).toBe("wait");
+    expect(f.api.calls).toHaveLength(1);
+    expect((await f.state()).ledger.ejected).toEqual([]);
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+  });
+  test("a rejected infrastructure rerun POST is not automatically submitted again", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    f.api.response = "forbidden";
+    await f.executor().maintain();
+    f.advance(3601);
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+    expect((await f.state()).ledger.ejected).toEqual([]);
+  });
   test.each(["lost", "forbidden", "unknown"] as const)(
     "comment %s outcome is durable and never blindly repeated",
     async (response) => {
@@ -480,7 +640,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         l.ejected.push({
           pull: f.makePull(),
           batchId: "a".repeat(64),
-          reason: "failure",
+          reason: "merge-tree conflict against candidate predecessor",
           announced: false,
         });
       });
@@ -504,7 +664,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "b".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -537,7 +697,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "c".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -557,7 +717,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "d".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -585,7 +745,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "e".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -615,7 +775,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "f".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -638,6 +798,108 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
+  test.each(["red", "unknown", "green"] as const)(
+    "inherited #5243-style singleton is parked without blame on %s main; new base does not retry it",
+    async (status) => {
+      const f = await fixture();
+      const m = await f.publish();
+      f.verdict(m, "code_failure");
+      f.api.baseStatus = status;
+      expect((await f.controller().step()).action.kind).toBe("record");
+      const held = (await f.state()).ledger;
+      expect(held.ejected).toEqual([]);
+      expect(held.recovery).toEqual([]);
+      expect(held.parked?.[0]?.baseSha).toBe(f.base);
+      expect((await f.controller().step()).action.kind).toBe("park");
+      expect(f.api.calls).toEqual([]);
+      await f.controller().step();
+      expect(f.api.comments).toHaveLength(1);
+      expect(f.api.comments[0]).toContain("not a culprit attribution");
+      await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      f.api.baseStatus = "green";
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect((await f.state()).ledger.parked).toHaveLength(1);
+      expect(f.api.calls).toHaveLength(1);
+      expect((await f.state()).ledger.baseHold).toBeUndefined();
+      expect((await f.state()).ledger.ejected).toEqual([]);
+    },
+  );
+  test("green full-main CI is not comparable base-suite evidence for singleton ejection", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "code_failure");
+    expect((await f.controller().step()).action.kind).toBe("record");
+    expect((await f.state()).ledger.ejected).toEqual([]);
+    expect((await f.state()).ledger.parked?.[0]?.pull.headSha).toBe(f.head);
+    expect((await f.state()).ledger.retries).toEqual({});
+  });
+  test("parking comment lost response is reconciled after restart, never blindly replayed", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    f.verdict(m, "code_failure");
+    await f.controller().step();
+    expect((await f.controller().step()).action.kind).toBe("park");
+    f.api.response = "lost";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    f.advance();
+    await f.executor().maintain();
+    const parked = (await f.state()).ledger.parked![0]!;
+    expect(parked.announced).toBe(true);
+    expect((await f.state()).ledger.effects[parked.effectId!]!.status).toBe("done");
+    expect(f.api.comments).toHaveLength(1);
+    expect(f.api.calls).toHaveLength(1);
+  });
+  test.each(["red", "unknown"] as const)(
+    "exact green batch builds and lands on %s full-main CI",
+    async (status) => {
+      const f = await fixture();
+      f.api.baseStatus = status;
+      await f.seed((l) => {
+        l.baseHold = { sha: f.base, status: "red", runId: 50, attempt: 1, reason: "legacy hold" };
+      });
+      const m = await f.publish();
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+      f.verdict(m);
+      // Main-CI observation failure must not become an indirect admission gate.
+      f.api.baseCI = async () => {
+        throw Error("full main CI unavailable");
+      };
+      expect((await f.controller().step()).action.kind).toBe("land");
+      expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+      expect((await f.state()).ledger.landed).toContain(m.batchId);
+      expect(f.api.comments).toHaveLength(1);
+      expect(f.api.comments[0]).toContain("landed the exact tested PR head");
+      expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
+    },
+  );
+  test("legacy pending code-failure comment holds even with green full-main CI", async () => {
+    const f = await fixture();
+    await f.seed((l) => {
+      l.ejected.push({
+        pull: f.makePull(),
+        batchId: "f".repeat(64),
+        reason: "merge-tree conflict against candidate predecessor",
+        announced: false,
+      });
+    });
+    await f.controller().step(); // Create a real durable effect, then model old code-blame state.
+    await f.seed((l) => {
+      l.ejected[0]!.reason = "non-retryable exact-candidate code failure";
+      for (const effect of Object.values(l.effects))
+        if (effect.kind === "comment")
+          effect.body = effect.body.replace(
+            "merge-tree conflict against candidate predecessor",
+            l.ejected[0]!.reason,
+          );
+    });
+    await f.executor().maintain();
+    expect(f.api.calls).toEqual([]);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.lastError).toContain(
+      "base batch-suite",
+    );
+  });
   test("main race outside tested ancestry rejects entire atomic landing", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -648,6 +910,21 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.controller().step()).rejects.toThrow();
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.divergent);
     expect((await f.state()).ledger.landed).toEqual([]);
+    // Restart after an emergency/admin main advance: the old green tip cannot
+    // be reused, and the exact replacement must earn its own provider verdict.
+    expect((await f.controller().step()).action.kind).toBe("record");
+    expect((await f.state()).ledger.invalidated).toContain(m.batchId);
+    const rebuilt = await f.publish();
+    expect(rebuilt.baseSha).toBe(f.divergent);
+    expect(rebuilt.tipSha).not.toBe(m.tipSha);
+    expect(rebuilt.batchId).not.toBe(m.batchId);
+    expect((await f.controller().step()).action.kind).toBe("wait");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.divergent);
+    f.verdict(rebuilt);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(rebuilt.tipSha);
+    expect(await f.origin.exec(["show", `${rebuilt.tipSha}:replacement`])).toBe("new");
+    expect(await f.origin.exec(["show", `${rebuilt.tipSha}:feature`])).toBe("old");
   });
   test("newer source branch is detected even if merged PR metadata still names old head", async () => {
     const f = await fixture(),
@@ -765,6 +1042,729 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       })) as unknown as typeof fetch);
     expect(await batch.mainBusy()).toBe(true);
     expect(batch.lastHeadroom?.reason).toContain("single candidate");
+  });
+  describe("runner headroom counts runner-holding jobs, not run placeholders", () => {
+    type JobPage = Record<string, unknown> | unknown[];
+    const MAIN = { head_branch: "main", path: ".github/workflows/ci.yml", event: "push" };
+    const OTHER = { head_branch: "feature", path: ".github/workflows/other.yml", event: "push" };
+    const jobs = (...statuses: unknown[]) =>
+      statuses.map((status) => (status === undefined ? {} : { status }));
+    const page = (list: unknown[]): JobPage => ({ total_count: list.length, jobs: list });
+    const reader = (
+      runs: Array<Record<string, unknown>>,
+      jobPages: Record<number, JobPage>,
+      budget = "60",
+      runPage?: (status: string) => JobPage,
+    ) => {
+      const cfg = config({
+        BATCHER_MODE: "active",
+        BATCHER_RUNNER_BUDGET: budget,
+        BATCHER_MAIN_RESERVE: "40",
+        // These cases isolate the repository allocation arithmetic; the hosted
+        // job limit and other-repository allowance are covered in capacity.test.ts.
+        BATCHER_PROVIDER_JOB_LIMIT: "100000",
+        BATCHER_OTHER_REPOSITORY_ALLOWANCE: "0",
+      });
+      const transport = (async (url: string | URL | Request) => {
+        const text = String(url);
+        const jobsMatch = /\/runs\/(\d+)\/jobs\?/.exec(text);
+        if (jobsMatch) return Response.json(jobPages[Number(jobsMatch[1])]);
+        const status = new URL(text).searchParams.get("status")!;
+        if (runPage) return Response.json(runPage(status));
+        const listed = runs.filter((run) => run.status === status);
+        return Response.json({ total_count: listed.length, workflow_runs: listed });
+      }) as typeof fetch;
+      return new GitHubReader(cfg, new GitHubAuth({}), transport);
+    };
+    test("classifier counts queued, in-progress and requested jobs only", () => {
+      expect(runnerJobDemand([])).toBe(0);
+      expect(runnerJobDemand(jobs("waiting", "waiting", "pending", "completed"))).toBe(0);
+      expect(runnerJobDemand(jobs("queued", "in_progress", "requested", "completed"))).toBe(3);
+      for (const invalid of ["action_required", "", "QUEUED", 1, null, undefined])
+        expect(runnerJobDemand(jobs("in_progress", invalid))).toBeNull();
+      expect(runnerJobDemand([null])).toBeNull();
+      expect(runnerJobDemand(["queued"])).toBeNull();
+    });
+    test.each([
+      ["zero-job other run held by its concurrency group", [], 0, true],
+      ["approval-waiting other jobs", ["waiting", "waiting", "waiting", "waiting"], 0, true],
+      ["concurrency-pending other jobs", ["pending", "pending", "pending"], 0, true],
+      ["completed other jobs", ["completed", "completed", "completed"], 0, true],
+      ["two runner-holding other jobs", ["queued", "in_progress", "completed"], 2, true],
+      ["three runner-holding other jobs", ["queued", "in_progress", "requested"], 3, false],
+      [
+        "mixed matrix counts each runner-holding job",
+        ["in_progress", "in_progress", "queued", "waiting", "pending", "completed", "completed"],
+        3,
+        false,
+      ],
+    ] as const)("%s", async (_name, statuses, demand, allowed) => {
+      const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: page(jobs(...statuses)) });
+      expect(await r.mainBusy()).toBe(!allowed);
+      expect(r.lastHeadroom).toMatchObject({
+        allowed,
+        occupied: demand,
+        reservedMain: 40,
+        candidateSlots: 18,
+        budget: 60,
+      });
+    });
+    test("main and non-main allocations are independent", async () => {
+      const busy = (budget: string) =>
+        reader(
+          [
+            { id: 1, status: "in_progress", ...MAIN },
+            // A job-less placeholder adds no demand. (A job-less *main* run is
+            // before its fan-out and holds admission; see capacity.test.ts.)
+            { id: 2, status: "waiting", ...OTHER },
+            { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+            { id: 4, status: "queued", ...MAIN, event: "pull_request" },
+            { id: 5, status: "pending", ...OTHER },
+          ],
+          {
+            1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
+            2: page([]),
+            3: page(jobs("queued", "waiting")),
+            4: page(jobs("queued", "pending", "completed")),
+            5: page(jobs("in_progress")),
+          },
+          budget,
+        );
+      // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
+      const fits = busy("66");
+      expect(await fits.mainBusy()).toBe(false);
+      expect(fits.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
+      const tight = busy("65");
+      expect(await tight.mainBusy()).toBe(true);
+      expect(tight.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
+      // An idle main run never shrinks the configured reserve.
+      const quiet = reader(
+        [
+          { id: 1, status: "queued", ...MAIN },
+          { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+        ],
+        // Fan-out already instantiated (more than the 3 pre-plan jobs listed).
+        {
+          1: page(jobs("waiting", "waiting", "completed", "completed")),
+          3: page(jobs("queued", "in_progress")),
+        },
+      );
+      expect(await quiet.mainBusy()).toBe(false);
+      expect(quiet.lastHeadroom).toMatchObject({ occupied: 2, reservedMain: 40 });
+    });
+    test.each([
+      ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
+      ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
+      [
+        "complete job page above the 100-row bound",
+        { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
+        "Incomplete",
+      ],
+      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
+      ["malformed job page", { total_count: 0 }, "Incomplete"],
+    ] as const)("%s holds", async (_name, jobPage, reason) => {
+      const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }, "1000");
+      expect(await r.mainBusy()).toBe(true);
+      expect(r.lastHeadroom?.reason).toContain(reason);
+      expect(r.lastHeadroom?.allowed).toBe(false);
+    });
+    test("run scan boundaries still hold with idle jobs", async () => {
+      const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
+      const many = Array.from({ length: 33 }, (_, i) => ({
+        id: i + 1,
+        status: "queued",
+        ...OTHER,
+      }));
+      const tooMany = reader(many, idle, "1000");
+      expect(await tooMany.mainBusy()).toBe(true);
+      expect(tooMany.lastHeadroom?.reason).toContain("32-run");
+      const invalid = reader([{ id: 0, status: "queued", ...OTHER }], idle, "1000");
+      expect(await invalid.mainBusy()).toBe(true);
+      expect(invalid.lastHeadroom?.reason).toContain("Invalid active run");
+      const truncated = reader([], idle, "1000", () => ({ total_count: 1, workflow_runs: [] }));
+      expect(await truncated.mainBusy()).toBe(true);
+      expect(truncated.lastHeadroom?.reason).toContain("Incomplete");
+      const oversized = reader([], idle, "1000", () => ({
+        total_count: 101,
+        workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
+      }));
+      expect(await oversized.mainBusy()).toBe(true);
+      expect(oversized.lastHeadroom?.reason).toContain("oversized");
+      const batch = reader(
+        [{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }],
+        { 7: page([]) },
+        "1000",
+      );
+      expect(await batch.mainBusy()).toBe(true);
+      expect(batch.lastHeadroom?.reason).toContain("single candidate");
+    });
+  });
+  describe("proven approval-only runs are excluded from the 32-run runner cap", () => {
+    type WirePage = Record<string, unknown> | unknown[];
+    const MAIN = { head_branch: "main", path: ".github/workflows/ci.yml", event: "push" };
+    const OTHER = { head_branch: "feature", path: ".github/workflows/other.yml", event: "push" };
+    const jobs = (...statuses: unknown[]) =>
+      statuses.map((status) => (status === undefined ? {} : { status }));
+    const page = (list: unknown[]): WirePage => ({ total_count: list.length, jobs: list });
+    type Fixture = {
+      id: number;
+      run: Record<string, unknown>;
+      jobs: WirePage | (() => WirePage) | "provider-error";
+    };
+    let nextId = 1;
+    const runs = (count: number, status: string, base: object, jobPage: Fixture["jobs"]) =>
+      Array.from({ length: count }, (): Fixture => {
+        const id = nextId++;
+        return { id, run: { id, status, ...base }, jobs: jobPage };
+      });
+    // Old main reruns waiting on environment approval: the gated job waits and
+    // the latest attempt of every other job is completed.
+    const approvalMain = (count: number) =>
+      runs(count, "waiting", MAIN, page(jobs("waiting", "completed", "completed")));
+    const approvalOther = (count: number) =>
+      runs(count, "waiting", OTHER, page(jobs("waiting", "pending")));
+    const busyOther = (count: number) =>
+      runs(count, "queued", OTHER, page(jobs("in_progress", "completed")));
+    const idleOther = (count: number) =>
+      runs(count, "queued", OTHER, page(jobs("pending", "completed")));
+    // Production allocation: 52 runners, 30 reserved for full main CI, 18 candidate slots.
+    const reader = (fixtures: Fixture[], budget = "52", reserve = "30") => {
+      const requests: string[] = [];
+      const cfg = config({
+        BATCHER_MODE: "active",
+        BATCHER_RUNNER_BUDGET: budget,
+        BATCHER_MAIN_RESERVE: reserve,
+      });
+      const transport = (async (url: string | URL | Request) => {
+        const text = String(url);
+        requests.push(text);
+        const jobsMatch = /\/runs\/(\d+)\/jobs\?/.exec(text);
+        if (jobsMatch) {
+          const subject = fixtures.find((entry) => entry.id === Number(jobsMatch[1]))!;
+          if (subject.jobs === "provider-error") return new Response("down", { status: 502 });
+          return Response.json(typeof subject.jobs === "function" ? subject.jobs() : subject.jobs);
+        }
+        const status = new URL(text).searchParams.get("status")!;
+        const listed = fixtures.filter((entry) => entry.run.status === status);
+        return Response.json({
+          total_count: listed.length,
+          workflow_runs: listed.map((entry) => entry.run),
+        });
+      }) as typeof fetch;
+      return { requests, github: new GitHubReader(cfg, new GitHubAuth({}), transport) };
+    };
+    test("approval-only proof requires a waiting run and a complete idle job set", () => {
+      const waitingRun = { id: 1, status: "waiting" };
+      const cases: Array<[unknown, unknown[], boolean]> = [
+        [waitingRun, jobs("waiting"), true],
+        [waitingRun, jobs("waiting", "completed", "completed"), true],
+        [waitingRun, jobs("waiting", "pending", "completed"), true],
+        [waitingRun, [], false],
+        [waitingRun, jobs("completed"), false],
+        [waitingRun, jobs("pending", "completed"), false],
+        [waitingRun, jobs("waiting", "queued"), false],
+        [waitingRun, jobs("waiting", "in_progress"), false],
+        [waitingRun, jobs("waiting", "requested"), false],
+        [waitingRun, jobs("waiting", "action_required"), false],
+        [waitingRun, jobs("waiting", undefined), false],
+        [waitingRun, [null, ...jobs("waiting")], false],
+        [{ id: 1, status: "queued" }, jobs("waiting"), false],
+        [{ id: 1, status: "in_progress" }, jobs("waiting", "completed"), false],
+        [{ id: 1, status: "pending" }, jobs("waiting"), false],
+        [{ id: 1 }, jobs("waiting"), false],
+        [null, jobs("waiting"), false],
+      ];
+      for (const [run, list, expected] of cases)
+        expect([run, list, approvalOnlyRun(run, list)]).toEqual([run, list, expected]);
+    });
+    test("12 waiting runs (10 old main reruns) plus active runs crossing 32 are admitted", async () => {
+      nextId = 1;
+      const fixtures = [
+        ...approvalMain(10),
+        ...approvalOther(2),
+        ...busyOther(4),
+        ...idleOther(21),
+      ];
+      // Negative control: the previous readers held on 37 distinct active runs before reading jobs.
+      expect(fixtures.length).toBeGreaterThan(MAX_RUNNER_RELEVANT_RUNS);
+      const fits = reader(fixtures);
+      expect(await fits.github.mainBusy()).toBe(false);
+      expect(fits.github.lastHeadroom).toMatchObject({
+        allowed: true,
+        budget: 52,
+        occupied: 4,
+        reservedMain: 30,
+        candidateSlots: 18,
+        scannedRuns: 37,
+        approvalOnlyRuns: 12,
+      });
+      // Every run's complete job page is read: 2 x 5 run-list pages plus 37 job pages.
+      expect(fits.requests.length).toBe(10 + 37);
+      // Budget arithmetic is unchanged: one more busy runner exceeds 4 + 30 + 18 = 52.
+      nextId = 1;
+      const tight = reader([
+        ...approvalMain(10),
+        ...approvalOther(2),
+        ...busyOther(5),
+        ...idleOther(20),
+      ]);
+      expect(await tight.github.mainBusy()).toBe(true);
+      expect(tight.github.lastHeadroom).toMatchObject({
+        allowed: false,
+        occupied: 5,
+        approvalOnlyRuns: 12,
+      });
+      // Runner-relevant runs still cap at 32 even beside approval-only runs.
+      nextId = 1;
+      const crossing = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(33)], "1000");
+      expect(await crossing.github.mainBusy()).toBe(true);
+      expect(crossing.github.lastHeadroom?.reason).toContain("32-run");
+      expect(crossing.github.lastHeadroom?.reason).toContain("approval-only");
+      nextId = 1;
+      const atCap = reader([...approvalMain(10), ...approvalOther(2), ...idleOther(32)], "1000");
+      expect(await atCap.github.mainBusy()).toBe(false);
+      expect(atCap.github.lastHeadroom).toMatchObject({ scannedRuns: 44, approvalOnlyRuns: 12 });
+    });
+    test("more than 32 proven approval-only runs accumulate without holding", async () => {
+      nextId = 1;
+      const forty = reader(approvalMain(40));
+      expect(await forty.github.mainBusy()).toBe(false);
+      expect(forty.github.lastHeadroom).toMatchObject({
+        allowed: true,
+        occupied: 0,
+        reservedMain: 30,
+        scannedRuns: 40,
+        approvalOnlyRuns: 40,
+      });
+      // The absolute scan bound admits exactly MAX_SCANNED_ACTIVE_RUNS runs with 10 + 64 requests.
+      nextId = 1;
+      const bound = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS));
+      expect(await bound.github.mainBusy()).toBe(false);
+      expect(bound.github.lastHeadroom?.approvalOnlyRuns).toBe(64);
+      expect(bound.requests.length).toBe(10 + MAX_SCANNED_ACTIVE_RUNS);
+      // One more distinct active run holds before any job page is read.
+      nextId = 1;
+      const over = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS + 1));
+      expect(await over.github.mainBusy()).toBe(true);
+      expect(over.github.lastHeadroom).toMatchObject({ allowed: false, scannedRuns: 0 });
+      expect(over.github.lastHeadroom?.reason).toContain("64-run job scan");
+      expect(over.requests.length).toBe(10);
+    });
+    test("an approval-waiting run that becomes queued counts toward demand and the cap", async () => {
+      nextId = 1;
+      let approved = false;
+      const transition: Fixture = {
+        id: 1000,
+        run: { id: 1000, status: "waiting", ...MAIN },
+        jobs: () =>
+          approved
+            ? page(jobs("queued", "queued", "completed", "completed"))
+            : page(jobs("waiting", "waiting", "completed")),
+      };
+      const fixtures = [transition, ...idleOther(32)];
+      const before = reader(fixtures, "1000");
+      expect(await before.github.mainBusy()).toBe(false);
+      expect(before.github.lastHeadroom).toMatchObject({ occupied: 0, approvalOnlyRuns: 1 });
+      // Approval granted: the run status may still read waiting while jobs queue.
+      approved = true;
+      const after = reader(fixtures, "1000");
+      expect(await after.github.mainBusy()).toBe(true);
+      expect(after.github.lastHeadroom?.reason).toContain("32-run");
+      // With room under the cap, the queued main jobs are main demand, and
+      // because they wait for runners on the newest main run, admission holds.
+      const roomy = reader([transition, ...idleOther(3)], "1000");
+      expect(await roomy.github.mainBusy()).toBe(true);
+      expect(roomy.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
+      expect(roomy.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
+      transition.run.status = "queued";
+      const queued = reader([transition, ...idleOther(3)], "1000");
+      expect(await queued.github.mainBusy()).toBe(true);
+      expect(queued.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
+      expect(queued.github.lastHeadroom?.capacity?.latestMain).toMatchObject({
+        runId: 1000,
+        queuedJobs: 2,
+      });
+    });
+    test("mixed, job-less and non-waiting runs are never treated as approval-only", async () => {
+      const mixed: Array<[string, string, unknown[], number]> = [
+        ["waiting run with a queued job", "waiting", ["waiting", "queued"], 1],
+        ["waiting run with an in-progress job", "waiting", ["waiting", "in_progress"], 1],
+        ["waiting run with a requested job", "waiting", ["waiting", "requested"], 1],
+        ["waiting run without materialized jobs", "waiting", [], 0],
+        ["waiting run with only completed jobs", "waiting", ["completed"], 0],
+        ["queued run whose jobs wait for approval", "queued", ["waiting"], 0],
+        ["in-progress run with a waiting job", "in_progress", ["waiting", "completed"], 0],
+      ];
+      for (const [name, status, statuses, demand] of mixed) {
+        // 31 runner-relevant runs plus the subject fit exactly; demand is counted.
+        nextId = 1;
+        const fits = reader(
+          [
+            ...runs(1, status, OTHER, page(jobs(...statuses))),
+            ...idleOther(31),
+            ...approvalMain(5),
+          ],
+          "1000",
+        );
+        expect([name, await fits.github.mainBusy()]).toEqual([name, false]);
+        expect([name, fits.github.lastHeadroom]).toMatchObject([
+          name,
+          { occupied: demand, approvalOnlyRuns: 5, scannedRuns: 37 },
+        ]);
+        // With 32 other runner-relevant runs the subject crosses the cap.
+        nextId = 1;
+        const over = reader(
+          [
+            ...runs(1, status, OTHER, page(jobs(...statuses))),
+            ...idleOther(32),
+            ...approvalMain(5),
+          ],
+          "1000",
+        );
+        expect([name, await over.github.mainBusy()]).toEqual([name, true]);
+        expect([name, over.github.lastHeadroom?.reason]).toEqual([
+          name,
+          expect.stringContaining("32-run"),
+        ]);
+      }
+    });
+    test("unknown statuses, incomplete pages and provider errors in approval runs hold", async () => {
+      const holds: Array<[string, WirePage, string]> = [
+        ["unknown job status", page(jobs("waiting", "action_required")), "Unrecognized"],
+        ["missing job status", page(jobs("waiting", undefined)), "Unrecognized"],
+        [
+          "truncated job page",
+          { total_count: 3, jobs: jobs("waiting", "completed") },
+          "Incomplete",
+        ],
+        [
+          "oversized job page",
+          { total_count: 101, jobs: jobs("waiting", ...Array(100).fill("completed")) },
+          "Incomplete",
+        ],
+        ["malformed job page", { jobs: jobs("waiting") }, "Incomplete"],
+        ["array job page", [], "Incomplete"],
+      ];
+      for (const [name, jobPage, reason] of holds) {
+        nextId = 1;
+        const r = reader([...approvalMain(40), ...runs(1, "waiting", MAIN, jobPage)], "1000");
+        expect([name, await r.github.mainBusy()]).toEqual([name, true]);
+        expect([name, r.github.lastHeadroom?.reason]).toEqual([
+          name,
+          expect.stringContaining(reason),
+        ]);
+      }
+      // Provider errors on a job page or a run-list page reject; callers hold.
+      nextId = 1;
+      const jobError = reader([...approvalMain(3), ...runs(1, "waiting", MAIN, "provider-error")]);
+      await expect(jobError.github.mainBusy()).rejects.toThrow();
+      const listError = new GitHubReader(
+        config({ BATCHER_MODE: "active", BATCHER_RUNNER_BUDGET: "52", BATCHER_MAIN_RESERVE: "30" }),
+        new GitHubAuth({}),
+        (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch,
+      );
+      await expect(listError.mainBusy()).rejects.toThrow();
+    });
+    // A run whose status flips once during the inventory listing, served by a
+    // transport that changes the run after the first listing of `flipAfter`.
+    const flipping = (
+      from: string,
+      to: string,
+      flipAfter: string,
+      base: object,
+      jobPage: WirePage,
+      budget = "52",
+      reserve = "30",
+      others: Fixture[] = [],
+    ) => {
+      const subject = { id: 5000, status: from, ...base };
+      let flipped = false;
+      const requests: string[] = [];
+      const transport = (async (url: string | URL | Request) => {
+        const text = String(url);
+        requests.push(text);
+        const jobsMatch = /\/runs\/(\d+)\/jobs\?/.exec(text);
+        if (jobsMatch) {
+          if (Number(jobsMatch[1]) === subject.id) return Response.json(jobPage);
+          const other = others.find((entry) => entry.id === Number(jobsMatch[1]))!;
+          return Response.json(other.jobs);
+        }
+        const status = new URL(text).searchParams.get("status")!;
+        const current = { ...subject, status: flipped ? to : from };
+        const listed = [
+          ...others.map((entry) => entry.run).filter((run) => run.status === status),
+          ...(current.status === status ? [current] : []),
+        ];
+        if (status === flipAfter) flipped = true;
+        return Response.json({ total_count: listed.length, workflow_runs: listed });
+      }) as typeof fetch;
+      const github = new GitHubReader(
+        config({
+          BATCHER_MODE: "active",
+          BATCHER_RUNNER_BUDGET: budget,
+          BATCHER_MAIN_RESERVE: reserve,
+        }),
+        new GitHubAuth({}),
+        transport,
+      );
+      return { github, requests };
+    };
+    test("a run moving backwards between page reads is listed by the second pass", async () => {
+      // in_progress -> waiting right after the waiting page: one pass would miss
+      // the run entirely (waiting read too early, in_progress read too late).
+      const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
+      const other = flipping("in_progress", "waiting", "waiting", OTHER, running);
+      expect(await other.github.mainBusy()).toBe(true);
+      expect(other.github.lastHeadroom).toMatchObject({
+        allowed: false,
+        occupied: 20,
+        reservedMain: 30,
+        scannedRuns: 1,
+        approvalOnlyRuns: 0,
+      });
+      expect(other.requests.length).toBe(10 + 1);
+      // Main demand above the reserve is likewise observed: max(30, 35) + 18 > 52.
+      const mainRun = flipping(
+        "in_progress",
+        "waiting",
+        "waiting",
+        MAIN,
+        page(jobs(...Array(35).fill("in_progress"), "waiting")),
+      );
+      expect(await mainRun.github.mainBusy()).toBe(true);
+      expect(mainRun.github.lastHeadroom).toMatchObject({ occupied: 35, reservedMain: 35 });
+      // queued -> waiting and in_progress -> queued flips are observed too.
+      for (const [from, to] of [
+        ["queued", "waiting"],
+        ["in_progress", "queued"],
+      ] as const) {
+        const flip = flipping(from, to, to, OTHER, running);
+        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, true]);
+        expect(flip.github.lastHeadroom).toMatchObject({ occupied: 20, scannedRuns: 1 });
+      }
+      // Approval to queued during the listing: demand is counted.
+      const approved = flipping(
+        "waiting",
+        "queued",
+        "waiting",
+        OTHER,
+        page(jobs(...Array(5).fill("queued"), "completed")),
+      );
+      expect(await approved.github.mainBusy()).toBe(true);
+      expect(approved.github.lastHeadroom).toMatchObject({ occupied: 5, approvalOnlyRuns: 0 });
+      // A run listed with a non-waiting status in any listing is never
+      // approval-only, even when its later listing and job page look idle.
+      nextId = 1;
+      const settling = flipping(
+        "in_progress",
+        "waiting",
+        "in_progress",
+        OTHER,
+        page(jobs("waiting", "completed")),
+        "1000",
+        "30",
+        idleOther(32),
+      );
+      expect(await settling.github.mainBusy()).toBe(true);
+      expect(settling.github.lastHeadroom?.reason).toContain("32-run");
+      nextId = 1;
+      const steady = flipping(
+        "waiting",
+        "waiting",
+        "waiting",
+        OTHER,
+        page(jobs("waiting", "completed")),
+        "1000",
+        "30",
+        idleOther(32),
+      );
+      expect(await steady.github.mainBusy()).toBe(false);
+      expect(steady.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 1, scannedRuns: 33 });
+    });
+    test("a response arriving after the deadline holds, including the last one", async () => {
+      const oneRun = (slowPath: RegExp, delay: number) => {
+        let clock = 0;
+        const get = async (path: string) => {
+          if (slowPath.test(path)) clock += delay;
+          if (/\/jobs\?/.test(path)) return page(jobs("in_progress"));
+          const status = new URLSearchParams(path.split("?")[1]).get("status");
+          const list = status === "queued" ? [{ id: 1, status: "queued", ...OTHER }] : [];
+          return { total_count: list.length, workflow_runs: list };
+        };
+        return scanRunnerDemand({
+          get,
+          batchWorkflow: "batch.yml",
+          baseBranch: "main",
+          now: () => clock,
+        });
+      };
+      // The only (last) job page arrives late.
+      expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS + 1)).toMatchObject({
+        ok: false,
+        hold: "deadline",
+        scannedRuns: 1,
+      });
+      expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS)).toMatchObject({ ok: true });
+      // With no active runs, the last run-list page arriving late also holds.
+      let clock = 0,
+        lists = 0;
+      const zero = await scanRunnerDemand({
+        get: async () => {
+          if (++lists === 10) clock += ACTIVE_RUN_SCAN_DEADLINE_MS + 1;
+          return { total_count: 0, workflow_runs: [] };
+        },
+        batchWorkflow: "batch.yml",
+        baseBranch: "main",
+        now: () => clock,
+      });
+      expect(zero).toMatchObject({ ok: false, hold: "deadline", scannedRuns: 0 });
+      expect(lists).toBe(10);
+      // A slow middle run-list page holds before the next request.
+      clock = 0;
+      lists = 0;
+      const middle = await scanRunnerDemand({
+        get: async () => {
+          if (++lists === 3) clock += ACTIVE_RUN_SCAN_DEADLINE_MS + 1;
+          return { total_count: 0, workflow_runs: [] };
+        },
+        batchWorkflow: "batch.yml",
+        baseBranch: "main",
+        now: () => clock,
+      });
+      expect(middle).toMatchObject({ ok: false, hold: "deadline" });
+      expect(lists).toBe(3);
+    });
+    test("pure scan enforces separate request, scan and deadline bounds", async () => {
+      const listed = (statusRuns: Record<string, unknown[]>) => {
+        const requests: string[] = [];
+        const get = async (path: string) => {
+          requests.push(path);
+          if (/^actions\/runs\/\d+\/jobs\?/.test(path)) return page(jobs("waiting", "completed"));
+          const status = new URLSearchParams(path.split("?")[1]).get("status")!;
+          const list = statusRuns[status] ?? [];
+          return { total_count: list.length, workflow_runs: list };
+        };
+        return { requests, get };
+      };
+      const scan = (get: (path: string) => Promise<unknown>, extra: object = {}) =>
+        scanRunnerDemand({ get, batchWorkflow: "batch.yml", baseBranch: "main", ...extra });
+      const waiting = Array.from({ length: 10 }, (_, i) => ({
+        id: i + 1,
+        status: "waiting",
+        ...MAIN,
+      }));
+      const ok = listed({ waiting });
+      expect(await scan(ok.get)).toEqual({
+        ok: true,
+        mainDemand: 0,
+        otherDemand: 0,
+        scannedRuns: 10,
+        approvalOnlyRuns: 10,
+        runnerRelevantRuns: 0,
+        latestMain: {
+          runId: 10,
+          queuedJobs: 0,
+          oldestQueuedSeconds: null,
+          maxStartWaitSeconds: null,
+        },
+        mainQueuedJobs: 0,
+        preFanoutMainRuns: [],
+      });
+      // A smaller explicit scan bound holds before reading jobs.
+      const bounded = listed({ waiting });
+      expect(await scan(bounded.get, { maxScannedRuns: 9 })).toMatchObject({
+        ok: false,
+        hold: "scan-bound",
+        scannedRuns: 0,
+      });
+      expect(bounded.requests.length).toBe(10);
+      // The wall-clock deadline holds mid-scan instead of admitting partial demand.
+      let clock = 0;
+      const slow = listed({ waiting });
+      const timed = await scan(
+        async (path) => {
+          clock += 20_000;
+          return slow.get(path);
+        },
+        { now: () => clock },
+      );
+      expect(timed).toMatchObject({ ok: false, hold: "deadline" });
+      expect(clock).toBeLessThanOrEqual(ACTIVE_RUN_SCAN_DEADLINE_MS + 20_000);
+      expect(slow.requests.length).toBeLessThan(10 + waiting.length);
+      // Duplicate listings of one run (status changed between pages) are scanned once.
+      expect(await scan(listed({ queued: [waiting[0]], waiting }).get)).toMatchObject({
+        ok: true,
+        scannedRuns: 10,
+      });
+      // A run approved between the waiting and queued page reads is listed as
+      // queued; its jobs are demand and it is not approval-only.
+      let approvedAfterWaitingPage = false;
+      const order: string[] = [];
+      const raced = await scan(async (path) => {
+        if (/^actions\/runs\/1\/jobs\?/.test(path))
+          return page(jobs(approvedAfterWaitingPage ? "queued" : "waiting"));
+        const status = new URLSearchParams(path.split("?")[1]).get("status")!;
+        order.push(status);
+        const run = { id: 1, status: approvedAfterWaitingPage ? "queued" : "waiting", ...MAIN };
+        const list = run.status === status ? [run] : [];
+        if (status === "waiting") approvedAfterWaitingPage = true;
+        return { total_count: list.length, workflow_runs: list };
+      });
+      const statuses = ["requested", "pending", "waiting", "queued", "in_progress"];
+      expect(order).toEqual([...statuses, ...statuses]);
+      expect(raced).toEqual({
+        ok: true,
+        mainDemand: 1,
+        otherDemand: 0,
+        scannedRuns: 1,
+        approvalOnlyRuns: 0,
+        runnerRelevantRuns: 1,
+        latestMain: {
+          runId: 1,
+          queuedJobs: 1,
+          oldestQueuedSeconds: null,
+          maxStartWaitSeconds: null,
+        },
+        // One queued job: the newly approved run has not instantiated its fan-out.
+        mainQueuedJobs: 1,
+        preFanoutMainRuns: [1],
+      });
+      // Completed runs listed between pages are not scanned; invalid identities hold.
+      expect(
+        await scan(listed({ waiting: [...waiting, { id: 77, status: "completed", ...MAIN }] }).get),
+      ).toMatchObject({ ok: true, scannedRuns: 10 });
+      for (const id of [0, -1, 1.5, "1", null, Number.MAX_SAFE_INTEGER + 1])
+        expect(
+          await scan(listed({ waiting: [{ id, status: "waiting", ...MAIN }] }).get),
+        ).toMatchObject({ ok: false, hold: "invalid-run" });
+      expect(await scan(listed({ waiting: [null] }).get)).toMatchObject({
+        ok: false,
+        hold: "invalid-run",
+      });
+      // A waiting Batch CI run still occupies the single candidate slot.
+      expect(
+        await scan(
+          listed({ waiting: [...waiting, { id: 88, status: "waiting", path: "batch.yml" }] }).get,
+        ),
+      ).toMatchObject({ ok: false, hold: "batch-slot" });
+      // Provider errors propagate to the caller rather than being treated as free.
+      await expect(
+        scan(async (path) => {
+          if (path.includes("/jobs?")) throw new Error("provider unavailable");
+          return ok.get(path);
+        }),
+      ).rejects.toThrow("provider unavailable");
+      for (const runPage of [
+        null,
+        [],
+        { total_count: 1, workflow_runs: [] },
+        { workflow_runs: [] },
+      ])
+        expect(await scan(async () => runPage)).toMatchObject({
+          ok: false,
+          hold: "incomplete-runs",
+        });
+    });
   });
   test("recovery CLI requires explicit active configuration and confirmation before auth", async () => {
     await expect(main(["recover-effect"], {})).rejects.toThrow("requires active mode");
@@ -919,7 +1919,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("latency stop signal also holds an already-durable whole-run retry intent", async () => {
     const f = await fixture(),
       manifest = await f.publish();
-    f.verdict(manifest, "code_failure");
+    f.verdict(manifest, "infrastructure");
+    f.advance(61);
     expect((await f.controller().step()).action.kind).toBe("retry");
     await f.seed((ledger) => {
       ledger.stages[manifest.batchId]!.ciStartedAt = "2026-10-21T12:40:00Z";

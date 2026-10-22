@@ -1,7 +1,7 @@
 // Run with: bun apps/web/test/artifact-library-browser.ts
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-import { chromium } from "playwright";
+import { chromium, type Request } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess } from "@opengeni/testing/process";
@@ -37,6 +37,20 @@ const browser = await chromium.launch({
   headless: true,
   executablePath: process.env.OPENGENI_TEST_CHROMIUM ?? "/usr/local/bin/chromium",
 });
+// The Site fixture's image points here, at another origin. A request from a
+// sandboxed still does not reach Playwright's request events (the frame has an
+// opaque origin in its own process), so the server's own log is the proof
+// that a still makes no network request.
+const outsideHits: string[] = [];
+const outsideServer = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch(request) {
+    outsideHits.push(request.url);
+    return new Response(null, { status: 204 });
+  },
+});
+const outsideOrigin = `http://127.0.0.1:${outsideServer.port}`;
 try {
   for (const { width, height } of [
     { width: 1440, height: 950 },
@@ -71,16 +85,17 @@ try {
     };
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    const outside: string[] = [];
+    const outside: Request[] = [];
     page.on("request", (request) => {
-      if (/^https?:/.test(request.url()) && !request.url().startsWith(baseUrl))
-        outside.push(request.url());
+      if (/^https?:/.test(request.url()) && new URL(request.url()).origin !== baseUrl)
+        outside.push(request);
     });
-    await page.addInitScript(() => {
+    await page.addInitScript((origin) => {
+      Reflect.set(window, "artifactLibraryOutsideOrigin", origin);
       window.addEventListener("message", (event) => {
         if (event.data === "site-ran") Reflect.set(window, "siteRan", true);
       });
-    });
+    }, outsideOrigin);
     await page.goto(`${baseUrl}/test/artifact-library.html`, { waitUntil: "networkidle" });
     // The first load pays Vite's cold transforms, slow on a busy machine.
     await page
@@ -112,13 +127,33 @@ try {
     await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
     assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
     assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.match(
+      (await still.getAttribute("csp")) ?? "",
+      /^default-src 'none';/,
+      "the frame requires the no-network policy before the Site markup is parsed",
+    );
     assert.equal(
       await page.locator("iframe:not([sandbox=''])").count(),
       0,
       "catalog must not run a Site",
     );
     assert.equal(await page.evaluate(() => Reflect.get(window, "siteRan") ?? false), false);
-    assert.deepEqual(outside, [], "a Site still makes no network requests");
+    // Chromium can report the still's image as a request it then blocks for the
+    // policy (failure "csp") before anything leaves the browser. Only that exact
+    // blocked attempt is allowed; any other outside request fails the run.
+    await Promise.all(outside.map((request) => request.response().catch(() => null)));
+    assert.deepEqual(
+      outside
+        .filter(
+          (request) =>
+            request.failure()?.errorText !== "csp" ||
+            request.url() !== `${outsideOrigin}/pixel.png`,
+        )
+        .map((request) => request.url()),
+      [],
+      "a Site still makes no network requests",
+    );
+    assert.deepEqual(outsideHits, [], "a Site still's image never reaches its server");
     assert.equal(
       await page.getByRole("radio", { name: "Gallery", exact: true }).getAttribute("aria-checked"),
       "true",
@@ -463,6 +498,7 @@ try {
     );
     assert.deepEqual(errors, []);
     await context.close();
+    assert.deepEqual(outsideHits, [], "no Site still reached the network during the run");
     console.log(
       `Artifact library ${suffix}: gallery with Site stills, list toggle, CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
     );
@@ -470,4 +506,5 @@ try {
 } finally {
   await browser.close();
   await web.stop();
+  outsideServer.stop(true);
 }

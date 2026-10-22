@@ -42,6 +42,10 @@ import type { IntegrationViewModel } from "@opengeni/react/app/components/capabi
 import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
 import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
 import {
+  ExcelAddinCatalogLink,
+  ExcelAddinSetupSteps,
+} from "@opengeni/react/app/components/capabilities/excel-addin-catalog-link";
+import {
   CatalogConnectedAccounts,
   type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
@@ -249,6 +253,8 @@ export function CatalogItemPage({
     primary = null;
   } else if (item.surfaceType === "first_party_onepassword") {
     primary = <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />;
+  } else if (item.surfaceType === "first_party_excel_addin") {
+    primary = <ExcelAddinCatalogLink item={item} />;
   } else if (plan.mode === "social_oauth") {
     primary = socialSetupAvailable ? (
       <Button
@@ -374,7 +380,15 @@ export function CatalogItemPage({
 
   let setup: ReactNode = null;
   if (!isSkill && item.surfaceType !== "codex_apps") {
-    if (plan.mode === "social_oauth") {
+    if (item.surfaceType === "first_party_excel_addin") {
+      setup = (
+        <DetailSection title="Set up">
+          <div className="max-w-md">
+            <ExcelAddinSetupSteps item={item} />
+          </div>
+        </DetailSection>
+      );
+    } else if (plan.mode === "social_oauth") {
       setup = (
         <DetailSection title={socialAccounts.length ? "Accounts" : `Connect ${title}`}>
           <div className="grid gap-5">

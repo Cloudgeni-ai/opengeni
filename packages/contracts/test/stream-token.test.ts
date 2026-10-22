@@ -159,6 +159,7 @@ describe("sandbox workspace permissions", () => {
   test("stream:view is a real, distinct permission (NOT an alias of sessions:read)", () => {
     expect(Permission.options).toContain("stream:view");
     expect(Permission.options).toContain("sessions:read");
-    expect("stream:view").not.toBe("sessions:read");
+    expect(Permission.parse("stream:view")).toBe("stream:view");
+    expect(Permission.parse("sessions:read")).toBe("sessions:read");
   });
 });

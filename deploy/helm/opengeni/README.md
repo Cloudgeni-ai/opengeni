@@ -125,6 +125,22 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+
+## Web assets across rollouts
+
+`web.previousAssets` carries the hashed assets of up to `maxImages` (default 2)
+previous web images into each web pod: one init container per image copies
+them into an emptyDir that the server reads when an asset is missing locally.
+`helm upgrade` finds the images with a `lookup` of the live web Deployment and
+its `opengeni.ai/previous-web-images` annotation. Offline renders carry only an
+explicit `web.previousAssets.images` list. `ingress.webAssetsIngress` adds an
+ingress-nginx Ingress for the hashed asset paths that retries a 404 on another
+web pod during the rollout (best effort). Carried images must stay in the
+registry for as long as the Deployment carries them, and `helm rollback`
+restores the earlier revision's chain. Test both with
+`bun test ./deploy/helm/opengeni/test/web-asset-skew.test.ts`. See
+[`docs/deployment.md`](../../../docs/deployment.md#web-assets-across-rollouts).
+
 ## Replicas and autoscaling
 
 When a workload's `autoscaling.enabled` is true (API, web, relay, control
@@ -133,6 +149,17 @@ its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
 when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
 never scales a Deployment back to `replicaCount` and kills pods with in-flight
 turns. `replicaCount` applies only when autoscaling is off.
+
+Turn pods drain in-flight turns before they exit. The chart surges one
+replacement turn pod before removing an old one, and renders
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` / `_FORCE_MS` from
+`worker.turns.shutdown.graceSeconds` / `forceSeconds`. Unset, they derive from
+`worker.turns.terminationGracePeriodSeconds` (default
+`worker.terminationGracePeriodSeconds`, 120): 90 seconds of natural completion,
+then the recoverable `WORKER_SHUTDOWN` checkpoint and an SDK force stop at 105
+seconds, with process exit by 115. Rendering fails for explicit values that do
+not fit. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md#deletion-and-shutdown-limitations).
 
 `worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
 source contract, not a production acceptance flag. It adds Namespace demand,

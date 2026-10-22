@@ -63,6 +63,13 @@ Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
 live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
 Artifact writes use the same native authorization as any other agent session.
+
+New configured sessions persist Knowledge search eagerness through ordinary
+`ToolRef.eager` selection at creation; scheduled occurrences freeze that selection
+with accepted execution. Existing sessions and accepted executions are not
+rewritten. Knowledge search discovery cards are an execution-time model-result
+projection, never a history rewrite; programmatic results remain complete.
+See [Knowledge discovery](knowledge.md#model-visible-discovery-results).
 After a worker claims a turn, its session RLS actor carries the canonical
 authority projection's root into preparation and execution. This lets a guest's
 worker read its own frozen attempt policies without a human identity or a
@@ -1702,6 +1709,17 @@ useful findings. Parsing and indexing remain mechanical services. Original bytes
 and search caches have separate storage jobs. Review controls
 publication, while action permissions remain independent.
 
+Knowledge reads evaluate evidence visibility for the complete matched candidate
+set through `knowledge_revisions_visible`; scalar readers use the same helper.
+Keyword nonmatches can be excluded first because their rank is per revision,
+but access filtering still precedes ranking, cursor selection and pagination.
+Dependency cycles terminate with recursive `UNION`, and shared identities are
+checked once within that read, never cached between statements. Existing
+VOLATILE document/source ACL helpers keep their fresh-snapshot behavior; this
+does not promise a single immutable snapshot across all nested ACL checks.
+Accepted-agent session/turn/attempt SHARE locks remain held until transaction
+completion, so reducing search work also shortens the event-writer lock queue.
+
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),
@@ -2178,12 +2196,15 @@ Atlassian API adapter retains disconnect and historical source/document records,
 but admits no new connection, source configuration, credential delegation, or
 source-fetch execution. Scheduled admission and attempt-bound source fetching
 both enforce that retirement, including existing schedules and accepted work.
-Google Drive keeps its separate native API connection and source features.
-Publishing setup first verifies a folder through a file-only OAuth Picker, then
-uses a separate incremental OAuth step to retain recursive source reads. Both
-steps bind the same subject, account and unchanged connection; only final
-completion replaces the encrypted credential and enables the verified output
-folder. See [`google-drive.md`](google-drive.md#launch-oauth-scope-decision).
+Google Drive uses one personal connection to Google's official MCP endpoint, with
+reviewed API extensions for file updates, moves/deletion, sharing, and change-feed
+checkpoints. Both surfaces use the same frozen connection authority and approval
+policy. `packages/runtime/src/drive-mcp.ts` composes the remote server with these
+extensions; `packages/db/src/connection-token-resolver.ts` confines credential reuse
+to exact Drive API routes. Native Drive source setup, publishing, and source-task
+execution are retired; account removal, imported documents, and history remain.
+Recurring work uses ordinary agent schedules. The remote provider stays disabled
+until the operator enables its preview/verification gate. See [Google Drive](google-drive.md).
 See [`integrations-design.md`](integrations-design.md).
 
 The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
@@ -2971,6 +2992,12 @@ run-attempt receipts distinguish assertion failures from infrastructure and
 cancellation. Landing requires the exact tested tip, a fast-forward base fence and
 a final head/readiness reread; late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
+Candidate plan/source/selected-unit/ready success may land on red or unknown
+full-main CI. Failed cohorts split sequentially; failed singletons are durably
+parked without attribution, while unrelated ready heads proceed. Parking survives
+main advancement and readiness churn for the same PR head; new heads can re-enter.
+Comparable base evidence and trusted same-way failure fingerprints are not yet
+available; neither full-main success nor matching job names proves member blame.
 `queue-health.yml` records provider batch timing separately from the controller's
 admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
 writes. The separately authorized CI-shadow stage pushes candidate refs only,
@@ -3030,7 +3057,9 @@ the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
 unchanged. `packages/react/src/session-capability-policy.ts` owns that client
 review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
-identity. Personal schedules have immutable owners. Personal/Workspace setup
+identity. Typed account-selection refusals preserve their diagnostic through the
+HTTP envelope. Composers refresh the visible inventory without changing explicit
+pins or retrying the refused input; the human reviews accounts and sends again. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.
 See [sender-owned connections](design/sender-owned-connections.md) for account
 selection, provider checks and migration.
@@ -3093,7 +3122,9 @@ Organization sharing may cover all or selected same-organization workspaces.
 Schedules and interactive turns use the same selected bot tools; a saved legacy
 destination is a default, never a grant to add excluded tools. Bot preparation and
 physical delivery retain exact attempt, connection/version, workspace and sharing
-generation checks. Personal Slack Add and Reconnect use distinct creation and
+generation checks. SQL scheduled-run admission and live claim lock the selected
+installation before its sharing row and validate the frozen sharing generation
+and target workspace; neither requires installing another bot locally. Personal Slack Add and Reconnect use distinct creation and
 exact-identity replacement semantics. See [Slack](slack-bot.md).
 
 Workspace `defaultExecutionTarget` selects the placement of new root chats.

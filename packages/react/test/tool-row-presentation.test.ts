@@ -78,7 +78,7 @@ describe("shared tool row presentation", () => {
       englishText,
       call({ name: "set_session_title", arguments: { title: "Fibonacci script" } }),
     );
-    expect(title.icon).toBe("sessions");
+    expect(title.icon).toBe("rename");
     expect(title.preview).toEqual({ kind: "text", text: "Fibonacci script" });
   });
 
@@ -123,7 +123,7 @@ describe("shared tool row presentation", () => {
     expect(row({ name: "interaction__interaction_discover" })).toMatchObject({
       tool: "machine",
       title: "Looked for a screen to use",
-      icon: "panels",
+      icon: "screen",
     });
     expect(row({ name: "interaction__cua_get_desktop_state" }).title).toBe("Looked at the screen");
     expect(row({ name: "interaction__cua_click" }).title).toBe("Clicked on the screen");

@@ -103,6 +103,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   background_unavailable: "unsupported",
   // The element did not take the keyboard focus; nothing else changed.
   focus_refused: "invalid_action",
+  // Background keys refused before any was sent: another window of the app
+  // (a sheet, a dialog) has the keyboard focus.
+  window_not_key: "invalid_action",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
@@ -154,6 +157,8 @@ export type RunStepsOutcome =
        * batch stopped before acting. Otherwise it may have taken effect. */
       definite: boolean;
       code: ComputerBackendErrorCode | null;
+      /** CUA's own code for the stopped action, when it gave one. */
+      cuaCode: string | null;
       message: string;
     };
 
@@ -226,6 +231,7 @@ export async function runSteps(
     completed: index,
     definite,
     code: mapped ?? null,
+    cuaCode: step.code ?? null,
     message: `${step.message?.trim() || "CUA reported no reason"}${hint}`,
   };
 }

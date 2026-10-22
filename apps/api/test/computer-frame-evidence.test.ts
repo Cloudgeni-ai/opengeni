@@ -285,7 +285,6 @@ async function withPipeline(
   const directory = await mkdtemp("/tmp/og-computer-frame-pipeline-");
   const browserSupervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "browser-state"),
-    socketRootDirectory: join(directory, "browser-sockets"),
     createDriver: async () => {
       throw new Error("browser driver must not be used by computer frame tests");
     },

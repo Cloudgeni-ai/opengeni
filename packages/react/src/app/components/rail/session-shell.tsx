@@ -27,7 +27,7 @@ import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-p
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
-import { SessionStartupProvider } from "../../lib/session-startup";
+import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
   requestSessionUsageLimitEditor,
   sessionUsageLimitCapability,
@@ -343,7 +343,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
+      <div
+        className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
+        // Lets page chrome (the desktop title bar) follow the rail without a
+        // document-wide `:has()` selector.
+        data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
+      >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
           <nav
@@ -410,6 +415,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
+  const brand = useSessionUiFeature("brand");
   const context = useAppContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -461,11 +467,20 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
+    // Both schedule facts come from one read, so a newer lineage never pairs
+    // with an older session read (an older server sends no upcoming flag).
+    const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
       <SessionRouteHeader
         session={{
           ...context.session,
-          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+          ...(lineageSchedules === undefined
+            ? {}
+            : {
+                hasSchedules: lineageSchedules,
+                hasUpcomingSchedules:
+                  lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+              }),
         }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
@@ -476,18 +491,22 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     );
   }
 
-  // Mobile, off a session route: the slim brand strip.
+  // Mobile, off a session route: the slim brand strip. A host without
+  // Opengeni's brand keeps only the menu button, or no strip at all.
+  if (!brand && !hamburger) return null;
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
-      <Link
-        to="/workspaces/$workspaceId/sessions"
-        params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-fg"
-      >
-        <BrandMark className="w-5" />
-        <Wordmark className="text-[17px]" />
-      </Link>
+      {brand ? (
+        <Link
+          to="/workspaces/$workspaceId/sessions"
+          params={{ workspaceId: rail.workspaceId }}
+          className="flex items-center gap-2 text-fg"
+        >
+          <BrandMark className="w-5" />
+          <Wordmark className="text-[17px]" />
+        </Link>
+      ) : null}
     </header>
   );
 }

@@ -23,6 +23,8 @@
     title.textContent = state.canCancel ? "Add an account" : `Sign in to ${state.productName}`;
     document.title = title.textContent;
     server.placeholder = state.defaultServerUrl.replace(/^https?:\/\//u, "");
+    details.hidden = state.otherServers === false;
+    if (details.hidden) details.open = false;
     const out = state.unreachable;
     unreachable.hidden = !out;
     start.hidden = Boolean(out || state.pendingServer);

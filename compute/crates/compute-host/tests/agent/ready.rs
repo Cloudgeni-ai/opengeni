@@ -688,7 +688,7 @@ fn template_dirs(lab: &Lab) -> Vec<String> {
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name != "used" && name != "vm")
+        .filter(|name| !["used", "vm", "inputs"].contains(&name.as_str()))
         .collect()
 }
 

@@ -46,6 +46,7 @@ export type {
   CreatedConversation,
 } from "./hooks/use-new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";
@@ -155,3 +156,27 @@ export type {
   WorkerCompletionItem,
   WorkerItem,
 } from "./timeline/types";
+
+// Why a message can't start (an admission block, or a chat on somebody else's
+// personal machine) and the allowed ways forward, for any renderer. Styled web
+// surfaces live in `@opengeni/react/session-ui` (`SessionStartNotice`).
+export { useSessionStart } from "./hooks/use-session-start";
+export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
+export {
+  admissionControlNeedsRefresh,
+  admissionRecheckControl,
+  currentSessionMachineAccess,
+  isMachineComputeSelectable,
+  personalMachineCopy,
+  recheckSessionAdmission,
+  savedMessageMachineChoices,
+  sessionAdmissionCopy,
+  sessionAdmissionMachineChangedCopy,
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "./session-admission-model";
+export type {
+  PersonalMachineCopy,
+  SessionAdmissionCopy,
+  SessionAdmissionReason,
+} from "./session-admission-model";

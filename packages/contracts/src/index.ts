@@ -14,6 +14,7 @@ import {
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "./claude-provider-account-authority";
 export {
+  SubscriptionAccountReach,
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionAccount,
@@ -170,6 +171,7 @@ export {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  SiteOpenedResponse,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
@@ -2923,6 +2925,24 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** Realtime voice models a voice conversation can run on. */
+export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "opengeni-azure/gpt-live-1",
+    "gpt-live-1-boulder-alpha",
+    "supergrok/grok-voice-think-fast-2.0",
+    "opengeni-gateway/openai/gpt-realtime-2.1",
+    "opengeni-gateway/openai/gpt-realtime-mini",
+    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-gateway/openai/gpt-realtime-2.1",
+    "workspace-gateway/openai/gpt-realtime-mini",
+    "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
+  ]),
+);
+export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
 /** How readily a realtime voice model decides the speaker is done and answers. */
 export const RealtimeTurnEagerness = /* @__PURE__ */ defineSchema(() =>
   z.enum(["low", "medium", "high"]),
@@ -2989,6 +3009,12 @@ export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
      * for a model when it has saved some, and these otherwise.
      */
     realtimeVoice: z.record(z.string().min(1).max(128), RealtimeVoiceSettings),
+    /**
+     * The realtime voice model new voice conversations start with in workspaces
+     * without their own choice, while the person hasn't picked one; null
+     * leaves it automatic.
+     */
+    realtimeDefaultModel: z.string().min(1).max(128).nullable(),
     updatedAt: z.string().nullable(),
   }),
 );
@@ -3000,6 +3026,7 @@ export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Obje
   allowedModels: null,
   modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
   realtimeVoice: Object.freeze({}) as Record<string, RealtimeVoiceSettings>,
+  realtimeDefaultModel: null,
   updatedAt: null,
 });
 
@@ -3007,8 +3034,9 @@ export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Obje
  * PATCH body for organization model defaults. Each field is independent:
  * omitted keeps it, `sessionDefaults: null` makes it automatic again,
  * `modelPolicy` replaces both allowlists at once (null allows everything),
- * and compaction and voice settings merge by exact model id (null resets
- * just that model).
+ * compaction and voice settings merge by exact model id (null resets just
+ * that model), and `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
  */
 export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -3023,6 +3051,7 @@ export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSche
         .optional(),
       modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
     })
     .strict(),
 );
@@ -3065,6 +3094,18 @@ export function resolveRealtimeVoiceSettings(
   if (!byModel || !Object.hasOwn(byModel, model)) return null;
   const inherited = byModel[model];
   return inherited && Object.keys(inherited).length > 0 ? inherited : null;
+}
+
+/**
+ * The workspace's own default realtime voice model, or null when it follows
+ * its organization. Read leniently: a malformed value reads as unset.
+ */
+export function resolveWorkspaceRealtimeDefaultModel(settings: unknown): string | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { realtimeDefaultModel?: unknown }).realtimeDefaultModel
+      : undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
 }
 
 /** Placement inherited by new top-level chats and schedules that follow the workspace. */
@@ -3147,6 +3188,9 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // Realtime voice settings by realtime model id. Read leniently per model
       // through resolveWorkspaceRealtimeVoiceSettings.
       realtimeVoice: z.record(z.string(), z.unknown()).optional().catch(undefined),
+      // The workspace's default realtime voice model; null or absent follows
+      // the organization. Read leniently.
+      realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3347,6 +3391,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       busySend: WorkspaceBusySend.optional(),
       // Voice settings by realtime model id, merged per model; null removes one.
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      // Default realtime voice model; null follows the organization again.
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
     })
     .passthrough(),
 );
@@ -4067,6 +4113,117 @@ export async function verifyEnrollmentBearer(
  */
 export const OPENGENI_BROWSER_EXTENSION_URL =
   "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
+
+/**
+ * A tool refusal the person can fix themselves, such as a missing machine,
+ * extension or permission. Every tool that hits one posts the same setup card
+ * (a `tool.auth_needed` capability card) in the calling turn, so the person
+ * sees how to fix it in the same reply instead of only reading what's wrong.
+ * Add a refusal code here to give it a card; no tool needs its own handling.
+ */
+export type UserSetupBlocker = {
+  /** The refusal code (OpenGeniApiError.code or a typed refusal's `code`). */
+  code: string;
+  /** The capability card that fixes it. */
+  capabilityId: string;
+  /** Which variant of that card to show, when the capability has several. */
+  purpose?: "chrome";
+  /** What blocked the tool, for the agent. */
+  problem: string;
+  /** What the card asks the person to do. */
+  rationale: string;
+  /** The exact next step, for the agent, when no card can be posted. */
+  nextStep: string;
+};
+
+export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
+  {
+    code: "attached_browser_unavailable",
+    capabilityId: "api:connected-machine",
+    purpose: "chrome",
+    problem: "No Chrome profile is connected through the browser extension.",
+    rationale: "Connect your Chrome so the agent can use it.",
+    nextStep: `connect their computer as a Connected Machine, then add the browser extension to Chrome: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+  },
+  {
+    code: "personal_machine_permission_required",
+    capabilityId: "api:connected-machine",
+    problem:
+      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
+    rationale: "Allow this chat to use your computer.",
+    nextStep: "open this chat in Opengeni and allow it to use their machine",
+  },
+];
+
+/** The blocker a refusal code names, or null when the person can't fix it. */
+export function userSetupBlocker(code: string | null | undefined): UserSetupBlocker | null {
+  if (!code) return null;
+  return USER_SETUP_BLOCKERS.find((blocker) => blocker.code === code) ?? null;
+}
+
+/**
+ * What the agent reads once the setup card is posted. The card is in this
+ * chat's timeline, but the person may be reading the chat elsewhere (Slack, a
+ * worker or scheduled chat), so the text names the chat link rather than
+ * promising the card is in front of them. Finishing the card sends a message
+ * that continues the chat, so the agent has nothing to wait for or retry.
+ */
+export function userSetupCardShownMessage(
+  blocker: UserSetupBlocker,
+  chatUrl: string | null = null,
+): string {
+  const elsewhere = chatUrl
+    ? `If they are reading this chat somewhere else (for example Slack, or this is a worker or scheduled chat), give them this link to it: ${chatUrl}. `
+    : "If they are reading this chat somewhere else (for example Slack, or this is a worker or scheduled chat), tell them to open this chat in Opengeni to use it. ";
+  return (
+    `${blocker.problem} ` +
+    "A card that fixes this is now posted in this chat in Opengeni. " +
+    "If they are reading this chat in Opengeni, tell them in one short sentence to use it there; do not describe its buttons or steps, and do not post another card. " +
+    elsewhere +
+    "Do not wait for it and do not retry: finishing the card sends a message that continues this chat."
+  );
+}
+
+/** What the agent reads when the setup card could not be posted for it. */
+export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
+  return (
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
+    `and tell them the exact next step: ${blocker.nextStep}. ` +
+    "Do not only report that it is unavailable."
+  );
+}
+
+/**
+ * What the agent reads when the card's capability is turned off on this
+ * deployment, so the person cannot fix the blocker here.
+ */
+export function userSetupUnavailableMessage(blocker: UserSetupBlocker): string {
+  return (
+    `${blocker.problem} This deployment doesn't support the setup that fixes it, so the person can't fix it here. ` +
+    "Tell them that in one short sentence and carry on without it; do not post a setup card."
+  );
+}
+
+/** The web link to a chat, or null when no safe web base is configured. */
+export function sessionChatUrl(
+  base: string | null | undefined,
+  workspaceId: string,
+  sessionId: string,
+): string | null {
+  if (!base) return null;
+  try {
+    const url = new URL(
+      `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+      base,
+    );
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Who can use a machine connected with an enroll token. `user` makes it the
@@ -8712,23 +8869,6 @@ export const SyncSessionRealtimeLedgerResponse = /* @__PURE__ */ defineSchema(()
 );
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
-export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
-  z.enum([
-    "opengeni-azure/gpt-live-1",
-    "gpt-live-1-boulder-alpha",
-    "supergrok/grok-voice-think-fast-2.0",
-    "opengeni-gateway/openai/gpt-realtime-2.1",
-    "opengeni-gateway/openai/gpt-realtime-mini",
-    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-gateway/openai/gpt-realtime-2.1",
-    "workspace-gateway/openai/gpt-realtime-mini",
-    "workspace-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-elevenlabs/eleven_realtime_v1_max",
-    "workspace-elevenlabs/eleven_realtime_v1_mini",
-  ]),
-);
-export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
-
 export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionRealtimeModel,
@@ -8772,6 +8912,13 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      * the workspace has none of its own.
      */
     organizationVoiceSettings: RealtimeVoiceSettings.optional(),
+    /** True on the model this workspace chose to start voice conversations with. */
+    workspaceDefault: z.boolean().optional(),
+    /**
+     * True on the model the organization chose to start voice conversations
+     * with. A workspace's own choice wins over it.
+     */
+    organizationDefault: z.boolean().optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -15835,6 +15982,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
     /** Current non-deleted schedules targeting this session, including paused schedules. */
     hasSchedules: z.boolean().optional(),
+    /**
+     * An active schedule targeting this session can still start a run: not
+     * paused, and not a one-time schedule whose time has passed.
+     */
+    hasUpcomingSchedules: z.boolean().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16095,6 +16247,39 @@ export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
 export type SessionListTotals = z.infer<typeof SessionListTotals>;
 
 /**
+ * One Site row in one project, for a rail that shows Sites as rows: a Site
+ * with this viewer's conversations, created by a chat the viewer lists, or
+ * opened by the viewer. Counts cover the complete authorized, unpinned set in
+ * the requested archive scope independent of page size; never a guess from
+ * loaded rows.
+ */
+export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    channelId: z.string().uuid().nullable(),
+    /** The Site's current title when the viewer can read it, else its creation label. */
+    title: z.string(),
+    /** Root conversations in the group; 0 for a Site with none yet. */
+    conversations: z.number().int().nonnegative(),
+    /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+    updatedAt: z.string().datetime(),
+    /** Creation time of the group's newest conversation, else of the Site. */
+    createdAt: z.string().datetime(),
+    /** The same status counts as a project total, over the group's trees. */
+    total: z.number().int().nonnegative(),
+    attention: z.number().int().nonnegative(),
+    attentionSince: z.string().datetime().nullable(),
+    failed: z.number().int().nonnegative(),
+    active: z.number().int().nonnegative(),
+    queued: z.number().int().nonnegative(),
+    waiting: z.number().int().nonnegative(),
+    unread: z.number().int().nonnegative(),
+    activeWork: z.number().int().nonnegative(),
+  }),
+);
+export type SiteConversationGroup = z.infer<typeof SiteConversationGroup>;
+
+/**
  * The canonical session-list page. Pinned rows are returned separately and are
  * excluded from `sessions`, so a cursor can page ordinary recency rows without
  * duplicating a pin. The newest 100 matching pins are returned, ordered by
@@ -16118,6 +16303,16 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     sortBy: z.enum(["updatedAt", "createdAt", "name", "archivedAt"]).optional(),
     archiveStatus: z.enum(["active", "archived", "all"]).optional(),
     originSiteId: z.string().uuid().optional(),
+    /**
+     * Receipt for `siteConversations`. `include` lists Site conversations as
+     * ordinary rows; `group` keeps them out of the rows and returns
+     * `siteGroups` instead. Absent: they are omitted, as before.
+     */
+    siteConversations: z.enum(["include", "group"]).optional(),
+    /** Complete Site rows for a `group` root page, newest activity first. */
+    siteGroups: z.array(SiteConversationGroup).optional(),
+    /** True when Site rows beyond the server bound were omitted. */
+    siteGroupsTruncated: z.literal(true).optional(),
     /** True when older matching pins were omitted from this bounded page. */
     pinnedTruncated: z.boolean().optional(),
     sessions: z.array(Session),
@@ -16135,6 +16330,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     status: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
+    hasUpcomingSchedules: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16241,6 +16437,8 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
   z.object({
     /** Current schedule relationship for the requested session. */
     sessionHasSchedules: z.boolean().optional(),
+    /** An active schedule targeting the requested session can still start a run. */
+    sessionHasUpcomingSchedules: z.boolean().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),
@@ -17135,6 +17333,19 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */
       setupRequest: CustomMcpSetupRequest.optional(),
+      /**
+       * The Connected Machine the agent asked for, when a Connected Machine card
+       * answers a refused switch or one-off command. Names the request; it grants
+       * nothing.
+       */
+      requestedSandboxId: z.string().uuid().optional(),
+      /**
+       * Why a Connected Machine card was posted, when it is for something
+       * narrower than running this chat on a machine. `chrome`: the agent needs
+       * the person's own Chrome, so the card leads with connecting a computer
+       * and adding the Opengeni Browser extension. Grants nothing.
+       */
+      purpose: z.literal("chrome").optional(),
     })
     .superRefine((payload, context) => {
       if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
@@ -21896,6 +22107,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: z.boolean().optional(),
+    // The Chrome extension people add to connect their own Chrome, and its
+    // Chrome Web Store page. Absent on older servers: Opengeni Browser.
+    browserExtension: z.object({ name: z.string(), installUrl: z.string().url() }).optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.

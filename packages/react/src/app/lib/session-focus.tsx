@@ -3,10 +3,18 @@ export type SessionRowRevealIntent = { current: string | null };
 
 export const FOCUS_SESSION_COMPOSER_EVENT = "opengeni:focus-session-composer";
 
+/**
+ * Who asked for the composer: a click on the chat's sidebar row, or a keyboard
+ * jump (the command menu, Control+Tab). Opening or reloading a chat with
+ * nothing focused asks too, without an intent ("load").
+ */
+export type SessionComposerFocusSource = "rail" | "keyboard" | "load";
+
 export type SessionComposerFocusIntent = {
   workspaceId: string;
   sessionId: string;
   nonce: number;
+  source: SessionComposerFocusSource;
 };
 
 // One pending intent per app, keyed by its UI event target (the page's
@@ -16,16 +24,17 @@ let pendingComposerFocusIntents = new WeakMap<EventTarget, SessionComposerFocusI
 let composerFocusNonce = 0;
 
 /**
- * Record one explicit desktop rail-click intent before route navigation.
- * Route refreshes, deep links, polling, and background state changes never call
- * this seam, so they cannot acquire composer focus accidentally.
+ * Record one explicit desktop navigation intent (a sidebar row click or a
+ * keyboard jump) before route navigation. Polling and background state changes
+ * never call this seam, so they cannot acquire composer focus.
  */
 export function requestSessionComposerFocus(
   events: EventTarget,
   workspaceId: string,
   sessionId: string,
+  source: Exclude<SessionComposerFocusSource, "load"> = "rail",
 ): void {
-  const intent = { workspaceId, sessionId, nonce: ++composerFocusNonce };
+  const intent = { workspaceId, sessionId, nonce: ++composerFocusNonce, source };
   pendingComposerFocusIntents.set(events, intent);
   events.dispatchEvent(
     new CustomEvent<SessionComposerFocusIntent>(FOCUS_SESSION_COMPOSER_EVENT, { detail: intent }),
@@ -52,21 +61,73 @@ export function clearSessionComposerFocusIntent(): void {
 }
 
 /**
- * A rail click may replace focus only while focus still belongs to that click.
- * Any dialog or unrelated focused control wins over the navigation convenience.
+ * Whether the composer may take focus now. Any open dialog wins. A keyboard
+ * jump replaces whatever the previous chat had focused. A rail click replaces
+ * only focus that still belongs to that click (its own row). Opening or
+ * reloading a chat takes focus only when nothing is focused.
  */
 export function shouldFocusSessionComposer(
   active: HTMLElement | null,
   sessionId: string,
   body: HTMLElement | null,
   dialogOpen: boolean,
+  source: SessionComposerFocusSource = "rail",
 ): boolean {
   if (dialogOpen) return false;
   if (!active || active === body || !active.isConnected) return true;
+  if (source === "keyboard") return true;
+  if (source === "load") return false;
   return (
     active.closest<HTMLElement>("[data-session-row]")?.getAttribute("data-session-row") ===
     sessionId
   );
+}
+
+const COMPOSER_FOCUS_WAIT_MS = 3_000;
+const DIALOG_SELECTOR = '[aria-modal="true"], [role="dialog"][data-state="open"]';
+
+/**
+ * Focus the chat's composer once it can take focus: the command menu may still
+ * be closing and the composer may still be loading its draft (disabled). Gives
+ * up when focus moves elsewhere in the meantime or after a few seconds.
+ * Returns a cancel function.
+ */
+export function focusSessionComposerWhenReady(input: {
+  textarea: () => HTMLTextAreaElement | null | undefined;
+  sessionId: string;
+  source: SessionComposerFocusSource;
+  doc?: Document;
+  now?: () => number;
+  requestFrame?: (callback: () => void) => number;
+  cancelFrame?: (handle: number) => void;
+}): () => void {
+  const doc = input.doc ?? document;
+  const now = input.now ?? (() => Date.now());
+  const requestFrame =
+    input.requestFrame ?? ((callback) => globalThis.requestAnimationFrame(callback));
+  const cancelFrame = input.cancelFrame ?? ((handle) => globalThis.cancelAnimationFrame(handle));
+  const deadline = now() + COMPOSER_FOCUS_WAIT_MS;
+  let frame = 0;
+  let cancelled = false;
+  const attempt = () => {
+    if (cancelled || now() > deadline) return;
+    const textarea = input.textarea();
+    const dialogOpen = Boolean(doc.querySelector(DIALOG_SELECTOR));
+    if (!textarea || textarea.disabled || dialogOpen) {
+      frame = requestFrame(attempt);
+      return;
+    }
+    const active = (doc.activeElement as HTMLElement | null) ?? null;
+    if (active === textarea) return;
+    if (shouldFocusSessionComposer(active, input.sessionId, doc.body, false, input.source)) {
+      textarea.focus({ preventScroll: true });
+    }
+  };
+  frame = requestFrame(attempt);
+  return () => {
+    cancelled = true;
+    cancelFrame(frame);
+  };
 }
 
 export function sessionComposerFocusIntentIsEligible(input: {

@@ -403,6 +403,22 @@ describe("native connection readiness", () => {
     expect(nativeCatalogItemVisible(otherEndpoint, catalog([]))).toBe(true);
   });
 
+  test("official Drive uses its dedicated setup readiness while other endpoints stay generic", () => {
+    const drive = item({ mcpUrl: "https://drivemcp.googleapis.com/mcp/v1" });
+    expect(nativeCatalogProviderId(drive)).toBe("google-drive");
+    expect(nativeCatalogItemVisible(drive, catalog([["google-drive", "available"]]))).toBe(true);
+    expect(
+      nativeCatalogItemVisible(drive, catalog([["google-drive", "needs_configuration"]])),
+    ).toBe(false);
+    expect(nativeCatalogItemVisible({ ...drive, enabled: true }, catalog([]))).toBe(true);
+    for (const mcpUrl of [
+      "https://drivemcp.googleapis.com/another-path",
+      "https://drivemcp.googleapis.com/mcp/v1?custom=1",
+    ]) {
+      expect(nativeCatalogProviderId(item({ mcpUrl }))).toBeNull();
+    }
+  });
+
   test("native built-ins are gated by identity while historical and custom MCP stay visible", () => {
     expect(nativeCatalogItemVisible(item(), catalog([]))).toBe(false);
     expect(nativeCatalogItemVisible(item(), catalog([["gmail", "available"]]))).toBe(true);

@@ -475,6 +475,58 @@
         "Not marked official: the server is Intercom's own but the snapshot domain is intercom.io while the server lives on mcp.intercom.com. official must stay a checkable claim.",
         "Not featured: Intercom was not on the reviewed featured list."
       ]
+    },
+    {
+      "name": "Google Drive",
+      "description": "Search, read, download, copy and upload Drive files through Google's MCP server, with Opengeni tools for file updates, moves, sharing and change-feed checkpoints. Recurring work uses ordinary agent schedules.",
+      "category": "productivity",
+      "featured": true,
+      "official": false,
+      "mcpUrl": "https://drivemcp.googleapis.com/mcp/v1",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file"
+      ],
+      "allowedTools": [
+        "copy_file",
+        "create_file",
+        "download_file_content",
+        "get_file_metadata",
+        "get_file_permissions",
+        "list_recent_files",
+        "read_file_content",
+        "search_files",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission",
+        "get_changes_start_token",
+        "list_changes"
+      ],
+      "requireApproval": [
+        "copy_file",
+        "create_file",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission"
+      ],
+      "defaultConnectionOwnership": "personal",
+      "documentationUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
+      "notes": [
+        "Google remote tools/list verified 2026-10-22. Official server remains Developer Preview; supplemental REST tools share the same personal grant. Disabled by deployment until preview, API enablement and OAuth verification are complete."
+      ]
     }
   ]
 }

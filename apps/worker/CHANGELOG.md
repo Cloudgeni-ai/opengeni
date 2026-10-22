@@ -1,5 +1,176 @@
 # @opengeni/worker-bundle
 
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+- Updated dependencies [d0eb91c]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/db@4.6.0
+  - @opengeni/codemode@4.6.0
+  - @opengeni/runtime@4.6.0
+  - @opengeni/core@4.6.0
+  - @opengeni/documents@4.6.0
+  - @opengeni/events@4.6.0
+  - @opengeni/agent-proto@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/decisions@4.6.0
+  - @opengeni/github@4.6.0
+  - @opengeni/interaction@4.6.0
+  - @opengeni/jev@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/storage@4.6.0
+  - @opengeni/subscriptions@4.6.0
+  - @opengeni/tool-gateway@4.6.0
+  - @opengeni/vaults@4.6.0
+  - @opengeni/vaults-keeper@4.6.0
+  - @opengeni/vaults-onepassword@4.6.0
+  - @opengeni/vaults-protonpass@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- f818ef2: Turns on an owned sandbox start the model sooner. Repository clones, rig setup and credential hooks now run alongside file delivery and model-input preparation instead of after them, and the first model request waits only for whichever finishes last. What the model sees, and its order, is unchanged.
+- Updated dependencies [6c7b552]
+- Updated dependencies [cfefee3]
+- Updated dependencies [f838cb7]
+- Updated dependencies [65fc9ab]
+- Updated dependencies [e142b9e]
+- Updated dependencies [1b8ca50]
+- Updated dependencies [debd64e]
+- Updated dependencies [acbf24e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [bce44cc]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [51d84b7]
+  - @opengeni/runtime@4.5.0
+  - @opengeni/codemode@4.5.0
+  - @opengeni/db@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/core@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/interaction@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/documents@4.5.0
+  - @opengeni/events@4.5.0
+  - @opengeni/github@4.5.0
+  - @opengeni/storage@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/tool-gateway@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/vaults-keeper@4.5.0
+  - @opengeni/vaults-onepassword@4.5.0
+  - @opengeni/vaults-protonpass@4.5.0
+  - @opengeni/agent-proto@4.5.0
+  - @opengeni/decisions@4.5.0
+  - @opengeni/jev@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+
+### Patch Changes
+
+- 4a48ec3: A retried context checkpoint request keeps its cause. Each retry, and the failure after the retries run out, now records the checkpoint diagnostics (transport code, status and request), and for a timeout its timeout class, request and whether a response arrived, so the session reports an unresponsive provider instead of a generic outage.
+- a891c5a: A chat no longer fails when the context checkpoint (compaction) request is cut off: a stream that ends without a final event or times out now retries the same turn through the usual bounded provider recovery. These failures stay terminal on ordinary model requests, where a replay could repeat model or tool effects; a checkpoint request only summarizes, so it is safe to send again.
+- 7c8a57d: Avoid unused Skill preparation for turns with Skills disabled or no bundled Skills selected, reuse caller-scoped metadata within full-detail session MCP reads, and repair stranded reasoning runs in one pass. Existing tool selection, live authority checks, model inputs and recoverable tool-call pairing remain unchanged.
+- 9ba6486: When a turn fails because one of Opengeni's own database checks refused it, the failure now records which check refused it: the database function names and line numbers on the call chain, for example `admit_turn_resources:31`. Before, the record kept only the error code. The refusal message and SQL text are still never copied. A one-off permission refusal can now be traced after the fact without server logs.
+- 9979e45: When an optional integration (a connected MCP server) can't connect or list its tools during a turn, tool search and tool list results now name it with a short reason, such as "connected but could not list its tools (HTTP 401); its connection may need to be signed in again". Before, its tools simply vanished: a search found nothing, and the agent told the person it had no access instead of saying the integration was failing.
+- a75f55e: A lost sandbox now recovers by itself on every managed backend, not only Modal. Docker, compute and the other hosted providers restore their latest verified checkpoint automatically, with the same "files may be older" warning Modal already gives. A session continues on an empty workspace only with proof that the lost sandbox is really gone: the compute control plane's own answer, a Docker workspace directory that the same daemon shows deleted, or a provider lifetime that has run out. A single transient or false "not found" (for example during host memory pressure) can therefore at most restore a checkpoint and never empties a workspace by itself. A failed rebuild after a loss keeps that loss on record instead of silently starting the session on an empty workspace, so the person who controls the chat can still choose Retry or an empty workspace without any database repair. `SandboxRecoverySelection.artifactId` is now nullable, because a portable checkpoint has no native artifact.
+- 4ef0433: A turn that a worker restart interrupts while it is running sandbox commands, for example downloading attached files at startup, now resumes on another worker. Before, it failed with the bare message "WORKER_SHUTDOWN", because the cancellation arrived wrapped in the sandbox command's own error and didn't take the shutdown recovery path.
+- Updated dependencies [6930cf0]
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [d948555]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [7c8a57d]
+- Updated dependencies [9ba6486]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [005c442]
+- Updated dependencies [9c25110]
+- Updated dependencies [926e0b8]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [a9a54f4]
+- Updated dependencies [f1a619f]
+- Updated dependencies [9979e45]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [81e817c]
+- Updated dependencies [2581842]
+- Updated dependencies [ea21aa0]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [84c8b32]
+- Updated dependencies [9850b5b]
+- Updated dependencies [84b1a18]
+- Updated dependencies [47dbfdf]
+- Updated dependencies [aa280c9]
+  - @opengeni/core@4.4.0
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/subscriptions@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/github@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/vaults-keeper@4.4.0
+  - @opengeni/vaults-onepassword@4.4.0
+  - @opengeni/vaults-protonpass@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/decisions@4.4.0
+  - @opengeni/jev@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

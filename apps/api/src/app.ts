@@ -144,6 +144,7 @@ import {
   databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
+  connectionAccountSelectionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -192,6 +193,7 @@ import {
   registerProductUsageMetricBaselines,
   stampPersonalApiKeyRequest,
   verifiedDelegatedHumanAuthorizationForRequest,
+  browserExtension,
 } from "@opengeni/core";
 import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
@@ -1515,6 +1517,7 @@ export function createAppComposition(deps: AppDependencies): {
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+        browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel,
@@ -2372,6 +2375,7 @@ export function createAppComposition(deps: AppDependencies): {
           scheduledTaskTargetAccessHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
           modelUnavailableHttpError(rawError) ??
+          connectionAccountSelectionHttpError(rawError) ??
           (rawError instanceof UnsupportedLatencyModeError
             ? new ApiHttpError(422, {
                 code: "validation_failed",

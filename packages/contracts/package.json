@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "4.3.1",
+  "version": "4.6.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -273,6 +273,10 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
+    },
+    "./google-drive-native-retirement": {
+      "types": "./src/google-drive-native-retirement.ts",
+      "default": "./src/google-drive-native-retirement.ts"
     }
   },
   "publishConfig": {

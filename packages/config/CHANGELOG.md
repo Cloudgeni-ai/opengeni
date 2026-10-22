@@ -1,5 +1,50 @@
 # @opengeni/config
 
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/codex@4.6.0
+- @opengeni/contracts@4.6.0
+- @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Minor Changes
+
+- f838cb7: A deployment that ships its own branded build of the browser extension can now name and link it. Set `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`. Agent tool descriptions, setup notes and errors, `/v1/config/client` (`browserExtension`), the machine card's Chrome step and the browser panel's install hint then use that name and install link. Without them, everything still says Opengeni Browser and links its Chrome Web Store page, unchanged.
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Patch Changes
+
+- d295544: Products that embed Opengeni can ship their own branded Excel add-in. The new `@opengeni/sdk/office` entry point has the add-in kit Opengeni's own add-in is built from: the manifest, the workbook link that lets agents run Office.js in the open workbook, Excel theme and selection watchers, per-message workbook and selection context, and a sign-in dialog helper. `createOfficeWorkbookTicket` and `listOfficeWorkbooks` connect and list workbooks per workspace.
+
+  A connected workbook now belongs to one person in one workspace, so agents reach it only from that workspace, and products whose users share one credential stay isolated. The ticket and list routes moved under `/v1/workspaces/{workspaceId}/office/`. `OPENGENI_OFFICE_ADDIN_NAME` and `OPENGENI_OFFICE_ADDIN_INSTALL_URL` set the add-in name and install link agents give when no workbook is connected.
+
+- a75f55e: A lost sandbox now recovers by itself on every managed backend, not only Modal. Docker, compute and the other hosted providers restore their latest verified checkpoint automatically, with the same "files may be older" warning Modal already gives. A session continues on an empty workspace only with proof that the lost sandbox is really gone: the compute control plane's own answer, a Docker workspace directory that the same daemon shows deleted, or a provider lifetime that has run out. A single transient or false "not found" (for example during host memory pressure) can therefore at most restore a checkpoint and never empties a workspace by itself. A failed rebuild after a loss keeps that loss on record instead of silently starting the session on an empty workspace, so the person who controls the chat can still choose Retry or an empty workspace without any database repair. `SandboxRecoverySelection.artifactId` is now nullable, because a portable checkpoint has no native artifact.
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

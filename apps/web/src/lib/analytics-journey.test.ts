@@ -39,6 +39,7 @@ describe("content-free customer journey", () => {
       "rigs",
       "capabilities",
       "plugins",
+      "sites",
     ]) {
       expect(journeyPage(`/workspaces/${workspace}/${page}`)).toEqual({
         page,

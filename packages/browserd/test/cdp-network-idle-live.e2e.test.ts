@@ -4,11 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -57,6 +53,10 @@ e2e(
             ),
           );
         }
+        if (url.pathname === "/poll") {
+          // A long poll the server never answers while the page is open.
+          return new Promise<Response>(() => {});
+        }
         const pages: Record<string, string> = {
           "/event-source":
             '<script>new EventSource("/events").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
@@ -65,6 +65,8 @@ e2e(
             '<script>fetch("/events").then(async(r)=>{const reader=r.body.getReader();for(;;){const {done}=await reader.read();if(done)break;document.querySelector("output").textContent="tick"}})</script>',
           "/slow-page":
             '<script>fetch("/slow").then((r)=>r.json()).then(()=>{document.querySelector("output").textContent="loaded"})</script>',
+          "/long-poll":
+            '<script>document.querySelector("output").textContent="ready";fetch("/poll")</script>',
         };
         const page = pages[url.pathname] ?? "";
         return new Response(`<!doctype html><title>Live page</title><output>-</output>${page}`, {
@@ -75,19 +77,9 @@ e2e(
     const directory = await mkdtemp("/tmp/ogb-network-idle-");
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `idle_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
@@ -153,6 +145,12 @@ e2e(
       // A slow finite request keeps the page busy until it finishes.
       await idleAt("/slow-page", 15_000);
       expect(await output()).toContain("loaded");
+
+      // A loaded page whose long poll never ends has settled as far as it
+      // will: the wait runs its full time and then completes, not fails.
+      const pollWait = await idleAt("/long-poll", 2_000);
+      expect(pollWait).toBeGreaterThanOrEqual(1_900);
+      expect(await output()).toContain("ready");
     } finally {
       await driver.close();
       for (const open of openStreams) {

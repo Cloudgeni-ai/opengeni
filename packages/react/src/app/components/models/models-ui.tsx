@@ -119,6 +119,45 @@ export function organizationReachLabel(
 /** "Not in use", in the usage column of an account new work here doesn't use. */
 export const NOT_IN_USE = <span className="text-xs font-medium text-fg-subtle">Not in use</span>;
 
+/** Who an account in the organization's list reaches, as the list reports it. */
+export interface AccountReach {
+  ownerWorkspaceId: string | null;
+  everyWorkspace: boolean;
+  workspaceIds: readonly string[];
+  personalWorkspaces: boolean;
+  people: number | null;
+}
+
+/**
+ * The tag of an account in the organization's list, from the reach the list
+ * reports: "Belongs to Design" for a workspace's own account, else everyone,
+ * one or two named workspaces, a count of workspaces or of chosen people.
+ */
+export function accountReachLabel(
+  labels: ModelsScopeLabels,
+  reach: AccountReach,
+  workspaceName: (id: string) => string | undefined,
+): string {
+  if (reach.ownerWorkspaceId !== null) {
+    const owner = workspaceName(reach.ownerWorkspaceId);
+    return owner ? `Belongs to ${owner}` : "Belongs to a workspace";
+  }
+  if (reach.people !== null)
+    return reach.people === 0
+      ? "No one"
+      : reach.people === 1
+        ? "1 person"
+        : `${reach.people} people`;
+  if (reach.everyWorkspace) return reach.personalWorkspaces ? labels.everyone : "Shared workspaces";
+  const names = reach.workspaceIds.map((id) => workspaceName(id) ?? null);
+  const personal = reach.personalWorkspaces ? ["Personal workspaces"] : [];
+  if (names.length === 0) return personal[0] ?? labels.none;
+  if (names.length === 1 && personal.length === 0 && names[0]) return `${names[0]} only`;
+  if (names.length <= 2 && names.every((name) => name !== null))
+    return [...(names as string[]), ...personal].join(", ");
+  return `${names.length} workspaces${personal.length ? " and Personal" : ""}`;
+}
+
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
 export function ModelsFormPage({
   backLabel,

@@ -8,6 +8,8 @@ import {
   updateScheduledTask,
   deleteScheduledTask,
   scheduledSessionIds,
+  scheduledTaskHasUpcomingRun,
+  sessionScheduleTargets,
   listScheduledTasks,
 } from "../src/index";
 
@@ -111,3 +113,71 @@ test("targets are current, batched, workspace scoped and independent of creation
   expect(index?.indexdef).toContain("(workspace_id, reusable_session_id)");
   expect(index?.indexdef).toContain("deleted_at IS NULL");
 }, 60_000);
+
+test("upcoming targets exclude paused, past one-time, ended and manual schedules", async () => {
+  const session = await fixture();
+  const now = new Date();
+  const later = new Date(now.getTime() + 3_600_000).toISOString();
+  const earlier = new Date(now.getTime() - 3_600_000).toISOString();
+  const create = (status: "active" | "paused", schedule: Record<string, unknown>) =>
+    createScheduledTask(client.db, {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      name: `${status} ${String(schedule.type)}`,
+      status,
+      schedule: schedule as never,
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "existing_session",
+      overlapPolicy: "skip",
+      targetSessionId: session.id,
+      agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
+  const targets = () => sessionScheduleTargets(client.db, session.workspaceId, [session.id], now);
+
+  // The reported case: a paused one-time checkpoint whose time passed unrun.
+  const stale = await create("paused", { type: "once", runAt: earlier, timeZone: "UTC" });
+  const expired = await create("active", { type: "once", runAt: earlier, timeZone: "UTC" });
+  const ended = await create("active", { type: "interval", everySeconds: 60, endAt: earlier });
+  const manual = await create("active", { type: "manual" });
+  const pausedFuture = await create("paused", { type: "once", runAt: later, timeZone: "UTC" });
+  expect(await targets()).toEqual({ scheduled: new Set([session.id]), upcoming: new Set() });
+  expect(await scheduledSessionIds(client.db, session.workspaceId, [session.id])).toEqual(
+    new Set([session.id]),
+  );
+
+  // Resuming a future one-time schedule makes it upcoming again.
+  await updateScheduledTask(client.db, session.workspaceId, pausedFuture.id, { status: "active" });
+  expect((await targets()).upcoming).toEqual(new Set([session.id]));
+  await deleteScheduledTask(client.db, session.workspaceId, pausedFuture.id);
+  expect((await targets()).upcoming).toEqual(new Set());
+
+  const calendar = await create("active", { type: "calendar", hour: 9, minute: 0 });
+  expect((await targets()).upcoming).toEqual(new Set([session.id]));
+  for (const task of [stale, expired, ended, manual, calendar]) {
+    await deleteScheduledTask(client.db, session.workspaceId, task.id);
+  }
+  expect(await targets()).toEqual({ scheduled: new Set(), upcoming: new Set() });
+}, 60_000);
+
+test("an upcoming run needs an active schedule with a run left", () => {
+  const now = new Date("2026-10-22T08:00:00Z");
+  const upcoming = (status: string, schedule: unknown) =>
+    scheduledTaskHasUpcomingRun({ status, schedule }, now);
+  expect(upcoming("active", { type: "once", runAt: "2026-10-22T09:00:00+01:00" })).toBe(false);
+  expect(upcoming("active", { type: "once", runAt: "2026-10-22T08:00:01Z" })).toBe(true);
+  expect(upcoming("paused", { type: "once", runAt: "2026-10-23T08:00:00Z" })).toBe(false);
+  expect(upcoming("active", { type: "once", runAt: "not a date" })).toBe(false);
+  expect(upcoming("active", { type: "interval", everySeconds: 60 })).toBe(true);
+  expect(
+    upcoming("active", { type: "interval", everySeconds: 60, endAt: "2026-10-23T00:00:00Z" }),
+  ).toBe(true);
+  expect(
+    upcoming("active", { type: "interval", everySeconds: 60, endAt: "2026-10-21T00:00:00Z" }),
+  ).toBe(false);
+  expect(upcoming("active", { type: "calendar", hour: 1, minute: 0 })).toBe(true);
+  expect(upcoming("paused", { type: "calendar", hour: 1, minute: 0 })).toBe(false);
+  expect(upcoming("active", { type: "manual" })).toBe(false);
+  expect(upcoming("active", null)).toBe(false);
+});

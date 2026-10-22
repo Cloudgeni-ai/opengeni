@@ -340,11 +340,12 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     const [core] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-        provider_account_id, plan_type, managed_by_workspace_id, allowed_model_ids
+        provider_account_id, plan_type, managed_by_workspace_id, allowed_model_ids,
+        allow_personal_workspaces
       ) values (
         ${fixture.accountId}::uuid, 'codex', 'subscription', ${tokens("access-core")}, 'shared',
         'workspaces', ${`chatgpt-access-${crypto.randomUUID()}`}, 'pro',
-        ${fixture.workspaceId}::uuid, ${[codexModels[0]!.id]}::text[]
+        ${fixture.workspaceId}::uuid, ${[codexModels[0]!.id]}::text[], false
       ) returning id::text as id`;
     await shared!.admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)

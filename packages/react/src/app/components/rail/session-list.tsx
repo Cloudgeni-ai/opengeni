@@ -5,6 +5,7 @@
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
+import { useSiteOpenedListener } from "../../lib/site-opened";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -15,6 +16,7 @@ import {
   sessionListGroupRevision,
 } from "../../lib/session-list-dirty-scopes";
 import { SiteOriginLink } from "../session/site-origin-link";
+import { sessionSiteOrigin } from "../../lib/session-site-origin";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
 import {
@@ -43,7 +45,9 @@ import {
 } from "lucide-react";
 import { toast } from "../../lib/toast";
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -149,6 +153,7 @@ import {
   defaultExpandedAncestors,
   sessionAncestorPath,
   sessionStateLabel,
+  sessionHasUpcomingSchedule,
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
@@ -187,9 +192,11 @@ import {
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
+  parseSiteRowKey,
   relativeTimeLabel,
   sessionBrowseResultCount,
   selectedDescendantNode,
+  siteRowConversationCount,
   sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
@@ -204,6 +211,7 @@ import {
   type SessionForest,
   type SessionRecencyGroup,
 } from "../../lib/sessions-group";
+import { railRouteSelection } from "../../lib/routes";
 import {
   readSessionBrowsePreferences,
   DEFAULT_SESSION_BROWSE_PREFERENCES,
@@ -240,6 +248,8 @@ import type { Channel, Session as SessionDetails } from "../../types";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { chordLabel, currentPlatform } from "../../lib/actions/chords";
+import { useHeldModifier } from "../../lib/actions/held-modifier";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
@@ -357,10 +367,11 @@ export function SessionList() {
   const setContextSession = context.setSession;
   const navigate = useNavigate();
   const activeSessionId = useRouterState({
-    select: (state): string | null => {
-      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
-      return match?.[1] ?? null;
-    },
+    select: (state): string | null => railRouteSelection(state.location).sessionId,
+  });
+  // The Site view marks its Site row, or the conversation open beside it.
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
   });
   const [documentForeground, setDocumentForeground] = useState(() =>
     Boolean(document.visibilityState === "visible" && document.hasFocus()),
@@ -449,6 +460,9 @@ export function SessionList() {
     mineOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
+    // Sites are rows of their own: their conversations nest under them and
+    // arrive as complete Site rows. Search and Archived list them as rows.
+    siteConversations: hierarchyMode && browseStatus !== "archived" ? "group" : "include",
     archiveStatus: browseStatus,
     ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
@@ -462,6 +476,7 @@ export function SessionList() {
     projection: "summary",
     limit: 1,
     pinsOnly: true,
+    siteConversations: "include",
     includeTotals: !hierarchyMode || browseStatus === "archived",
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
@@ -523,10 +538,25 @@ export function SessionList() {
     },
     [refresh, refreshGlobalPins, refreshChannels],
   );
+  // Opening a Site moves its row: only the grouped root page carries Site rows.
+  const refreshSiteRows = useCallback(() => void refresh(), [refresh]);
+  useSiteOpenedListener(
+    rail.workspaceId,
+    refreshSiteRows,
+    hierarchyMode && browseStatus !== "archived",
+  );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
-    if (workspaceSessionListEvent.available)
-      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+    if (!workspaceSessionListEvent.available) return;
+    const { sessionIds, siteSessionIds = [] } = workspaceSessionListEvent;
+    // A Site conversation the rail has not loaded sits in a collapsed Site
+    // row, whose summary arrives with the root page this always re-reads.
+    // Only loaded ones dirty their own branch; none forces a full reload.
+    void refreshSessionPages(
+      sessionIds === null
+        ? null
+        : [...sessionIds, ...siteSessionIds.filter((id) => knownListSessions.current.has(id))],
+    );
   }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
   useEffect(() => {
     if (workspaceControlEvent) void refreshSessionPages();
@@ -715,7 +745,8 @@ export function SessionList() {
     branchSummaryKeys.current.clear();
     activeBranchHydration.current = null;
     setChildPages(new Map());
-  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
+    // Site rows list root conversations, so the root filters scope them too.
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus, needsYouOnly, mineOnly]);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -1474,9 +1505,22 @@ export function SessionList() {
   const railSections = useMemo(
     () =>
       buildPinnedRailSections(projectedSessions, new Date(), {
-        groupSites: hierarchyMode && browseGroupBy === "project",
+        // Sites are stable rows whenever the rail is a hierarchy. Search is
+        // flat: a matching conversation is listed as itself.
+        groupSites: hierarchyMode,
+        siteGroups: rootPage.siteGroups ?? undefined,
+        siteRowsByProject: channelMode,
+        workspaceId: rail.workspaceId,
+        creator: { kind: "subject", subjectId: context.accessContext.subjectId },
       }),
-    [projectedSessions, hierarchyMode, browseGroupBy],
+    [
+      projectedSessions,
+      hierarchyMode,
+      rootPage.siteGroups,
+      channelMode,
+      rail.workspaceId,
+      context.accessContext.subjectId,
+    ],
   );
   const forest = useMemo(
     () =>
@@ -1938,8 +1982,15 @@ export function SessionList() {
       for (const node of bucket.sessions) visit(node);
     }
     for (const node of archivedNodes) visit(node);
+    // Site rows are presentation-only; register them by key for disclosure.
+    for (const node of [
+      ...railSections.ordinary.running,
+      ...railSections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ]) {
+      if (node.siteGroup && !result.has(node.session.id)) result.set(node.session.id, node);
+    }
     return result;
-  }, [archivedNodes, railSections.complete]);
+  }, [archivedNodes, railSections.complete, railSections.ordinary]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -2006,11 +2057,24 @@ export function SessionList() {
       );
       try {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        // A Site row's "children" are the Site's own root conversations.
+        const siteRow = parseSiteRowKey(parentSessionId);
         const page = await readLoadedSessionBranchWindow(
           (pageCursor) =>
             context.client.listSessionSummaryPage(rail.workspaceId, {
               limit: 50,
-              parentSessionId,
+              ...(siteRow
+                ? {
+                    parentSessionId: null,
+                    originSiteId: siteRow.siteId,
+                    ...(siteRow.channelId !== undefined ? { channelId: siteRow.channelId } : {}),
+                    // Its conversations are roots: list exactly the set the
+                    // Site row's count was computed over.
+                    ...(needsYouOnly ? { needsYouOnly: true } : {}),
+                    ...(mineOnly ? { mineOnly: true } : {}),
+                  }
+                : // Work spawned by a Site conversation runs inside the Site too.
+                  { parentSessionId, siteConversations: "include" as const }),
               ...(pageCursor ? { cursor: pageCursor } : {}),
               archiveStatus: browseStatus,
               sortBy: browseSortBy,
@@ -2050,6 +2114,8 @@ export function SessionList() {
       branchReadRevision,
       browseSortBy,
       browseStatus,
+      needsYouOnly,
+      mineOnly,
     ],
   );
   // The active route supplies exact child + ancestor detail even before the
@@ -2145,6 +2211,46 @@ export function SessionList() {
       });
     }
   }, [allSessions, childPages, context.session, expanded, loadChildPage, branchReadRevision]);
+  // A loaded Site row follows its complete server summary: a new or newly
+  // active conversation reloads an open Site and marks a closed one stale.
+  const siteRowSummaryKeys = useRef(new Map<string, string>());
+  useEffect(() => {
+    const newlyStale = new Set<string>();
+    for (const [key, page] of childPages) {
+      if (!parseSiteRowKey(key)) continue;
+      const summary = nodesById.get(key)?.siteSummary;
+      // Membership and status always matter; activity time only when the
+      // rows are ordered by it.
+      const next = summary
+        ? [
+            summary.conversations,
+            summary.total,
+            summary.attention,
+            summary.failed,
+            summary.active,
+            summary.queued,
+            summary.waiting,
+            summary.unread,
+            browseSortBy === "updatedAt" ? summary.updatedAt : "",
+          ].join(":")
+        : "";
+      const previous = siteRowSummaryKeys.current.get(key);
+      if (page.loading) continue;
+      siteRowSummaryKeys.current.set(key, next);
+      if (previous === undefined || previous === next) continue;
+      if (expanded.has(key)) void loadChildPage(key, undefined, { feedbackVisible: false });
+      else if (!page.stale) newlyStale.add(key);
+    }
+    if (newlyStale.size === 0) return;
+    setChildPages((current) => {
+      const next = new Map(current);
+      for (const key of newlyStale) {
+        const page = next.get(key);
+        if (page) next.set(key, { ...page, stale: true });
+      }
+      return next;
+    });
+  }, [childPages, expanded, loadChildPage, nodesById, browseSortBy]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -2161,9 +2267,9 @@ export function SessionList() {
         return next;
       });
       const node = nodesById.get(sessionId);
-      if (sessionId.startsWith("site:")) return;
-      const knownDirectChildren =
-        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      const knownDirectChildren = node?.siteGroup
+        ? siteRowConversationCount(node)
+        : (node?.session.treeStats?.directChildren ?? node?.children.length ?? 0);
       if (
         opening &&
         hierarchyMode &&
@@ -2177,6 +2283,30 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
+  // Opening one of a Site's conversations opens its Site row once per visit
+  // to that Site, as a person's own expansion would: it stays open when
+  // another session is selected, and closing it again is respected while
+  // switching between the Site's conversations.
+  const openSiteId =
+    activeSiteId ??
+    (activeSessionId &&
+    context.session?.id === activeSessionId &&
+    context.session.parentSessionId === null
+      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
+      : null);
+  const siteRouteExpansion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hierarchyMode || !openSiteId) {
+      siteRouteExpansion.current = null;
+      return;
+    }
+    // The Site itself is marked without opening its row.
+    if (!activeSessionId || siteRouteExpansion.current === openSiteId) return;
+    const rows = [...nodesById.values()].filter((node) => node.siteGroup?.siteId === openSiteId);
+    if (rows.length === 0) return;
+    siteRouteExpansion.current = openSiteId;
+    for (const row of rows) if (!expanded.has(row.session.id)) toggleExpand(row.session.id);
+  }, [activeSessionId, expanded, hierarchyMode, nodesById, openSiteId, toggleExpand]);
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     // Channel mode replaces the ordinary recency forest with channel sections;
@@ -2239,16 +2369,21 @@ export function SessionList() {
   // and ⌘1 to ⌘9 follow the order shown here.
   const directorySubject = context.accessContext.subjectId;
   useEffect(() => {
-    rememberChats(directorySubject, rail.workspaceId, [...pinned, ...sessions]);
-  }, [directorySubject, rail.workspaceId, pinned, sessions]);
+    rememberChats(directorySubject, [...pinned, ...sessions]);
+  }, [directorySubject, pinned, sessions]);
   useEffect(() => {
     setSidebarOrder(
       directorySubject,
       rail.workspaceId,
       flat.map((session) => session.id),
-      pinned.map((session) => session.id),
+      pinnedNodes.map((node) => node.session.id),
     );
-  }, [directorySubject, rail.workspaceId, flat, pinned]);
+  }, [directorySubject, rail.workspaceId, flat, pinnedNodes]);
+  // ⌘1 to ⌘9 open the pinned chats in the order shown; holding ⌘ shows which.
+  const pinnedJumpNumbers = useMemo(
+    () => new Map(pinnedNodes.slice(0, 9).map((node, index) => [node.session.id, index + 1])),
+    [pinnedNodes],
+  );
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
@@ -3474,32 +3609,47 @@ export function SessionList() {
           <>
             {pinnedNodes.length > 0 ? (
               <>
-                <SessionGroup
-                  label="Pinned"
-                  nodes={pinnedNodes}
-                  localDeliveryAttention={localDeliveryAttention}
-                  flat={flat}
-                  activeSessionId={activeSessionId}
-                  focusIndex={focusIndex}
-                  onFocusSession={setFocusedSessionId}
-                  expanded={expanded}
-                  onToggleExpand={toggleExpand}
-                  childPages={childPages}
-                  onLoadMoreChildren={loadChildPage}
-                  onRename={context.updateSessionTitle}
-                  onPin={onPin}
-                  channels={channels}
-                  onMoveToChannel={onMoveToChannel}
-                  onUpdateAttention={onUpdateAttention}
-                  onArchive={onArchive}
-                  onRequestDelete={setSessionPendingDelete}
-                />
+                <PinnedJumpNumbers.Provider value={pinnedJumpNumbers}>
+                  <SessionGroup
+                    label="Pinned"
+                    nodes={pinnedNodes}
+                    localDeliveryAttention={localDeliveryAttention}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
+                  />
+                </PinnedJumpNumbers.Provider>
                 {pinnedTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
                     Showing the 100 most recently pinned sessions. Older pins are omitted.
                   </p>
                 ) : null}
               </>
+            ) : null}
+            {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+              <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                Some older Sites aren&apos;t shown. Find them in{" "}
+                <Link
+                  to="/workspaces/$workspaceId/artifacts"
+                  params={{ workspaceId: rail.workspaceId }}
+                  className="underline underline-offset-2 hover:text-fg"
+                >
+                  Artifacts
+                </Link>
+                .
+              </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (
               renderedChannelSections.map((section) => (
@@ -4208,25 +4358,37 @@ function SessionGroup(props: {
   );
 }
 
-/** A node plus, when expanded, its spawned children rendered one level deeper. */
+/**
+ * A Site row. Its conversations stay nested under it whichever session is
+ * open: collapsed it shows only the selected one, expanded it lists them all.
+ */
 function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
   const { node } = props;
   const origin = node.siteGroup!;
-  const key = `site:${origin.siteId}`;
+  const key = node.session.id;
   const expanded = props.expanded.has(key);
-  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const summary = summarizeRailNodes([node], props.localDeliveryAttention);
   const selected = selectedDescendantNode(node, props.activeSessionId);
   const children = expanded ? node.children : selected ? [selected] : [];
+  const page = props.childPages.get(key);
+  const count = siteRowConversationCount(node);
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
+  });
   return (
     <div role="listitem" className="min-w-0">
       <SiteSessionGroupHeading
         origin={origin}
         workspaceId={node.session.workspaceId}
+        active={activeSiteId === origin.siteId && props.activeSessionId === null}
         expanded={expanded}
         onToggle={() => props.onToggleExpand(key)}
         summary={summary}
+        count={count}
+        relativeTime={relativeTimeLabel(t, node.session.updatedAt)}
+        depth={props.depth}
       />
-      {children.length > 0 && (
+      {children.length > 0 || (expanded && page) ? (
         <div role="list" aria-label={`Conversations from ${origin.title}`}>
           {children.map((child) => (
             <SessionTreeRow
@@ -4234,10 +4396,28 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
               {...props}
               node={child}
               depth={props.depth + 1}
+              nestedInSiteId={origin.siteId}
             />
           ))}
+          {expanded && page?.loading && page.feedbackVisible ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading conversations…" />
+          ) : null}
+          {expanded && page?.failed && page.feedbackVisible ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading conversations"
+              onClick={() => void props.onLoadMoreChildren(key, page.retryCursor ?? undefined)}
+            />
+          ) : null}
+          {expanded && !page?.loading && !page?.failed && page?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(key, page.nextCursor!)}
+            />
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -4261,6 +4441,8 @@ function SessionTreeRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  /** Listed under its Site row: opens in that Site's view, which names the Site. */
+  nestedInSiteId?: string | undefined;
 }) {
   const { node } = props;
   if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
@@ -4305,6 +4487,7 @@ function SessionTreeRow(props: {
         onUpdateAttention={props.onUpdateAttention}
         onArchive={props.onArchive}
         onRequestDelete={props.onRequestDelete}
+        nestedInSiteId={props.nestedInSiteId}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -4410,6 +4593,23 @@ function TreeLoadRow({
   );
 }
 
+/** The ⌘1 to ⌘9 number of each top-level pinned row; absent outside the Pinned section. */
+const PinnedJumpNumbers = createContext<ReadonlyMap<string, number> | null>(null);
+
+/** "⌘3" while ⌘ is held on a pinned row that ⌘3 opens; otherwise nothing. */
+function usePinnedJumpKey(sessionId: string, depth: number, mobile: boolean): string | undefined {
+  const jumpNumber = useContext(PinnedJumpNumbers)?.get(sessionId);
+  // Only where ⌘1 to ⌘9 work: browsers keep those keys for their own tabs.
+  const pinnedKeys = useActionShortcut("go.pinnedChat");
+  const platform = currentPlatform();
+  const held = useHeldModifier(
+    platform,
+    Boolean(pinnedKeys && jumpNumber && depth === 0 && !mobile),
+  );
+  if (!held || !pinnedKeys || !jumpNumber) return undefined;
+  return chordLabel({ ...pinnedKeys.chord, code: `Digit${jumpNumber}` }, platform);
+}
+
 function SessionRow(props: {
   session: Session;
   index: number;
@@ -4434,6 +4634,7 @@ function SessionRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  nestedInSiteId?: string | undefined;
 }) {
   const rail = useRail();
   const context = useAppContext();
@@ -4446,6 +4647,7 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   // A key press puts the person's attention elsewhere (⌘K right after opening a
   // chat, with the pointer still on its row), so the hover card gives way, as
   // tooltips do.
@@ -4562,7 +4764,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={props.session.hasSchedules === true}
+          scheduled={sessionHasUpcomingSchedule(props.session)}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -4580,7 +4782,7 @@ function SessionRow(props: {
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
-          <SiteOriginLink session={props.session} compact />
+          {props.nestedInSiteId ? null : <SiteOriginLink session={props.session} compact />}
           <HoverCard
             openDelay={100}
             closeDelay={80}
@@ -4589,7 +4791,16 @@ function SessionRow(props: {
           >
             <HoverCardTrigger asChild>
               <Link
-                to="/workspaces/$workspaceId/sessions/$sessionId"
+                {...(props.nestedInSiteId
+                  ? {
+                      to: "/workspaces/$workspaceId/sites/$siteId",
+                      params: { workspaceId: rail.workspaceId, siteId: props.nestedInSiteId },
+                      search: { conversation: props.session.id },
+                    }
+                  : {
+                      to: "/workspaces/$workspaceId/sessions/$sessionId",
+                      params: { workspaceId: rail.workspaceId, sessionId: props.session.id },
+                    })}
                 draggable={props.session.parentSessionId === null && !props.session.archived}
                 onDragStart={(event) => {
                   if (props.session.parentSessionId !== null || props.session.archived) {
@@ -4600,7 +4811,6 @@ function SessionRow(props: {
                   event.dataTransfer.effectAllowed = "move";
                   event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
                 }}
-                params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
                 data-session-index={props.index}
                 data-session-focus
                 data-session-row={props.session.id}
@@ -4691,8 +4901,9 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={props.session.hasSchedules === true}
+                  scheduled={sessionHasUpcomingSchedule(props.session)}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
+                  jumpKey={jumpKey}
                   creator={creator}
                 />
               </Link>

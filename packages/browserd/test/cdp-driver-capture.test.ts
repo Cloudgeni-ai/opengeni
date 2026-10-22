@@ -336,7 +336,6 @@ test("the supervisor preserves target authority when a failed capture has a slow
   let driverLifecycles = 0;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "s"),
     createDriver: async () => {
       driverLifecycles += 1;
       return fixture.driver;
@@ -447,7 +446,6 @@ test("a fully fenced action preserves a frame timeout before dispatch", async ()
   const directory = await mkdtemp("/tmp/ogb-frame-timeout-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "s"),
     createDriver: async () => fixture.driver,
   });
   try {

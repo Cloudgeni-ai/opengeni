@@ -42,58 +42,86 @@ const usage: InsightsSiteUsageResponse = {
       subscriptionApiEquivalentMicros: 1_000_000,
       ownKeyApiEquivalentMicros: 0,
     },
+    {
+      siteId: "33333333-3333-4333-8333-333333333333",
+      title: "Unpriced app",
+      kind: "site",
+      calls: 3,
+      pricedCalls: 0,
+      chargedMicros: 0,
+      apiEquivalentMicros: 0,
+      subscriptionApiEquivalentMicros: 0,
+      ownKeyApiEquivalentMicros: 0,
+    },
   ],
 };
 
-test("Site AI distinguishes actual charges and incomplete estimates without conversation links", async () => {
+async function render(node: React.ReactNode) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  try {
-    await act(async () => root.render(<components.SiteAiUsageView usage={usage} />));
-    expect(container.querySelector("h3")?.textContent).toBe("Model costs");
-    expect(container.textContent).not.toContain("Site AI");
-    expect(container.textContent).toContain("Credits charged");
-    expect(container.textContent).toContain("API-equivalent");
-    expect(container.textContent).toContain("partial");
-    expect(container.textContent).toContain("Private or unavailable Sites");
-    expect(container.querySelectorAll("a")).toHaveLength(0);
-    expect(container.innerHTML).not.toContain(usage.rows[0]!.siteId!);
-    expect(container.querySelector("td[title]")?.getAttribute("title")).toContain(
-      "18 of 20 calls priced",
-    );
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
+  await act(async () => root.render(node));
+  return {
+    container,
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function cellTexts(container: HTMLElement, title: string): string[] {
+  const row = [...container.querySelectorAll('[role="row"]')].find((candidate) =>
+    candidate.textContent?.includes(title),
+  );
+  return [...(row?.querySelectorAll('[role="cell"]') ?? [])].map((cell) =>
+    (cell.textContent ?? "").trim(),
+  );
+}
+
+test("model costs by Site use the Breakdown table with its money formatting", async () => {
+  const view = await render(<components.SiteAiUsageTable usage={usage} />);
+  const { container } = view;
+  const table = container.querySelector('[role="table"]');
+  expect(table?.getAttribute("aria-label")).toBe("Model costs by Site");
+  const headers = [...container.querySelectorAll('[role="columnheader"]')].map((cell) =>
+    (cell.textContent ?? "").trim(),
+  );
+  expect(headers.slice(0, 4)).toEqual(["Site", "Calls", "Charged", "API-equivalent"]);
+  // Estimates carry the page's "~"; a partly priced amount gets the Breakdown asterisk.
+  expect(cellTexts(container, "Operations app").join("|")).toContain("20|$3.00|~$9.00*");
+  expect(cellTexts(container, "Private or unavailable Sites").join("|")).toContain(
+    "4|$0.00|~$1.00",
+  );
+  // Nothing priced: a dash with its reason, never a misleading $0.
+  expect(cellTexts(container, "Unpriced app").join("|")).toContain("3|$0.00|—");
+  expect(container.querySelector('[aria-label="Not priced"]')).not.toBeNull();
+  // The subscription / own-key split is a focusable tooltip, not a hover-only title.
+  expect(container.querySelector("[title]")).toBeNull();
+  const estimate = [...container.querySelectorAll<HTMLElement>('[tabindex="0"]')].find(
+    (element) => element.textContent === "~$9.00",
+  );
+  expect(estimate).toBeDefined();
+  await act(async () => estimate!.click());
+  expect(estimate!.getAttribute("data-state")).toEndWith("open");
+  // Radix skips portals when it first loaded without a DOM (other files in one process).
+  const tooltip = document.querySelector('[data-slot="reason-tooltip"]');
+  if (tooltip) expect(tooltip.textContent).toContain("Subscriptions: $5.00; own API keys: $1.00.");
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+  // Folded on a phone, a row keeps the charge and the estimate, not just the estimate.
+  const phoneHidden = [...container.querySelectorAll("span")]
+    .filter((span) => span.textContent === "Charged " || span.textContent === "API-equivalent ")
+    .map((label) => label.parentElement?.className.includes("@max-[479px]/list:hidden"));
+  expect(phoneHidden.length).toBeGreaterThan(0);
+  expect(phoneHidden.every((hidden) => hidden === false)).toBe(true);
+  expect(container.querySelectorAll("a")).toHaveLength(0);
+  expect(container.innerHTML).not.toContain(usage.rows[0]!.siteId!);
+  await view.unmount();
 });
 
-test("Site AI gives an explicit empty state and a bounded failure state", async () => {
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
-  try {
-    await act(async () =>
-      root.render(<components.SiteAiUsageView usage={{ ...usage, rows: [] }} />),
-    );
-    expect(container.textContent).toContain("No model usage attributed to Sites");
-    await act(async () =>
-      root.render(
-        <components.SiteAiUsageSection
-          workspaceId={usage.workspaceId}
-          range="month"
-          client={{
-            getWorkspaceInsightsSiteUsage: async () => {
-              throw new Error("private diagnostics");
-            },
-          }}
-        />,
-      ),
-    );
-    expect(container.textContent).toContain("Couldn’t load Site model costs.");
-    expect(container.textContent).not.toContain("private diagnostics");
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
+test("an empty period says so instead of drawing an empty table", async () => {
+  const view = await render(<components.SiteAiUsageTable usage={{ ...usage, rows: [] }} />);
+  expect(view.container.querySelector('[role="table"]')).toBeNull();
+  expect(view.container.textContent).toBe("No model usage attributed to Sites in this period.");
+  await view.unmount();
 });

@@ -1,4 +1,5 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { userSetupCardPoster } from "./user-setup-card";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -23,18 +24,12 @@ import {
   type OpenGeniRuntime,
   type RunMcpCredentials,
   selectedSessionRemoteMcpTargets,
-  type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
-import {
-  createGoogleDrivePublicationAttemptTool,
-  googleDrivePublicationConnectorCall,
-  resolveGoogleDrivePublicationTarget,
-} from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
   accountRouteAuthNeededPayload,
@@ -302,7 +297,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     bus,
     runtime,
-    objectStorage,
     observability,
     cancellationSignal,
     eventing,
@@ -325,7 +319,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     activeSandboxBackend,
     groupBoxBackend,
     routingOn,
-    runtimeCancellationSignal,
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
@@ -401,25 +394,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       subjectId: turn.initiator.subjectId,
     },
   } as const;
-  const googleDrivePublicationTarget = objectStorage
-    ? await resolveGoogleDrivePublicationTarget(
-        db,
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-        personalConnectionDelegations,
-      )
-    : null;
-  const googleDrivePublicationTool =
-    objectStorage && googleDrivePublicationTarget
-      ? createGoogleDrivePublicationAttemptTool({
-          db,
-          objectStorage,
-          identity: connectorActionIdentity,
-          subjectId: googleDrivePublicationTarget.ownerSubjectId,
-          target: googleDrivePublicationTarget,
-          resolveCredential,
-          ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-        })
-      : null;
   const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
@@ -538,35 +512,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
-  const googleDrivePublicationAllowed =
-    selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
-    selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
-    hasPermission(
-      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
-      "artifacts:read",
-    ) &&
-    hasPermission(
-      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
-      "artifacts:publish",
-    );
-  const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
-    googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
-      ? [
-          {
-            modelName: googleDrivePublicationTool.modelName,
-            call: (approvalId, arguments_) =>
-              googleDrivePublicationConnectorCall(
-                googleDrivePublicationTarget,
-                arguments_,
-                approvalId,
-              ),
-          },
-        ]
-      : [];
-  const attemptConnectorActionBindings = [
-    ...googleDriveConnectorBindings,
-    ...githubRestMcp.connectorBindings,
-  ];
+  const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
   const connectorActionPolicy: ConnectorActionPolicyHooks = {
     preview: async (call) =>
       await previewConnectorActionApproval(db, connectorActionIdentity, call),
@@ -582,24 +528,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
-  // Independent scoped reads after the native-link authority check. Both
-  // finish before assembling the Skill index or preparing executable tools.
+  // These reads only feed the Skill index. Disabled Skills need neither the
+  // descriptors nor bundled files; agent build still rechecks live video policy.
+  // Enabled reads remain independent and finish before executable preparation.
   const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    listSkillDescriptors(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-    }),
+    toolFamilies.skills === false
+      ? Promise.resolve(null)
+      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    toolFamilies.skills === false
+      ? Promise.resolve([])
+      : listSkillDescriptors(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+        }),
   ]);
-  const bundledSkills = loadConfiguredBundledSkills({
-    // Rows that could not freeze the "none" default at create (scheduled
-    // generated sessions, pre-existing rows) get the same rule here.
-    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
-    firstPartyTools: selectedFirstPartyMcpTools,
-    videoGenerationEnabled:
-      skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
-  });
+  const bundledSkills =
+    toolFamilies.skills === false
+      ? []
+      : loadConfiguredBundledSkills({
+          // Rows that could not freeze the "none" default at create (scheduled
+          // generated sessions, pre-existing rows) get the same rule here.
+          bundledSkillIds: bundledSkillSelectionForAgentConfig(
+            session.bundledSkillIds,
+            session.agent,
+          ),
+          firstPartyTools: selectedFirstPartyMcpTools,
+          videoGenerationEnabled:
+            skillConfiguration !== null &&
+            skillConfiguration.defaultModelId !== null &&
+            skillConfiguration.enabledModelIds.length > 0,
+        });
   const selectedSkills = [
     ...bundledSkills,
     ...session.skills.map((skill) => ({
@@ -920,10 +879,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
+      postSetupCard: userSetupCardPoster({
+        db,
+        bus,
+        connectedMachinesEnabled: runSettings.sandboxSelfhostedEnabled,
+        webBaseUrl: runSettings.webBaseUrl ?? runSettings.publicBaseUrl,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: input.attemptId,
+      }),
     }),
-    ...(googleDrivePublicationTool && googleDrivePublicationAllowed
-      ? [googleDrivePublicationTool]
-      : []),
     ...codeSearchTools,
     ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));

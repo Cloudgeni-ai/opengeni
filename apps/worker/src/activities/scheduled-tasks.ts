@@ -1,5 +1,11 @@
+import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
+import { scheduledTaskSessionTitle } from "./scheduled-task-title";
+export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
@@ -19,7 +25,6 @@ import {
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
-  normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
@@ -51,6 +56,7 @@ import {
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
   recordUserMessageAccepted,
@@ -254,10 +260,6 @@ function recordScheduledSessionCreated(observability: ProductUsageMetricsSink | 
   });
 }
 
-export function scheduledTaskSessionTitle(taskName: string): string {
-  return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
-}
-
 /**
  * Title a session the scheduler generated, and emit the same `session.title_set`
  * event every other title write in the product emits.
@@ -370,6 +372,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
+        if (
+          priorRun.status === "queued" &&
+          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
+        ) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+          );
+          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
+        }
         if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
           await markScheduledTaskRunFailedIfQueued(
             db,
@@ -447,6 +461,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
+      if (isRetiredNativeGoogleDriveTask(task))
+        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
       if (isRetiredNativeAtlassianTask(task))
         return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
@@ -649,7 +665,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
-          taskTools = written.tools;
+          taskTools = newSessionKnowledgeSearchTools(
+            written.tools,
+            resolvedAgentConfig,
+            firstPartyMcpTools,
+            settings.mcpServers,
+          );
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
@@ -2421,6 +2442,8 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
+    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
   if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
     return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {

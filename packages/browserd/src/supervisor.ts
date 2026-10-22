@@ -5,7 +5,6 @@ import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./h
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
   BrowserActionCommand,
@@ -29,7 +28,7 @@ import type {
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
-import type { UpdateBlocker } from "./update-admission";
+import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserDownloadExportRequest,
@@ -52,9 +51,13 @@ import {
   type BrowserTabNavigationOptions,
 } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
+import {
+  readDetachedBrowserRecords,
+  removeDetachedBrowserRecord,
+  writeDetachedBrowserRecord,
+} from "./detached-browsers";
 import { uploadBrowserDownload } from "./download-upload";
 import { BrowserRecording, type RecordingFrameSource, type RecordingSummary } from "./recording";
-import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
 import { ExternalProviderCdpRunner } from "./external-provider-runner";
@@ -67,8 +70,7 @@ import {
 } from "./media";
 import {
   AgentBrowserCommandError,
-  AgentBrowserJsonRunner,
-  assertAgentBrowserSocketPath,
+  ManagedBrowserRunner,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
   reapOrphanedAgentBrowserDaemons,
@@ -120,6 +122,7 @@ import {
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
 import { markProfileExitedCleanly } from "./profile-exit-state";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -335,14 +338,12 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
 
 export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   sessionDirectory: string;
-  socketDirectory: string;
   profileDirectory: string;
   restoredProfile: boolean;
   recoverOwnedProcess?: OwnedManagedBrowserProcess;
   allowOwnedProcessLaunch?: boolean;
   headlessSessionCookies?: HeadlessSessionCookies;
   downloadDirectory: string;
-  screenshotDirectory: string;
   headed: boolean;
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
@@ -376,10 +377,9 @@ export type BrowserSupervisorOptions = {
    * the background. */
   passkeys?: boolean;
   rootDirectory: string;
-  socketRootDirectory?: string;
   maxSessions?: number;
-  agentBrowserBinary?: ResolvedAgentBrowserBinary;
-  lightpandaBinary?: ResolvedLightpandaBinary;
+  /** Resolves the verified Lightpanda binary when a Lightpanda session first needs it. */
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>;
   headlessShell?: VerifiedHeadlessShell;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -402,7 +402,22 @@ export type BrowserSupervisorOptions = {
     operation: "end" | "launch",
     browserSessionId: string,
   ) => Promise<void>;
+  /** Close a managed browser nobody used for this long, keeping its profile
+   * on disk; its next request relaunches it with the same tabs (default 10
+   * minutes, 0 disables). */
+  idleReleaseMs?: number;
+  /** Clock for idle release; tests advance it. */
+  now?: () => number;
 };
+
+/** Managed browsers stop after this long unused. The profile, tabs and
+ * downloads stay on disk, and the next request relaunches the browser on them,
+ * so an idle browser costs no memory or CPU while waiting. */
+export const BROWSER_IDLE_RELEASE_MS = 10 * 60_000;
+const IDLE_RELEASE_SWEEP_MS = 60_000;
+/** How long a handed-off browser gets to save its session and exit after a
+ * close request before it is stopped by signal. */
+const HANDED_OFF_CLOSE_TIMEOUT_MS = 10_000;
 
 type Runtime = {
   options: BrowserRuntimeOptions;
@@ -429,6 +444,8 @@ type Runtime = {
   presence: Set<PresenceHold>;
   /** The session's current or last recording; one at a time. */
   recording: BrowserRecording | null;
+  /** When a request last reached this browser (supervisor clock). */
+  lastUsedAt: number;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
@@ -460,7 +477,6 @@ type ValidatedBrowserSupervisorSessionOptions = Omit<
 /** One placement-local authority hosting many independently fenced browser sessions. */
 export class BrowserSupervisor {
   readonly rootDirectory: string;
-  readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
   private readonly passkeysEnabled: boolean;
@@ -495,19 +511,18 @@ export class BrowserSupervisor {
   private cleanupUncertain = false;
   /** Browsers whose failed reattach could not prove its transport detached. */
   private readonly recoveryTransportsUncertain = new Set<string>();
+  private readonly idleReleaseMs: number;
+  private readonly now: () => number;
+  private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
+  /** Browsers an earlier controller handed off that this one is stopping. */
+  private readonly releasingDetached = new Map<string, Promise<void>>();
+  /** Handed-off browsers the last sweep found still waiting for their idle
+   * time; the controller is not empty while any remain. */
+  private detachedWaiting = 0;
+  private detachedSweep: Promise<string[]> | null = null;
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
-    this.socketRootDirectory = resolve(
-      options.socketRootDirectory ?? defaultSocketRoot(this.rootDirectory),
-    );
-    if (!options.createDriver) {
-      assertAgentBrowserSocketPath({
-        socketDirectory: join(this.socketRootDirectory, "0".repeat(16)),
-        namespace: "og",
-        sessionName: `b${"0".repeat(16)}`,
-      });
-    }
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
     this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
@@ -521,7 +536,6 @@ export class BrowserSupervisor {
           ? this.createEphemeralDriver(context, options)
           : createBrowserDriver(
               context,
-              options.agentBrowserBinary,
               options.lightpandaBinary,
               options.headlessShell,
               options.networkIsolation !== false,
@@ -533,6 +547,169 @@ export class BrowserSupervisor {
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
     this.afterAdoptionPhase = options.afterAdoptionPhase;
     this.afterWorkingDirectoryClaim = options.afterWorkingDirectoryClaim;
+    this.now = options.now ?? Date.now;
+    this.idleReleaseMs = options.idleReleaseMs ?? BROWSER_IDLE_RELEASE_MS;
+    if (this.idleReleaseMs > 0) {
+      this.idleReleaseTimer = setInterval(
+        () => {
+          void this.releaseIdleBrowsers();
+          void this.releaseDetachedBrowsers();
+        },
+        Math.min(IDLE_RELEASE_SWEEP_MS, this.idleReleaseMs),
+      );
+      this.idleReleaseTimer.unref?.();
+    }
+  }
+
+  /**
+   * Closes every managed browser nobody used for the idle release time.
+   * Each keeps its working directory and a recoverable working-runtime
+   * receipt, exactly as a controller shutdown leaves it, except that its
+   * browser process stops instead of running on. The session leaves this
+   * controller; its next request finds it missing, and the control plane
+   * recovers it from that directory: the same profile, relaunched with its
+   * last tabs. Returns the released browser session ids.
+   */
+  async releaseIdleBrowsers(): Promise<string[]> {
+    if (this.closed) return [];
+    return await this.releaseIdleRuntimes();
+  }
+
+  private async releaseIdleRuntimes(): Promise<string[]> {
+    if (this.idleReleaseMs <= 0) return [];
+    const idleBefore = this.now() - this.idleReleaseMs;
+    const released: string[] = [];
+    for (const runtime of [...this.sessions.values()]) {
+      if (!idleReleasable(runtime, idleBefore)) continue;
+      // A download still transferring is the browser at work with nobody
+      // calling it; stopping the browser would fail the download.
+      if (await downloadInProgress(runtime)) continue;
+      if (!idleReleasable(runtime, idleBefore)) continue;
+      const browserSessionId = runtime.options.browserSessionId;
+      if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
+        continue;
+      runtime.lifecycle = "ending";
+      const ending = (async () => {
+        await runtime.controller.waitForIdle();
+        await this.disposeRuntime(runtime, false, false, true, true);
+      })();
+      this.ending.set(browserSessionId, ending);
+      try {
+        await ending;
+        if (this.sessions.get(browserSessionId) === runtime) this.sessions.delete(browserSessionId);
+        released.push(browserSessionId);
+      } catch (error) {
+        console.warn("browserd.idle_release_failed", {
+          browserSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (this.ending.get(browserSessionId) === ending) this.ending.delete(browserSessionId);
+      }
+    }
+    return released;
+  }
+
+  /**
+   * Stops browsers an earlier controller left running at its shutdown (an
+   * agent update or restart) once they have gone unused for the idle release
+   * time. A handed-off browser is adopted again only when its session's next
+   * request arrives; without this, a browser whose session never returns
+   * would run forever. The browser's receipt already records a recoverable
+   * suspension, so its next request relaunches it on the same profile, as
+   * after any idle release. The recorded process is stopped only while its
+   * PID birth and exact profile still identify it. Returns the released ids.
+   */
+  async releaseDetachedBrowsers(): Promise<string[]> {
+    if (this.closed || this.idleReleaseMs <= 0) return [];
+    this.detachedSweep ??= this.sweepDetachedBrowsers().finally(() => {
+      this.detachedSweep = null;
+    });
+    return await this.detachedSweep;
+  }
+
+  private async sweepDetachedBrowsers(): Promise<string[]> {
+    let records;
+    try {
+      records = await readDetachedBrowserRecords(this.rootDirectory);
+    } catch (error) {
+      console.warn("browserd.detached_release_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+    const idleBefore = this.now() - this.idleReleaseMs;
+    const released: string[] = [];
+    let waiting = 0;
+    for (const record of records) {
+      const browserSessionId = record.browserSessionId;
+      const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+      const profileDirectory = join(sessionDirectory, "profile");
+      if (
+        this.sessions.has(browserSessionId) ||
+        this.creating.has(browserSessionId) ||
+        this.ending.has(browserSessionId) ||
+        this.adopting.has(browserSessionId) ||
+        this.endingWorkingCopies.has(browserSessionId)
+      )
+        continue;
+      if (this.closed) break;
+      if (record.lastUsedAt > idleBefore) {
+        waiting += 1;
+        continue;
+      }
+      // Checked and claimed without yielding, so a request that recovers the
+      // same session waits for this stop instead of adopting a dying browser.
+      const release = (async () => {
+        if (record.process.profileDirectory === profileDirectory) {
+          await this.closeHandedOffBrowser(record.process);
+          await this.stopEndedProcess(profileDirectory, record.process);
+        }
+        await removeDetachedBrowserRecord(sessionDirectory);
+      })();
+      this.releasingDetached.set(browserSessionId, release);
+      try {
+        await release;
+        released.push(browserSessionId);
+      } catch (error) {
+        waiting += 1;
+        console.warn("browserd.detached_release_failed", {
+          browserSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (this.releasingDetached.get(browserSessionId) === release)
+          this.releasingDetached.delete(browserSessionId);
+      }
+    }
+    this.detachedWaiting = waiting;
+    return released;
+  }
+
+  /** Ask a handed-off browser to shut down over its own DevTools endpoint,
+   * as an idle release does, so Chromium saves its session and the next
+   * launch restores its tabs. Best effort: the identity-checked stop that
+   * follows ends it either way. */
+  private async closeHandedOffBrowser(owned: OwnedManagedBrowserProcess): Promise<void> {
+    if ((await this.inspectOwnedProcess(owned).catch(() => "exited")) !== "live") return;
+    let connection: CdpConnection;
+    try {
+      connection = await CdpConnection.connect(owned.cdpEndpoint, { timeoutMs: 2_000 });
+    } catch {
+      return;
+    }
+    try {
+      await connection.send("Browser.close", {}, { timeoutMs: 5_000 });
+    } catch {
+      // The browser may drop the connection while it closes.
+    } finally {
+      connection.close();
+    }
+    const deadline = Date.now() + HANDED_OFF_CLOSE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if ((await this.inspectOwnedProcess(owned).catch(() => "exited")) === "exited") return;
+      await Bun.sleep(100);
+    }
   }
 
   private async createEphemeralDriver(
@@ -564,7 +741,6 @@ export class BrowserSupervisor {
       // replace it until its retained shutdown has positively completed.
       if (pool) await pool.close();
       const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
-      const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
         authorityKey: key,
         onTerminal: () => {
@@ -576,26 +752,19 @@ export class BrowserSupervisor {
           });
         },
         launch: async () => {
-          const runner = await AgentBrowserJsonRunner.create({
-            namespace: "og",
-            sessionName: `e${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-            socketDirectory: poolSocketDirectory,
+          const runner = await ManagedBrowserRunner.create({
             profileDirectory: join(poolDirectory, "profile"),
-            downloadDirectory: join(poolDirectory, "downloads"),
-            screenshotDirectory: join(poolDirectory, "screenshots"),
             headed: false,
             ...(options.networkIsolation === false ? { networkIsolation: false } : {}),
             ...(context.browserExecutablePath
               ? { browserExecutablePath: context.browserExecutablePath }
               : {}),
-            ...(options.agentBrowserBinary ? { binary: options.agentBrowserBinary } : {}),
           });
           return {
             run: runner.run.bind(runner),
             terminate: async () => {
               await runner.terminate();
               await rm(poolDirectory, { recursive: true, force: true });
-              await rm(poolSocketDirectory, { recursive: true, force: true });
             },
           };
         },
@@ -618,12 +787,7 @@ export class BrowserSupervisor {
       recursive: true,
       mode: 0o700,
     });
-    await mkdir(supervisor.socketRootDirectory, {
-      recursive: true,
-      mode: 0o700,
-    });
     await chmod(supervisor.rootDirectory, 0o700);
-    await chmod(supervisor.socketRootDirectory, 0o700);
     if (!options.createDriver) {
       await reapManagedBrowserProcesses(supervisor.rootDirectory, async (directory) => {
         // A durable launch/retirement history can include an accepted unknown
@@ -637,10 +801,15 @@ export class BrowserSupervisor {
           throw error;
         }
       });
-      // Daemons whose browser is gone serve nothing and never exit on their
-      // own. Startup must not fail because one of them could not be stopped.
+      // Launcher daemons an earlier release left behind after their browser
+      // ended serve nothing and never exit on their own. Startup must not
+      // fail because one of them could not be stopped.
       await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
     }
+    // Browsers an earlier controller handed off and nobody used since are
+    // stopped now rather than at the first sweep; recent ones are counted so
+    // this controller is not stopped as empty before their idle time ends.
+    void supervisor.releaseDetachedBrowsers();
     return supervisor;
   }
 
@@ -973,6 +1142,17 @@ export class BrowserSupervisor {
     options: ValidatedBrowserSupervisorSessionOptions,
   ): Promise<BrowserSupervisorSession> {
     await this.retireTerminalSessions();
+    // A handed-off browser being stopped for idleness is never adopted while
+    // it dies; its recovery relaunches it once the stop settles. The check
+    // must not yield when nothing is being stopped, so the claim below stays
+    // atomic with it.
+    for (
+      let releasing = this.releasingDetached.get(options.browserSessionId);
+      releasing;
+      releasing = this.releasingDetached.get(options.browserSessionId)
+    ) {
+      await releasing.catch(() => undefined);
+    }
     const active = this.sessions.get(options.browserSessionId);
     if (active) {
       this.assertSameBinding(active, options);
@@ -1014,6 +1194,9 @@ export class BrowserSupervisor {
           "browser supervisor is closed",
         );
       }
+      // This controller holds the browser now; an earlier handoff record
+      // must not outlive that.
+      await removeDetachedBrowserRecord(runtime.sessionDirectory).catch(() => undefined);
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
@@ -1054,6 +1237,21 @@ export class BrowserSupervisor {
     if (this.stateTransferTails.size)
       blockers.push({ kind: "browser_state_transfer", count: this.stateTransferTails.size });
     for (const runtime of this.sessions.values()) {
+      // A restart in the middle of a task fails the agent's next calls while
+      // it lasts, even for a session that survives it. A session used within
+      // the hold is mid-task, so the update waits for a pause.
+      if (
+        runtime.lifecycle === "active" &&
+        runtime.controller.isIdle() &&
+        this.now() - runtime.lastUsedAt < RECENT_USE_UPDATE_HOLD_MS
+      ) {
+        blockers.push({
+          kind: "browser_recent_use",
+          resourceId: runtime.options.browserSessionId,
+          count: 1,
+        });
+        continue;
+      }
       if (restartPreservesRuntime(runtime)) continue;
       const kind =
         runtime.recovery !== null
@@ -1070,7 +1268,12 @@ export class BrowserSupervisor {
 
   /** No session of any lifecycle remains and no work is in flight. */
   isEmpty(): boolean {
-    return this.sessions.size === 0 && this.isIdle();
+    return (
+      this.sessions.size === 0 &&
+      this.detachedWaiting === 0 &&
+      this.detachedSweep === null &&
+      this.isIdle()
+    );
   }
 
   listSessions(): BrowserSessionReference[] {
@@ -1310,7 +1513,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.list();
@@ -1324,7 +1527,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.get(downloadId);
@@ -1516,6 +1719,13 @@ export class BrowserSupervisor {
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
     if (!this.sessions.has(reference.browserSessionId)) {
+      for (
+        let releasing = this.releasingDetached.get(reference.browserSessionId);
+        releasing;
+        releasing = this.releasingDetached.get(reference.browserSessionId)
+      ) {
+        await releasing.catch(() => undefined);
+      }
       const sessionDirectory = join(this.rootDirectory, "sessions", reference.browserSessionId);
       let workingRuntimePresent = true;
       try {
@@ -1555,7 +1765,11 @@ export class BrowserSupervisor {
         return;
       }
     }
+    const usedAt = this.sessions.get(reference.browserSessionId)?.lastUsedAt;
     const runtime = this.requireBound(reference);
+    // A controller shutdown is not a use: the handoff record keeps the time
+    // of the browser's last real request.
+    if (suspendForShutdown && usedAt !== undefined) runtime.lastUsedAt = usedAt;
     if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
     if (existing) {
@@ -1621,6 +1835,8 @@ export class BrowserSupervisor {
   async close(): Promise<void> {
     if (this.closePromise) return await this.closePromise;
     this.closed = true;
+    if (this.idleReleaseTimer) clearInterval(this.idleReleaseTimer);
+    this.idleReleaseTimer = null;
     this.closePromise = this.performClose();
     return await this.closePromise;
   }
@@ -1628,6 +1844,10 @@ export class BrowserSupervisor {
   private async performClose(): Promise<void> {
     await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
+    // A browser already unused for the idle release time is stopped, not
+    // handed off: its successor would only stop it later, and if its session
+    // never returns nothing would. Its next request relaunches it as usual.
+    await this.releaseIdleRuntimes().catch(() => undefined);
     const active = [...this.sessions.values()];
     const results = await Promise.allSettled(
       active.map(async (runtime) => await this.finishSession(binding(runtime), {}, true)),
@@ -1669,11 +1889,9 @@ export class BrowserSupervisor {
     options: ValidatedBrowserSupervisorSessionOptions,
   ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
-    const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
     const uploadDirectory = join(sessionDirectory, "uploads");
-    const screenshotDirectory = join(sessionDirectory, "screenshots");
     if (
       !options.recoverExistingWorkingDirectory &&
       !options.restore &&
@@ -1805,13 +2023,7 @@ export class BrowserSupervisor {
         // Validate every path consumed by the existing writers before opening
         // any journal RW or creating a driver. Missing adjunct directories may
         // be recreated only after the exact profile/receipt proof above.
-        for (const path of [
-          socketDirectory,
-          downloadDirectory,
-          uploadDirectory,
-          screenshotDirectory,
-          join(downloadDirectory, "files"),
-        ])
+        for (const path of [downloadDirectory, uploadDirectory, join(downloadDirectory, "files")])
           await assertOptionalDirectory(path);
         for (const path of ["operations.sqlite", "state-transfers.sqlite"])
           await assertOptionalRegularFile(join(sessionDirectory, path));
@@ -1846,13 +2058,7 @@ export class BrowserSupervisor {
       // never the launch.
       await markProfileExitedCleanly(profileDirectory).catch(() => false);
     }
-    for (const directory of [
-      sessionDirectory,
-      socketDirectory,
-      downloadDirectory,
-      uploadDirectory,
-      screenshotDirectory,
-    ]) {
+    for (const directory of [sessionDirectory, downloadDirectory, uploadDirectory]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
@@ -1911,7 +2117,10 @@ export class BrowserSupervisor {
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
-    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
+    if (
+      options.transport.kind === "attached_chrome" ||
+      (options.transport.kind === "managed" && options.transport.engine !== "lightpanda")
+    ) {
       try {
         downloadStore = await BrowserDownloadStore.open({
           rootDirectory: downloadDirectory,
@@ -1928,7 +2137,6 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
       sessionDirectory,
-      socketDirectory,
       profileDirectory,
       restoredProfile: restoredProfileMaterialized,
       ...(recoveredReceipt && recoveredReceipt.intent !== "adopt"
@@ -1939,7 +2147,6 @@ export class BrowserSupervisor {
         : {}),
       ...(restoredCookies ? { headlessSessionCookies: restoredCookies } : {}),
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
-      screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
       resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
@@ -2025,6 +2232,7 @@ export class BrowserSupervisor {
         recovery: null,
         presence: new Set(),
         recording: null,
+        lastUsedAt: this.now(),
       };
       runtime.controller = this.createController(runtime, driver);
       // Startup and tab restoration are a use of the browser: nothing may park
@@ -2484,6 +2692,7 @@ export class BrowserSupervisor {
     await this.bindPresence(runtime, hold);
     return () => {
       if (!runtime.presence.delete(hold)) return;
+      runtime.lastUsedAt = this.now();
       hold.driver = null;
       hold.release();
     };
@@ -2603,6 +2812,8 @@ export class BrowserSupervisor {
           initialJournal,
           onJournalRecord: (record) => runtime.journal.write(record),
           loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          onUnexpectedDispatchError: (error, command) =>
+            reportUnexpectedDispatchError("browser", error, command),
           authority: {
             authorizeDispatch: async (command) => {
               if (runtime.lifecycle !== "active") {
@@ -2739,10 +2950,6 @@ export class BrowserSupervisor {
     }
     if (!abandoned) throw workingRuntimeUnavailable();
     if (!removeState) return;
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
     await rm(sessionDirectory, { recursive: true, force: true });
   }
 
@@ -2790,10 +2997,6 @@ export class BrowserSupervisor {
     } finally {
       journal.close();
     }
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
     if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
   }
 
@@ -2854,10 +3057,6 @@ export class BrowserSupervisor {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     await rename(sessionDirectory, target);
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
   }
 
   private retireWorkingRuntime(runtime: Runtime) {
@@ -2908,6 +3107,7 @@ export class BrowserSupervisor {
         "browser request targets a stale controller generation",
       );
     }
+    runtime.lastUsedAt = this.now();
     return runtime;
   }
 
@@ -2916,6 +3116,8 @@ export class BrowserSupervisor {
     removeState: boolean,
     driverAlreadyClosed = false,
     suspendForShutdown = false,
+    /** Suspend recoverably but stop the browser too (idle release). */
+    stopSuspendedBrowser = false,
   ): Promise<void> {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
@@ -2942,9 +3144,30 @@ export class BrowserSupervisor {
       // A controller restart (upgrade, crash recovery) must not cost the page
       // state an agent is working in. Release only this controller's transport;
       // the successor adopts the same live browser from the suspended receipt.
-      keepBrowserRunning = runtime.driver.detach !== undefined;
+      keepBrowserRunning = !stopSuspendedBrowser && runtime.driver.detach !== undefined;
     } else {
       this.retireWorkingRuntime(runtime);
+    }
+    if (keepBrowserRunning && runtime.workingReceipt?.process) {
+      // Tell the successor about the browser it inherits, so it stops it once
+      // unused for the idle release time even if its session never returns.
+      // Best effort: a missing record only means the browser waits for its
+      // session, as before.
+      try {
+        await writeDetachedBrowserRecord(runtime.sessionDirectory, {
+          version: 1,
+          browserSessionId: runtime.options.browserSessionId,
+          // A live view, recording or request still open at shutdown is a use
+          // that has not ended yet, so the successor's idle time starts now.
+          lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
+          process: runtime.workingReceipt.process,
+        });
+      } catch (error) {
+        console.warn("browserd.detached_record_failed", {
+          browserSessionId: runtime.options.browserSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
     if (!driverAlreadyClosed) {
       try {
@@ -3009,18 +3232,6 @@ export class BrowserSupervisor {
     const recording = runtime.recording;
     runtime.recording = null;
     await recording?.discard();
-    // Recovery inspects the exact daemon namespace for live owners. Preserve
-    // that evidence for suspension; missing namespace state is not exit proof.
-    if (driverClosed && runtime.workingReceipt?.intent !== "suspend") {
-      try {
-        await rm(join(this.socketRootDirectory, shortDigest(runtime.options.browserSessionId)), {
-          recursive: true,
-          force: true,
-        });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
     if (
       removeState &&
       driverClosed &&
@@ -3118,8 +3329,7 @@ export async function managedChromiumLaunchExecutable(
 
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
-  binary?: ResolvedAgentBrowserBinary,
-  lightpandaBinary?: ResolvedLightpandaBinary,
+  lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>,
   headlessShell?: VerifiedHeadlessShell,
   networkIsolation = true,
 ): Promise<BrowserSupervisorDriver> {
@@ -3133,7 +3343,12 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return createAttachedChromeDriver(context, attached, context.resolveWorkspaceFiles);
+    return createAttachedChromeDriver(
+      context,
+      attached,
+      context.resolveWorkspaceFiles,
+      context.downloadEvents,
+    );
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
@@ -3143,7 +3358,7 @@ async function createBrowserDriver(
       );
     }
     const runner = await LightpandaRunner.create({
-      binary: lightpandaBinary,
+      binary: await lightpandaBinary(),
       sessionDirectory: join(context.sessionDirectory, "lightpanda"),
     });
     return new AgentBrowserDriver({
@@ -3215,17 +3430,8 @@ async function createBrowserDriver(
     context.headed &&
     !context.linkedComputer &&
     (process.platform === "darwin" || (process.platform === "linux" && !linuxGraphicalDisplay()));
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: "og",
-    // A close followed immediately by another daemon using the same socket
-    // name races agent-browser's asynchronous socket teardown. Every physical
-    // driver lifecycle therefore gets a private socket identity; durable state
-    // lives solely in the explicitly supplied profile directory.
-    sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-    socketDirectory: context.socketDirectory,
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory: context.profileDirectory,
-    downloadDirectory: context.downloadDirectory,
-    screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
     ...(networkIsolation ? {} : { networkIsolation: false }),
     ...(offscreen ? { offscreen: true } : {}),
@@ -3240,7 +3446,6 @@ async function createBrowserDriver(
         }
       : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
-    ...(binary ? { binary } : {}),
   }).catch((error: unknown) => {
     // Recovery proves the previous browser's state before reattaching or
     // relaunching. A proof that cannot be completed is a definite refusal
@@ -3315,6 +3520,33 @@ function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
     runtime.workingReceipt.process !== null &&
     runtime.workingReceipt.directoryLaunchAllowed
   );
+}
+
+/** A managed browser nobody is using, whose stopped profile its next request
+ * can relaunch: no request, live view, recording or recovery in progress. */
+function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
+  return (
+    runtime.options.transport.kind === "managed" &&
+    runtime.lastUsedAt <= idleBefore &&
+    runtime.presence.size === 0 &&
+    runtime.recording?.summary().state !== "recording" &&
+    runtime.recovery === null &&
+    runtime.externalAuthTail === null &&
+    runtime.controller.isIdle() &&
+    hasPreservableWorkingRuntime(runtime)
+  );
+}
+
+/** Whether the browser is still receiving a download. A store that cannot be
+ * read counts as busy, so an idle sweep never fails a download it cannot see. */
+async function downloadInProgress(runtime: Runtime): Promise<boolean> {
+  if (!runtime.downloadStore) return false;
+  try {
+    const downloads = await runtime.downloadStore.list();
+    return downloads.some((download) => download.status === "in_progress");
+  } catch {
+    return true;
+  }
 }
 
 /** A restart now loses neither admitted work nor unrecoverable session state. */
@@ -4031,15 +4263,6 @@ function canonicalValue(value: unknown): unknown {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function defaultSocketRoot(rootDirectory: string): string {
-  const base = process.platform === "win32" ? tmpdir() : "/tmp";
-  return join(base, "ogb-s", shortDigest(resolve(rootDirectory)));
-}
-
-function shortDigest(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 /** Bounded, content-free cause for a launch receipt; never page data or secrets. */

@@ -11,6 +11,9 @@ import { verifyResult } from "../merge-batcher/result";
 import {
   ADAPTER_PATHS,
   adapterPresent,
+  inspectAdapter,
+  trafficEvidenceRecords,
+  TRAFFIC_LOG_LIMIT_BYTES,
   TRAFFIC_PREFIX,
   TRAFFIC_STATE,
   collectTraffic,
@@ -166,6 +169,179 @@ function run(tip: string, branch: string, patch: Partial<Run> = {}): Run {
 }
 
 describe("merged traffic replay", () => {
+  async function segmentedFixture(count: number, changes: number[] = [], versions: number[] = []) {
+    const f = await fixture({ adapter: true });
+    let parent = f.base;
+    const files = { ...f.files };
+    const pulls: MergedPull[] = [];
+    for (let n = 1; n <= count; n++) {
+      files[`member-${n}.txt`] = `member ${n}\n`;
+      if (changes.includes(n)) files["scripts/adapter-helper.ts"] = `adapter ${n}\n`;
+      const oid = await tree(f.origin, files);
+      const head = await f.origin.commit(oid, [parent], `head ${n}`, date(n));
+      const merge = await f.origin.commit(oid, [parent], `squash (#${n})`, date(n));
+      await f.origin.exec(["update-ref", `refs/heads/member-${n}`, head]);
+      pulls.push({
+        ...f.pulls[0]!,
+        number: n,
+        headSha: head,
+        mergeSha: merge,
+        headRef: versions.includes(n) ? "changeset-release/main" : `member-${n}`,
+        mergedAt: date(n),
+        readiness: { ...f.pulls[0]!.readiness, at: date(n) },
+      });
+      parent = merge;
+    }
+    await f.origin.exec(["update-ref", "refs/heads/main", parent]);
+    return { ...f, input: { ...f.input, until: date(59), pulls, observedMerged: count } };
+  }
+
+  test("mixed and consecutive adapter changes are isolated without dropping or reordering PRs", async () => {
+    const f = await segmentedFixture(7, [3, 4]);
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(report.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2],
+      [3],
+      [4],
+      [5, 6, 7],
+    ]);
+    expect(report.cohorts.map((c) => c.adapterReady)).toEqual([true, false, false, true]);
+    expect(report.cohorts.every((c) => c.equivalent && c.compositionComplete)).toBe(true);
+    expect(report.cohorts.flatMap((c) => c.pulls)).toEqual(f.input.pulls);
+    for (const c of report.cohorts) {
+      expect(c.adapterCheck).toMatchObject({
+        baseSha: c.baseSha,
+        tipSha: c.manifest!.tipSha,
+        ready: c.adapterReady,
+      });
+      expect(
+        c.pulls.every(
+          (p) => p.readiness.kind === "merged-at-proxy" && !p.readiness.admissionEvidence,
+        ),
+      ).toBe(true);
+      if (!c.adapterReady) expect(c.adapterCheck!.firstFailure?.path).toBe("scripts");
+    }
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(refs);
+  });
+
+  test("unchanged runs retain maximum16 and Version singleton barriers", async () => {
+    const f = await segmentedFixture(20);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(report.cohorts.map((c) => c.pulls.length)).toEqual([16, 4]);
+    expect(report.cohorts.every((c) => c.adapterReady && c.equivalent)).toBe(true);
+    f.input.pulls[8]!.headRef = "changeset-release/main";
+    const version = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(version.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2, 3, 4, 5, 6, 7, 8],
+      [9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    ]);
+  });
+
+  test("unselected adapter main boundary splits neighbors while preserving collection gap evidence", async () => {
+    const f = await segmentedFixture(5, [3]);
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: f.input.pulls.filter((p) => p.number !== 3),
+    });
+    expect(report.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2],
+      [4, 5],
+    ]);
+    expect(report.cohorts.every((c) => c.adapterReady && c.equivalent)).toBe(true);
+    expect(report.collectionCoverage.unrepresented.map((r) => r.sha)).toContain(
+      f.input.pulls[2]!.mergeSha,
+    );
+    expect(report.cohorts[1]!.baseSha).toBe(f.input.pulls[2]!.mergeSha);
+  });
+
+  test("ambiguous shared merge projections remain unavailable after singleton segmentation", async () => {
+    const f = await segmentedFixture(2, [1]);
+    const aliased = { ...f.input.pulls[0]!, number: 99 };
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [...f.input.pulls, aliased],
+    });
+    expect(
+      report.cohorts
+        .flatMap((c) => c.pulls)
+        .map((p) => p.number)
+        .sort((a, b) => a - b),
+    ).toEqual([1, 2, 99]);
+    const ambiguous = report.cohorts.filter((c) =>
+      c.pulls.some((p) => p.number === 1 || p.number === 99),
+    );
+    expect(
+      ambiguous.every((c) => c.status === "unavailable" && !c.manifest && !c.adapterReady),
+    ).toBe(true);
+  });
+
+  test("actual-main segmentation never substitutes for the synthetic-tip adapter guard", async () => {
+    const f = await fixture({ adapter: true });
+    const changedHead = await f.origin.commit(
+      await tree(f.origin, {
+        ...f.files,
+        "one.txt": "one\n",
+        "scripts/merge-batcher/model.ts": "unlanded change\n",
+      }),
+      [f.base],
+      "changed historical head",
+      date(2),
+    );
+    await f.origin.exec(["update-ref", "refs/heads/changed-head", changedHead]);
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [{ ...f.pulls[0]!, headSha: changedHead }],
+    });
+    expect(report.cohorts[0]!.adapterReady).toBe(false);
+    expect(report.cohorts[0]!.equivalent).toBe(false);
+    expect(report.cohorts[0]!.adapterCheck!.firstFailure).toMatchObject({
+      path: "scripts",
+      reason: "changed-or-invalid-object",
+    });
+    const missing = await fixture();
+    expect(
+      (await inspectAdapter(missing.origin, missing.base, missing.base)).firstFailure,
+    ).toMatchObject({ path: ".github/workflows/batch-ci.yml", reason: "unavailable-object" });
+  });
+
+  test("full evidence log chunks roundtrip with bounded entries, explicit overflow and no environment projection", async () => {
+    const f = await segmentedFixture(3, [2]);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const evidence = { ...report, publication: { action: "wait", reason: "bounded evidence" } };
+    const records = trafficEvidenceRecords(evidence);
+    expect(records.every((r) => r.event === "traffic_report_chunk")).toBe(true);
+    const data = records.map((r) => ("data" in r ? r.data : "")).join("");
+    // Decode independently per chunk: base64 padding is chunk-local.
+    const decoded = Buffer.concat(
+      records.map((r) => Buffer.from("data" in r ? r.data! : "", "base64")),
+    ).toString();
+    expect(JSON.parse(decoded)).toEqual(evidence);
+    expect(data.length).toBeGreaterThan(0);
+    expect(records.every((r) => Buffer.byteLength(JSON.stringify(r)) < 100000)).toBe(true);
+    expect(decoded).not.toContain("GH_TOKEN");
+    const large = { ...evidence, readinessMeaning: "x".repeat(100000) };
+    const multi = trafficEvidenceRecords(large);
+    expect(multi.length).toBeGreaterThan(1);
+    expect(
+      JSON.parse(
+        Buffer.concat(
+          multi.map((r) => Buffer.from("data" in r ? r.data! : "", "base64")),
+        ).toString(),
+      ),
+    ).toEqual(large);
+    const overflow = trafficEvidenceRecords({
+      ...evidence,
+      readinessMeaning: "x".repeat(TRAFFIC_LOG_LIMIT_BYTES),
+    });
+    expect(overflow).toHaveLength(1);
+    expect(overflow[0]).toMatchObject({
+      event: "traffic_report_overflow",
+      fullReportRetained: false,
+    });
+  });
+
   test("post-base main ancestry is a historical replay artifact, not live queue infeasibility", async () => {
     const f = await fixture();
     const changed = { ...f.files, "one.txt": "changed after squash\n", "two.txt": "two\n" };
@@ -631,7 +807,17 @@ describe("traffic recovery and bounded reads", () => {
     const reader = {
       fresh: async (path: string) =>
         path.includes("/jobs?")
-          ? { total_count: 2, jobs: [{ status: "in_progress" }, { status: "queued" }] }
+          ? {
+              // Two running jobs after the fan-out (3 pre-plan jobs completed).
+              total_count: 5,
+              jobs: [
+                { status: "in_progress" },
+                { status: "in_progress" },
+                { status: "completed" },
+                { status: "completed" },
+                { status: "completed" },
+              ],
+            }
           : {
               total_count: 1,
               workflow_runs: [
@@ -669,6 +855,367 @@ describe("traffic recovery and bounded reads", () => {
         )
       ).allowed,
     ).toBe(false);
+  });
+  describe("traffic headroom counts runner-holding jobs, not run placeholders", () => {
+    // Provider wire JSON, deliberately including malformed pages.
+    type WirePage = Record<string, any> | unknown[];
+    const MAIN = { path: ".github/workflows/ci.yml", event: "push", head_branch: "main" };
+    const OTHER = { path: ".github/workflows/other.yml", event: "push", head_branch: "feature" };
+    const jobs = (...statuses: unknown[]) =>
+      statuses.map((status) => (status === undefined ? {} : { status }));
+    const page = (list: unknown[]) => ({ total_count: list.length, jobs: list });
+    const scan = (
+      runs: Array<Record<string, unknown>>,
+      jobPages: Record<number, WirePage>,
+      runPage?: () => WirePage,
+    ) => ({
+      fresh: async (path: string): Promise<WirePage> => {
+        const match = /^actions\/runs\/(\d+)\/jobs\?/.exec(path);
+        if (match) return jobPages[Number(match[1])] ?? {};
+        if (runPage) return runPage();
+        const status = new URLSearchParams(path.split("?")[1]).get("status");
+        const listed = runs.filter((entry) => entry.status === status);
+        return { total_count: listed.length, workflow_runs: listed };
+      },
+    });
+    test.each([
+      ["zero-job run held by its concurrency group", [], 0, true],
+      ["approval-waiting jobs", ["waiting", "waiting", "waiting", "waiting"], 0, true],
+      ["concurrency-pending jobs", ["pending", "pending", "pending"], 0, true],
+      ["completed jobs", ["completed", "completed"], 0, true],
+      ["two runner-holding jobs", ["queued", "in_progress", "completed"], 2, true],
+      ["three runner-holding jobs", ["queued", "in_progress", "requested"], 3, false],
+      [
+        "mixed matrix counts each runner-holding job",
+        ["in_progress", "in_progress", "queued", "waiting", "pending", "completed"],
+        3,
+        false,
+      ],
+    ] as const)("%s", async (_name, statuses, demand, allowed) => {
+      const reader = scan([{ id: 2, status: "queued", ...OTHER }], {
+        2: page(jobs(...statuses)),
+      });
+      expect(await readHeadroom(reader, 60, 40)).toMatchObject({
+        allowed,
+        occupied: demand,
+        reservedMain: 40,
+        candidateSlots: 18,
+        budget: 60,
+      });
+    });
+    test("main and non-main allocations are independent", async () => {
+      const reader = scan(
+        [
+          { id: 1, status: "in_progress", ...MAIN },
+          // Job-less placeholder: no demand (a job-less main run holds as pre-fan-out).
+          { id: 2, status: "waiting", ...OTHER },
+          { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+          { id: 4, status: "queued", ...MAIN, event: "pull_request" },
+          { id: 5, status: "pending", ...OTHER },
+        ],
+        {
+          1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
+          2: page([]),
+          3: page(jobs("queued", "waiting")),
+          4: page(jobs("queued", "pending", "completed")),
+          5: page(jobs("in_progress")),
+        },
+      );
+      // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
+      // The hosted job limit and allowance are isolated here; see capacity.test.ts.
+      const isolated = { providerJobLimit: 100000, otherRepositoryAllowance: 0 };
+      expect(await readHeadroom(reader, 66, 40, undefined, isolated)).toMatchObject({
+        allowed: true,
+        occupied: 48,
+        reservedMain: 45,
+      });
+      expect((await readHeadroom(reader, 65, 40, undefined, isolated)).allowed).toBe(false);
+      const quiet = scan([{ id: 1, status: "queued", ...MAIN }], {
+        1: page(jobs("waiting", "waiting", "completed", "completed")),
+      });
+      expect(await readHeadroom(quiet, 58, 40)).toMatchObject({
+        allowed: true,
+        occupied: 0,
+        reservedMain: 40,
+      });
+      expect((await readHeadroom(quiet, 57, 40)).allowed).toBe(false);
+    });
+    test.each([
+      ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
+      ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
+      [
+        "complete job page above the 100-row bound",
+        { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
+        "incomplete",
+      ],
+      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "incomplete"],
+      ["malformed job page", { total_count: 0 }, "incomplete"],
+      ["array job page", [], "incomplete"],
+    ] as const)("%s holds", async (_name, jobPage, reason) => {
+      const result = await readHeadroom(
+        scan([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }),
+        1000,
+        40,
+      );
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain(reason);
+    });
+    test("run scan boundaries still hold with idle jobs", async () => {
+      const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
+      const many = Array.from({ length: 33 }, (_, i) => ({
+        id: i + 1,
+        status: "queued",
+        ...OTHER,
+      }));
+      const tooMany = await readHeadroom(scan(many, idle), 1000, 40);
+      expect(tooMany.allowed).toBe(false);
+      expect(tooMany.reason).toContain("Too many");
+      const truncated = await readHeadroom(
+        scan([], idle, () => ({ total_count: 1, workflow_runs: [] })),
+        1000,
+        40,
+      );
+      expect(truncated).toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining("incomplete"),
+      });
+      const oversized = await readHeadroom(
+        scan([], idle, () => ({
+          total_count: 101,
+          workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
+        })),
+        1000,
+        40,
+      );
+      expect(oversized).toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining("exceeds bounded scan"),
+      });
+      const batch = await readHeadroom(
+        scan([{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }], {
+          7: page([]),
+        }),
+        1000,
+        40,
+      );
+      expect(batch).toMatchObject({ allowed: false, reason: expect.stringContaining("Batch CI") });
+      await expect(
+        readHeadroom(scan([{ id: 0, status: "queued", ...OTHER }], idle), 1000, 40),
+      ).rejects.toThrow("Invalid traffic number");
+    });
+    describe("proven approval-only runs are excluded from the 32-run cap", () => {
+      let nextId = 1;
+      const runSet = (count: number, status: string, base: object, statuses: unknown[]) => {
+        const runs: Array<Record<string, unknown>> = [];
+        const pages: Record<number, WirePage> = {};
+        for (let i = 0; i < count; i++) {
+          const id = nextId++;
+          runs.push({ id, status, ...base });
+          pages[id] = page(jobs(...statuses));
+        }
+        return { runs, pages };
+      };
+      const combine = (...parts: Array<ReturnType<typeof runSet>>) => {
+        const requests: string[] = [];
+        const runs = parts.flatMap((part) => part.runs);
+        const inner = scan(runs, Object.assign({}, ...parts.map((part) => part.pages)));
+        return {
+          requests,
+          runs,
+          fresh: async (path: string) => {
+            requests.push(path);
+            return inner.fresh(path);
+          },
+        };
+      };
+      const approvalMain = (count: number) =>
+        runSet(count, "waiting", MAIN, ["waiting", "completed", "completed"]);
+      const approvalOther = (count: number) =>
+        runSet(count, "waiting", OTHER, ["waiting", "pending"]);
+      const busyOther = (count: number) =>
+        runSet(count, "queued", OTHER, ["in_progress", "completed"]);
+      const idleOther = (count: number) => runSet(count, "queued", OTHER, ["pending", "completed"]);
+      test("12 waiting runs (10 old main reruns) plus active runs crossing 32 are admitted", async () => {
+        nextId = 1;
+        const reader = combine(approvalMain(10), approvalOther(2), busyOther(4), idleOther(21));
+        // Negative control: the previous reader held on more than 32 distinct active runs.
+        expect(reader.runs.length).toBe(37);
+        expect(await readHeadroom(reader, 52, 30)).toMatchObject({
+          allowed: true,
+          occupied: 4,
+          reservedMain: 30,
+          candidateSlots: 18,
+          budget: 52,
+          scannedRuns: 37,
+          approvalOnlyRuns: 12,
+        });
+        expect(reader.requests.length).toBe(10 + 37);
+        nextId = 1;
+        const tight = combine(approvalMain(10), approvalOther(2), busyOther(5), idleOther(20));
+        expect(await readHeadroom(tight, 52, 30)).toMatchObject({ allowed: false, occupied: 5 });
+        nextId = 1;
+        const crossing = combine(approvalMain(10), approvalOther(2), idleOther(33));
+        expect(await readHeadroom(crossing, 1000, 30)).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("Too many active workflows"),
+        });
+      });
+      test("approval-only accumulation is bounded by the absolute scan", async () => {
+        nextId = 1;
+        expect(await readHeadroom(combine(approvalMain(40)), 52, 30)).toMatchObject({
+          allowed: true,
+          occupied: 0,
+          approvalOnlyRuns: 40,
+        });
+        nextId = 1;
+        const over = combine(approvalMain(65));
+        expect(await readHeadroom(over, 52, 30)).toMatchObject({
+          allowed: false,
+          scannedRuns: 0,
+          reason: expect.stringContaining("bounded scan of 64"),
+        });
+        expect(over.requests.length).toBe(10);
+      });
+      const flipping = (
+        from: string,
+        to: string,
+        flipAfter: string,
+        base: object,
+        jobPage: WirePage,
+      ) => {
+        let flipped = false;
+        const requests: string[] = [];
+        return {
+          requests,
+          fresh: async (path: string): Promise<WirePage> => {
+            requests.push(path);
+            if (/^actions\/runs\/\d+\/jobs\?/.test(path)) return jobPage;
+            const status = new URLSearchParams(path.split("?")[1]).get("status");
+            const subject = { id: 9, status: flipped ? to : from, ...base };
+            const list = subject.status === status ? [subject] : [];
+            if (status === flipAfter) flipped = true;
+            return { total_count: list.length, workflow_runs: list };
+          },
+        };
+      };
+      test("runs flipping status during the listing are observed by the second pass", async () => {
+        const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
+        const backwards = flipping("in_progress", "waiting", "waiting", OTHER, running);
+        expect(await readHeadroom(backwards, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 20,
+          scannedRuns: 1,
+          approvalOnlyRuns: 0,
+        });
+        expect(backwards.requests.length).toBe(10 + 1);
+        const mainRun = flipping(
+          "in_progress",
+          "waiting",
+          "waiting",
+          MAIN,
+          page(jobs(...Array(35).fill("in_progress"), "waiting")),
+        );
+        expect(await readHeadroom(mainRun, 52, 30)).toMatchObject({
+          allowed: false,
+          reservedMain: 35,
+        });
+        const approved = flipping(
+          "waiting",
+          "queued",
+          "waiting",
+          OTHER,
+          page(jobs(...Array(5).fill("queued"))),
+        );
+        expect(await readHeadroom(approved, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 5,
+          approvalOnlyRuns: 0,
+        });
+      });
+      test("responses arriving after the scan deadline hold", async () => {
+        let clock = 0;
+        nextId = 1;
+        const one = combine(busyOther(1));
+        const slowJob = await readHeadroom(
+          {
+            fresh: async (path: string) => {
+              if (path.includes("/jobs?")) clock += 120_001;
+              return one.fresh(path);
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowJob).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
+        clock = 0;
+        let lists = 0;
+        const slowEmpty = await readHeadroom(
+          {
+            fresh: async () => {
+              if (++lists === 10) clock += 120_001;
+              return { total_count: 0, workflow_runs: [] };
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowEmpty).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
+      });
+      test("mixed waiting runs, transitions and unknown statuses are not approval-only", async () => {
+        for (const statuses of [["waiting", "queued"], ["waiting", "in_progress"], []]) {
+          nextId = 1;
+          const mixed = combine(runSet(1, "waiting", OTHER, statuses), idleOther(32));
+          expect([statuses, await readHeadroom(mixed, 1000, 30)]).toMatchObject([
+            statuses,
+            { allowed: false, reason: expect.stringContaining("Too many active workflows") },
+          ]);
+        }
+        nextId = 1;
+        const unknown = combine(approvalMain(40), runSet(1, "waiting", MAIN, ["waiting", "nope"]));
+        expect(await readHeadroom(unknown, 1000, 30)).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("Unrecognized"),
+        });
+        nextId = 1;
+        const failing = combine(approvalMain(3));
+        await expect(
+          readHeadroom(
+            {
+              fresh: async (path: string) => {
+                if (path.includes("/jobs?")) throw new Error("provider unavailable");
+                return failing.fresh(path);
+              },
+            },
+            52,
+            30,
+          ),
+        ).rejects.toThrow("provider unavailable");
+        let clock = 0;
+        nextId = 1;
+        const slow = combine(approvalMain(10));
+        expect(
+          await readHeadroom(
+            {
+              fresh: async (path: string) => {
+                clock += 30_000;
+                return slow.fresh(path);
+              },
+            },
+            52,
+            30,
+            () => clock,
+          ),
+        ).toMatchObject({ allowed: false, reason: expect.stringContaining("deadline") });
+      });
+    });
   });
   test("persistent rate backoff and hourly budget prevent restart storms", async () => {
     const f = await fixture();

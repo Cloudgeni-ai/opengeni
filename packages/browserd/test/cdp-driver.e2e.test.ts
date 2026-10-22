@@ -10,10 +10,9 @@ import type {
 import { BrowserInteractionController } from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserSupervisor,
   imageDimensions,
-  resolvePinnedAgentBrowserBinary,
   restoreTabs,
 } from "../src";
 import { CdpConnection, CdpProtocolError, type CdpSendOptions } from "../src/cdp";
@@ -29,22 +28,12 @@ e2e(
   "replaces existing editable text and honors select-all on the browser platform",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-replace-text-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `replace_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -102,6 +91,177 @@ e2e(
 );
 
 e2e(
+  "runs one batch across a page load, a late element and a form that enables late",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/account"
+            ? `<!doctype html><title>Account</title><main></main>
+              <script>
+                setTimeout(() => {
+                  const edit = document.createElement("button");
+                  edit.textContent = "Edit billing";
+                  edit.onclick = () => {
+                    document.querySelector("main").innerHTML =
+                      '<label>Seats <input disabled></label><button disabled>Save changes</button><output></output>';
+                    const [input, save] = [document.querySelector("input"), document.querySelector("button")];
+                    save.onclick = () => { document.querySelector("output").textContent = "Saved " + input.value; };
+                    setTimeout(() => { input.disabled = false; save.disabled = false; }, 400);
+                  };
+                  document.querySelector("main").append(edit);
+                }, 300);
+              </script>`
+            : `<!doctype html><title>Accounts</title><a href="/account">Birch Holdings</a>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      const initial = await driver.start(String(server.url));
+      const observation = await driver.dispatch(
+        command(initial, {
+          type: "batch",
+          actions: [
+            { type: "click", locator: { kind: "role", role: "link", name: "Birch Holdings" } },
+            { type: "click", locator: { kind: "role", role: "button", name: "Edit billing" } },
+            { type: "fill", locator: { kind: "label", text: "Seats" }, value: "21" },
+            { type: "click", locator: { kind: "role", role: "button", name: "Save changes" } },
+          ],
+        }),
+      );
+      expect(names(observation)).toContain("Saved 21");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a fenced action's locator wait stops at a navigation instead of acting on the next document",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-fence-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/next"
+            ? `<!doctype html><title>Next</title>
+              <input id="next" aria-label="Next field" oninput="document.querySelector('output').textContent = 'Got ' + this.value"><output></output>`
+            : `<!doctype html><title>Start</title>
+              <button onclick="setTimeout(() => { location.href = '/next'; }, 1000)">Go later</button>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    const goLater = { kind: "role", role: "button", name: "Go later" } as const;
+    const restart = async () => {
+      const observation = await driver.dispatch(
+        command(await driver.observe(initial.target.id), {
+          type: "navigate",
+          url: String(server.url),
+        }),
+      );
+      return observation!;
+    };
+    const afterNavigation = async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const observation = await driver.observe(initial.target.id);
+        if (new URL(observation.target.url).pathname === "/next") return observation;
+        await Bun.sleep(50);
+      }
+      throw new Error("the page did not navigate");
+    };
+    let initial!: BrowserObservation;
+    try {
+      initial = await driver.start(String(server.url));
+      for (const locator of [
+        { kind: "css", selector: "#next" },
+        { kind: "label", text: "Next field" },
+      ] as const) {
+        const start = await restart();
+        await expect(
+          driver.dispatch(
+            command(start, {
+              type: "batch",
+              fenceEachAction: true,
+              actions: [
+                { type: "click", locator: goLater },
+                { type: "fill", locator, value: "crossed" },
+              ],
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: "outcome_unknown",
+          message: expect.stringContaining("document_stale"),
+        });
+        expect(names(await afterNavigation())).not.toContain("Got crossed");
+      }
+
+      const clicked = await driver.dispatch(
+        command(await restart(), { type: "click", locator: goLater }),
+      );
+      await expect(
+        driver.dispatch(
+          command(clicked!, {
+            type: "fill",
+            locator: { kind: "css", selector: "#next" },
+            value: "crossed",
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "document_stale" });
+      expect(names(await afterNavigation())).not.toContain("Got crossed");
+
+      // Without fenceEachAction, a later action still follows the page.
+      const followed = await driver.dispatch(
+        command(await restart(), {
+          type: "batch",
+          actions: [
+            { type: "click", locator: goLater },
+            { type: "fill", locator: { kind: "css", selector: "#next" }, value: "crossed" },
+          ],
+        }),
+      );
+      expect(names(followed!)).toContain("Got crossed");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+e2e(
   "counts a page's own failed request but not the browser's missing-icon fetch",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-icon-failure-");
@@ -118,22 +278,12 @@ e2e(
         return new Response("not found", { status: 404 });
       },
     });
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `icon_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -182,22 +332,12 @@ e2e(
         );
       },
     });
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `loadwait_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -226,22 +366,12 @@ headedE2e(
   "parks an idle windowed browser so its animated page stops rendering, and presents it for the next use",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-park-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `park_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: true,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -317,22 +447,12 @@ headedE2e(
         });
       },
     });
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `slow_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: true,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -359,22 +479,12 @@ headedE2e(
   "streams a mobile headed tab continuously while another tab stays foregrounded",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-hidden-stream-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `hidden_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: true,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -481,14 +591,12 @@ headedE2e.each([
   "streams a mobile headed tab continuously while managed input stays in the background unless passkeys need the front (%j)",
   async ({ headed, passkeys }) => {
     const directory = await mkdtemp("/tmp/ogb-background-input-");
-    const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
     const reference = {
       browserSessionId: randomUUID(),
       controllerGeneration: `controller-${randomUUID()}`,
     };
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
-      socketRootDirectory: socketDirectory,
       // A passkey placement brings the acted-on tab to the front (Chromium
       // refuses WebAuthn in a background tab); without passkeys managed
       // input never switches the real tab.
@@ -668,7 +776,6 @@ headedE2e.each([
       cdp?.close();
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
   60_000,
@@ -678,13 +785,8 @@ headedE2e(
   "keeps a headed managed tab active for frame-scheduled interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-headed-tab-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `headed_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: true,
     });
     const driver = new AgentBrowserDriver({
@@ -752,13 +854,8 @@ e2e(
   "a screenshot taken right after a viewport change shows the new viewport",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-viewport-shot-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: "vpshot_" + randomUUID().slice(0, 8),
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -806,13 +903,8 @@ e2e(
   "a tab opened after a viewport change has the size the agent set, and earlier tabs keep theirs",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-viewport-tab-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: "vptab_" + randomUUID().slice(0, 8),
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -861,13 +953,8 @@ e2e(
   "keeps scaled mobile frames stable during pointer interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-scale-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: "scale_" + randomUUID().slice(0, 8),
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -970,13 +1057,8 @@ e2e(
     });
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `covered_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -1070,13 +1152,8 @@ e2e(
     const directory = await mkdtemp("/tmp/ogb-partial-");
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `partial_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -1127,13 +1204,8 @@ e2e(
     const directory = await mkdtemp("/tmp/ogb-cdp-");
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `cdp_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
     });
     const cdpMethods: string[] = [];
@@ -1308,16 +1380,19 @@ e2e(
           locator: { kind: "role", role: "button", name: "Log failure" },
         }),
       );
-      expect(logged.diagnostics.consoleErrorCount).toBe(1);
+      // Runtime stays disabled, so console messages are read only on request.
+      expect(logged.diagnostics.consoleErrorCount).toBe(0);
       const debug = await driver.debug(logged.target.id, { kinds: ["console"] });
       expect(debug.entries.at(-1)).toMatchObject({
         kind: "console",
         level: "error",
         message: "Fixture console failure",
       });
+      // Chrome replays its whole buffer on every read; nothing is reported twice.
       expect(
         (await driver.debug(logged.target.id, { afterSequence: debug.cursor })).entries,
       ).toEqual([]);
+      expect((await driver.observe(logged.target.id)).diagnostics.consoleErrorCount).toBe(1);
 
       const asking = await driver.dispatch(
         command(logged, {
@@ -1673,13 +1748,8 @@ async function popupCloseTest(closeDuringFrameInspection: boolean) {
       );
     },
   });
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: `close_${randomUUID().slice(0, 8)}`,
-    sessionName: "s",
-    socketDirectory: join(directory, "s"),
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    downloadDirectory: join(directory, "downloads"),
-    screenshotDirectory: join(directory, "screenshots"),
     headed: false,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
@@ -1936,22 +2006,12 @@ headedE2e(
   "reads real native select options without rewriting the page and preserves selection events",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-select-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: "sel_" + randomUUID().slice(0, 8),
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: true,
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     let detachOnResolve = false;
     let accessibilityReads = 0;
@@ -2116,22 +2176,12 @@ for (const mode of [
     `completes native drag lifecycle with ${mode}`,
     async () => {
       const directory = await mkdtemp("/tmp/ogb-drag-");
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: `drag_${randomUUID().slice(0, 8)}`,
-        sessionName: "s",
-        socketDirectory: join(directory, "s"),
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: join(directory, "profile"),
-        downloadDirectory: join(directory, "downloads"),
-        screenshotDirectory: join(directory, "screenshots"),
         headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
-        binary: await resolvePinnedAgentBrowserBinary(
-          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-            : {},
-        ),
       });
       const driver = new AgentBrowserDriver({
         browserSessionId: randomUUID(),
@@ -2229,22 +2279,12 @@ chromiumE2e(
   "a crashed tab fails fast with a non-retryable error and a new tab keeps working",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-crashed-tab-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `crash_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -2296,22 +2336,12 @@ for (const mode of ["start", "restore tabs"] as const) {
     `${mode} on a browser whose only restored tab crashed selects a live tab`,
     async () => {
       const directory = await mkdtemp("/tmp/ogb-crashed-restore-");
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: `crashrestore_${randomUUID().slice(0, 8)}`,
-        sessionName: "s",
-        socketDirectory: join(directory, "s"),
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: join(directory, "profile"),
-        downloadDirectory: join(directory, "downloads"),
-        screenshotDirectory: join(directory, "screenshots"),
         headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
-        binary: await resolvePinnedAgentBrowserBinary(
-          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-            : {},
-        ),
       });
       const first = new AgentBrowserDriver({
         browserSessionId: randomUUID(),
@@ -2369,22 +2399,12 @@ chromiumE2e(
   "restore tabs reopens saved tabs whose pages can't load instead of failing the browser",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-unreachable-restore-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `unreachrestore_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -2445,22 +2465,12 @@ chromiumE2e(
   "a page whose server never answers fails within the commit deadline and names the cause",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-silent-server-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `silent_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -2500,8 +2510,8 @@ chromiumE2e(
         code: "resource_unavailable",
         message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
       });
-      // agent-browser was still preparing the tabs that closed above; its
-      // queued work must not hold the browser's shutdown.
+      // Chromium was still preparing the tabs that closed above; that
+      // work must not hold the browser's shutdown.
       const closing = Date.now();
       await driver.close();
       expect(Date.now() - closing).toBeLessThan(10_000);

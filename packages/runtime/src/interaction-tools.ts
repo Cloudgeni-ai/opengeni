@@ -5,6 +5,11 @@ import {
   cuaDesktopToolVariants,
   AttemptToolResult,
   ComputerNativeReceipt,
+  type UserSetupBlocker,
+  userSetupBlocker,
+  userSetupCardShownMessage,
+  userSetupCardUnpostedMessage,
+  userSetupUnavailableMessage,
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
@@ -1007,6 +1012,19 @@ export type CreateInteractionAttemptToolsInput = {
   selectedTools?: readonly FirstPartyMcpToolName[];
   permissions?: readonly Permission[];
   interventionResume?: InteractionInterventionResume | null;
+  /**
+   * Put the setup card for a refusal the person can fix (USER_SETUP_BLOCKERS)
+   * in this chat. Any tool here that hits one calls it, so the person sees the
+   * fix on the first attempt. Resolves once the card is in the chat (including
+   * one this turn already posted), with the chat link; null when none could be
+   * posted.
+   */
+  postSetupCard?: UserSetupCardPoster | undefined;
+  /**
+   * The Chrome extension people add to connect their own Chrome, as agents
+   * name and link it. Default: Opengeni Browser.
+   */
+  browserExtension?: { name: string; installUrl: string };
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -1014,6 +1032,10 @@ export function createInteractionAttemptToolDefinitions(
 ): AttemptToolDefinition[] {
   const selected = new Set(input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS);
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+  const extension = input.browserExtension ?? {
+    name: "Opengeni Browser",
+    installUrl: OPENGENI_BROWSER_EXTENSION_URL,
+  };
   const definitions: AttemptToolDefinition[] = [];
   // A retried browser_act (same operation) must dispatch the same File IDs, so
   // each operation publishes a given path at most once.
@@ -1421,7 +1443,13 @@ export function createInteractionAttemptToolDefinitions(
           options.output,
           raw,
           context,
-          options.execute,
+          async (value, executionContext) => {
+            try {
+              return await options.execute(value, executionContext);
+            } catch (error) {
+              throw await withUserSetupCard(error, options.name, input.postSetupCard);
+            }
+          },
           options.readOnly,
           options.modelText,
         ),
@@ -1432,7 +1460,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
+    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile. If none is connected, browser_open shows the person the setup card. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -1501,7 +1529,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, call interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1517,6 +1545,7 @@ export function createInteractionAttemptToolDefinitions(
         input.sessionId,
         value,
         context,
+        extension.installUrl,
       );
       const openedTargetId =
         opened.observation?.target.id ??
@@ -1795,7 +1824,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Role, label, text, placeholder, test id and CSS locators wait up to 10 s for their element to appear, and input actions wait while it is disabled, so a known sequence across page changes (open a record, open its edit form, fill it, save) can run as one batch without fenceEachAction; use those locators there, because a ref only names an element you have already seen. When a procedure repeats for many records, do the first step by step, then run each remaining record as one such batch, or loop over them in Code Mode. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use navigate with waitUntil ('load' or 'network_idle') to wait for the page before acting or capturing it. Use viewport to set page width and height (mobile:true adds mobile layout and touch emulation), then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; after your first reading of a page it lists only the elements that changed since your last reading of it, and the refs you hold stay valid. Set view=full for every element, or view=none when no post-action outline is needed; browser_observe always returns the whole outline. Set includeScreenshot=true to also get a still image of the tab after the action, in the same call, when the page's visual state matters. An upload action takes paths of files in this session's workspace, or workspace File IDs such as a sandbox_file_publish artifactId. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     modelInputSchema: browserActModelInputSchema,
     output: BrowserAgentActionReceipt,
@@ -1916,7 +1945,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloads"],
     title: "Inspect browser downloads",
     description:
-      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. Attached browsers and Lightpanda do not expose managed downloads.",
+      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. In attached Chrome the person's own file also stays in their downloads folder. Lightpanda has no downloads.",
     input: BrowserDownloadsInput,
     output: z.union([BrowserDownloadListResponse, BrowserDownload]),
     readOnly: true,
@@ -1957,7 +1986,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloadSave"],
     title: "Save browser download to workspace",
     description:
-      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+      "Save one exact completed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation.",
     input: BrowserDownloadSaveInput,
     output: BrowserDownloadSaveResponse,
     readOnly: false,
@@ -2740,9 +2769,14 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
     transport: client,
     workspaceId: input.scope.workspaceId,
     sessionId: input.scope.sessionId,
+    browserExtension: {
+      name: input.settings.browserExtensionName,
+      installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+    },
     selectedTools,
     permissions,
     ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
+    ...(input.postSetupCard ? { postSetupCard: input.postSetupCard } : {}),
   });
 }
 
@@ -3080,6 +3114,7 @@ async function openBrowser(
   sourceSessionId: string,
   value: z.output<typeof BrowserOpenInput>,
   context: AttemptToolExecutionContext,
+  extensionUrl: string,
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
@@ -3143,7 +3178,7 @@ async function openBrowser(
       session = reusable;
     } else {
       created = true;
-      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory);
+      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory, extensionUrl);
       // Without a deviceId, chooseAttachedProfile has resolved one (or thrown).
       const placement = profileChoice
         ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
@@ -3261,6 +3296,7 @@ type AttachedProfileChoice = {
  * updatedAt moves with its tab inventory, not with heartbeats). */
 function chooseAttachedProfile(
   inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+  extensionUrl: string,
 ): AttachedProfileChoice {
   const usable = inventory.devices
     .filter((device) => device.state === "connected" && device.capabilities.debuggerAttachment)
@@ -3269,11 +3305,60 @@ function chooseAttachedProfile(
   if (!chosen) {
     throw new OpenGeniApiError(
       409,
-      `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      `No Chrome profile is connected through the browser extension. The person needs a Connected Machine, then the extension: ${extensionUrl}`,
       { code: "attached_browser_unavailable", retryable: false },
     );
   }
   return { chosen, others };
+}
+
+/**
+ * Posts a blocker's setup card. Resolves the chat link once it is posted,
+ * "unavailable" when the card's capability is off on this deployment, or null
+ * when it could not be posted.
+ */
+export type UserSetupCardPoster = (
+  blocker: UserSetupBlocker,
+  toolName: string,
+) => Promise<{ chatUrl: string | null } | "unavailable" | null>;
+
+/**
+ * A tool was refused for something the person can fix themselves (a missing
+ * machine, extension or permission; see USER_SETUP_BLOCKERS). Put its setup
+ * card in the chat right away, so the person sees the fix on the first attempt
+ * instead of having to ask, and tell the model the card is there so it neither
+ * repeats its steps nor posts another. Without a card (no poster, or posting
+ * failed), tell the model to offer the fix itself; when the deployment can't
+ * offer the fix, say so. Every other error is
+ * returned unchanged.
+ */
+async function withUserSetupCard(
+  error: unknown,
+  toolName: string,
+  post: UserSetupCardPoster | undefined,
+): Promise<unknown> {
+  if (!(error instanceof OpenGeniApiError)) return error;
+  const blocker = userSetupBlocker(error.code);
+  if (!blocker) return error;
+  let posted: Awaited<ReturnType<UserSetupCardPoster>> = null;
+  if (post) {
+    try {
+      posted = await post(blocker, toolName);
+    } catch {
+      posted = null;
+    }
+  }
+  return new OpenGeniApiError(
+    error.status,
+    posted === "unavailable"
+      ? userSetupUnavailableMessage(blocker)
+      : posted
+        ? userSetupCardShownMessage(blocker, posted.chatUrl)
+        : userSetupCardUnpostedMessage(blocker),
+    // Not retryable: finishing the card continues the chat, so a retry only
+    // repeats the refusal. The reference ID stays for support.
+    { code: blocker.code, retryable: false, correlationId: error.correlationId },
+  );
 }
 
 function agentAttachedProfile(

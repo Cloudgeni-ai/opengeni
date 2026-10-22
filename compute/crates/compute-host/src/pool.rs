@@ -41,6 +41,8 @@
 //!   vm/firecracker/template-<key>/ the VM building it: its jail, and
 //!     ordinal                      the ordinal whose user its VMM runs as
 //!   used/<shape>                   when the shape was last used (see uses)
+//!   inputs/hashes.json             the input files' hashes, kept for the
+//!                                  next agent (see hashes)
 //! ```
 //!
 //! Anything a build left when the agent stopped is removed on start, its VM
@@ -51,9 +53,11 @@
 //! A shape unused for a while (see [`uses`]) retires: its template is
 //! removed and no ready sandboxes are kept of it until its next create.
 
+mod hashes;
 mod shape;
 mod uses;
 
+pub(crate) use hashes::Hashes;
 pub use shape::{Keep, Shape};
 pub(crate) use uses::{Uses, write_use};
 
@@ -63,8 +67,8 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_core::{DiskSpace, LoanId, Step};
@@ -137,7 +141,8 @@ impl PoolConfig {
 }
 
 /// Where today's templates come from. Fixed for the agent's life; the
-/// files' contents are checked whenever a template is built or used.
+/// files' contents are checked whenever a template is built or used, a
+/// stored image's by the cache that keeps it.
 #[derive(Debug)]
 pub(crate) struct Sources {
     pub kernel: PathBuf,
@@ -154,8 +159,9 @@ pub(crate) struct Sources {
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
-    /// The content hash of each file, with the metadata it was read under.
-    pub hashes: Mutex<HashMap<PathBuf, (Stamp, String)>>,
+    /// The content hash of each file, with the metadata it was read under,
+    /// kept for the next agent too.
+    pub hashes: Hashes,
 }
 
 impl Sources {
@@ -167,21 +173,16 @@ impl Sources {
     }
 
     /// The inputs a template of `shape` built now has. Blocks: the first
-    /// time, and after a file changed, it reads the whole file. Fails for
-    /// a shape whose image file is not that image.
+    /// time, and after a file changed, it reads the whole file; never a
+    /// stored image's, which its id names.
     pub fn inputs(&self, shape: Shape) -> io::Result<Inputs> {
-        let files: Vec<FileId> = [&self.kernel, &self.image(shape)]
-            .into_iter()
-            .chain(&self.depends_on)
-            .map(|path| self.content(path))
-            .collect::<io::Result<_>>()?;
-        if let Some(image) = shape.image
-            && files[1].blake3 != image.to_string()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("the file of image {image} holds another image"),
-            ));
+        let mut files = vec![self.content(&self.kernel)?];
+        files.push(match shape.image {
+            Some(image) => self.stored(image)?,
+            None => self.content(&self.base_image)?,
+        });
+        for path in &self.depends_on {
+            files.push(self.content(path)?);
         }
         Ok(Inputs {
             format: FORMAT,
@@ -194,66 +195,29 @@ impl Sources {
         })
     }
 
+    /// What the host's file of the stored image `image` holds: that image,
+    /// whose id is the hash of its content. The cache checks the file
+    /// against it before anything copies it, and nothing writes to it, so
+    /// reading it again would only repeat that check. Its metadata could
+    /// not stand in for it either: every create marks it used.
+    fn stored(&self, image: ImageId) -> io::Result<FileId> {
+        let path = self.rootfs.path(image);
+        Ok(FileId {
+            len: fs::metadata(&path)?.len(),
+            path,
+            blake3: image.to_string(),
+        })
+    }
+
     /// What the file at `path` holds, hashed again only when its metadata
     /// says it may have changed.
     fn content(&self, path: &Path) -> io::Result<FileId> {
-        let stamp = Stamp::of(&fs::metadata(path)?);
-        let known = self
-            .hashes
-            .lock()
-            .map_err(|_| io::Error::other("template input hashes poisoned"))?
-            .get(path)
-            .filter(|(seen, _)| *seen == stamp)
-            .map(|(_, hash)| hash.clone());
-        let hash = if let Some(hash) = known {
-            hash
-        } else {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update_reader(fs::File::open(path)?)?;
-            // A file written to while it was read has no one content.
-            if Stamp::of(&fs::metadata(path)?) != stamp {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    format!("{} changed while it was read", path.display()),
-                ));
-            }
-            let hash = hasher.finalize().to_hex().to_string();
-            self.hashes
-                .lock()
-                .map_err(|_| io::Error::other("template input hashes poisoned"))?
-                .insert(path.to_owned(), (stamp, hash.clone()));
-            hash
-        };
+        let (len, hash) = self.hashes.of(path)?;
         Ok(FileId {
             path: path.to_owned(),
-            len: stamp.len,
+            len,
             blake3: hash,
         })
-    }
-}
-
-/// What a file's metadata says about its content. Every write to a file,
-/// and every replacement of it, changes one of these: the kernel moves a
-/// file's change time on each, and nothing can set it back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stamp {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified_ns: i128,
-    changed_ns: i128,
-}
-
-impl Stamp {
-    fn of(metadata: &fs::Metadata) -> Self {
-        let ns = |secs: i64, nanos: i64| i128::from(secs) * 1_000_000_000 + i128::from(nanos);
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified_ns: ns(metadata.mtime(), metadata.mtime_nsec()),
-            changed_ns: ns(metadata.ctime(), metadata.ctime_nsec()),
-        }
     }
 }
 
@@ -851,6 +815,18 @@ async fn attempt<E: Engine>(
         let ordinal = build.ordinal;
         let memory_mib = build.shape.memory_mib;
         let shape = build.shape;
+        // Held until its disk is copied, as a create holds it: the copy is
+        // of an image the cache checked, and it is not removed meanwhile.
+        let held = match shape.image {
+            Some(image) => Some(
+                sources
+                    .rootfs
+                    .hold(image)
+                    .await
+                    .ok_or_else(|| format!("image {image} is no longer on the host"))?,
+            ),
+            None => None,
+        };
         Arc::new(
             blocking(move || {
                 remove_dir(&paths.dir)?;
@@ -862,6 +838,7 @@ async fn attempt<E: Engine>(
                 fs::write(paths.dir.join(MEMORY), memory_mib.to_string())?;
                 fs::write(paths.dir.join(VCPUS), shape.vcpus.to_string())?;
                 copy_sparse(&sources.image(shape), &paths.disk)?;
+                drop(held);
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
                     isolated.ensure(uid, uid).map_err(io::Error::other)?;
@@ -1250,7 +1227,7 @@ fn keep_fitting(dir: &Path, sources: &Sources) -> Vec<Template> {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         let name = entry.file_name();
-        if name == "vm" || name == uses::USED {
+        if name == "vm" || name == uses::USED || name == hashes::INPUTS {
             continue;
         }
         let fitting = read_inputs(&path)

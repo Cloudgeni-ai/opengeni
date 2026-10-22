@@ -246,11 +246,9 @@ jobs:
           runtime_fixture="$(mktemp -d)"
           trap 'rm -rf "$runtime_fixture"' EXIT
           printf '%s\n' 'synthetic browserd bytes' > "$runtime_fixture/browserd"
-          printf '%s\n' 'synthetic pinned driver bytes' > "$runtime_fixture/agent-browser"
           printf '%s\n' 'synthetic computer helper bytes' > "$runtime_fixture/computer-native"
-          chmod 0600 "$runtime_fixture/browserd" "$runtime_fixture/agent-browser" "$runtime_fixture/computer-native"
+          chmod 0600 "$runtime_fixture/browserd" "$runtime_fixture/computer-native"
           export OPENGENI_EMBEDDED_BROWSERD="$runtime_fixture/browserd"
-          export OPENGENI_EMBEDDED_AGENT_BROWSER="$runtime_fixture/agent-browser"
           export OPENGENI_EMBEDDED_COMPUTER_NATIVE="$runtime_fixture/computer-native"
           for proof in \
             browser_sidecar::tests::complete_embedded_bundle_ignores_stale_adjacent_helpers_and_refuses_changed_materialization \

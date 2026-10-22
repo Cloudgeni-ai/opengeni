@@ -44,11 +44,11 @@ export function blockedSubscriptionWindows(
   provider: Provider,
   usage: ReturnType<typeof projectSubscriptionCoreAccountUsage>,
   now: number,
-): Partial<Record<Window, number>> {
-  const blocked: Partial<Record<Window, number>> = {};
+): Partial<Record<Window, number | null>> {
+  const blocked: Partial<Record<Window, number | null>> = {};
   if (!usage) return blocked;
   const block = (id: Window, until: number) => {
-    if (until > now) blocked[id] = Math.max(blocked[id] ?? 0, until);
+    if (until > now && blocked[id] !== null) blocked[id] = Math.max(blocked[id] ?? 0, until);
   };
   const windows = usage.windows.flatMap((window) => {
     const id = windowId(provider, window.id);
@@ -56,8 +56,10 @@ export function blockedSubscriptionWindows(
     return id === null ? [] : [{ id, resetsAt, status: window.status }];
   });
   for (const window of windows) {
-    if (window.status === "exhausted" && window.resetsAt !== null)
-      block(window.id, window.resetsAt);
+    if (window.status === "exhausted") {
+      if (window.resetsAt === null) blocked[window.id] = null;
+      else block(window.id, window.resetsAt);
+    }
   }
   const until = epoch(usage.exhaustedUntil);
   if (until !== null && until > now) {

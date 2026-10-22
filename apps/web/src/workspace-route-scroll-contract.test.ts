@@ -63,6 +63,11 @@ const workspaceRouteContracts = {
     kind: "page",
     source: "../../../packages/react/src/app/routes/retained-artifact.tsx",
   },
+  // The Site fills the canvas beside its conversations column; each pane scrolls itself.
+  workspaceSiteViewRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/site-view.tsx",
+  },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",

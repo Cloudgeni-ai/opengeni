@@ -1,15 +1,15 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "private": true,
-  "description": "Placement-resident browser controller and audited agent-browser adapter for Opengeni.",
+  "description": "Placement-resident browser controller for Opengeni: launches and drives managed Chrome over CDP.",
   "license": "Apache-2.0",
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "build:binary": "bun build --compile --env OPENGENI_RUNTIME_BUILD_* ./src/main.ts --outfile ./dist/opengeni-browserd && bun ./scripts/stage-agent-browser.ts",
+    "build:binary": "bun build --compile --env OPENGENI_RUNTIME_BUILD_* ./src/main.ts --outfile ./dist/opengeni-browserd",
     "typecheck": "tsrs --noEmit",
     "test": "bun test",
     "test:e2e": "OPENGENI_BROWSERD_E2E=1 bun test --timeout 120000 test/cdp-driver.e2e.test.ts test/tab-not-responding.e2e.test.ts test/cdp-upload.e2e.test.ts test/cdp-reference.e2e.test.ts test/fenced-input-batch.e2e.test.ts test/cdp-press-key.e2e.test.ts test/cdp-covered-click.e2e.test.ts test/cdp-sticky-cover.e2e.test.ts test/cdp-hover-reveal.e2e.test.ts test/cdp-wait-any-match.e2e.test.ts test/cdp-network-idle-live.e2e.test.ts test/cdp-scroll-container.e2e.test.ts test/cdp-exit-animation.e2e.test.ts test/browser-conformance.e2e.test.ts test/chromium-context-pool.e2e.test.ts test/ephemeral-supervisor.e2e.test.ts test/supervisor.e2e.test.ts test/server.e2e.test.ts test/state-restore.e2e.test.ts test/headless-session-auth.e2e.test.ts test/external-provider.e2e.test.ts test/network-isolation.e2e.test.ts"
@@ -18,7 +18,6 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/interaction": "workspace:*",
     "@trycua/cua-driver": "0.37.0",
-    "agent-browser": "0.33.2",
     "zod": "4.4.3"
   },
   "devDependencies": {

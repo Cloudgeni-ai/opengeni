@@ -11,6 +11,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  createScheduledTask,
   ensureManagedAccessForUser,
   grantWorkspaceAccess,
   listVisibleSessionInvalidationIds,
@@ -18,6 +19,7 @@ import {
   SessionListAccessError,
   setSessionArchive,
   setSessionPin,
+  updateScheduledTask,
 } from "../src/index";
 
 let shared: SharedTestDatabase;
@@ -264,4 +266,69 @@ test("commit hints coalesce, roll back, and ignore raw deltas and unrelated meta
     subjectId: null,
     all: true,
   });
+});
+
+test("a schedule timing edit alone refreshes lists, since it decides the upcoming icon", async () => {
+  const id = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: id,
+    accountName: "Schedule hints",
+    workspaceExternalSource: "test",
+    workspaceExternalId: id,
+    workspaceName: "Schedule hints",
+    subjectId: `reader:${id}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "Schedule target",
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    resources: [],
+    metadata: {},
+  });
+  const earlier = new Date(Date.now() - 3_600_000).toISOString();
+  const later = new Date(Date.now() + 3_600_000).toISOString();
+  const task = await createScheduledTask(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    name: "Checkpoint",
+    status: "active",
+    schedule: { type: "once", runAt: earlier, timeZone: "UTC" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "existing_session",
+    overlapPolicy: "skip",
+    targetSessionId: session.id,
+    agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    metadata: {},
+  });
+  await drain();
+  changes.length = 0;
+
+  // Moving a past one-time run into the future makes it upcoming again.
+  await updateScheduledTask(client.db, grant.workspaceId, task.id, {
+    schedule: { type: "once", runAt: later, timeZone: "UTC" },
+  });
+  await drain();
+  expect(changes).toEqual([
+    {
+      schema: "public",
+      workspaceId: grant.workspaceId,
+      sessionId: null,
+      subjectId: null,
+      all: true,
+    },
+  ]);
+  changes.length = 0;
+
+  // An unchanged spec, or an edit that cannot change the icon, stays quiet.
+  await shared.admin`update scheduled_tasks set schedule=schedule where id=${task.id}`;
+  await updateScheduledTask(client.db, grant.workspaceId, task.id, { name: "Renamed" });
+  await drain();
+  expect(changes).toHaveLength(0);
 });

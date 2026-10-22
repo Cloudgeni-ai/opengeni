@@ -151,10 +151,9 @@ export const subscriptionCoreOperationConnections = memoByProvider(
      * Shared organization- or workspace-scoped connections that can serve an
      * operation in this workspace, in placement order: the session's explicit
      * choice (session scope only), then the effective primary, then pool
-     * order. Only active, allocatable connections the workspace's inference
-     * pool admits qualify: the pool the workspace selected, or both shared
-     * pools under the automatic source, exactly as for its chat turns. Empty
-     * when the cutover is not enabled.
+     * order. Only active, allocatable connections that reach the workspace
+     * qualify, exactly as for its chat turns. Empty when the cutover is not
+     * enabled.
      */
     async function listSubscriptionCoreOperationCandidates(
       db: Database,
@@ -170,12 +169,8 @@ export const subscriptionCoreOperationConnections = memoByProvider(
           return [];
         const pool = await readSubscriptionCoreWorkspacePool(tx, provider, scope);
         if (pool.source.effectiveSource === "disabled") return [];
-        // The pool reader already lists only what the workspace's source admits.
         const eligible = pool.connections.filter(
-          (entry) =>
-            entry.row.status === "active" &&
-            entry.row.allocator_enabled &&
-            entry.poolAllocatorEnabled,
+          (entry) => entry.row.status === "active" && entry.row.allocator_enabled,
         );
         // A workspace-scoped connection listed only because personal
         // workspaces may use it is not assigned here: operations refuse it.

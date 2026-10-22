@@ -82,18 +82,14 @@ function accountStatus(account: SuperGrokAccount): "connected" | "disabled" | "n
 export interface OrganizationSuperGrokPool {
   grok: SuperGrokSubscriptions;
   workspace: { id: string; personal: boolean };
+  /** A workspace's name in the organization, for an account's tag. */
+  workspaceName: (workspaceId: string) => string | undefined;
   openAccount: (accountId: string) => void;
 }
 
 /** How many rows SuperGrok adds to the Accounts list once loaded. */
-export function superGrokListedCount(
-  grok: SuperGrokSubscriptions,
-  organization: OrganizationSuperGrokPool | null = null,
-) {
-  return subscriptionListedCount(
-    grok,
-    organization ? { ...organization, pool: organization.grok } : null,
-  );
+export function superGrokListedCount(grok: SuperGrokSubscriptions) {
+  return subscriptionListedCount(grok);
 }
 /** Who a SuperGrok account is for, in the one tag its row and page carry. */
 function scopeOf(grok: SuperGrokSubscriptions, account: SuperGrokAccount, places: SuperGrokPlaces) {
@@ -116,10 +112,7 @@ export function SuperGrokAccountRows({
       pool={grok}
       places={places}
       organization={organization ? { ...organization, pool: organization.grok } : null}
-      provider="supergrok"
-      kind="supergrok"
       providerName="SuperGrok"
-      plan={planOf}
       renderRow={(account, onOpen, scopeLabel) => (
         <SuperGrokRow
           grok={grok}

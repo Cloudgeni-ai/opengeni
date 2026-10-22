@@ -15,6 +15,7 @@ import {
   type ComputerImageFrame,
   type ComputerSupervisorDriver,
 } from "../src";
+import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
 
 const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -118,8 +119,10 @@ describe("ComputerSupervisor", () => {
         startGate = Promise.withResolvers<void>();
       const ending = Promise.withResolvers<void>(),
         endGate = Promise.withResolvers<void>();
+      let clock = 1_000_000;
       const supervisor = await ComputerSupervisor.open({
         rootDirectory,
+        now: () => clock,
         displaceExistingSessions,
         environmentAllocator: fixtureEnvironmentAllocator(),
         createDriver: async (context) => {
@@ -148,7 +151,12 @@ describe("ComputerSupervisor", () => {
         expect(supervisor.isIdle()).toBe(false);
         startGate.resolve();
         await creating;
-        // An open, quiescent session on the physical seat survives a restart.
+        // An open, quiescent session on the physical seat survives a restart,
+        // once its agent has paused.
+        expect(supervisor.updateBlockers()).toEqual([
+          { kind: "computer_recent_use", resourceId: options().computerSessionId, count: 1 },
+        ]);
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         const closing = supervisor.endSession(options());
         await ending.promise;
@@ -171,8 +179,10 @@ describe("ComputerSupervisor", () => {
     const dispatched = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
     let virtualSeat = false;
+    let clock = 1_000_000;
     const supervisor = await ComputerSupervisor.open({
       rootDirectory,
+      now: () => clock,
       environmentAllocator: {
         async allocate() {
           return {
@@ -200,6 +210,7 @@ describe("ComputerSupervisor", () => {
     });
     try {
       await supervisor.createSession(options());
+      clock += RECENT_USE_UPDATE_HOLD_MS;
       expect(supervisor.isIdle()).toBe(true);
       const running = supervisor.action(command());
       await dispatched.promise;
@@ -208,6 +219,9 @@ describe("ComputerSupervisor", () => {
       expect(await running).toMatchObject({ state: "completed" });
       // The target queue releases its tail just after the receipt settles.
       await Bun.sleep(1);
+      // Just used: mid-task, so the update waits for a pause.
+      expect(supervisor.isIdle()).toBe(false);
+      clock += RECENT_USE_UPDATE_HOLD_MS;
       expect(supervisor.isIdle()).toBe(true);
       await supervisor.endSession(options());
       virtualSeat = true;

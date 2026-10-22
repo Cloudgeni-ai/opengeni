@@ -54,7 +54,7 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, `files`, `playground`, `read-only-chats`, and `inbox`; a session page also carries
+`organization`, `files`, `playground`, `read-only-chats`, `inbox`, and `sites`; a session page also carries
 `session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
@@ -364,7 +364,14 @@ and retried once when the browser fires `online`; it is never retried twice.
 
 `chunk_load` counts documents that failed to load a lazy module or stylesheet,
 which after a deploy usually means the tab still references replaced hashed
-assets. The signal is Vite's `vite:preloadError` event
+assets. The production server keeps serving the hashed assets of the previous
+web builds the Helm chart carries (`web.previousAssets`), and ingress-nginx
+retries an asset 404 on another pod during a rollout
+(`ingress.webAssetsIngress`; see "Web assets across rollouts" in
+`docs/deployment.md`). A `chunk_load` after a deploy then means a tab older
+than every carried build, or a deployment that carries nothing, such as an
+offline `helm template` render without `web.previousAssets.images`. The signal
+is Vite's `vite:preloadError` event
 (`installVitePreloadErrorReporting`), which fires before the recovery listener
 in `vite-preload-recovery.ts` decides whether to reload, so it counts both tabs
 that recover through the automatic one-time reload and tabs that cannot.

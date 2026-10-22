@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react";
-import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { ConnectAdvance, ConnectAttempt, ConnectController } from "@opengeni/connect";
+import { copyTextToClipboard } from "./lib/clipboard";
 import { useConnect } from "./hooks/use-connect";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
@@ -23,6 +24,78 @@ const setupStatus = (t: OpenGeniText): Record<ConnectAttempt["state"], string> =
 /** GitHub returned from a non-owner's install request: an organization owner must approve. */
 export function isOwnerApprovalPending(attempt: Pick<ConnectAttempt, "error">): boolean {
   return attempt.error?.code === "owner_approval_pending";
+}
+
+/**
+ * A built-in integration (Outlook, Gmail, ...) has one reviewed tool set, so
+ * after the person signs in there is nothing left for them to choose: setup
+ * continues to the preview and installs every reviewed tool by itself. Custom
+ * OpenAPI or GraphQL sources keep the explicit tool review.
+ */
+export function isCuratedDefinitionAttempt(
+  attempt: Pick<ConnectAttempt, "source" | "completionRequirement" | "mcpSetup">,
+): boolean {
+  return (
+    attempt.completionRequirement === "integration" &&
+    !attempt.mcpSetup &&
+    (attempt.source === undefined || attempt.source.kind === "definition")
+  );
+}
+
+/** The next step a built-in integration takes by itself, or null when the
+ * person must act (or an error needs their attention). */
+export function curatedAutoAdvance(attempt: ConnectAttempt): ConnectAdvance | null {
+  if (!isCuratedDefinitionAttempt(attempt) || attempt.error) return null;
+  const next = attempt.nextAction;
+  if (attempt.state === "connected_but_incomplete" && next.type === "none")
+    return { type: "retry" };
+  if (attempt.state === "preview" && next.type === "preview")
+    return {
+      type: "install",
+      previewId: next.previewId,
+      contentHash: next.contentHash,
+      operationIds: next.operations.map((operation) => operation.id),
+    };
+  return null;
+}
+
+const MICROSOFT_APPROVAL_LINK = /https:\/\/login\.microsoftonline\.com\/[^\s]+/;
+
+/** Microsoft said, or may have said, that an administrator must approve the app first. */
+export function adminApprovalLink(
+  attempt: Pick<ConnectAttempt, "error">,
+): { url: string; required: boolean } | null {
+  const error = attempt.error;
+  if (!error || !["admin_consent_required", "provider_denied"].includes(error.code)) return null;
+  const match = MICROSOFT_APPROVAL_LINK.exec(error.message)?.[0];
+  if (!match) return null;
+  try {
+    const url = new URL(match);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    return { url: url.toString(), required: error.code === "admin_consent_required" };
+  } catch {
+    return null;
+  }
+}
+
+function CopyLinkButton({ url }: { url: string }) {
+  const t = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="og-connect-setup-secondary"
+      onClick={() =>
+        void copyTextToClipboard(url).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        })
+      }
+    >
+      {copied ? t("copyButton.copied") : t("connectSetup.copyAdminApprovalLink")}
+    </button>
+  );
 }
 
 function deviceVerificationUrl(action: ConnectAttempt["nextAction"]): string | null {
@@ -79,6 +152,9 @@ function ScopedSetup({
   const view = useConnect(controller);
   const [localError, setLocalError] = useState(false);
   const [navigating, setNavigating] = useState(false);
+  // One automatic step per attempt revision; a failure falls back to the
+  // manual controls below instead of retrying in a loop.
+  const autoStep = useRef<string | null>(null);
   const invoke = (operation: () => unknown | Promise<unknown>) => {
     setLocalError(false);
     try {
@@ -88,6 +164,16 @@ function ScopedSetup({
     }
   };
   const attempt = view.attempt;
+  useEffect(() => {
+    if (!attempt || view.busy || localError || view.error) return;
+    const step = `${attempt.id}:${attempt.revision}`;
+    if (autoStep.current === step) return;
+    const advance = curatedAutoAdvance(attempt);
+    if (!advance) return;
+    autoStep.current = step;
+    invoke(() => view.advance(advance, crypto.randomUUID()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt, view.busy, localError, view.error]);
   if (!attempt)
     return (
       <section
@@ -101,6 +187,14 @@ function ScopedSetup({
   const verificationUrl = deviceVerificationUrl(action);
   const terminal = ["complete", "cancelled", "expired"].includes(attempt.state);
   const awaitingOwner = isOwnerApprovalPending(attempt);
+  // While a built-in integration finishes by itself, show progress instead of
+  // the manual tool chooser; any error brings the manual controls back.
+  const autoFinishing =
+    !localError &&
+    !view.error &&
+    (curatedAutoAdvance(attempt) !== null ||
+      (attempt.state === "installing" && isCuratedDefinitionAttempt(attempt) && !attempt.error));
+  const adminApproval = adminApprovalLink(attempt);
   const offersGitHubRequest =
     action.type === "select_account" &&
     attempt.providerId.startsWith("github") &&
@@ -168,7 +262,9 @@ function ScopedSetup({
             ? t("connectSetup.waitingForAnOrganizationOwner")
             : attempt.mcpSetup && attempt.state === "credential_input"
               ? t("connectSetup.enterTheRequestedKey")
-              : setupStatus(t)[attempt.state]}
+              : autoFinishing
+                ? t("connectSetup.finishingSetup")
+                : setupStatus(t)[attempt.state]}
         </p>
         <p className="og-connect-setup-description">
           {attempt.ownership === "personal"
@@ -187,7 +283,26 @@ function ScopedSetup({
           <p>{t("connectSetup.nothingIsConnectedUntilThen")}</p>
         </div>
       )}
-      {(localError || view.error || (attempt.error && !awaitingOwner)) && (
+      {adminApproval && (
+        <div className="og-connect-setup-pending" role="alert">
+          <p>
+            {adminApproval.required
+              ? t("connectSetup.microsoftAdminApprovalRequired")
+              : t("connectSetup.microsoftAdminApprovalMaybe")}
+          </p>
+          <ol>
+            <li>{t("connectSetup.sendTheApprovalLinkTo")}</li>
+            <li>{t("connectSetup.afterTheyApproveConnectAgain")}</li>
+          </ol>
+          <p className="og-connect-setup-approval-link">
+            <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
+              {t("connectSetup.adminApprovalLink")}
+            </a>
+            <CopyLinkButton url={adminApproval.url} />
+          </p>
+        </div>
+      )}
+      {(localError || view.error || (attempt.error && !awaitingOwner && !adminApproval)) && (
         <p role="alert">
           {attempt.error?.code === "source_changed"
             ? t("connectSetup.theIntegrationSourceChangedReview")
@@ -196,7 +311,7 @@ function ScopedSetup({
               : t("connectSetup.connectionSetupCouldNotContinue")}
         </p>
       )}
-      {!terminal && (
+      {!terminal && !autoFinishing && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy || navigating}>
             {["credentials", "select_account", "select_resources", "preview"].includes(

@@ -1,6 +1,6 @@
 # First-party capability marks
 
-These four bundled marks cover first-party catalog rows that do not pass
+These bundled marks cover first-party catalog rows that do not pass
 through the integrations.sh import, so they cannot receive a vendored registry
 `logoAssetPath`. `@opengeni/react` carries them as data URLs (generated from
 these files; a test keeps them identical), so the session UI shows them in

@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy};
-use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
-use compute_host::{HostConfig, PoolConfig, Shape};
+use compute_host::protocol::{HostStatus, Id, LevelName, Reply, SandboxConfig, TemplateState};
+use compute_host::{Directory, HostConfig, PoolConfig, Shape};
 use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, World, id, vm_name};
@@ -59,7 +59,9 @@ fn templates(root: &Path) -> Vec<PathBuf> {
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| !["vm", "used"].contains(&path.file_name().unwrap().to_str().unwrap()))
+        .filter(|path| {
+            !["vm", "used", "inputs"].contains(&path.file_name().unwrap().to_str().unwrap())
+        })
         .collect();
     found.sort();
     found
@@ -722,6 +724,47 @@ async fn a_changed_base_image_rebuilds_the_template() {
     lab.create(id(2), NEVER).await;
     assert!(memory_saved(&lab.status().await, id(2)));
     assert_eq!(lab.run(id(2), &["disk"]).await, ["base two"]);
+    lab.assert_clean();
+}
+
+/// A stored image's template keeps fitting while creates mark the image
+/// used, and creates of it at once all restore it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creates_of_a_stored_image_restore_its_template() {
+    let root = Lab::root();
+    let store = Directory::new(root.join("store"));
+    let file = root.join("image.ext4");
+    std::fs::write(&file, b"an image").unwrap();
+    let image = store.put_rootfs(&file).await.unwrap();
+    let lab = Lab::start_stored_configured(root, Arc::default(), store, warm(Vec::new())).await;
+    let config = SandboxConfig::new(SHAPE.vcpus, SHAPE.memory_mib, NEVER).with_image(image);
+    lab.handle.create(id(1), config.clone()).await.unwrap();
+    lab.wait_until("a ready template of the image", |status| {
+        status
+            .templates
+            .iter()
+            .any(|template| template.image == Some(image) && template.state == TemplateState::Ready)
+    })
+    .await;
+
+    let creates = (2..=4).map(|n| {
+        let (handle, config) = (lab.handle.clone(), config.clone());
+        async move { handle.create(id(n), config).await }
+    });
+    for created in futures::future::join_all(creates).await {
+        created.unwrap();
+    }
+    let status = lab.status().await;
+    for n in 2..=4 {
+        assert!(
+            memory_saved(&status, id(n)),
+            "sandbox {n} restores the template"
+        );
+    }
+    for n in 2..=4 {
+        assert_eq!(lab.run(id(n), &["disk"]).await, ["an image"]);
+    }
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 3);
     lab.assert_clean();
 }
 

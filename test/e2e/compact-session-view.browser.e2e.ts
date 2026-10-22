@@ -51,6 +51,9 @@ const rows = Array.from({ length: 65 }, (_, index) => ({
 type FixtureRow = Omit<(typeof rows)[number], "parentSessionId"> & {
   parentSessionId: string | null;
 };
+// Marks the root browse read issued synchronously by a test invalidation, so
+// the rail's own poll or retry reads cannot consume its gate.
+const INVALIDATION_READ_HEADER = "x-opengeni-test-invalidation-read";
 const pendingFixtureGateReleases = new Set<() => void>();
 const releaseFixtureGates = () => {
   for (const resolve of pendingFixtureGateReleases) resolve();
@@ -348,9 +351,12 @@ describe("compact session view on the live local workspace route (API fixture)",
           await hold?.promise;
         }
         if (fixture && !search && url.searchParams.get("parentSessionId") === "null") {
-          const hold = fixture.holdRead;
-          fixture.holdRead = undefined;
-          fixture.readStarted = true;
+          const invalidationRead = route.request().headers()[INVALIDATION_READ_HEADER] === "1";
+          const hold = invalidationRead ? fixture.holdRead : undefined;
+          if (invalidationRead) {
+            fixture.holdRead = undefined;
+            fixture.readStarted = true;
+          }
           // A held read was answered by the server when it started; only its
           // delivery is delayed, so it keeps the outcome of that moment.
           const failedAtStart = fixture.failReads;
@@ -550,6 +556,88 @@ describe("compact session view on the live local workspace route (API fixture)",
       { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
     );
   };
+  // The rail's fallback poll and failed-read retry can also start a root browse
+  // read, so arrival alone does not prove the invalidation caused it. The
+  // listener issues the read synchronously inside notifySessionListChanged and
+  // no timer can run within that call, so only a fetch issued during it is
+  // tagged; the fixture holds and counts only tagged reads. If a rail read is
+  // already in flight, the invalidation queues behind it untagged; let those
+  // reads finish, then invalidate again.
+  const invalidateBrowseRead = async () => {
+    const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
+    const startedByInvalidation = await page.evaluate(
+      async ({ targetWorkspaceId, moduleUrl, header }) => {
+        const { notifySessionListChanged } = await import(moduleUrl);
+        // This runs in the page. Bun's global fetch type adds members such as
+        // preconnect, so use the DOM's own fetch type for the page global.
+        const pageScope: WindowOrWorkerGlobalScope = window;
+        const originalFetch = pageScope.fetch;
+        const isRootBrowseRead = (input: RequestInfo | URL) => {
+          const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+          return (
+            url.pathname.endsWith("/sessions") &&
+            url.searchParams.get("parentSessionId") === "null" &&
+            !url.searchParams.get("search")
+          );
+        };
+        let started = false;
+        const taggingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
+          this: unknown,
+          input,
+          init,
+        ) {
+          if (!isRootBrowseRead(input)) return originalFetch.call(this, input, init);
+          started = true;
+          const headers = new Headers(input instanceof Request ? input.headers : undefined);
+          new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+          headers.set(header, "1");
+          return originalFetch.call(this, input, { ...init, headers });
+        };
+        const pendingReads = new Set<Promise<unknown>>();
+        const watchingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
+          this: unknown,
+          input,
+          init,
+        ) {
+          const response = originalFetch.call(this, input, init);
+          if (isRootBrowseRead(input)) {
+            const read: Promise<unknown> = response
+              .then((value) => value.clone().arrayBuffer())
+              .catch(() => undefined)
+              .finally(() => pendingReads.delete(read));
+            pendingReads.add(read);
+          }
+          return response;
+        };
+        const deadline = performance.now() + 5_000;
+        try {
+          for (;;) {
+            pageScope.fetch = taggingFetch;
+            try {
+              notifySessionListChanged({
+                workspaceId: targetWorkspaceId,
+                sessionId: "remote-change",
+              });
+            } finally {
+              pageScope.fetch = watchingFetch;
+            }
+            if (started || performance.now() > deadline) return started;
+            do await new Promise((resolve) => setTimeout(resolve, 50));
+            while (pendingReads.size > 0 && performance.now() <= deadline);
+          }
+        } finally {
+          pageScope.fetch = originalFetch;
+        }
+      },
+      { targetWorkspaceId: workspaceId, moduleUrl: modulePath, header: INVALIDATION_READ_HEADER },
+    );
+    expect(startedByInvalidation).toBe(true);
+    await waitFor(() => archiveFixture?.readStarted === true, {
+      timeoutMs: 5_000,
+      intervalMs: 10,
+      describe: () => "The invalidated browse read did not reach the fixture.",
+    });
+  };
   const settleRead = async () => {
     await page.waitForLoadState("networkidle");
     await page.evaluate(
@@ -674,8 +762,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       const delayed = deferred();
       archiveFixture.holdRead = delayed;
       archiveFixture.readStarted = false;
-      await invalidate();
-      await page.waitForTimeout(100);
+      await invalidateBrowseRead();
       expect(archiveFixture.readStarted).toBe(true);
       // Pending transitions cannot be revived by an invalidation.
       expect(await matchingChildren.count()).toBe(0);
@@ -926,8 +1013,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       const oldWorkspaceRead = deferred();
       archiveFixture.holdRead = oldWorkspaceRead;
       archiveFixture.readStarted = false;
-      await invalidate();
-      await page.waitForTimeout(100);
+      await invalidateBrowseRead();
       expect(archiveFixture.readStarted).toBe(true);
       await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();

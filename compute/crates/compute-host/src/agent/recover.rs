@@ -67,6 +67,7 @@ fn loose_config(loose: Option<&serde_json::Value>) -> SandboxConfig {
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
+        let began = tokio::time::Instant::now();
         self.recover_strays(strays).await;
         let mut recovering = Vec::new();
         for (record, settled) in self.settle_records().await {
@@ -106,7 +107,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             recovering.push(record);
         }
-        self.recover_recorded(recovering).await;
+        let settle_ms = began.elapsed().as_millis();
+        self.recover_recorded(recovering, settle_ms).await;
     }
 
     /// Tidies the sandboxes whose records are missing, and blocks those
@@ -174,8 +176,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Takes back or blocks every sandbox whose record is durable.
-    async fn recover_recorded(&mut self, recovering: Vec<Record>) {
+    /// Takes back or blocks every sandbox whose record is durable, after
+    /// `settle_ms` spent settling records and tidying strays.
+    async fn recover_recorded(&mut self, recovering: Vec<Record>, settle_ms: u128) {
+        let began = tokio::time::Instant::now();
         // Finding VMs and checking networks touch only their own sandbox,
         // so they run for every sandbox at once; the results are taken in
         // one by one.
@@ -183,6 +187,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.find_vms(&recovering),
             self.ensure_networks(&recovering)
         );
+        let find_ms = began.elapsed().as_millis();
         let mut adopted = 0_usize;
         for record in recovering {
             let id = record.id;
@@ -219,6 +224,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandboxes = self.slots.len(),
             adopted,
             blocked = self.blocked.len(),
+            settle_ms,
+            find_ms,
+            take_ms = began.elapsed().as_millis() - find_ms,
             "recovered"
         );
     }

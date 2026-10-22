@@ -9,7 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { Toaster } from "@opengeni/react/app/components/toaster";
 import { ArtifactDetailRoute } from "@opengeni/react/app/routes/artifacts";
-import { SitePlatformUsageSection } from "../src/components/insights/site-platform-usage-section";
+import { SitesUsageSection } from "../src/components/insights/sites-usage-section";
 import { SectionStack } from "@opengeni/react/ui/section";
 import { SiteAuthorizeRoute } from "../src/routes/site-auth";
 import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
@@ -31,15 +31,24 @@ const site = createRoute({
   validateSearch: artifactReturnSearch,
   component: () => <ArtifactDetailRoute {...site.useParams()} />,
 });
-// Insights, the Site platform section alone (AI costs and limits have their
-// actual page previews in insights-preview-fixture.tsx).
+// Insights, the Sites section's platform activity alone (a custom range skips
+// model costs, which have their actual page preview in insights-preview-fixture.tsx).
 const usage = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/settings/usage",
   component: () => (
     <div className="mx-auto w-full max-w-3xl px-6 py-8 max-sm:px-4">
       <SectionStack>
-        <SitePlatformUsageSection client={client} workspaceId={workspaceId} />
+        <SitesUsageSection
+          client={{
+            getSitePlatformUsage: client.getSitePlatformUsage,
+            getWorkspaceInsightsSiteUsage: async () => {
+              throw new Error("Not requested for a custom range");
+            },
+          }}
+          workspaceId={workspaceId}
+          range={null}
+        />
       </SectionStack>
     </div>
   ),

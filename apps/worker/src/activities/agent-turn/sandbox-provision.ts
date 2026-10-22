@@ -15,6 +15,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,
+  TurnSandboxCommandCancelledError,
   WorkspaceArchiveIntegrityError,
   classifyProviderSandboxFailure,
 } from "@opengeni/runtime";
@@ -90,9 +91,17 @@ export class SandboxDeadlineRotationError extends Error {
  * resource. The wrapper error must never fall through as an ordinary turn
  * failure: doing so would omit the quiescence receipt and strand a committed
  * Steer/Pause behind `control-pending`.
+ *
+ * A sandbox command the turn's tool fence cancelled carries the activity's
+ * own cancellation as its cause. That is the same Temporal cancellation
+ * (for example a worker shutdown during startup file downloads) and must
+ * reach the same recovery path, not settle as an ordinary failure.
  */
 export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
   if (error instanceof CancelledFailure) return error;
+  if (error instanceof TurnSandboxCommandCancelledError) {
+    return error.cause instanceof CancelledFailure ? error.cause : null;
+  }
   if (!(error instanceof TurnOperationCancelledError)) return null;
   return error.reason instanceof CancelledFailure
     ? error.reason
@@ -155,8 +164,11 @@ export async function waitForTurnOperation<T>(
 
 /**
  * Upper bound for joining a cancelled attempt's in-flight provider establish.
- * Worker shutdown cancels activities 5s after SIGTERM and force-stops 100s
- * after it; this leaves room for the remaining finalization steps.
+ * Ordinary user or replacement cancellation has no worker deadline. During a
+ * turn-worker shutdown, turns cancelled with WORKER_SHUTDOWN after the natural
+ * drain (default 90s) have only the checkpoint window before the SDK force
+ * time (default 105s) and process exit (115s); an establish still running past
+ * that is left to the lease reaper, as after a crash.
  */
 export const PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS = 60_000;
 

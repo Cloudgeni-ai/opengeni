@@ -23,7 +23,7 @@ import type {
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -52,12 +52,8 @@ import {
   CodexAccountPage,
   CodexAccountRows,
   CodexConnectPage,
-  CodexPoolNotice,
-  type KeptForPeopleReport,
-  type KeptForPeopleReporter,
   CodexSettingRows,
   codexListedCount,
-  organizationNoticeCodexCount,
   codexSectionVisible,
   type CodexPlaces,
   type OrganizationCodexPool,
@@ -311,21 +307,6 @@ export function WorkspaceModelsPageBody({
   const nav = useModelsNavigation(scope, { account, view });
   const [revision, setRevision] = useState(0);
   const [claudeSigningIn, setClaudeSigningIn] = useState(false);
-  // Organization accounts this workspace keeps as its own, limited to chosen
-  // people: its pool doesn't list them, so their rows report them to the notice.
-  const [keptReports, setKeptReports] = useState<ReadonlyMap<string, KeptForPeopleReport>>(
-    () => new Map(),
-  );
-  const reportKeptForPeople = useCallback<KeptForPeopleReporter>((accountId, report) => {
-    setKeptReports((current) => {
-      const previous = current.get(accountId);
-      if (JSON.stringify(previous) === JSON.stringify(report)) return current;
-      const next = new Map(current);
-      if (report) next.set(accountId, report);
-      else next.delete(accountId);
-      return next;
-    });
-  }, []);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -389,19 +370,6 @@ export function WorkspaceModelsPageBody({
   const orgId = organizationId ?? "";
   const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
     organizationAccounts;
-  // Named in the order the rows list them, not the order their reads finish.
-  const orgCodexOrder = new Map(orgCodex.accounts.map((candidate, index) => [candidate.id, index]));
-  const keptForPeople = [...keptReports.entries()]
-    .sort(
-      ([left], [right]) =>
-        (orgCodexOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
-        (orgCodexOrder.get(right) ?? Number.MAX_SAFE_INTEGER),
-    )
-    .flatMap(([, report]) => (!report.pending && report.keptName ? [report.keptName] : []));
-  // Until the organization's list (and so its rows) is read, a kept copy isn't known either.
-  const keptForPeoplePending =
-    (organizationAdmin && (orgCodex.loading || Boolean(orgCodex.loadError))) ||
-    [...keptReports.values()].some((report) => report.pending);
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
@@ -494,14 +462,21 @@ export function WorkspaceModelsPageBody({
     openAccess: (id) => nav.openView("model-access", accountKey("claude", id, true)),
     backToList,
   };
+  const workspaceNameOf = (id: string) => workspaces.find((candidate) => candidate.id === id)?.name;
   const claudePool: OrganizationClaudePool | null =
     organizationAdmin && claudeEnabled && !orgClaude.unavailable
-      ? { pool: orgClaude, workspace: here, openAccount: orgClaudePlaces.openAccount }
+      ? {
+          pool: orgClaude,
+          workspace: here,
+          workspaceName: workspaceNameOf,
+          openAccount: orgClaudePlaces.openAccount,
+        }
       : null;
   const codexPool: OrganizationCodexPool | null = organizationAdmin
     ? {
         codex: orgCodex,
         workspace: here,
+        workspaceName: workspaceNameOf,
         openAccount: orgCodexPlaces.openAccount,
       }
     : null;
@@ -510,6 +485,7 @@ export function WorkspaceModelsPageBody({
       ? {
           grok: orgGrok,
           workspace: here,
+          workspaceName: workspaceNameOf,
           openAccount: orgGrokPlaces.openAccount,
         }
       : null;
@@ -1191,9 +1167,9 @@ export function WorkspaceModelsPageBody({
     const listed = [
       // Credits pay for credit models, so the list is never "nothing pays" on such a deployment.
       credits.visible ? 1 : 0,
-      codexListedCount(codex, codexPool),
-      superGrokListedCount(grok, grokPool),
-      claudeEnabled ? claudeListedCount(claude, claudePool) : 0,
+      codexListedCount(codex),
+      superGrokListedCount(grok),
+      claudeEnabled ? claudeListedCount(claude) : 0,
       listedGateways.length,
       listedOrgGateways.length,
       readyOrgKeys.length,
@@ -1239,20 +1215,6 @@ export function WorkspaceModelsPageBody({
             onEditAllowed={() => nav.openView("allowed-models")}
             onEditCompaction={() => nav.openView("compaction")}
             onConnect={() => nav.openView("connect")}
-            accountsNote={
-              <CodexPoolNotice
-                codex={codex}
-                places={codexPlaces}
-                organizationAccountCount={
-                  codex.source?.organizationCount ??
-                  (organizationAdmin
-                    ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
-                    : undefined)
-                }
-                keptForPeople={keptForPeople}
-                keptForPeoplePending={keptForPeoplePending}
-              />
-            }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
                 {subscriptionsListed > 0 ? (
@@ -1264,12 +1226,7 @@ export function WorkspaceModelsPageBody({
                   id={workspaceId}
                   provider="codex"
                 />
-                <CodexAccountRows
-                  codex={codex}
-                  places={codexPlaces}
-                  organization={codexPool}
-                  onKeptForPeople={reportKeptForPeople}
-                />
+                <CodexAccountRows codex={codex} places={codexPlaces} organization={codexPool} />
                 {claudeEnabled ? (
                   <ConnectedSubscriptionUsagePool
                     client={client}
@@ -1417,14 +1374,17 @@ export function WorkspaceModelsPageBody({
       <div ref={root} className="min-w-0">
         {!key && !view ? <ModelsRefreshControl client={client} /> : null}
         {organizationAdmin
-          ? orgCodex.accounts.map((candidate) => (
-              <OrganizationCodexDetailPrefetch
-                key={candidate.id}
-                client={client}
-                organizationId={orgId}
-                account={candidate}
-              />
-            ))
+          ? orgCodex.accounts
+              // A workspace's own account opens on that workspace's page.
+              .filter((candidate) => !candidate.reach?.ownerWorkspaceId)
+              .map((candidate) => (
+                <OrganizationCodexDetailPrefetch
+                  key={candidate.id}
+                  client={client}
+                  organizationId={orgId}
+                  account={candidate}
+                />
+              ))
           : null}
         {page}
       </div>

@@ -1,6 +1,6 @@
 # Independent operator utility: no application runtime, database driver or SDK.
 ARG POSTGRES_MAJOR=18
-ARG BUN_VERSION=1.4.3
+ARG BUN_VERSION=1.4.4
 # Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
 # the compromised emSign roots there once, natively on the build machine, for the
 # target architecture's Bun (never executed here); every stage that runs or

@@ -5,8 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import {
   SubscriptionUsagePoolView,
   ConnectedSubscriptionUsagePool,
+  ProviderGroupHeading,
 } from "./subscription-usage-pool";
 import { pooledLimitsFixture, POOL_PREVIEW_NOW } from "@/dev/ui-kit/pages/models/pooled-limits";
+import { ExhaustedClaudePreview } from "@/dev/ui-kit/pages/models/claude-exhausted";
 import {
   retainSharedQueries,
   invalidateSharedQueries,
@@ -51,7 +53,7 @@ test("shows weekly utilization and one weighted total bar without an account bre
   expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("65.61");
   expect(container.querySelector('[aria-label="Account limits"]')).toBeNull();
   expect(container.querySelectorAll("li")).toHaveLength(0);
-  expect(container.textContent).toContain("Total remaining");
+  expect(container.textContent).toContain("Available now");
   expect(container.textContent).toContain("66% left");
   expect(container.textContent).toContain("Read 3 min ago");
   expect(container.textContent).not.toContain("Bar sizes");
@@ -72,6 +74,108 @@ test("run-out headline names the time and gap to the next reset", async () => {
   );
   expect(container.textContent).toContain("At this pace you'll run out");
   expect(container.textContent).toContain("1 day before the next reset.");
+});
+
+test("an exhausted pool shows its next usable reset, never a future run-out, on both pages", async () => {
+  const now = Date.now();
+  const pool = pooledLimitsFixture("workspace");
+  const weekly = pool.windows.find((window) => window.id === "weekly")!;
+  weekly.remainingPercent = 0;
+  weekly.forecast = {
+    ...weekly.forecast,
+    kind: "runs_out",
+    basis: "Observed pool exhaustion.",
+    runsOutAt: new Date(now - 60_000).toISOString(),
+    nextResetAt: new Date(now + 2 * 3_600_000).toISOString(),
+  };
+  await act(async () =>
+    root.render(
+      <ul>
+        <li>
+          <SubscriptionUsagePoolView pool={pool} now={now} />
+        </li>
+        <ProviderGroupHeading
+          title="Claude"
+          facts={["2 accounts"]}
+          pool={{ pool, loading: false }}
+        />
+      </ul>,
+    ),
+  );
+  expect(container.textContent).toContain("No capacity available.");
+  expect(container.textContent).toContain("Next reset");
+  expect(container.textContent).not.toContain("At this pace");
+  expect(container.textContent).toContain("Available now");
+  expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("0");
+  expect(container.textContent).toContain("Limit reached");
+  expect(container.textContent!.match(/Next reset/g)).toHaveLength(2);
+});
+
+test("an exhausted pool with an unknown or elapsed return time waits for updated limits", async () => {
+  for (const nextResetAt of [null, new Date(POOL_PREVIEW_NOW - 1).toISOString()]) {
+    const pool = pooledLimitsFixture("workspace");
+    const weekly = pool.windows[0]!;
+    weekly.remainingPercent = 0;
+    weekly.forecast = {
+      ...weekly.forecast,
+      kind: "runs_out",
+      basis: "Observed pool exhaustion.",
+      runsOutAt: new Date(POOL_PREVIEW_NOW).toISOString(),
+      nextResetAt,
+    };
+    await act(async () =>
+      root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+    );
+    expect(container.textContent).toContain("No capacity available. Waiting for updated limits.");
+    expect(container.textContent).not.toContain("you'll run out");
+    expect(container.textContent).not.toContain("Next reset");
+  }
+});
+
+test("the real Claude rows and pool agree in the six-account regression preview", async () => {
+  const now = Date.now();
+  await act(async () => root.render(<ExhaustedClaudePreview now={now} />));
+  const rows = () => [...container.querySelectorAll("li")].slice(1);
+  expect(rows()).toHaveLength(6);
+  expect(rows().every((row) => row.textContent!.includes("Limit reached"))).toBe(true);
+  expect(container.textContent).toContain("No capacity available. Next reset");
+  expect(container.textContent).not.toContain("8% left");
+  await act(async () => root.render(<ExhaustedClaudePreview now={now} mixed />));
+  expect(container.textContent).toContain("12% left");
+  expect(rows().filter((row) => row.textContent!.includes("Limit reached"))).toHaveLength(5);
+  expect(rows()[1]!.textContent).toContain("60% left");
+  expect(container.textContent).not.toContain("No capacity available.");
+});
+
+test("the provider heading reads the pool total as capacity left now", async () => {
+  const pool = pooledLimitsFixture("workspace");
+  const total = Math.round(pool.windows.find((item) => item.id === "weekly")!.remainingPercent!);
+  await act(async () =>
+    root.render(
+      <ul>
+        <ProviderGroupHeading
+          title="Claude"
+          facts={["2 accounts"]}
+          pool={{ pool, loading: false }}
+        />
+      </ul>,
+    ),
+  );
+  expect(container.textContent).toContain(`${total}% left now`);
+  expect(container.textContent).not.toContain("left available now");
+});
+
+test("a projected run-out whose time passed does not declare a positive observed pool exhausted", async () => {
+  const pool = pooledLimitsFixture("workspace", false, true);
+  const weekly = pool.windows[0]!;
+  weekly.forecast.runsOutAt = new Date(POOL_PREVIEW_NOW - 1).toISOString();
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).toContain("62% left");
+  expect(container.textContent).toContain("Waiting for updated limits.");
+  expect(container.textContent).not.toContain("No capacity available");
+  expect(container.textContent).not.toContain("you'll run out");
 });
 
 test("workspace scope and sparse/unknown readings remain truthful", async () => {

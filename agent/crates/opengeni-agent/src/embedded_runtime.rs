@@ -1,7 +1,7 @@
 //! Release-contained browser/computer helpers.
 //!
-//! A release agent embeds the exact browserd, pinned agent-browser, and native
-//! computer helper built from the same source identity. This intentionally keeps
+//! A release agent embeds the exact browserd and native computer helper built
+//! from the same source identity. This intentionally keeps
 //! the historical one-file updater valid: after its atomic executable swap, the
 //! new process materializes its own complete helper generation before use.
 
@@ -13,8 +13,6 @@ use opengeni_agent_platform::PlatformResult;
 
 #[cfg(opengeni_embedded_runtime)]
 const BROWSERD: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_BROWSERD"));
-#[cfg(opengeni_embedded_runtime)]
-const AGENT_BROWSER: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_AGENT_BROWSER"));
 #[cfg(opengeni_embedded_runtime)]
 const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_NATIVE"));
 
@@ -46,7 +44,6 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
                 companion_name(crate::browser_sidecar::BROWSERD_FILE),
                 BROWSERD,
             ),
-            (companion_name("agent-browser"), AGENT_BROWSER),
             (
                 companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE),
                 COMPUTER_NATIVE,
@@ -122,7 +119,7 @@ fn is_generation_name(name: &std::ffi::OsStr) -> bool {
 #[cfg(opengeni_embedded_runtime)]
 fn runtime_digest() -> String {
     let mut hasher = blake3::Hasher::new();
-    for bytes in [BROWSERD, AGENT_BROWSER, COMPUTER_NATIVE] {
+    for bytes in [BROWSERD, COMPUTER_NATIVE] {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
@@ -227,10 +224,6 @@ mod tests {
             .expect("embedded runtime");
         let directory = browserd.parent().expect("runtime directory");
         assert_eq!(std::fs::read(&browserd).expect("browserd"), BROWSERD);
-        assert_eq!(
-            std::fs::read(directory.join(companion_name("agent-browser"))).expect("agent-browser"),
-            AGENT_BROWSER
-        );
         assert_eq!(
             std::fs::read(
                 directory.join(companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE,))

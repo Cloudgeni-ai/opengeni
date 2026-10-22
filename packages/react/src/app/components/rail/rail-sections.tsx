@@ -10,6 +10,7 @@ import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { TooltipWithKeys } from "../command-menu/keycaps";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
@@ -63,6 +64,7 @@ export function SessionShellSlotsProvider({
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
+  const sidebarKeys = useActionShortcut("view.sidebar");
   // Without the brand (an embed, or the macOS app whose window controls sit
   // in the row), the row holds just the collapse toggle, at its end.
   const brand = useSessionUiFeature("brand");
@@ -75,6 +77,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
           variant="ghost"
           size="icon-sm"
           aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-keyshortcuts={sidebarKeys?.ariaKeys}
           onClick={rail.toggleCollapsed}
           className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
         >
@@ -86,7 +89,10 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
         </Button>
       </TooltipTrigger>
       <TooltipContent side="right">
-        {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        <TooltipWithKeys
+          label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          shortcut={sidebarKeys}
+        />
       </TooltipContent>
     </Tooltip>
   ) : null;

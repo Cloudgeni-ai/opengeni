@@ -233,6 +233,7 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
+export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
   ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
@@ -345,6 +346,8 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { isTransientRequestError } from "./read-retry";
+export type { OpenGeniReadRetryOptions } from "./read-retry";
 export { parseDeprecationNotice } from "./deprecation";
 export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
@@ -531,6 +534,7 @@ export type {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  SiteOpenedResponse,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactVisibility,
@@ -965,6 +969,7 @@ export type {
   CodexConnectStart,
   CodexConnectPoll,
   SuperGrokAccount,
+  SubscriptionAccountReach,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
   SuperGrokAllocatorUpdate,
@@ -1318,6 +1323,7 @@ export type {
   AgentTopologySession,
   SessionListResponse,
   SessionListTotals,
+  SiteConversationGroup,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,
@@ -1326,6 +1332,7 @@ export type {
   SessionQueueSnapshot,
   SessionControlResponse,
   SessionRetryRequest,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryProjection,

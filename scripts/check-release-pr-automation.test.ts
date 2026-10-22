@@ -2313,6 +2313,7 @@ function approvalFixture(
     movingMainSourceExtra?: boolean;
     movingMainTreeTruncated?: "parent" | "source";
     movingMainParentRetainsBase?: boolean;
+    patchComparisonWrongHead?: boolean;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -2479,15 +2480,18 @@ function approvalFixture(
           ? [options.requestedReviewer ?? RELEASE_AUTOMATION_CONTRACT.releaseApprover]
           : [],
       });
-    if (method === "GET" && url.pathname === `${prefix}/compare/${baseSha}...${pullHeadSha}`)
+    if (
+      method === "GET" &&
+      url.pathname === `${prefix}/compare/${reviewedBaseSha}...${pullHeadSha}`
+    )
       return response({
-        status: "ahead",
-        base_commit: { sha: baseSha },
+        status: reviewedBaseSha === baseSha ? "ahead" : "diverged",
+        base_commit: { sha: reviewedBaseSha },
         merge_base_commit: { sha: baseSha },
         ahead_by: pullCommitCount,
-        behind_by: 0,
+        behind_by: reviewedBaseSha === baseSha ? 0 : 1,
         total_commits: pullCommitCount,
-        commits: [{ sha: pullHeadSha }],
+        commits: [{ sha: options.patchComparisonWrongHead ? "0".repeat(40) : pullHeadSha }],
       });
     if (
       method === "GET" &&
@@ -3017,6 +3021,67 @@ describe("release approval provenance", () => {
       });
     },
   );
+
+  test.each(["moving-main-squash", "moving-main-merge"] as const)(
+    "accepts %s when the provider PR base has advanced to the landing parent",
+    async (mergeMethod) => {
+      const fixture = approvalFixture({
+        mergeMethod,
+        reviewedBaseSha: movingMainParentSha,
+        controllerSha: movingMainParentSha,
+        controllerTreeSha: movingMainParentTreeSha,
+      });
+      const result = await verifyApprovedMerge({
+        env: approvalEnv({
+          GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
+          GITHUB_SHA: movingMainParentSha,
+          GITHUB_WORKFLOW_SHA: movingMainParentSha,
+          RELEASE_CONTROLLER_SHA: movingMainParentSha,
+        }),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      });
+      expect(result).toMatchObject({
+        reviewedBaseSha: movingMainParentSha,
+        reviewedBaseTreeSha: movingMainParentTreeSha,
+        sourceComposition: {
+          patchBaseSha: baseSha,
+          integrationBaseSha: movingMainParentSha,
+          pathCount: 1,
+        },
+      });
+      expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+    },
+  );
+
+  test.each([
+    [{ movingMainOverlap: true }, "differs from the exact reviewed moving-main composition"],
+    [{ movingMainSourceExtra: true }, "differs from the exact reviewed moving-main composition"],
+    [
+      { movingMainTreeTruncated: "source" as const },
+      "moving-main release source tree is truncated",
+    ],
+    [{ patchComparisonWrongHead: true }, "reviewed release patch comparison identity changed"],
+  ] as const)("rejects altered advanced-provider-base composition %#", async (options, message) => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv({
+          GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
+          GITHUB_SHA: movingMainParentSha,
+          GITHUB_WORKFLOW_SHA: movingMainParentSha,
+          RELEASE_CONTROLLER_SHA: movingMainParentSha,
+        }),
+        fetchImpl: approvalFixture({
+          mergeMethod: "moving-main-squash",
+          reviewedBaseSha: movingMainParentSha,
+          controllerSha: movingMainParentSha,
+          controllerTreeSha: movingMainParentTreeSha,
+          ...options,
+        }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow(message);
+  });
 
   test.each([
     ["overlapping integration change", { movingMainOverlap: true }],

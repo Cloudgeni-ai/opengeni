@@ -7,6 +7,8 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 export const embeddingMigrationTail = [
   // Session list notifications reference the final imported/archive/site fields.
   "0888_session_list_invalidation.sql",
+  // Adds a schedule-spec hint using 0888's notify function; replay after it.
+  "0905_schedule_timing_session_list_hints.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -290,6 +292,8 @@ export const embeddingMigrationTail = [
   "0775_session_usage_limit_attention_cursor.sql",
   // Patches the semantic projection in the cursor trigger restored by 0775.
   "0877_single_semantic_event_projection.sql",
+  // Splits the semantic projection 0877 installed, by exact text; replay after it.
+  "0904_infrastructure_events_keep_session_activity.sql",
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",
@@ -371,4 +375,9 @@ export const embeddingMigrationTail = [
   "0897_workspace_owner_administers_subscriptions.sql",
   // Restricts the predicate 0897 creates.
   "0900_workspace_admin_predicate_privileges.sql",
+  // Patches the scheduled admission and live-authority routines from withheld
+  // 0275/0478/0534/0539/0622/0864 by exact anchors; replay after all of them.
+  "0906_scheduled_shared_slack_authority.sql",
+  // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
+  "0907_subscription_connection_one_owner.sql",
 ];

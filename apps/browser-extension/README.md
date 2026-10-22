@@ -40,6 +40,38 @@ to the configured deployment.
   [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole/).
   Store edits are applied there; pushing source does not publish the extension.
 
+## A product's own branded build
+
+A product built on Opengeni can ship this extension under its own name, so
+its people never see Opengeni. Write a brand file:
+
+```json
+{
+  "name": "Acme Browser",
+  "product": "Acme",
+  "shortName": "Acme",
+  "description": "Let Acme's agents work in your Chrome tabs, through the Acme app on this computer.",
+  "homepageUrl": "https://acme.example",
+  "iconsDir": "icons",
+  "packageName": "acme-browser-extension"
+}
+```
+
+`iconsDir` (relative to the brand file) holds `brand-mark.svg` and
+`icon-16.png`, `icon-32.png`, `icon-48.png`, `icon-128.png`;
+`bun run brand:icons --mark logo.svg --out icons [--tile "#202020"]` makes
+them, plus store promo tiles, from one mark. An optional `key` (a base64
+public key) fixes the unpacked build's extension ID.
+
+Then `bun scripts/build.ts --store --brand path/to/brand.json --out path/to/dist`
+writes `<packageName>-store.zip` for the product's own Chrome Web Store item.
+Every name a person sees (manifest, popup, toolbar titles and connection
+messages) comes from the brand. The native host identifier and protocol stay
+the same, so the brand works with the Opengeni agent unchanged; list the
+store's item ID in the agent's allowed extensions (`browserExtensionIds` in
+the desktop kit, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` for standalone
+installs).
+
 ## Publish an update
 
 Run `bun run typecheck`, `bun test`, and `bun run build:store`. Upload the ZIP

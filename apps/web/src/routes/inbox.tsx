@@ -1010,6 +1010,8 @@ function AnswerDialog({
       });
     } catch (error) {
       setSubmitError(userErrorText(error, "Couldn't send your answer. Try again."));
+      // Reject so the form keeps the unsent answer (and its draft) for a retry.
+      throw error;
     } finally {
       setSubmitting(false);
     }

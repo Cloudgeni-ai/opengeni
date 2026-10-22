@@ -105,12 +105,15 @@ export function ClaudeRow({
   places,
   onOpen,
   scopeLabel,
+  usage,
 }: {
   claude: ClaudeSubscriptions;
   account: ClaudeSubscriptionAccount;
   places: ClaudePlaces;
   onOpen: () => void;
   scopeLabel?: ReactNode;
+  /** Replaces the live reading in this list's scope (an account another scope owns). */
+  usage?: ReactNode;
 }) {
   // An organization's own account says where it's available, like Codex and SuperGrok.
   const access = useConnectionAccess({
@@ -138,15 +141,18 @@ export function ClaudeRow({
         claudePlan(account),
       ]}
       cells={{
-        usage: (
-          <ClaudeAccountUsageReadout
-            client={claude.client}
-            scope={claude.organizationId ? "organization" : "workspace"}
-            scopeId={claude.organizationId ?? claude.workspaceId!}
-            account={account}
-            canManage={managesSubscriptionAccount(claude, account)}
-          />
-        ),
+        usage:
+          usage !== undefined ? (
+            usage
+          ) : (
+            <ClaudeAccountUsageReadout
+              client={claude.client}
+              scope={claude.organizationId ? "organization" : "workspace"}
+              scopeId={claude.organizationId ?? claude.workspaceId!}
+              account={account}
+              canManage={managesSubscriptionAccount(claude, account)}
+            />
+          ),
       }}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
@@ -169,10 +175,7 @@ export function ClaudeAccountRows({
       pool={claude}
       organization={organization}
       places={places}
-      provider="claude_subscription"
-      kind="claude_subscription"
       providerName="Claude"
-      plan={claudePlan}
       renderRow={(account, onOpen, scopeLabel) => (
         <ClaudeRow
           claude={claude}

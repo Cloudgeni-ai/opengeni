@@ -24,6 +24,7 @@ const defaults: OrganizationModelDefaults = {
   allowedModels: null,
   modelCompactionThresholds: {},
   realtimeVoice: {},
+  realtimeDefaultModel: null,
   updatedAt: null,
 };
 const workspaceSettings = { workspaceId: "workspace-a", version: 1 };

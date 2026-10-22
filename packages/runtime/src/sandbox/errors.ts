@@ -118,6 +118,19 @@ export class SandboxProviderContinuityUnavailableError extends Error {
   }
 }
 
+/** The elected continuity owner proved the lost workspace itself is gone: the
+ * provider that held it (for Docker: the same daemon that ran the exact
+ * container) reports the box missing and the durable workspace it owned no
+ * longer exists. Only this, never a NotFound alone, lets the lease record that
+ * the workspace is dead rather than temporarily unreachable. */
+export class SandboxProviderWorkspaceAbsentError extends SandboxProviderContinuityUnavailableError {
+  readonly workspaceAbsent = true;
+
+  constructor(backend: SandboxBackend | string, sourceInstanceId: string) {
+    super(backend, sourceInstanceId, false);
+  }
+}
+
 // Thrown by a provider's build() when its SDK client class is genuinely not
 // available in the installed @openai/agents-extensions. Per the P0.3 ruling we
 // NEVER fake a build body; if a provider cannot be constructed we register the

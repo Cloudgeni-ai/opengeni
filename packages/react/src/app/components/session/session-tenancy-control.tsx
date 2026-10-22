@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { isTransientRequestError } from "@opengeni/sdk";
 import type {
   Session,
   SessionEvent,
@@ -85,12 +86,29 @@ export default function SessionRouteAuxiliary(
         workspaceId: string;
         sessionId: string;
         loadError: unknown;
+        /** Retry the session read now (it also keeps retrying in the background). */
+        onRetry?: (() => void) | undefined;
         session?: never | undefined;
         events?: never | undefined;
       },
 ) {
   return props.session ? (
     <SessionTenancyRouteControl session={props.session} events={props.events} />
+  ) : isTransientRequestError(props.loadError) ? (
+    // The session read has failed transiently for a while (an outage outlasting
+    // a rolling deploy). The read keeps retrying and the page opens the session
+    // on its own when it succeeds.
+    <ProblemPanel
+      title="Temporarily unavailable"
+      description="Retrying automatically."
+      action={
+        props.onRetry ? (
+          <Button type="button" variant="outline" onClick={props.onRetry}>
+            Try again
+          </Button>
+        ) : undefined
+      }
+    />
   ) : !isApiErrorStatus(props.loadError, 404) ? (
     <ProblemPanel
       title="Unable to open session"

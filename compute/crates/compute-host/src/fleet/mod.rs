@@ -8,6 +8,12 @@
 //! - The renewer ([`lease`]) registers, carries out the service's rulings
 //!   on what the host still holds, and renews, writing the lease file
 //!   before anything goes out under it.
+//! - The renewer and the listener start before the agent takes back what
+//!   an earlier run left ([`FleetConfig::start`]), which can take longer
+//!   than the lease's term, and go on while it stops
+//!   ([`Joined::stopping`]), until the process exits: while the agent does
+//!   not serve, the lease held is renewed without a capacity, no
+//!   registration is sent, and every request is refused as `unavailable`.
 //! - The guard ([`run_guard`]), a process of its own, freezes the VMs a
 //!   second before the deadline in that file and kills them if they are
 //!   not frozen by then, and holds the kernel watchdog, so the VMs stop
@@ -24,12 +30,16 @@ mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use compute_fleet::{HostLease, LeaseTerms};
 use compute_protocol::fleet::{Answered, HostInfo};
+use futures::FutureExt as _;
+use futures::future::Fuse;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 pub use gate::Admission;
@@ -41,7 +51,7 @@ pub use link::MetricsRoute;
 pub use record::LeaseFile;
 pub use tls::{Tls, TlsFiles};
 
-use crate::agent::Handle;
+use crate::agent::{Handle, HostError};
 
 /// How a host joins a fleet.
 #[derive(Clone, Debug)]
@@ -74,6 +84,79 @@ pub struct Prepared {
     /// The gate for the agent's config and store.
     pub gate: LeaseGate,
     file: LeaseFile,
+}
+
+/// Where the agent stands, as the fleet sees it.
+#[derive(Clone, Debug)]
+enum Phase {
+    /// Taking back what an earlier run left.
+    Starting,
+    Started(Handle),
+    /// Stopping: the process exits next.
+    Stopping,
+}
+
+/// The agent as the fleet sees it: its handle only while it serves.
+#[derive(Clone, Debug)]
+pub(crate) struct Agent(watch::Receiver<Phase>);
+
+impl Agent {
+    /// The agent's handle, while it serves.
+    fn handle(&self) -> Option<Handle> {
+        match &*self.0.borrow() {
+            Phase::Started(handle) => Some(handle.clone()),
+            Phase::Starting | Phase::Stopping => None,
+        }
+    }
+
+    /// Why it does not serve now.
+    fn not_serving(&self) -> &'static str {
+        match &*self.0.borrow() {
+            Phase::Stopping => {
+                "this host's agent is stopping; the next one takes its sandboxes over"
+            }
+            Phase::Starting | Phase::Started(_) => {
+                "this host's agent is starting: it is taking back the sandboxes an earlier run left"
+            }
+        }
+    }
+}
+
+/// The fleet's part of a started agent: renewing the host's lease and
+/// serving the service, until the agent's process exits.
+pub struct Joined {
+    /// Ends only with an error; pending for good once it has.
+    running: Fuse<Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>>,
+    phase: watch::Sender<Phase>,
+}
+
+impl std::fmt::Debug for Joined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Joined")
+            .field("phase", &*self.phase.borrow())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Joined {
+    /// Renews and serves; returns only the error that stopped that.
+    pub async fn run(&mut self) -> anyhow::Result<()> {
+        (&mut self.running).await
+    }
+
+    /// Goes on renewing the lease while the agent stops, until `stopping`
+    /// ends, so the next agent finds as much of the lease's term left as
+    /// the restart allows. Requests are refused as `unavailable`
+    /// meanwhile: they would race the agent's stop.
+    pub async fn stopping<T>(mut self, stopping: impl Future<Output = T>) -> T {
+        self.phase.send_replace(Phase::Stopping);
+        let mut stopping = std::pin::pin!(stopping);
+        tokio::select! {
+            output = &mut stopping => output,
+            // It failed; the agent stops all the same.
+            _ = &mut self.running => stopping.await,
+        }
+    }
 }
 
 /// Checks the service's URL is HTTPS: its lease answers and rulings must
@@ -120,8 +203,38 @@ impl FleetConfig {
         })
     }
 
-    /// Registers, renews and serves the service until the agent stops.
-    pub async fn run(self, prepared: Prepared, handle: Handle) -> anyhow::Result<()> {
+    /// Joins the fleet, then starts the agent with `start`. The lease a
+    /// previous run of the agent left is renewed meanwhile: taking back
+    /// the sandboxes it ran can take longer than the lease's term, and
+    /// once that ran out the guard would freeze their VMs, and the service
+    /// give the host up, before this run answered anything. Returns what
+    /// `start` did and the fleet's part, which goes on until the agent
+    /// stops.
+    pub async fn start<T>(
+        self,
+        prepared: Prepared,
+        start: impl Future<Output = Result<(Handle, T), HostError>>,
+    ) -> anyhow::Result<((Handle, T), Joined)> {
+        let (phase, agent) = watch::channel(Phase::Starting);
+        let running: Pin<Box<dyn Future<Output = _> + Send>> =
+            Box::pin(self.run(prepared, Agent(agent)));
+        let mut running = running.fuse();
+        let started = tokio::select! {
+            started = start => started?,
+            result = &mut running => {
+                return Err(result
+                    .err()
+                    .unwrap_or_else(|| anyhow::anyhow!("left the fleet"))
+                    .context("in the fleet, while the agent started"));
+            }
+        };
+        phase.send_replace(Phase::Started(started.0.clone()));
+        Ok((started, Joined { running, phase }))
+    }
+
+    /// Registers, renews and serves the service until the agent stops,
+    /// from before `agent` has started.
+    async fn run(self, prepared: Prepared, agent: Agent) -> anyhow::Result<()> {
         let Prepared { gate, file } = prepared;
         let tls = Tls::load(&self.tls)?;
         let listener = TcpListener::bind(self.listen)
@@ -131,7 +244,7 @@ impl FleetConfig {
         let listening = listen::Listening {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
             service: tls::service_name(&self.control)?,
-            handle: handle.clone(),
+            agent: agent.clone(),
             gate: gate.clone(),
         };
         // Lease answers and rulings come only over mutual TLS, from the
@@ -151,7 +264,7 @@ impl FleetConfig {
             host: file.host,
             file: self.lease_file,
             gate,
-            handle,
+            agent,
             info: self.info,
             image: self.image,
         };

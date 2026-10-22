@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, Session } from "@opengeni/sdk";
+import { isConnectionAccountSubmissionError } from "../../../lib/format";
 import { userErrorText } from "../../../ui/api-error";
 import { isWorkspacePermissionDenied } from "../../lib/permissions";
 import {
@@ -223,5 +224,10 @@ export function useConnectionAccounts(
     unavailable: Boolean(hasNative && canReadConnections === true && unavailable),
     loading: hasNative && canReadConnections !== false && !matches,
     refresh,
+    // Refresh inventory only. Explicit choices remain pinned, and the failed
+    // send keeps its original accounts until the human edits and sends again.
+    onSelectionError: (error: unknown) => {
+      if (isConnectionAccountSubmissionError(error)) void refresh();
+    },
   };
 }

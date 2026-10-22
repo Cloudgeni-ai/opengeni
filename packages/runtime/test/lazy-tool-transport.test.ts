@@ -437,6 +437,78 @@ describe("query-independent tool discovery", () => {
     });
   }
 
+  test("search and listing name integrations whose tools could not load this turn", async () => {
+    const scripted = () =>
+      new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "search",
+            name: "tool_search",
+            arguments: '{"query":"list my calendar events"}',
+          },
+        ],
+        [{ type: "function_call", callId: "list", name: "tool_list", arguments: "{}" }],
+        [finalMessage("done")],
+      ]);
+    const unavailable = new Map([
+      [
+        "calendar",
+        "connected but could not list its tools (HTTP 401); its connection may need to be signed in again",
+      ],
+    ]);
+    const agent = new Agent({
+      name: "degraded",
+      tools: [firstPartyTool("records__search", "Search records")],
+      model: "scripted",
+    });
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => unavailable,
+    );
+    const model = scripted();
+    await runStreamed(agent, model, runtime);
+    const expected = JSON.stringify({
+      unavailableSources: [{ server: "calendar", reason: unavailable.get("calendar") }],
+    }).slice(1, -1);
+    const searched = (model.requests[1]!.input as { type?: string; output?: unknown }[]).find(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(searched)).toContain(JSON.stringify(expected).slice(1, -1));
+    const listed = (model.requests[2]!.input as { type?: string; output?: unknown }[]).filter(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(listed.at(-1))).toContain(JSON.stringify(expected).slice(1, -1));
+
+    // Every integration loaded: the results carry no such field at all.
+    const healthy = new Agent({
+      name: "healthy",
+      tools: [firstPartyTool("records__search", "Search records")],
+      model: "scripted",
+    });
+    const healthyModel = scripted();
+    await runStreamed(
+      healthy,
+      healthyModel,
+      installLazyToolRuntime(healthy, "generic_dispatch", new Set()),
+    );
+    expect(JSON.stringify(healthyModel.requests.map((request) => request.input))).not.toContain(
+      "unavailableSources",
+    );
+  });
+
   test("listing pages are compact, lexical, scoped, and reject stale cursors", async () => {
     const catalog = ["c", "a", "b"].map((name) =>
       firstPartyTool(`records__${name}`, "文".repeat(1000)),

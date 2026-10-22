@@ -1206,6 +1206,8 @@ describe("turn worker concurrency", () => {
     expect(settings.turnWorkerEmergencyMemoryUsage).toBe(0.9);
     expect(settings.turnWorkerMemoryGuardIntervalMs).toBe(5_000);
     expect(settings.turnWorkerMemoryGuardSustainMs).toBe(30_000);
+    expect(settings.turnWorkerShutdownGraceMs).toBe(90_000);
+    expect(settings.turnWorkerShutdownForceMs).toBe(105_000);
   });
 
   test("parses a bounded resource-based machine profile", () => {
@@ -1241,9 +1243,26 @@ describe("turn worker concurrency", () => {
       { OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.96" },
       { OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "999" },
       { OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "4999" },
+      { OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS: "-1" },
+      { OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS: "3600001" },
+      { OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS: "9999" },
+      { OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS: "3600001" },
+      { OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS: "105000.5" },
     ]) {
       expect(() => withEnv(env, () => getSettings())).toThrow();
     }
+  });
+
+  test("parses the turn-worker natural drain grace and force times", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS: "0",
+        OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS: "40000",
+      },
+      () => getSettings(),
+    );
+    expect(settings.turnWorkerShutdownGraceMs).toBe(0);
+    expect(settings.turnWorkerShutdownForceMs).toBe(40_000);
   });
 });
 

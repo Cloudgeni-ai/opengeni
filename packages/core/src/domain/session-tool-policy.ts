@@ -37,7 +37,7 @@ import {
   getSandbox,
   listSkillDescriptors,
   requireWorkspace,
-  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
@@ -381,19 +381,11 @@ export async function workspaceSessionEffectiveToolsContext(
           ),
         )
       : Promise.resolve([]),
-    Promise.all(
-      [...new Map(configured.map((session) => [session.id, session])).values()].map(
-        async (session) =>
-          [
-            session.id,
-            await sessionHasToolRouterHistory(deps.db, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: session.id,
-            }),
-          ] as const,
-      ),
-    ),
+    sessionsWithToolRouterHistory(deps.db, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      sessionIds: [...new Set(configured.map((session) => session.id))],
+    }),
   ]);
   return {
     ...baseline,
@@ -406,9 +398,7 @@ export async function workspaceSessionEffectiveToolsContext(
         sandbox?.kind === "selfhosted" ? [[id, "selfhosted" as const]] : [],
       ),
     ),
-    routerHistorySessionIds: new Set(
-      routerHistory.filter(([, present]) => present).map(([id]) => id),
-    ),
+    routerHistorySessionIds: routerHistory,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,

@@ -1150,10 +1150,10 @@ describe("CUA desktop boundary", () => {
       await expect(
         keys("name.txt", await backend.observe("cua:window:42:1")),
       ).rejects.toMatchObject({
-        code: "driver_failed",
+        code: "invalid_action",
         dispatched: false,
         message:
-          "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+          "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: in a file dialog invoke a sidebar place or a folder to go into it and invoke a file to choose it; set_value on a text field, invoke on a button",
       });
       // Keys aimed at the sheet's own window, which cannot be observed, stop
       // before any input with the same direction.
@@ -1196,6 +1196,154 @@ describe("CUA desktop boundary", () => {
       });
     } finally {
       await backend.close();
+    }
+  });
+
+  test("invoking a file dialog's folder or file opens it, though macOS does not confirm it", async () => {
+    // A folder or file of a file dialog's list opens (AXOpen) rather than
+    // presses; macOS answers "cannot complete" even when it went in.
+    class FileDialogFixture extends Fixture {
+      opened = false;
+      opens = true;
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "click" && args.action === "open") {
+          this.calls.push({ name, args });
+          if (this.opens) this.opened = true;
+          return result(
+            {
+              error: {
+                code: "ax_action_failed",
+                message: "AX action failed: AXUIElementPerformAction(AXOpen) returned -25205",
+              },
+            },
+            true,
+          );
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "get_window_state" && args.include_accessibility_tree) {
+          const state = JSON.parse(response.structuredJson!);
+          state.elements.push({
+            element_index: 2,
+            element_token: `${state.snapshot_id}:2`,
+            role: "AXTextField",
+            label: this.opened ? "pick-me.txt" : "Downloads",
+            actions: ["AXOpen", "AXConfirm"],
+          });
+          response.structuredJson = JSON.stringify(state);
+        }
+        return response;
+      }
+    }
+    const fixture = new FileDialogFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const open = async () => {
+        const observation = await backend.observe(target.id);
+        const item = observation.roots.find(
+          (node) => node.name === (fixture.opened ? "pick-me.txt" : "Downloads"),
+        )!;
+        expect(item.actions).toContain("invoke");
+        expect(item.actions).not.toContain("set_value");
+        return backend.dispatch({
+          ...command(observation),
+          action: { type: "semantic", locator: { kind: "ref", ref: item.ref }, action: "invoke" },
+        });
+      };
+      // It went into the folder: the reading after it shows that.
+      const after = await open();
+      expect(after?.roots.some((node) => node.name === "pick-me.txt")).toBe(true);
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        action: "open",
+        button: "left",
+      });
+      // Nothing changed: the outcome is unknown, not a success.
+      fixture.opens = false;
+      await expect(open()).rejects.toMatchObject({
+        code: "outcome_unknown",
+        dispatched: true,
+        message: expect.stringContaining(
+          "macOS did not confirm the action, and the window reads the same as before",
+        ),
+      });
+      // A button still presses.
+      await backend.dispatch(command(await backend.observe(target.id)));
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).not.toHaveProperty(
+        "action",
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a press macOS did not confirm, which closed its window, reads the window it opened", async () => {
+    // Excel's start gallery: pressing "Blank Workbook" closes the gallery and
+    // opens the workbook, and macOS answers the press with -25205.
+    class GalleryFixture extends Fixture {
+      pressed = false;
+      opens = true;
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "click" && args.element_token !== undefined) {
+          this.calls.push({ name, args });
+          this.pressed = true;
+          return result(
+            {
+              error: {
+                code: "ax_action_failed",
+                message: "AX action failed: AXUIElementPerformAction(AXPress) returned -25205",
+              },
+            },
+            true,
+          );
+        }
+        if (name === "list_windows" && this.pressed) {
+          this.calls.push({ name, args });
+          return result({
+            windows: this.opens
+              ? [
+                  {
+                    pid: 42,
+                    window_id: 5,
+                    title: "Book1",
+                    app_name: "Fixture",
+                    bounds: { x: 50, y: 50, width: 200, height: 100 },
+                  },
+                ]
+              : [],
+          });
+        }
+        if (name === "get_window_state" && this.pressed && args.window_id === 1) {
+          this.calls.push({ name, args });
+          return result({ error: { code: "window_not_found", message: "no such window" } }, true);
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "get_window_state" && args.window_id === 5) {
+          const state = JSON.parse(response.structuredJson!);
+          response.structuredJson = JSON.stringify({ ...state, window_id: 5 });
+        }
+        return response;
+      }
+    }
+    for (const opens of [true, false]) {
+      const fixture = new GalleryFixture();
+      fixture.opens = opens;
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const pressing = backend.dispatch(command(await backend.observe(target.id)));
+        if (opens) expect((await pressing)?.target.id).toBe("cua:window:42:5");
+        else
+          await expect(pressing).rejects.toMatchObject({
+            code: "outcome_unknown",
+            dispatched: true,
+            message:
+              "macOS did not confirm the action, but cua:window:42:1 has closed since, so it likely took effect; list the app's windows and observe the one to act on",
+          });
+      } finally {
+        await backend.close();
+      }
     }
   });
 
@@ -2308,6 +2456,22 @@ describe("CUA desktop boundary", () => {
           reply: step(1, { phase: "action", message: "did not confirm" }),
           expected: { code: "outcome_unknown", dispatched: true },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        },
+        // Keys of a later action were refused before any was sent: the
+        // failure says what to do, not CUA's own options.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "window_not_key",
+            message: "CUA's own reason, naming its own delivery options",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: Keys reach only the focused window of a background app, and another of its windows has focus, so none were sent: act on that window, or close it first",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
         // A later action was refused: the earlier ones still ran.
         {

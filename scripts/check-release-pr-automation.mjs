@@ -2097,8 +2097,21 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     "release source tree differs from the exact reviewed head and is not a moving-main squash or exact-head merge",
   );
   const integrationBaseSha = source.parents[0];
+  // A merged PR's provider base may already be its landing parent. Its patch
+  // still starts at the head/base merge base, not at that later target tree.
+  const comparison = await api.get(
+    repositoryPath(`/compare/${pullIdentity.baseSha}...${pullIdentity.headSha}`),
+  );
   invariant(
-    integrationBaseSha !== pullIdentity.baseSha,
+    comparison?.base_commit?.sha === pullIdentity.baseSha &&
+      comparison?.commits?.at(-1)?.sha === pullIdentity.headSha &&
+      Number.isSafeInteger(comparison?.ahead_by) &&
+      comparison.ahead_by > 0,
+    "reviewed release patch comparison identity changed",
+  );
+  const patchBaseSha = assertSha(comparison?.merge_base_commit?.sha, "reviewed patch-base SHA");
+  invariant(
+    integrationBaseSha !== patchBaseSha,
     "release source tree differs from the exact reviewed head on its exact PR base",
   );
   await assertSourceAncestorOfCurrentMain(
@@ -2113,14 +2126,22 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     integrationBaseSha,
     "moving-main integration-base commit",
   );
+  const patchBase =
+    patchBaseSha === base.sha
+      ? base
+      : assertCommit(
+          await api.get(repositoryPath(`/git/commits/${patchBaseSha}`)),
+          patchBaseSha,
+          "reviewed patch-base commit",
+        );
   const [baseTree, headTree, integrationBaseTree, sourceTree] = await Promise.all([
-    api.get(repositoryPath(`/git/trees/${base.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${patchBase.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${integrationBase.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
   ]);
   const reviewedManifest = directTreeManifest(
-    canonicalReleaseLeafMap(baseTree, base.treeSha, "reviewed base tree"),
+    canonicalReleaseLeafMap(baseTree, patchBase.treeSha, "reviewed patch-base tree"),
     canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
   );
   const landedManifest = directTreeManifest(
@@ -2142,6 +2163,7 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
       : "provider-verified-moving-main-squash",
     sourceComposition: {
       type: "exact-reviewed-delta-on-moving-main",
+      patchBaseSha,
       integrationBaseSha,
       integrationBaseTreeSha: integrationBase.treeSha,
       manifestSha256: treeManifestSha256(reviewedManifest),

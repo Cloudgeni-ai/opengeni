@@ -236,8 +236,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
-    // withheld usage-history routines and the later 0890 reconciliation
-    // tables. The previous runtime remains ready.
+    // withheld usage-history routines, the later 0890 reconciliation tables and
+    // the Site opens table. The previous runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
         await inspectRuntimeDatabasePosture(client.db, options),
@@ -245,8 +245,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
-      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
+      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -264,8 +264,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
-    // This pre-0864 binary predates forward-compatible posture (#5263): 0890's
-    // two new tables make it unready. Keep the exact incompatibilities as a
+    // This pre-0864 binary predates forward-compatible posture (#5263): later
+    // new tables make it unready. Keep the exact incompatibilities as a
     // negative control so additional known-object or grant regressions fail.
     // This is not rolling-readiness evidence: pre-compatibility fleets need a
     // compatibility-first or maintenance rollout. The pinned-readiness job's
@@ -277,9 +277,10 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         options,
       ),
     ).toEqual([
-      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, site_opens",
       "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table site_opens grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
     ]);
   } finally {
     await client?.close();

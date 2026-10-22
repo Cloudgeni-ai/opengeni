@@ -137,6 +137,10 @@ const integrationMethods = [
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",
   "updateSiteLimitProfile",
+  // The Excel add-in reaches its workbook tickets and list through a host's
+  // session proxy; the web console has no Office surface.
+  "createOfficeWorkbookTicket",
+  "listOfficeWorkbooks",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push

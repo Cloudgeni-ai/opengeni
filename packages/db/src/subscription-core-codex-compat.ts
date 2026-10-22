@@ -22,6 +22,7 @@ import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
   readSubscriptionCoreCutoverDisposition,
   readSubscriptionCoreOrganizationPool,
+  type SubscriptionCoreConnectionReach,
   readSubscriptionCoreWorkspacePool,
   readSubscriptionCoreWorkspaceView,
   renameSubscriptionCoreConnection,
@@ -138,7 +139,6 @@ function projectAccount(
   input: {
     source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
     primaryConnectionId: string | null;
-    poolAllocatorEnabled: boolean;
   },
 ): CodexAccountStatus {
   const quota = decodeSubscriptionQuota(row);
@@ -166,7 +166,7 @@ function projectAccount(
     extraCreditsEnabled: row.extra_credits_enabled,
     extraCreditsVersion: Number(row.extra_credits_version),
     extraCreditsUpdatedAt: date(row.extra_credits_updated_at),
-    allocatorEnabled: row.allocator_enabled && input.poolAllocatorEnabled,
+    allocatorEnabled: row.allocator_enabled,
     allocatorVersion: Number(row.allocator_version),
     allocatorUpdatedBySubjectId: null,
     allocatorUpdatedAt: date(row.updated_at),
@@ -240,7 +240,6 @@ export async function projectSubscriptionCoreCodexWorkspace(
       projectAccount(entry.row, {
         source: entry.source,
         primaryConnectionId: pool.primaryConnectionId,
-        poolAllocatorEnabled: entry.poolAllocatorEnabled,
       }),
     ),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),
@@ -268,7 +267,6 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
       projectAccount(entry.row, {
         source: entry.source,
         primaryConnectionId: view.pool.primaryConnectionId,
-        poolAllocatorEnabled: entry.poolAllocatorEnabled,
       }),
     ),
     rotation: rotationSettings(view.primaryConnectionId, view.pool.rotationMode === "spread"),
@@ -284,7 +282,6 @@ export async function getSubscriptionCoreCodexWorkspaceProjection(
             projectAccount(row, {
               source: "workspace",
               primaryConnectionId: view.primaryConnectionId,
-              poolAllocatorEnabled: true,
             }),
           ),
         ],
@@ -311,7 +308,6 @@ export async function listSubscriptionCoreCodexPersonalAccountsInTransaction(
     projectAccount(row, {
       source: "workspace",
       primaryConnectionId: null,
-      poolAllocatorEnabled: true,
     }),
   );
 }
@@ -333,9 +329,9 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
       ...projectAccount(row, {
         source: "organization",
         primaryConnectionId: pool.primaryConnectionId,
-        poolAllocatorEnabled: true,
       }),
       ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+      ...reachOf(pool.reach, row.id),
     })),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),
   };
@@ -358,13 +354,21 @@ export async function getSubscriptionCoreOrganizationCodexAccount(
     ...projectAccount(row, {
       source: "organization",
       primaryConnectionId: pool.primaryConnectionId,
-      poolAllocatorEnabled: true,
     }),
     ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+    ...reachOf(pool.reach, row.id),
   };
 }
 
 type Administration = SubscriptionCoreAdministration;
+
+function reachOf(
+  reach: ReadonlyMap<string, SubscriptionCoreConnectionReach>,
+  id: string,
+): { reach?: SubscriptionCoreConnectionReach } {
+  const found = reach.get(id);
+  return found ? { reach: found } : {};
+}
 
 export type SubscriptionCoreCodexAllocatorResult = SubscriptionCoreAllocatorResult;
 
@@ -440,9 +444,9 @@ export async function setSubscriptionCoreCodexRotation(
 
 /**
  * Legacy workspace source modes as the workspace's Codex provider override:
- * `automatic` removes it, `workspace`/`organization` set `inferenceSource`,
- * `disabled` sets `enabled = false`. Connection scope and the model allowlist
- * are never touched (design 5.2). Throws
+ * `disabled` sets `enabled = false`; any other mode removes it (the older
+ * `workspace` and `organization` modes no longer choose connections, D-50).
+ * Connection scope and the model allowlist are never touched. Throws
  * `SubscriptionCoreCodexSourceRefusedError` when refused.
  */
 export async function setSubscriptionCoreWorkspaceCodexSource(
@@ -454,6 +458,9 @@ export async function setSubscriptionCoreWorkspaceCodexSource(
     mode: WorkspaceCodexSubscriptionMode;
   },
 ): Promise<{ source: WorkspaceCodexSubscriptionSource; wake: SubscriptionCoreCodexWake }> {
-  const changed = await setSubscriptionCoreWorkspaceSource(db, SUBSCRIPTION_CORE_CODEX, input);
+  const changed = await setSubscriptionCoreWorkspaceSource(db, SUBSCRIPTION_CORE_CODEX, {
+    ...input,
+    mode: input.mode === "disabled" ? "disabled" : "automatic",
+  });
   return { source: changed.pool.source, wake: changed.wake };
 }

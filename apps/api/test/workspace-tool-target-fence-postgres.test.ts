@@ -98,6 +98,11 @@ function startProvider() {
   const arrivals: { request: string; statementsBefore: number }[] = [];
   let pending: { method: string; change: () => Promise<unknown> } | undefined;
   let changedAt: number | undefined;
+  // Armed by `measure`: the client opens its event stream (GET) in the
+  // background after initialization, so its credential step and fence can still
+  // be running when a quick operation ends. Answer tools/list only once that
+  // GET has arrived, so every physical request settles inside the operation.
+  let eventStream: { arrived: boolean; wake: () => void } | undefined;
   const server = startTestMcpServer({
     validateAuthorization: async () => {
       const last = server.requests.at(-1);
@@ -105,6 +110,19 @@ function startProvider() {
         request: `${last?.httpMethod ?? "?"} ${last?.jsonRpcMethod ?? "-"}`,
         statementsBefore: statements.length,
       });
+      if (eventStream && last?.httpMethod === "GET") {
+        eventStream.arrived = true;
+        eventStream.wake();
+      }
+      const stream = eventStream;
+      if (stream && !stream.arrived && last?.jsonRpcMethod === "tools/list") {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await new Promise<void>((resolve) => {
+          stream.wake = resolve;
+          timer = setTimeout(resolve, 10_000);
+        });
+        clearTimeout(timer);
+      }
       const due = pending;
       if (due && last?.jsonRpcMethod === due.method) {
         pending = undefined;
@@ -135,6 +153,11 @@ function startProvider() {
       server.calls.length = 0;
       pending = undefined;
       changedAt = undefined;
+      eventStream = undefined;
+    },
+    /** Hold tools/list until the client's background event-stream GET arrives. */
+    awaitEventStream() {
+      eventStream = { arrived: false, wake: () => undefined };
     },
   };
 }
@@ -490,6 +513,7 @@ async function transportFixture(provider: Provider, kind: "static" | "capability
 /** Statements of one request, split at its first physical provider request. */
 async function measure(provider: Provider, run: () => Promise<Response>) {
   provider.reset();
+  provider.awaitEventStream();
   statements.length = 0;
   recording = true;
   const response = await run().finally(() => {

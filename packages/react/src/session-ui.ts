@@ -100,6 +100,7 @@ export type {
   NewConversationLabels,
 } from "./components/new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";
@@ -144,3 +145,19 @@ export { useStartupDetails, setStartupDetails } from "./timeline/startup-prefere
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+
+// Why a message can't start, with machine choice and recheck. Every word comes
+// from the message catalog (`sessionAdmission.*`). The headless state is
+// `useSessionStart` in `@opengeni/react/session`.
+export {
+  PersonalMachineExplanation,
+  SessionAdmissionNotice,
+  SessionMachineAccessNotice,
+  SessionMachineChoices,
+  SessionStartNotice,
+} from "./components/session-admission-notice";
+export type {
+  SessionAdmissionNoticeProps,
+  SessionMachineChoicesProps,
+  SessionStartNoticeProps,
+} from "./components/session-admission-notice";

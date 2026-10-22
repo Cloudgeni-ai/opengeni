@@ -5,6 +5,7 @@ import {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  SiteOpenedResponse,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
@@ -24,6 +25,7 @@ import {
   resolveSiteAudienceChange,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  currentSiteSessionOrigin,
   siteViewerForGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -33,6 +35,7 @@ import {
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
   listWorkspaceArtifacts,
+  recordSiteOpened,
   nestedPostgresSqlState,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
@@ -227,6 +230,33 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         parseVersionId(context.req.query("versionId")),
       );
       return context.json(await workspaceArtifactDownloads(deps.objectStorage, ref, "public"));
+    } catch (error) {
+      return workspaceArtifactErrorResponse(context, error);
+    }
+  });
+
+  // Opening a Site counts as this person's activity on its sidebar row. It is
+  // personal, needs only read access, and a Site page cannot record it.
+  app.post(`${base}/:artifactId/opened`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    if (currentSiteSessionOrigin())
+      throw new HTTPException(403, { message: "A Site page cannot record opening a Site" });
+    const siteId = artifactId(context);
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    if (!viewer.subjectId)
+      throw new HTTPException(403, { message: "A signed-in person is required" });
+    try {
+      return context.json(
+        SiteOpenedResponse.parse(
+          await recordSiteOpened(deps.db, {
+            workspaceId,
+            subjectId: viewer.subjectId,
+            viewer,
+            siteId,
+          }),
+        ),
+      );
     } catch (error) {
       return workspaceArtifactErrorResponse(context, error);
     }

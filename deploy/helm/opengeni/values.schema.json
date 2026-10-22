@@ -8,6 +8,15 @@
         "turns": {
           "type": "object",
           "properties": {
+            "terminationGracePeriodSeconds": { "type": ["integer", "null"], "minimum": 0 },
+            "shutdown": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "graceSeconds": { "type": ["integer", "null"], "minimum": 0 },
+                "forceSeconds": { "type": ["integer", "null"], "minimum": 10 }
+              }
+            },
             "autoscaling": {
               "type": "object",
               "properties": {

@@ -1915,9 +1915,11 @@ describe("scheduled task personal MCP authority", () => {
       // 0873 patches the account-binding fence as rewritten by withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0873_mcp_binding_delegation_revocation.sql')`;
-      // The list invalidation triggers read visibility from withheld 0501.
+      // The list invalidation triggers read visibility from withheld 0501;
+      // 0905 adds one more on 0888's notify function.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0888_session_list_invalidation.sql')`;
+        ('0888_session_list_invalidation.sql'),
+        ('0905_schedule_timing_session_list_hints.sql')`;
       // These learning-scope repairs rewrite routines installed by withheld
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.

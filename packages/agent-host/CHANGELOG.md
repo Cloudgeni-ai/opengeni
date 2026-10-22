@@ -1,5 +1,47 @@
 # @opengeni/agent-host
 
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+  - @opengeni/sdk@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [debd64e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/sdk@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- a1a907c: A product can let its own branded build of the Opengeni Browser Chrome extension reach the person's agent. Set `browserExtensionIds` (Chrome's 32-letter extension IDs) in the desktop kit's config, or in `ThisComputer`'s options; the agent then lists those extensions next to Opengeni Browser in the Chrome Native Messaging host it registers. Standalone installs read the same list from `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` when running `opengeni-agent service install`. This needs an agent built from this release or later.
+
+### Patch Changes
+
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [84c8b32]
+- Updated dependencies [84b1a18]
+  - @opengeni/sdk@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

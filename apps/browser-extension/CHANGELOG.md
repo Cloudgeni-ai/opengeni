@@ -1,5 +1,21 @@
 # @opengeni/browser-extension
 
+## 0.2.0
+
+### Minor Changes
+
+- 6c7b552: Downloads now work in attached Chrome. A file that a tab Opengeni controls downloads appears in `browser_downloads` like a managed browser's download, and `browser_download_save` saves it into the session's workspace. Chrome still saves it in the person's own downloads folder, where it stays untouched; the session keeps a verified copy. The extension asks for Chrome's `downloads` permission so it can tell where Chrome saved a controlled tab's download (it looks up only completed downloads of that address since the download began). With an older extension, such a download is listed as failed with `download_location_unavailable`.
+
+### Patch Changes
+
+- e142b9e: The browser extension now reconnects to the local agent after Chrome stops and later restarts its service worker. A periodic wake-up alarm (new `alarms` permission) reopens the native connection when it is down, so an attached Chrome no longer stays disconnected until a tab event happens. Browser and computer controllers also log the class, frame and redacted message of any dispatch error the driver did not classify, so `controller_lost` failures leave a cause in the agent log.
+
+## 0.1.7
+
+### Patch Changes
+
+- 0ac4e98: A product can build the extension under its own name and icons: `scripts/build.ts --brand <file>` takes a brand file (names, summary, homepage, icons, optional manifest key), and `brand:icons` makes the icons from one mark. Every name a person sees comes from the brand; Opengeni Browser's own build is unchanged.
+
 ## 0.1.6
 
 ### Patch Changes

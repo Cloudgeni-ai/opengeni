@@ -270,3 +270,70 @@ describe("shared capability connection lifecycle", () => {
     });
   });
 });
+
+test("Drive actions use the dedicated Connect attempt and never generic OAuth or early enable", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const saved = new Map<string, string>();
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      location: { href: "https://app.example/capabilities" },
+      sessionStorage: {
+        setItem: (key: string, value: string) => saved.set(key, value),
+        getItem: (key: string) => saved.get(key) ?? null,
+        removeItem: (key: string) => saved.delete(key),
+      },
+    },
+  });
+  try {
+    const drive = CapabilityCatalogItem.parse({
+      ...item,
+      id: "drive",
+      authKind: "oauth2",
+      mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
+      providerDomain: "drivemcp.googleapis.com",
+    });
+    const beginConnect = mock(async () => ({
+      id: "drive-attempt",
+      revision: 1,
+      state: "credential_input",
+    }));
+    const advanceConnectAttempt = mock(async () => ({
+      id: "drive-attempt",
+      nextAction: { type: "authorize", url: "https://accounts.google.com/consent" },
+    }));
+    const startConnectionOAuth = mock(async () => {
+      throw new Error("Generic OAuth must not run");
+    });
+    const h = harness({
+      beginConnect,
+      connectTransport: () => ({ advance: advanceConnectAttempt }),
+      startConnectionOAuth,
+    });
+    await performCapabilityAction(
+      { ...h.options, item: drive, connectReturnUrl: "https://app.example/capabilities" },
+      {
+        type: "reconnect_oauth",
+        item: drive,
+        ownership: "personal",
+        connectionId: "existing",
+        connectionWorkspaceId: "account-workspace",
+      },
+    );
+    expect(beginConnect).toHaveBeenCalledWith(
+      "account-workspace",
+      expect.objectContaining({
+        providerId: "google-drive",
+        reconnectAccountId: "existing",
+        ownership: "personal",
+      }),
+    );
+    expect(startConnectionOAuth).not.toHaveBeenCalled();
+    expect(h.enableCapability).not.toHaveBeenCalled();
+    expect(h.options.redirect).toHaveBeenCalledWith("https://accounts.google.com/consent");
+    expect(saved.size).toBe(1);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});

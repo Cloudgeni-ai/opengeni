@@ -9,6 +9,7 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { Select } from "@opengeni/react/ui/select";
 import { useState } from "react";
+import { ExhaustedClaudePreview } from "./claude-exhausted";
 
 export const POOL_PREVIEW_NOW = Date.parse("2026-10-20T09:30:00Z");
 const at = (hours: number) => new Date(POOL_PREVIEW_NOW + hours * 3_600_000).toISOString();
@@ -93,7 +94,14 @@ export function pooledLimitsFixture(
 
 export function PooledLimitsPreview() {
   const [scenario, setScenario] = useState<
-    "normal" | "runout" | "sparse" | "partial" | "workspace" | "empty"
+    | "normal"
+    | "runout"
+    | "sparse"
+    | "partial"
+    | "workspace"
+    | "empty"
+    | "claude-exhausted"
+    | "claude-mixed"
   >("normal");
   const scope = scenario === "workspace" || scenario === "empty" ? "workspace" : "organization";
   const pool = pooledLimitsFixture(scope, scenario === "sparse", scenario === "runout");
@@ -123,42 +131,48 @@ export function PooledLimitsPreview() {
           <option value="partial">One account not reported</option>
           <option value="workspace">Workspace · shared and own accounts</option>
           <option value="empty">Workspace · no available accounts</option>
+          <option value="claude-exhausted">Claude · all accounts at a binding limit</option>
+          <option value="claude-mixed">Claude · mixed availability</option>
         </Select>
       </div>
       <SectionStack variant="group">
         <Section
           title={scope === "organization" ? "Organization · Models" : "Design workspace · Models"}
         >
-          <RowList label="Model providers" flush>
-            <AccountGroupHeading>Subscriptions</AccountGroupHeading>
-            <li className="col-span-full list-none">
-              <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
-            </li>
-            {(pool.windows.find((window) => window.id === "weekly")?.accounts ?? []).map(
-              (account) => (
-                <SubscriptionAccountRow
-                  key={account.id}
-                  provider="codex"
-                  title={account.label}
-                  description={
-                    account.remainingPercent === null
-                      ? "Not reported yet"
-                      : account.remainingPercent === 0
-                        ? "Limit reached"
-                        : `${Math.round(account.remainingPercent)}% left this week`
-                  }
-                  onOpen={() => undefined}
-                />
-              ),
-            )}
-            <AccountGroupHeading>Pay as you go</AccountGroupHeading>
-            <ListRow
-              leading={<ProviderTile provider="vercel" size="lg" />}
-              title="Vercel AI Gateway"
-              meta={["Belongs to Design", "API key"]}
-              onOpen={() => undefined}
-            />
-          </RowList>
+          {scenario.startsWith("claude-") ? (
+            <ExhaustedClaudePreview mixed={scenario === "claude-mixed"} />
+          ) : (
+            <RowList label="Model providers" flush>
+              <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+              <li className="col-span-full list-none">
+                <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
+              </li>
+              {(pool.windows.find((window) => window.id === "weekly")?.accounts ?? []).map(
+                (account) => (
+                  <SubscriptionAccountRow
+                    key={account.id}
+                    provider="codex"
+                    title={account.label}
+                    description={
+                      account.remainingPercent === null
+                        ? "Not reported yet"
+                        : account.remainingPercent === 0
+                          ? "Limit reached"
+                          : `${Math.round(account.remainingPercent)}% left this week`
+                    }
+                    onOpen={() => undefined}
+                  />
+                ),
+              )}
+              <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+              <ListRow
+                leading={<ProviderTile provider="vercel" size="lg" />}
+                title="Vercel AI Gateway"
+                meta={["Belongs to Design", "API key"]}
+                onOpen={() => undefined}
+              />
+            </RowList>
+          )}
         </Section>
       </SectionStack>
     </div>

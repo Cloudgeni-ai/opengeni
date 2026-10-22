@@ -1,3 +1,4 @@
+import { isRetiredNativeGoogleDriveTask } from "@opengeni/contracts/google-drive-native-retirement";
 import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
@@ -133,7 +134,7 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   active: boolean;
   reason: "active" | "user_paused" | "connection_paused" | "source_disabled" | "provider_retired";
 } {
-  if (isRetiredNativeAtlassianTask(task))
+  if (isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task))
     return { label: "Sync retired", active: false, reason: "provider_retired" };
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };

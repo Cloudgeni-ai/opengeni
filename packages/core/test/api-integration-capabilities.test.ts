@@ -122,6 +122,23 @@ describe("API Integration capability projection", () => {
     ).toEqual([]);
   });
 
+  test("retains native Drive installation data without exposing its retired executable adapter", () => {
+    const retired = runtime({
+      definitionId: "google-drive",
+      definitionProvenance: "curated",
+      serverId: "old-drive",
+    });
+    const custom = runtime({
+      definitionId: "google-drive",
+      definitionProvenance: "workspace",
+      serverId: "custom-api",
+    });
+    const projected = settingsWithApiIntegrationServers(testSettings(), [retired, custom]);
+    expect(projected.mcpServers.some((server) => server.id === "old-drive")).toBe(false);
+    expect(projected.mcpServers.some((server) => server.id === "custom-api")).toBe(true);
+    expect(retired.definitionId).toBe("google-drive");
+  });
+
   test("adds installed adapters to ordinary MCP settings without overriding deployment config", () => {
     const settings = testSettings({
       mcpServers: [

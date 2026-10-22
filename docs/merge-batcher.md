@@ -1,6 +1,6 @@
 # Portable merge batcher
 
-This is the in-house batcher core. It uses Bun 1.4.3, built-in APIs and
+This is the in-house batcher core. It uses Bun 1.4.4, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
 The default mode is **read-only shadow**. Opt-in `shadow-ci` publishes candidates
@@ -63,6 +63,19 @@ dependencies, not substitutes for missing provider transaction guarantees.
 The parent workflow integration and production deployment are separate work.
 No branch/ruleset/permission/cloud activation is performed by this code change.
 
+The [administration bundle](merge-batcher-admin/README.md) prepares the dedicated
+App and reversible split rulesets offline. It is not an activation mechanism.
+Main control remains held through the second production release until the
+rollout owner explicitly authorizes it; candidate-only CI shadow does not lift
+that hold. The tested-descendant release-lane ops change also has its own held
+merge/rollout decision. Preserve the existing manual squash and full-main release
+proof paths until those coordinated decisions are made.
+The version 2 admin plan makes the App the only normal main writer while active,
+including PR merges; administrators have no standing writer bypass. The same
+verified activation receipt selects AGENTS' queue-only instructions. Partial
+transitions hold merges. Emergency OFF must prove runtime stop **and** exact
+original ruleset restoration before instructions return to normal manual squash.
+
 ## Commands
 
 ```sh
@@ -111,6 +124,8 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_MAX_INFLIGHT` | `1` hosted candidate CI |
 | `BATCHER_RUNNER_BUDGET` | No default; explicitly allocated repository runner/job budget, not an assumed organization quota |
 | `BATCHER_MAIN_RESERVE` | No default; conservative slots reserved for full-main CI |
+| `BATCHER_PROVIDER_JOB_LIMIT` | `60`, GitHub's documented Team concurrent-job default for the whole organization's hosted pool |
+| `BATCHER_OTHER_REPOSITORY_ALLOWANCE` | `28`, assumed runner-holding jobs in other organization repositories (measured maximum; see headroom) |
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
 | `BATCHER_GIT_DIR` | `/data/objects.git`, disposable bare object cache |
 | `BATCHER_OUTPUT_DIR` | `/data/shadow`, local stage/manifest evidence |
@@ -255,14 +270,16 @@ code failure needs `failure`. Missing/expired/ambiguous/malformed artifacts,
 wrong attempts/branches/workflows and other conclusions are unknown, never
 evidence against a PR. Archive reading is bounded and never extracts paths.
 
-Retries rerun the **entire workflow**, never only failed jobs. Before requesting its
-whole-candidate retry, the controller durably records the trusted exact run/attempt
-code-failure receipt in Git-backed state. That receipt survives artifact replacement
-and process restart. For historical runs not observed before their artifacts
-expired, the controller does not invent failure evidence. Attempt-specific names
-retain history without weakening the identity bindings.
-Unknown result evidence can exhaust its bounded retry budget and require
-operator investigation rather than endlessly rerunning or ejecting a PR.
+Code/test failures are **never retried**. Only the candidate's own first completed
+Batch CI attempt with positive infrastructure-only evidence may request one
+whole-workflow retry; main, Version and release runs are excluded. The exact
+run/attempt, request time and reason are durably recorded in Git and stage evidence.
+Ambiguous or partial receipts hold rather than authorize a retry or blame a PR.
+A second infrastructure failure holds. Invalidated, landed or obsolete-base
+candidates cannot submit pending retries: the candidate must still be rooted in
+current main or an exact live predecessor chain, checked before and after the
+durable submission claim. An unknown POST outcome remains reconciliation-only,
+never a blind replay; these observations do not make GitHub REST atomic with Git.
 
 ## State machine and recovery
 
@@ -273,12 +290,83 @@ rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
 even if a higher legacy max-inflight planner setting is present.
 Full-main CI retains explicit reserved capacity, but its mere presence does not
 block progress. Before publication/retry/landing, the reader scans current
-repository runs and their latest jobs (at most 32 runs, 100 entries per response;
-incomplete observations hold). Required capacity is other nonterminal job demand
-plus the larger of configured main reserve and observed main demand, plus **18
-candidate slots**. It proceeds only when that fits BATCHER_RUNNER_BUDGET and no
-other Batch CI run occupies the single candidate slot. Missing budget/reserve or
-unobservable other-workflow job demand holds rather than inventing capacity.
+repository runs and their latest jobs (one complete page of at most 100 entries
+per response; incomplete observations hold). Each of the five active run statuses
+is listed twice, so a run whose status changes once during the listing (in either
+direction, for example `in_progress` to `waiting` while other jobs still run) is
+still listed; the latest active listing is used, and a run listed as `completed`
+is skipped. Two passes do not rule out more changes during the listing or
+provider snapshot lag. Every distinct active run's complete latest-job page is
+then read, up to an absolute bound of 64 runs per observation (at most 10
+run-list plus 64 job requests, 74 in total) and a 120-second scan deadline,
+checked before each request and after the last response; a larger backlog, an
+overrun deadline or a provider error holds. A run is **approval-only** only when
+every listing in the observation reports the run as `waiting` and its complete
+job page has at least one `waiting` job and otherwise only `pending` or
+`completed` jobs. Such
+runs have zero runner demand and are excluded from the **32 runner-relevant
+runs** cap; every other run, including waiting runs with any `queued`,
+`in_progress` or `requested` job and waiting runs without jobs, counts toward
+that cap, and exceeding it holds. Demand counts runner-holding jobs: `queued`,
+`in_progress` and `requested` (created but not yet queued; counted
+conservatively). Jobs waiting for environment approval (`waiting`) or a job
+concurrency group (`pending`), completed jobs, and runs without materialized jobs
+(for example a run held by its concurrency group) are not demand; a run is a
+placeholder, not a runner. Required
+capacity is other job demand plus the larger of configured main reserve and
+observed main demand, plus **18 candidate slots**. It proceeds only when that fits
+BATCHER_RUNNER_BUDGET and no other Batch CI run occupies the single candidate
+slot. Missing budget/reserve or any unrecognized or missing job status holds
+rather than inventing capacity. Waiting, pending and job-less runs can start
+requesting runners after observation.
+
+Further checks protect the organization's shared hosted pool. They do not
+change the 52/30/18 allocation, and the two main holds apply before any
+arithmetic:
+
+- **Main before fan-out.** `ci.yml` first creates only automation-admission,
+  merge-content and plan; every other job needs plan and appears together, about
+  77–92 seconds later (measured), as a fan-out of up to 46 runner-holding jobs.
+  An active full-main push run whose complete job list has at most those 3 jobs
+  (any status, including a just-pushed run without jobs or a run held by its
+  concurrency group) is pre-fan-out: its observed demand understates what it is
+  about to request, so no new candidate is admitted until its fan-out exists.
+  A drained run still lists its completed fan-out jobs, so it is not pre-fan-out.
+  A run proven approval-only (an old rerun waiting for environment approval) is
+  idle and never freezes admission; once approved, a later observation sees it
+  queue and holds. A job-less waiting or pending main run fails closed until it
+  materializes. A test checks the 3-job constant against `ci.yml`.
+- **Main jobs waiting for runners.** If any active full-main push CI run, newest
+  or an older rerun, has a `queued` or `requested` job, no new candidate is
+  admitted. Main CI itself is never gated, cancelled or skipped.
+- **Provider pool fit.** Observed repository demand (main + other) plus
+  `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots must fit
+  `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
+  repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
+  so other <= 4 while main <= 30), admission needs other <= 4 and main + other <= 14.
+
+The batcher's App is installed only on this repository, so it cannot read other
+repositories' jobs and does not try. The allowance replaces that observation. It is
+the maximum of one measured window (October 22, 2026, 02:00–08:40 UTC, every
+organization repository pushed since October 21, 10-second samples: other-repository
+runner-holding jobs p50 1, p95 10, p99 18, maximum 28, from cua 21 plus cloudgeni 7).
+It is an assumption, not an observation: a larger burst elsewhere can still queue
+jobs. The same window showed the org pool peaking at exactly 60 runner-holding jobs,
+with multi-minute runner waits for CI jobs created while 40–59 runners were busy.
+No reservation here can guarantee main CI never queues behind a running candidate:
+one full main fan-out holds up to 46 jobs and a candidate up to 17, so a main landing
+that starts after admission can exceed 60. The pre-fan-out and main-queued holds stop
+a new candidate from adding to main's demand once a main run is observed; they do
+not preempt a running candidate. Invalid limit or
+allowance values reject configuration; allowance plus 18 above the limit never admits.
+
+`stage.json` headroom now also records `capacity`: the configured limit and
+allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
+requested jobs across all active main runs), `preFanoutMainRuns` (their run IDs),
+and `latestMain` (newest main run ID, jobs
+waiting for runners, oldest current queue age, and the largest `started_at -
+created_at` among started jobs, all measured from the job timestamps). These are
+measured main queue waits, not predicted candidate latency.
 stage.json exposes the measured occupied/reserved slots, configured budget and
 decision. These are explicit repository allocations, not a claim that GitHub
 granted a custom quota or that other repositories are idle. Jobs can expand or
@@ -287,23 +375,41 @@ observed demand, not an atomic GitHub scheduler or cancellation mechanism.
 Invalidated descendants still occupy CI slots while running: no cancellation
 operation exists in the adapter.
 
-A retryable trusted code-red result gets one whole-candidate retry. Exit 70 is
-non-retryable process-leak evidence and goes directly to bisection/ejection.
-Two trusted retryable code-red
-attempts split the ordered candidate at `ceil(length / 2)`; halves are tested
-sequentially against the actual landed base. Repeated singleton failure ejects
-that exact head with an exact-head reason comment. Changed heads and new ready
-events may return; merely editing evidence cannot re-enqueue the same known-bad
-head/event. Merge-tree conflicts also eject their exact member with a distinct
-conflict reason, not a fabricated CI failure. This isolation identifies failing
-combinations against the then-current base; it does not claim a universally bad
-PR independently of interactions.
+The required batch suite is the current plan/source/impact-selected unit/Batch
+ready subset on the exact stacked candidate tree. Its trusted, completed, latest
+run-attempt success permits landing even when full-main CI is red, missing,
+running, cancelled or unknown. This is not full-CI equivalence or release evidence.
+Full main CI remains an independent post-merge backstop. Capacity admission still
+respects observed main runner demand; main advancing still invalidates obsolete
+candidates and requires a new exact-tree test. Legacy `baseHold` records remain
+audit history, not green-candidate admission gates.
 
-Infrastructure/cancelled/unknown attempts never incriminate PRs. They back off
-exponentially from 60 seconds to at most 3,600 seconds, with an eight-attempt
-budget. Retry intent is durable before effect submission. An uncertain effect
-does not get blindly replayed after restart; its observable intent waits for
-provider reconciliation. No running job is cancelled.
+A trusted candidate code failure is **not** proof that a member caused it. Until
+the separate producer/consumer contract supplies comparable same-job base batch-suite
+evidence, failed cohorts split sequentially and failed singleton heads are durably
+parked, never blamed or ejected. Each parking record binds the PR head, tested base,
+batch, original cohort, run and attempt, with a durable non-blaming PR comment.
+Other ready heads proceed. Readiness churn and main advancement do not retry a
+parked head; a genuinely different head may re-enter. Historical parking evidence
+is retained. Legacy bisection groups use the same parking policy; pending legacy
+code-blame comments remain held. No base-only workflow is invoked.
+
+The requested all-singletons-same-way suspected-base landing hold is **not yet
+supported**: existing trusted receipts bind task exit outcomes, not assertion-level
+failure fingerprints. Matching job names, exit codes or free-text reasons cannot
+establish the same failure. No attribution or landing hold is fabricated from them.
+Failed speculative descendants may be invalidated, but running CI is never cancelled.
+Main advancement or readiness changes still invalidate unparked candidates normally.
+Merge-tree conflicts retain their distinct
+conflict reason and comment path, not a fabricated CI failure. Legacy receipt
+`retryable` flags do not override the controller's no-code-retry policy.
+
+Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible positive
+infrastructure evidence waits at least 60 seconds and for admission headroom
+before the single allowed retry; unknown evidence cannot request it. Retry intent
+is durable before effect submission. An uncertain effect uses bounded, backed-off
+provider observations, not additional CI attempts, and is never blindly replayed
+after restart. No running job is cancelled.
 Exit 75 (setup), 124/126/127, negative exits and OOM/signal exits are
 infrastructure; 130/143 are cancellation. Missing plan/batch identity or missing
 or unverifiable result receipts are infrastructure, never code-red evidence.
@@ -518,12 +624,16 @@ Portable placement options, without deployment by this task:
   continuous background CPU, runtime secrets and equivalent probes. Keep the
   same Git-backed state protocol; do not introduce Azure-only state authority.
 
-One-step rollback is `BATCHER_MODE=shadow` followed by the platform's normal
-restart/revision replacement. Default configuration is still shadow. An active
-rollout must ensure old active instances have stopped or
-their provider authority is fenced before declaring rollback complete. Leave
-running CI untouched, retain state/queue/result evidence, and inspect main's
-exact landed SHA. Do not delete refs, force-reset main or rotate credentials.
+With exclusive main policy enabled, changing `BATCHER_MODE=shadow` or stopping a
+service alone is **not** complete rollback: it leaves normal manual merges blocked.
+Use the administration bundle's reviewed one-command OFF, which first proves
+runtime STOP and then restores the exact original policy and emits a verified
+manual-mode receipt. Unknown or forced STOP and unresolved REST outcomes remain
+explicit holds. Default configuration is still shadow; optional shadow image/
+credential restoration and restart are separately owned deployment actions after
+the active writer is proven stopped. Leave running CI untouched, retain state/
+queue/result evidence, and inspect main's exact landed SHA. Do not delete refs,
+force-reset main or rotate credentials.
 
 Full VM/monorepo testing, exact-head independent agent review and the repository's
 evidence comment remain required before this batcher itself lands. Focused core

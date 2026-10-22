@@ -564,7 +564,8 @@ describe("release image workflow contract", () => {
     expect(dockerfile).toContain("xdotool scrot ffmpeg");
     expect(dockerfile).toContain("COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc");
     expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
-    expect(dockerfile).toContain("COPY --from=browserd-build /out/agent-browser");
+    expect(dockerfile).toContain("COPY --from=browserd-build /out/opengeni-browserd");
+    expect(dockerfile).not.toContain("agent-browser");
     expect(dockerfile).toContain("ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome");
   });
 
@@ -1461,6 +1462,20 @@ describe("release image workflow contract", () => {
       const step = steps.find((candidate) => candidate.name === name);
       expect(step?.run).toContain("--binary-identifier ai.opengeni.agent");
     }
+    // The LaunchAgent names this bundle in AssociatedBundleIdentifiers so macOS
+    // attributes the background item to the app, not the signing developer.
+    const bundle = steps.find(
+      (candidate) =>
+        candidate.name === "macOS assemble + sign + notarize .app bundle (if creds present)",
+    );
+    expect(bundle?.run).toContain(
+      "<key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>",
+    );
+    const launchd = await readFile(
+      resolve(root, "agent/crates/opengeni-agent-platform/src/service.rs"),
+      "utf8",
+    );
+    expect(launchd).toContain('pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";');
   });
 
   test("agent publication creates only immutable-compatible versioned releases", async () => {
@@ -1520,7 +1535,6 @@ describe("release image workflow contract", () => {
     for (const executable of [
       "Contents/MacOS/opengeni-agent",
       "Contents/Helpers/opengeni-browserd",
-      "Contents/Helpers/agent-browser",
       "Contents/Helpers/opengeni-computer-native",
     ]) {
       expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
@@ -1546,7 +1560,6 @@ describe("release image workflow contract", () => {
     expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
     expect(agentRelease).toContain("bun_target=bun-linux-x64;");
     expect(agentRelease).toContain("bun_target=bun-linux-arm64;");
-    expect(agentRelease).toContain("OPENGENI_BROWSERD_TARGET_MUSL=false");
     expect(agentRelease).toContain("linux browserd must use the glibc dynamic linker");
     expect(agentRelease).not.toContain("bun-linux-x64-musl");
     expect(agentRelease).not.toContain("bun-linux-arm64-musl");

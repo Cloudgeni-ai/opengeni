@@ -140,7 +140,10 @@ function upstreamServer() {
     if (path === "/v1/access/me") {
       return Response.json({
         subjectId: "subject-u42",
-        accountGrants: [],
+        accountGrants: [
+          { accountId: "acct-1", subjectId: "subject-u42", permissions: [] },
+          { accountId: "acct-2", subjectId: "subject-u42", permissions: ["workspace:admin"] },
+        ],
         workspaceGrants: [
           {
             workspaceId: WORKSPACE_ID,
@@ -148,7 +151,30 @@ function upstreamServer() {
             subjectId: "subject-u42",
             permissions: ["sessions:read", "artifacts:read"],
           },
+          {
+            workspaceId: OTHER_WORKSPACE_ID,
+            accountId: "acct-2",
+            subjectId: "subject-u42",
+            permissions: ["workspace:admin"],
+          },
         ],
+        defaultAccountId: "acct-2",
+        defaultWorkspaceId: OTHER_WORKSPACE_ID,
+        credential: { kind: "api_key" },
+      });
+    }
+    if (path === "/v1/workspaces") {
+      return Response.json([
+        { id: WORKSPACE_ID, name: "Product" },
+        { id: OTHER_WORKSPACE_ID, name: "Elsewhere" },
+      ]);
+    }
+    if (path === "/v1/catalog-assets/logos/github.svg") {
+      return new Response("<svg/>", { headers: { "Content-Type": "image/svg+xml" } });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/channels/c1/stream`) {
+      return new Response("event: ping\ndata: {}\n\n", {
+        headers: { "Content-Type": "text/event-stream" },
       });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/access/grant`) {
@@ -201,6 +227,9 @@ function upstreamServer() {
         },
       });
     }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/new-session-draft` && request.method === "GET") {
+      return Response.json(draftAt(6));
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
       return Response.json({ session: { id: SESSION_ID } });
     }
@@ -213,6 +242,25 @@ function upstreamServer() {
     return Response.json({ id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "idle" });
   };
   return { requests, fetch };
+}
+
+function draftAt(revision: number) {
+  return {
+    revision,
+    text: "Fill B2",
+    resources: [
+      { kind: "file", fileId: "f1" },
+      { kind: "repository", repository: "acme/app" },
+    ],
+    tools: [],
+    toolsProvided: false,
+    model: "codex/gpt",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+    options: { visibility: "private" },
+    selectionHistory: { projects: [] },
+    updatedAt: null,
+  };
 }
 
 function setup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
@@ -2012,6 +2060,33 @@ describe("createSessionProxyHandler", () => {
     expect((await on.handler(new Request(editable))).status).toBe(404);
   });
 
+  test("Excel workbook routes are opt-in and act as the resolved user", async () => {
+    const off = setup();
+    await expect(off.browser.createOfficeWorkbookTicket(WORKSPACE_ID)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(off.upstream.requests.some((r) => r.url.pathname.includes("/office/"))).toBe(false);
+
+    const on = setup({ office: true });
+    await on.browser.createOfficeWorkbookTicket(WORKSPACE_ID);
+    const minted = on.upstream.requests.at(-1)!;
+    expect(minted.method).toBe("POST");
+    expect(minted.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbook-tickets`);
+    expect(minted.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    await on.browser.listOfficeWorkbooks(WORKSPACE_ID).catch(() => undefined);
+    const listed = on.upstream.requests.at(-1)!;
+    expect(listed.method).toBe("GET");
+    expect(listed.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbooks`);
+    // Another workspace and other office paths stay closed.
+    await expect(on.browser.createOfficeWorkbookTicket(OTHER_WORKSPACE_ID)).rejects.toMatchObject({
+      status: 403,
+    });
+    const other = await on.handler(
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/office/anything`),
+    );
+    expect(other.status).toBe(404);
+  });
+
   test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
     const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
     const scoped = { "x-opengeni-session-id": SESSION_ID };
@@ -2327,5 +2402,282 @@ describe("createSessionProxyHandler", () => {
         workspaceId: OTHER_WORKSPACE_ID,
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("createSessionProxyHandler sessionApp", () => {
+  const mount = `${PRODUCT}/api/opengeni/v1`;
+  const ws = `${mount}/workspaces/${WORKSPACE_ID}`;
+  const chat = `${ws}/sessions/${SESSION_ID}`;
+  const send = (
+    handler: (request: Request) => Promise<Response>,
+    url: string,
+    init?: RequestInit,
+  ) => handler(new Request(url, init));
+
+  test("is off by default: the app's extra routes stay closed", async () => {
+    const { handler, upstream } = setup();
+    for (const url of [
+      `${mount}/access/me`,
+      `${mount}/workspaces`,
+      `${ws}/capabilities`,
+      `${chat}/children`,
+      `${mount}/catalog-assets/logos/github.svg`,
+    ]) {
+      expect((await send(handler, url)).status).toBe(404);
+    }
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("bootstraps with the resolved workspace only, never other access or the key", async () => {
+    const { handler } = setup({ sessionApp: true });
+    const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(access.workspaceGrants).toEqual([
+      expect.objectContaining({ workspaceId: WORKSPACE_ID, accountId: "acct-1" }),
+    ]);
+    expect(access.accountGrants).toEqual([expect.objectContaining({ accountId: "acct-1" })]);
+    expect(access.defaultWorkspaceId).toBe(WORKSPACE_ID);
+    expect(access.defaultAccountId).toBe("acct-1");
+    expect(access).not.toHaveProperty("credential");
+    const workspaces = (await (await send(handler, `${mount}/workspaces`)).json()) as Array<{
+      id: string;
+    }>;
+    expect(workspaces.map((workspace) => workspace.id)).toEqual([WORKSPACE_ID]);
+  });
+
+  test("bootstraps an external actor, whose access inventory is empty, from its effective grant", async () => {
+    const upstream = upstreamServer();
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === "/v1/access/me") {
+          return Response.json({
+            mode: "configured",
+            subjectId: "subject-u42",
+            accountGrants: [],
+            workspaceGrants: [],
+            defaultAccountId: null,
+            defaultWorkspaceId: null,
+          });
+        }
+        return await upstream.fetch(request);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
+      sessionApp: true,
+    });
+    const access = (await (await send(handler, `${mount}/access/me`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(access.subjectId).toBe("subject-u42");
+    expect(access.workspaceGrants).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        accountId: "acct-1",
+        subjectId: "subject-u42",
+        permissions: ["sessions:read", "artifacts:read"],
+      },
+    ]);
+    expect(access.defaultWorkspaceId).toBe(WORKSPACE_ID);
+    expect(access.defaultAccountId).toBe("acct-1");
+  });
+
+  test("reads pass through as the resolved user, streams included", async () => {
+    const { handler, upstream } = setup({ sessionApp: true });
+    const capabilities = await send(handler, `${ws}/capabilities?view=composer`);
+    expect(capabilities.status).toBe(200);
+    const read = upstream.requests.at(-1)!;
+    expect(read.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/capabilities`);
+    expect(read.url.searchParams.get("view")).toBe("composer");
+    expect(read.headers.get("x-opengeni-external-actor")).toContain("u_42");
+
+    const stream = await send(handler, `${ws}/channels/c1/stream`, {
+      headers: { accept: "text/event-stream" },
+    });
+    expect(stream.headers.get("content-type")).toBe("text/event-stream");
+    expect(await stream.text()).toContain("event: ping");
+
+    const children = await send(handler, `${chat}/children`);
+    expect(children.status).toBe(200);
+    expect(upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/children`,
+    );
+
+    const logo = await send(handler, `${mount}/catalog-assets/logos/github.svg`);
+    expect(logo.headers.get("content-type")).toBe("image/svg+xml");
+    expect((await send(handler, `${mount}/catalog-assets/logos/a%2Fb.svg`)).status).toBe(404);
+  });
+
+  test("the proxy's own routes, administration and other workspaces stay closed", async () => {
+    const { handler, upstream } = setup({ sessionApp: true });
+    const before = upstream.requests.length;
+    for (const url of [
+      `${ws}/members`,
+      `${ws}/api-keys`,
+      `${ws}/allowance`,
+      `${ws}/usage`,
+      `${ws}/office/workbooks`,
+      `${mount}/workspaces/${OTHER_WORKSPACE_ID}/capabilities`,
+      `${mount}/organizations`,
+      `${chat}/fs/read`,
+    ]) {
+      const response = await send(handler, url);
+      expect([403, 404]).toContain(response.status);
+    }
+    expect(upstream.requests.length).toBe(before);
+  });
+
+  test("only the app's listed writes pass; other writes are refused", async () => {
+    const { handler, upstream } = setup({ sessionApp: true });
+    const put = (url: string, body: unknown, method = "PUT") =>
+      send(handler, url, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await put(`${chat}/pin`, { pinned: true })).status).toBe(200);
+    expect(upstream.requests.at(-1)!.body).toEqual({ pinned: true });
+    expect((await put(`${ws}/new-session-draft`, { text: "hi" })).status).toBe(200);
+    expect((await put(`${ws}/channels`, { name: "Q3" }, "POST")).status).toBe(200);
+    const before = upstream.requests.length;
+    for (const [url, method] of [
+      [`${ws}/scheduled-tasks`, "POST"],
+      [`${ws}/settings`, "PATCH"],
+      [`${chat}/children`, "POST"],
+      [`${chat}/control`, "DELETE"],
+    ] as const) {
+      expect((await put(url, {}, method)).status).toBe(404);
+    }
+    expect(upstream.requests.length).toBe(before);
+  });
+
+  test("authorizeSession still guards every chat route", async () => {
+    const { handler, upstream } = setup({
+      sessionApp: true,
+      authorizeSession: async () => false,
+    });
+    expect((await send(handler, `${chat}/children`)).status).toBe(404);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("creates a chat from the session app's own create body", async () => {
+    const inputs: unknown[] = [];
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => {
+        inputs.push(input);
+        return { initialMessage: input.initialMessage, modelContext: "Server context." };
+      },
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Fill B2",
+      visibility: "workspace",
+      resources: [],
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      clientEventId: "event-1",
+      idempotencyKey: "k1",
+      connectionAccounts: [],
+      expectedNewSessionDraftRevision: 6,
+      modelContext: "Selection: Sheet1!B2",
+    });
+    expect(inputs).toEqual([
+      {
+        initialMessage: "Fill B2",
+        idempotencyKey: "k1",
+        model: "codex/gpt",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+      },
+    ]);
+    expect(upstream.requests[0]!.body).toEqual({
+      initialMessage: "Fill B2",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
+      idempotencyKey: "k1",
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      clientEventId: "event-1",
+      modelContext: "Server context.\n\nSelection: Sheet1!B2",
+    });
+    // The hook decides the create request, so the proxy clears the sent draft
+    // itself once the chat exists: text-free, repositories kept, one revision on.
+    expect(upstream.requests.slice(1).map((r) => [r.method, r.url.pathname])).toEqual([
+      ["GET", `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+    ]);
+    expect(upstream.requests[2]!.body).toEqual({
+      text: "",
+      resources: [{ kind: "repository", repository: "acme/app" }],
+      tools: [],
+      toolsProvided: false,
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      options: { visibility: "private" },
+      expectedRevision: 6,
+    });
+  });
+
+  test("leaves a new-chat draft that changed after it was sent", async () => {
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Fill B2",
+      expectedNewSessionDraftRevision: 5,
+    });
+    expect(upstream.requests.map((r) => r.method)).toEqual(["POST", "GET"]);
+  });
+
+  test("refuses a connected-account choice and still refuses other configuration", async () => {
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    const accounts = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "hi",
+        connectionAccounts: [{ serverId: "github", accountId: "a" }],
+      } as never),
+    );
+    expect(accounts.status).toBe(403);
+    expect(accounts.code).toBe("connection_account_not_allowed");
+    const tools = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "hi",
+        tools: [{ kind: "mcp", id: "everything" }],
+      } as never),
+    );
+    expect(tools.code).toBe("create_field_not_allowed");
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("without the session app, its create fields stay refused", async () => {
+    const { upstream, browser } = setup({
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    for (const extra of [
+      { visibility: "workspace" },
+      { clientEventId: "event-1" },
+      { expectedNewSessionDraftRevision: 1 },
+    ]) {
+      const refused = await rejection(
+        browser.createSession(WORKSPACE_ID, { initialMessage: "hi", ...extra } as never),
+      );
+      expect(refused.code).toBe("create_field_not_allowed");
+    }
+    expect(upstream.requests).toHaveLength(0);
   });
 });

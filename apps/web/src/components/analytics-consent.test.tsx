@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
+  ANALYTICS_COLLECTION_ENABLED_EVENT,
   openAnalyticsPreferences,
   setAnalyticsConsentDecisionSender,
 } from "@opengeni/react/app/lib/analytics-consent";
@@ -35,6 +36,19 @@ beforeAll(() => {
 afterAll(() => {
   GlobalRegistrator.unregister();
 });
+
+// Choosing an answer applies it to the providers after the banner hides,
+// through a lazy import of the analytics module. Wait for that to land so no
+// consent work is still in flight when happy-dom is torn down.
+async function waitUntil(done: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  }
+}
 
 describe("analytics consent accessibility", () => {
   test("subjects modern theme colors to the manual contrast audit", async () => {
@@ -123,6 +137,16 @@ describe("analytics consent accessibility", () => {
     window.localStorage.clear();
     const sent: string[] = [];
     setAnalyticsConsentDecisionSender((body) => sent.push(body));
+    // Declining tells GA4 consent mode; allowing starts collection.
+    const deniedUpdates: unknown[] = [];
+    window.gtag = (...args) => {
+      if (args[0] === "consent" && args[1] === "update") deniedUpdates.push(args[2]);
+    };
+    let collectionEnabled = 0;
+    const enabled = () => {
+      collectionEnabled += 1;
+    };
+    window.addEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, enabled);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -153,18 +177,26 @@ describe("analytics consent accessibility", () => {
       });
       await choose("Decline");
       expect(sent).toEqual([JSON.stringify({ decision: "denied" })]);
+      await waitUntil(() => deniedUpdates.length === 1, "the decline to reach the providers");
       // Re-confirming the same answer from Account preferences is not counted.
       await act(async () => openAnalyticsPreferences());
       await choose("Decline");
       expect(sent).toHaveLength(1);
+      await waitUntil(
+        () => deniedUpdates.length === 2,
+        "the second decline to reach the providers",
+      );
       await act(async () => openAnalyticsPreferences());
       await choose("Allow analytics");
       expect(sent).toEqual([
         JSON.stringify({ decision: "denied" }),
         JSON.stringify({ decision: "granted" }),
       ]);
+      await waitUntil(() => collectionEnabled === 1, "the allow to start collection");
     } finally {
       setAnalyticsConsentDecisionSender(null);
+      window.removeEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, enabled);
+      delete window.gtag;
       await act(async () => root.unmount());
       container.remove();
       window.localStorage.clear();

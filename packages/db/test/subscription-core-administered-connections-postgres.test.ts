@@ -197,9 +197,15 @@ async function sharedConnection(
       managed_by_workspace_id
     ) values (
       ${org.accountId}::uuid, ${FAKE_API_KEY_PROVIDER}, 'api_key', ${credential(`sk-${label}`)},
-      'shared', 'organization', true, ${`${label}-${crypto.randomUUID()}`}, ${label}, ${label},
+      'shared', ${options.managedByWorkspaceId ? "workspaces" : "organization"},
+      ${!options.managedByWorkspaceId}, ${`${label}-${crypto.randomUUID()}`}, ${label}, ${label},
       ${options.managedByWorkspaceId ?? null}::uuid
     ) returning id::text as id`;
+  // A workspace's own connection reaches only that workspace.
+  if (options.managedByWorkspaceId)
+    await shared.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${options.managedByWorkspaceId}::uuid)`;
   return row!.id;
 }
 
@@ -463,6 +469,111 @@ describe("the owner-only routines' predicates (0735)", () => {
 });
 
 describe("an organization administrator's read (organization route)", () => {
+  test("different connections share the membership read fence during provider requests", async () => {
+    const org = await organization();
+    const ids = await Promise.all(
+      Array.from({ length: 5 }, (_, i) => sharedConnection(org, `parallel-${i}`)),
+    );
+    let active = 0;
+    let peak = 0;
+    const upstream = scriptedUsage(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        await Bun.sleep(200);
+        return Response.json({ data: { spentCents: 100, limitCents: 10_000, resetsAt: null } });
+      } finally {
+        active -= 1;
+      }
+    });
+    const start = performance.now();
+    const results = await Promise.all(
+      ids.map((id) => orgProbe(org.accountId, org.ownerSubjectId, id, upstream.fetchImpl)),
+    );
+    if (process.env.OPENGENI_BENCH_ADMIN_READS === "1")
+      console.log(
+        JSON.stringify({ parallelReads: ids.length, peak, elapsedMs: performance.now() - start }),
+      );
+    expect(results.every((result) => result.kind === "read" && result.applied)).toBe(true);
+    expect(upstream.calls).toHaveLength(5);
+    expect(peak).toBe(5);
+  });
+
+  test("requests for the same connection still serialize under credential custody", async () => {
+    const org = await organization();
+    const id = await sharedConnection(org, "same-connection");
+    let active = 0;
+    let peak = 0;
+    const upstream = scriptedUsage(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        await Bun.sleep(100);
+        return Response.json({ data: { spentCents: 100, limitCents: 10_000, resetsAt: null } });
+      } finally {
+        active -= 1;
+      }
+    });
+    const results = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        orgProbe(org.accountId, org.ownerSubjectId, id, upstream.fetchImpl),
+      ),
+    );
+    expect(results.every((result) => result.kind === "read")).toBe(true);
+    expect(upstream.calls).toHaveLength(3);
+    expect(peak).toBe(1);
+  });
+
+  test("administrator demotion waits for provider custody and prevents later reads and recording", async () => {
+    const org = await organization();
+    const administrator = await member(org, "admin");
+    const id = await sharedConnection(org, "demotion-custody");
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const upstream = scriptedUsage(async () => {
+      entered.resolve();
+      await release.promise;
+      return Response.json({ data: { spentCents: 100, limitCents: 10_000, resetsAt: null } });
+    });
+    const probe = orgProbe(org.accountId, administrator.subjectId, id, upstream.fetchImpl);
+    let writer: Promise<unknown> | undefined;
+    let committed = false;
+    try {
+      await entered.promise;
+      writer = shared.admin
+        .begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${org.accountId}`}, 0))`;
+          await tx`update organization_memberships set role = 'member' where id = ${administrator.membershipId}::uuid`;
+        })
+        .then(() => {
+          committed = true;
+        });
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i += 1) {
+        const [row] = await shared.admin<{ waiting: boolean }[]>`
+          select exists(select 1 from pg_locks where locktype = 'advisory'
+            and not granted and mode = 'ExclusiveLock'
+            and classid::bigint = ((hashtextextended(${`organization-membership:${org.accountId}`}, 0) >> 32) & 4294967295)
+            and objid::bigint = (hashtextextended(${`organization-membership:${org.accountId}`}, 0) & 4294967295)) as waiting`;
+        waiting = row!.waiting;
+        if (!waiting) await Bun.sleep(10);
+      }
+      expect(waiting).toBe(true);
+      expect(committed).toBe(false);
+    } finally {
+      release.resolve();
+      await writer;
+      await probe;
+    }
+    expect(await probe).toMatchObject({ kind: "read", applied: false });
+    expect(committed).toBe(true);
+    expect(await storedQuota(id)).toBeNull();
+    expect(await orgProbe(org.accountId, administrator.subjectId, id, upstream.fetchImpl)).toEqual({
+      kind: "not_visible",
+    });
+    expect(upstream.calls).toHaveLength(1);
+  });
+
   test("reads an organization-pool connection live; a member, another organization, a workspace-managed or personal connection and maintenance read nothing", async () => {
     const org = await organization();
     const connectionId = await sharedConnection(org, "org-live");
