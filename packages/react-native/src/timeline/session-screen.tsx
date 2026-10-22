@@ -1,9 +1,12 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
 import {
   conversationTimeline,
+  personalMachineCopy,
+  useSessionStart,
   type AgentMessageItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
+import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
 import {
   useCallback,
   useEffect,
@@ -49,7 +52,7 @@ import {
   type NativeAnnotationLike,
 } from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
+import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
@@ -279,19 +282,12 @@ function SessionScreenBody({
         }
         trailing={
           <>
-            {controller.admissionBlocked && !paused ? (
+            {controller.admissionBlocked && !paused && controller.session.session ? (
               <StuckCard
-                needsAccess={
-                  controller.session.session?.admissionBlock?.reason ===
-                    "initiator_membership_required" ||
-                  controller.session.session?.admissionBlock?.reason ===
-                    "personal_resource_grant_required"
-                }
+                session={controller.session.session}
                 busy={composer.resuming || control.controlling}
-                onRetry={async () => {
-                  const result = await control.resume();
+                onSessionChanged={async () => {
                   await Promise.all([controller.session.refresh(), queue.refresh()]);
-                  if (!result) throw new Error("Resume was not accepted");
                 }}
               />
             ) : null}
@@ -541,18 +537,33 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
  * starts the kept work again.
  */
 function StuckCard({
+  session,
   busy,
-  needsAccess,
-  onRetry,
+  onSessionChanged,
 }: {
+  session: Session;
   busy: boolean;
-  needsAccess: boolean;
-  onRetry: () => Promise<void>;
+  onSessionChanged: () => Promise<void>;
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
+  // The same state as the web notice: why the saved message didn't start, the
+  // machines this person may move the chat to, and one fenced recheck.
+  const start = useSessionStart({ session, onSessionChanged });
   const [failed, setFailed] = useState(false);
+  const [moving, setMoving] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
   const c = theme.colors;
+  const reason = start.reason;
+  const machine =
+    start.needsDifferentMachine && start.machineAccess
+      ? personalMachineCopy(t, start.machineAccess, { queued: true })
+      : null;
+  const needsAccess =
+    reason?.reason === "initiator_membership_required" ||
+    reason?.reason === "personal_resource_grant_required";
+  const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
       accessibilityRole="summary"
@@ -567,18 +578,63 @@ function StuckCard({
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Icon name="circle-alert" size={16} color={c["status-failed"]} />
-        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg }}>{m.stuckTitle}</Text>
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
+          {machine ? t("sessionAdmission.needsDifferentMachineTitle") : m.stuckTitle}
+        </Text>
       </View>
-      <Text
-        style={{
-          ...fontStyle(theme),
-          fontSize: 14,
-          lineHeight: 20,
-          color: c["fg-muted"],
-        }}
-      >
-        {needsAccess ? m.stuckAccessBody : m.stuckBody}
-      </Text>
+      {machine ? (
+        <>
+          <Text style={textStyle}>{machine.explanation}</Text>
+          <Text style={textStyle}>{machine.next}</Text>
+          {start.canChooseMachine ? (
+            <View
+              style={{ gap: 6 }}
+              accessibilityLabel={t("sessionAdmission.chooseAMachineForThisChat")}
+            >
+              {start.machineChoices.length === 0 ? (
+                <Text style={textStyle}>{t("sessionAdmission.noMachineChoices")}</Text>
+              ) : (
+                start.machineChoices.map((choice) => (
+                  <Button
+                    key={choice.sandboxId}
+                    label={
+                      moving === choice.sandboxId
+                        ? t("sessionAdmission.moving")
+                        : machineDisplayName(t, choice)
+                    }
+                    busy={moving === choice.sandboxId}
+                    disabled={busy || moving !== null}
+                    style={{ alignSelf: "stretch" }}
+                    onPress={() => {
+                      setMoving(choice.sandboxId);
+                      setMoveError(null);
+                      start
+                        .chooseMachine(choice)
+                        .then(setMoveError, () =>
+                          setMoveError(t("sessionAdmission.machineChangeFailed")),
+                        )
+                        .finally(() => setMoving(null));
+                    }}
+                  />
+                ))
+              )}
+              <Text style={{ ...textStyle, fontSize: 13 }}>
+                {t("sessionAdmission.savedMessageMachineNote")}
+              </Text>
+            </View>
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : (
+        <Text style={textStyle}>{needsAccess ? m.stuckAccessBody : m.stuckBody}</Text>
+      )}
       {failed ? (
         <Text
           accessibilityLiveRegion="polite"
@@ -591,17 +647,19 @@ function StuckCard({
           {m.stuckRetryFailed}
         </Text>
       ) : null}
-      <Button
-        label={m.stuckRetry}
-        variant="primary"
-        busy={busy}
-        disabled={busy}
-        style={{ alignSelf: "flex-start" }}
-        onPress={() => {
-          setFailed(false);
-          onRetry().catch(() => setFailed(true));
-        }}
-      />
+      {machine ? null : (
+        <Button
+          label={m.stuckRetry}
+          variant="primary"
+          busy={busy}
+          disabled={busy}
+          style={{ alignSelf: "flex-start" }}
+          onPress={() => {
+            setFailed(false);
+            start.recheck().catch(() => setFailed(true));
+          }}
+        />
+      )}
     </View>
   );
 }
