@@ -1665,9 +1665,43 @@ test("user-scoped chat files stay personal before and after source deletion", as
   expect(snapshot).toMatchObject({ owner: f.owner.subjectId, shared: false });
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    actorSubjectId: f.owner.subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `legacy-user-scope:${crypto.randomUUID()}`,
+  });
+  const [legacyOwner] = await shared.admin`
+    select file_source_owner_snapshot_0913(${f.owner.subjectId}, null, null, '') as owner`;
+  expect(legacyOwner?.owner).toBe(f.owner.subjectId);
+  await shared.admin.begin(async (tx) => {
+    // Migration 0457 preserved older user-scoped sessions with no scope subject.
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set scope_subject_id = null where id = ${session.id}`;
+  });
+  expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
+  expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
   await shared.admin`delete from sessions where id = ${session.id}`;
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  const unrelatedAgent = await withSessionRlsActorContext(
+    {
+      subjectId: "agent:example",
+      initiatingHumanSubjectId: f.owner.subjectId,
+      privateFileOwnerSubjectId: f.owner.subjectId,
+      agentRootSessionId: crypto.randomUUID(),
+    },
+    () =>
+      getFilesForSubject(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: "agent:example",
+        fileIds: [fileId],
+      }),
+  );
+  expect(unrelatedAgent).toHaveLength(0);
 });
 
 test("an app-shot travels with its screenshot and only with an image", async () => {

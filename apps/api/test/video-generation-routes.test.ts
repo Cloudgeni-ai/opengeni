@@ -194,6 +194,42 @@ describe("video generation workspace routes", () => {
       expect(await agentVisible.json()).toMatchObject({ operationId, status: "preparing" });
       allowed = false;
       expect((await hosted.request(path, { headers: agentHeaders })).status).toBe(404);
+      await shared!.admin`delete from sessions where id = ${source.id}`;
+      expect((await app.request(path, { headers })).status).toBe(200);
+      expect((await hosted.request(path, { headers })).status).toBe(404);
+      const historicalId = crypto.randomUUID();
+      await shared!.admin`insert into video_generation_operations(
+        id, account_id, workspace_id, private_file_owner_subject_id,
+        tool_call_id, admission_key, request_digest, prompt_digest, model_id,
+        source_mode, capability_revision, funding_source, credential_version,
+        provider_idempotency_key, expected_artifact_id, expected_file_id,
+        reserved_bytes, recovery_deadline_at
+      ) values(
+        ${historicalId}, ${workspace.accountId}, ${workspace.workspaceId},
+        ${workspace.subjectId}, 'historical-call', ${"e".repeat(64)},
+        ${"f".repeat(64)}, ${"1".repeat(64)}, ${MODEL_ID}, 'text',
+        ${"2".repeat(64)}, 'supergrok_subscription', 1,
+        'historical-provider-operation', ${crypto.randomUUID()}, ${crypto.randomUUID()},
+        1000000, ${new Date(Date.now() + 60_000)}
+      )`;
+      const historicalPath = `${settingsUrl(workspace.workspaceId)}/operations/${historicalId}`;
+      expect((await app.request(historicalPath, { headers })).status).toBe(200);
+      expect((await hosted.request(historicalPath, { headers })).status).toBe(404);
+      const unrelatedAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: `user:other-${crypto.randomUUID()}`,
+        principalKind: "human_session",
+        permissions: ["workspace:read"],
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      })}`;
+      expect(
+        (
+          await app.request(historicalPath, {
+            headers: { authorization: unrelatedAuthorization },
+          })
+        ).status,
+      ).toBe(404);
     } finally {
       await deleteWorkspace(client.db, workspace.workspaceId);
     }

@@ -48,7 +48,7 @@ CREATE FUNCTION file_source_owner_snapshot_0913(
 ) RETURNS text LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $body$
   SELECT CASE WHEN count(DISTINCT owner) = 1 THEN nullif(min(owner), '') END
   FROM unnest(ARRAY[private_owner, site_owner, slack_owner, memory_owner]) owner
-  WHERE owner IS NOT NULL
+  WHERE nullif(owner, '') IS NOT NULL
 $body$;
 
 -- A file has one immutable producer. A conflicting historical receipt needs
@@ -695,6 +695,10 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
       AND (source_session.memory_scope <> 'user'
         OR source_session.scope_subject_id =
           nullif(current_setting('opengeni.subject_id', true), '')
+        OR (source_session.scope_subject_id IS NULL
+          AND source_session.visibility = 'user_private'
+          AND source_session.owner_subject_id =
+            nullif(current_setting('opengeni.subject_id', true), ''))
         OR source_session.root_session_id::text =
           nullif(current_setting('opengeni.agent_root_session_id', true), ''))
       -- A deleted Slack connection must not erase a private audience snapshot.
@@ -709,16 +713,25 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
           nullif(current_setting('opengeni.subject_id', true), '')
         OR source_session.root_session_id::text =
           nullif(current_setting('opengeni.agent_root_session_id', true), '')))
-  OR ((source_session_owner_subject_id = nullif(current_setting('opengeni.subject_id', true), '')
-      OR (source_session_owner_subject_id =
+  OR (
+    (
+      ((source_session_owner_subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+        OR (source_session_owner_subject_id =
+            nullif(current_setting('opengeni.private_file_owner', true), '')
+          AND source_session_owner_subject_id = ANY(private_owner_subject_ids)))
+        AND NOT source_session_shared_unrestricted)
+      OR (source_session_shared_unrestricted AND private_owner_subject_ids IS NOT NULL
+        AND nullif(current_setting('opengeni.subject_id', true), '') =
           nullif(current_setting('opengeni.private_file_owner', true), '')
-        AND source_session_owner_subject_id = ANY(private_owner_subject_ids)))
-    AND NOT source_session_shared_unrestricted
+        AND nullif(current_setting('opengeni.private_file_owner', true), '') =
+          ANY(private_owner_subject_ids))
+    )
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND (source_session_id IS NULL OR NOT file_source_session_exists_0913(
-      account_id, workspace_id, source_session_id)))
-  -- A deleted shared source has no live host audience to check. Its inherited
-  -- Files fail closed; a human can explicitly share a File before deletion.
+      account_id, workspace_id, source_session_id))
+  )
+  -- A deleted shared source has no live host audience to check. Inherited
+  -- workspace Files fail closed; a personal File keeps only its exact owner.
 );
 -- Previous application binaries never set this marker. A maintenance cutover
 -- must not let their unguarded File readers disclose any rows after restart.

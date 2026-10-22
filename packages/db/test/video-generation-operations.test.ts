@@ -483,6 +483,26 @@ describe("durable video generation operation", () => {
       expect(
         (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
       ).toBe("completed");
+      if (personal) {
+        await shared!.admin`delete from sessions where id = ${session.id}`;
+        await shared!.admin`update video_generation_operations
+          set source_session_id_snapshot = null where id = ${operationId}`;
+        const [historicalOperation] = await shared!.admin`
+          select private_file_owner_subject_id as owner
+          from video_generation_operations where id = ${operationId}`;
+        expect(historicalOperation?.owner).toBe(grant.subjectId);
+        expect(
+          await withOwner(() => getGeneratedVideoArtifact(client.db, grant.workspaceId, artifactId)),
+        ).not.toBeNull();
+        expect(
+          (await withOwner(() =>
+            getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          ))?.status,
+        ).toBe("completed");
+        expect(
+          await getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+        ).toBeNull();
+      }
     },
     60_000,
   );

@@ -1337,9 +1337,14 @@ export async function getVideoGenerationOperationSummary(
       sql`SELECT EXISTS (
         SELECT 1 FROM video_generation_operations op
         WHERE op.workspace_id = ${workspaceId}::uuid AND op.id = ${operationId}::uuid
-          AND op.source_session_id_snapshot IS NOT NULL
           AND (
-            (op.source_session_shared_unrestricted AND EXISTS (
+            (op.source_session_id_snapshot IS NULL
+              AND op.private_file_owner_subject_id =
+                nullif(current_setting('opengeni.subject_id', true), '')
+              AND op.private_file_owner_subject_id =
+                nullif(current_setting('opengeni.private_file_owner', true), ''))
+            OR (op.source_session_id_snapshot IS NOT NULL
+              AND op.source_session_shared_unrestricted AND EXISTS (
               SELECT 1 FROM sessions source_session
               WHERE source_session.account_id = op.account_id
                 AND source_session.workspace_id = op.workspace_id
@@ -1353,7 +1358,8 @@ export async function getVideoGenerationOperationSummary(
                     AND slack.session_reservation_id = source_session.root_session_id
                     AND slack.visibility = 'private')
             ))
-            OR (NOT op.source_session_shared_unrestricted AND (
+            OR (op.source_session_id_snapshot IS NOT NULL
+              AND NOT op.source_session_shared_unrestricted AND (
               op.source_session_owner_subject_id =
                 nullif(current_setting('opengeni.subject_id', true), '')
               OR EXISTS (
