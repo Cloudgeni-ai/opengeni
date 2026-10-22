@@ -55,6 +55,10 @@ export type LinkProps = NavigateOptions &
       | undefined;
     preload?: false | "intent" | "viewport" | "render" | undefined;
     disabled?: boolean | undefined;
+    /** When the link counts as the current page (`aria-current`); the router's default otherwise. */
+    activeOptions?:
+      | { exact?: boolean | undefined; includeSearch?: boolean | undefined }
+      | undefined;
     ref?: Ref<HTMLAnchorElement> | undefined;
   };
 

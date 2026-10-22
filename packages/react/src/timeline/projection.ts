@@ -33,6 +33,7 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
+import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
@@ -894,21 +895,25 @@ export function buildTimeline(
           // decision behind a duplicate generic "Ask" step.
           break;
         }
+        // A worker started or messaged through tool_invoke is the same worker.
+        const invoked = invokedTool(name, args);
+        const workerName = invoked?.name ?? name;
+        const workerArgs = invoked ? invoked.arguments : args;
         if (
-          toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
-          toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
+          toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL) ||
+          toolMatchesLeaf(workerName, WORKER_MESSAGE_TOOL)
         ) {
-          const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
-          const title = spawn ? workerTitle(args) : null;
+          const spawn = toolMatchesLeaf(workerName, WORKER_SPAWN_TOOL);
+          const title = spawn ? workerTitle(workerArgs) : null;
           const item: WorkerItem = {
             kind: "worker",
             id: event.id,
             turnId,
             callId,
             action: spawn ? "spawn" : "message",
-            prompt: workerPrompt(args),
+            prompt: workerPrompt(workerArgs),
             ...(title ? { title } : {}),
-            workerSessionId: extractSessionRef(args),
+            workerSessionId: extractSessionRef(workerArgs),
             failure: null,
             status: "running",
             occurredAt: event.occurredAt,

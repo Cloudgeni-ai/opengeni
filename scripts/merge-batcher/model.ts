@@ -86,6 +86,17 @@ export interface RetryIntent {
   requestedAt: string;
   reason?: InfrastructureRetryReason;
 }
+export interface ParkedPull {
+  pull: Pull;
+  baseSha: string;
+  batchId: string;
+  cohortId: string;
+  runId: number;
+  attempt: number;
+  parkedAt: string;
+  announced: boolean;
+  effectId?: string;
+}
 export interface StageSample {
   batchId: string;
   readyAt: string;
@@ -120,6 +131,7 @@ export interface Ledger {
   landed: string[];
   invalidated: string[];
   ejected: Ejection[];
+  parked?: ParkedPull[];
   recovery: { batchId: string; pulls: Pull[] }[];
   retries: Record<string, RetryIntent>;
   codeFailures: Record<string, string[]>;

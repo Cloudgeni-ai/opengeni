@@ -891,7 +891,11 @@ test("the row hover explains status, model and activity from the compact list ro
   expect(await card.innerText()).toContain("Waiting on you for 24 min");
 }, 30_000);
 
+const usageSiteId = "00000000-0000-4000-a000-000000000001";
+const checklistSiteId = "00000000-0000-4000-a000-000000000004";
+const conversationId = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
 const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
+const sitePanel = () => page.getByRole("complementary", { name: "Conversations" });
 const siteRow = (title: string) =>
   sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
 const railConversation = (title: string) =>
@@ -946,4 +950,96 @@ test("a Site row keeps its conversations nested whichever session is selected", 
     .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
     .click();
   for (const title of usageConversations) await railConversation(title).waitFor();
+}, 30_000);
+
+test("a Site a chat made sits in that chat's project, and opening a Site moves its row up", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  // "Pricing page copy" made it in Website redesign; nobody has asked it
+  // anything, so the row has no count and nothing to disclose.
+  await group("Website redesign")
+    .getByRole("link", { name: "Open Pricing calculator. Site", exact: true })
+    .waitFor();
+  expect(
+    await sidebar()
+      .getByRole("button", { name: /from Pricing calculator$/u })
+      .count(),
+  ).toBe(0);
+  // An untouched Site sorts down with the old rows, behind Default's first step.
+  expect(await siteRow("Launch checklist").count()).toBe(0);
+  await showMore("Default").click();
+  await siteRow("Launch checklist").click();
+  await page.waitForURL(new RegExp(`/sites/${checklistSiteId}$`, "u"));
+  await page.waitForFunction(
+    (id) => window.sessionSidebarQa.siteOpens.includes(id),
+    checklistSiteId,
+  );
+  // Opening it is activity: it now leads Default.
+  await page.waitForFunction(() => {
+    const folder = document.querySelector('[role="group"][aria-label="Default"]');
+    const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
+    return first?.textContent?.includes("Launch checklist") === true;
+  });
+  expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
+  await capture("site-row-opened");
+}, 30_000);
+
+test("a Site row opens the Site beside its conversations; a nested one opens selected", async () => {
+  await page.goto(`${url}?scenario=sites&theme=dark`);
+  await siteRow("Opengeni usage").click();
+  await page.waitForURL(new RegExp(`/sites/${usageSiteId}$`, "u"));
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
+  await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+  // The newest conversation is open; the others are one click away.
+  await sitePanel().getByText("filters all four graphs together").waitFor();
+  const switcher = sitePanel().getByRole("navigation");
+  expect(await switcher.getByRole("link").count()).toBe(3);
+  expect(
+    await switcher
+      .getByRole("link", { name: /^Time filters across all graphs\./u })
+      .getAttribute("aria-current"),
+  ).toBe("page");
+  await capture("site-view");
+
+  // Clicking a nested conversation opens the same view with it selected, and
+  // its Site row opens so the selection is visible in the sidebar.
+  await page.goto(`${url}?scenario=sites&theme=dark`);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await railConversation("Export usage to CSV").click();
+  await page.waitForURL(
+    new RegExp(`/sites/${usageSiteId}\\?conversation=${conversationId(903)}$`, "u"),
+  );
+  await sitePanel().getByText("one row per workspace and week").waitFor();
+  expect(await railConversation("Export usage to CSV").getAttribute("aria-current")).toBe("page");
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBeNull();
+
+  // Switching in the panel updates the address and the sidebar together.
+  await switcher.getByRole("link", { name: /^Weekly active users by plan\./u }).click();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(902)}$`, "u"));
+  await sitePanel().getByText("Weekly active users last week").waitFor();
+  expect(await railConversation("Weekly active users by plan").getAttribute("aria-current")).toBe(
+    "page",
+  );
+
+  // Closing the Site row is respected while switching between its conversations.
+  await sidebar()
+    .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await switcher.getByRole("link", { name: /^Export usage to CSV\./u }).click();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(903)}$`, "u"));
+  await sitePanel().getByText("one row per workspace and week").waitFor();
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .waitFor();
+  // As for any collapsed branch, only the selected conversation stays visible.
+  expect(await railConversation("Export usage to CSV").count()).toBe(1);
+  expect(await railConversation("Weekly active users by plan").count()).toBe(0);
+  expect(await railConversation("Time filters across all graphs").count()).toBe(0);
+
+  // New is the one action: the composer replaces the open conversation.
+  await sitePanel().getByRole("button", { name: "New", exact: true }).click();
+  await sitePanel().getByText("Ask about Opengeni usage").waitFor();
+  await page.waitForURL(new RegExp(`/sites/${usageSiteId}$`, "u"));
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
 }, 30_000);

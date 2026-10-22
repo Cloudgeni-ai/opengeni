@@ -134,7 +134,8 @@ import {
 } from "react";
 import { toast } from "../lib/toast";
 
-import { isApiErrorStatus, useAppApi } from "../lib/app-api";
+import { useAppApi } from "../lib/app-api";
+import { useSessionFailureToasts } from "../lib/session-failure-toasts";
 import { apiErrorFacts, userErrorText } from "../../ui/api-error";
 import { ConsoleComposer } from "../components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "../lib/allowance-labels";
@@ -858,18 +859,7 @@ export function SessionRoute({
     },
     [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
-  useEffect(() => {
-    if (streamError && !isApiErrorStatus(streamError, 404)) {
-      toast.error("Event stream disconnected", {
-        description: streamError.message,
-      });
-    }
-  }, [streamError]);
-  useEffect(() => {
-    if (loadError && !isApiErrorStatus(loadError, 404)) {
-      toast.error("Failed to load session", { description: String(loadError) });
-    }
-  }, [loadError]);
+  useSessionFailureToasts(loadError, streamError);
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -1277,6 +1267,7 @@ export function SessionRoute({
             workspaceId={workspaceId}
             sessionId={sessionId}
             loadError={loadError}
+            onRetry={() => void refreshSession()}
           />
         </Suspense>
       );

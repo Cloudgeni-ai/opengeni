@@ -2544,4 +2544,90 @@ describe("createSessionProxyHandler sessionApp", () => {
     expect((await send(handler, `${chat}/children`)).status).toBe(404);
     expect(upstream.requests).toHaveLength(0);
   });
+
+  test("creates a chat from the session app's own create body", async () => {
+    const inputs: unknown[] = [];
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => {
+        inputs.push(input);
+        return { initialMessage: input.initialMessage, modelContext: "Server context." };
+      },
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Fill B2",
+      visibility: "workspace",
+      resources: [],
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      clientEventId: "event-1",
+      idempotencyKey: "k1",
+      connectionAccounts: [],
+      expectedNewSessionDraftRevision: 6,
+      modelContext: "Selection: Sheet1!B2",
+    });
+    expect(inputs).toEqual([
+      {
+        initialMessage: "Fill B2",
+        idempotencyKey: "k1",
+        model: "codex/gpt",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+      },
+    ]);
+    expect(upstream.requests[0]!.body).toEqual({
+      initialMessage: "Fill B2",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
+      idempotencyKey: "k1",
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      clientEventId: "event-1",
+      expectedNewSessionDraftRevision: 6,
+      modelContext: "Server context.\n\nSelection: Sheet1!B2",
+    });
+  });
+
+  test("refuses a connected-account choice and still refuses other configuration", async () => {
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    const accounts = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "hi",
+        connectionAccounts: [{ serverId: "github", accountId: "a" }],
+      } as never),
+    );
+    expect(accounts.status).toBe(403);
+    expect(accounts.code).toBe("connection_account_not_allowed");
+    const tools = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "hi",
+        tools: [{ kind: "mcp", id: "everything" }],
+      } as never),
+    );
+    expect(tools.code).toBe("create_field_not_allowed");
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("without the session app, its create fields stay refused", async () => {
+    const { upstream, browser } = setup({
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    for (const extra of [
+      { visibility: "workspace" },
+      { clientEventId: "event-1" },
+      { expectedNewSessionDraftRevision: 1 },
+    ]) {
+      const refused = await rejection(
+        browser.createSession(WORKSPACE_ID, { initialMessage: "hi", ...extra } as never),
+      );
+      expect(refused.code).toBe("create_field_not_allowed");
+    }
+    expect(upstream.requests).toHaveLength(0);
+  });
 });

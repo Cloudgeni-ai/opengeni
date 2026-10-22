@@ -106,3 +106,45 @@ export function artifactReturnSearch(search: Record<string, unknown>): ArtifactR
         : undefined,
   };
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** The Site view: the Site with its conversations beside it, one of them open. */
+export type SiteViewSearch = { conversation?: string | undefined };
+
+export function siteViewSearch(search: Record<string, unknown>): SiteViewSearch {
+  return {
+    conversation:
+      typeof search.conversation === "string" && UUID.test(search.conversation)
+        ? search.conversation
+        : undefined,
+  };
+}
+
+export function workspaceSitePath(
+  workspaceId: string,
+  siteId: string,
+  conversation?: string | undefined,
+): string {
+  const path = `${workspacePath(workspaceId)}/sites/${encodeURIComponent(siteId)}`;
+  return conversation ? `${path}?conversation=${encodeURIComponent(conversation)}` : path;
+}
+
+/**
+ * What the rail marks as open for a location: a session page's session, or a
+ * Site view's Site and its selected conversation.
+ */
+export function railRouteSelection(location: {
+  pathname: string;
+  search: Record<string, unknown>;
+}): { sessionId: string | null; siteId: string | null } {
+  const session = /\/sessions\/([^/]+)/u.exec(location.pathname);
+  if (session) return { sessionId: session[1] ?? null, siteId: null };
+  const site = /^\/workspaces\/[^/]+\/sites\/([^/]+)\/?$/u.exec(location.pathname);
+  // Site ids are UUIDs; anything else (including a malformed escape) is no Site.
+  if (!site || !UUID.test(site[1] ?? "")) return { sessionId: null, siteId: null };
+  return {
+    sessionId: siteViewSearch(location.search).conversation ?? null,
+    siteId: site[1]!.toLowerCase(),
+  };
+}

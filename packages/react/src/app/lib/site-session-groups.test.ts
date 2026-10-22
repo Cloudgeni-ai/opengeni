@@ -162,6 +162,48 @@ test("Site rows sort by activity among ordinary rows and summarize complete coun
   }
 });
 
+test("a Site without conversations is a plain row in its creating chat's project", () => {
+  const chat = session("chat", {
+    metadata: {},
+    channelId: "project-id",
+    updatedAt: "2026-09-08T11:00:00Z",
+  });
+  const older = session("older", { metadata: {}, updatedAt: "2026-09-08T06:00:00Z" });
+  const created = siteGroup({
+    channelId: "project-id",
+    conversations: 0,
+    total: 0,
+    updatedAt: "2026-09-08T10:00:00Z",
+  });
+  const result = buildPinnedRailSections([chat, older], new Date("2026-09-08T13:00:00Z"), {
+    siteGroups: [created],
+    siteRowsByProject: true,
+  });
+  const sections = channelRailSections(result.ordinary, [
+    { id: "project-id", name: "Project" } as never,
+  ]);
+  const project = sections.find((section) => section.channelId === "project-id")!;
+  // Top-level beside the chat that made it, ordered by its own activity.
+  expect(project.sessions.map((n) => n.session.id)).toEqual([
+    "chat",
+    siteRowKey(siteId, "project-id"),
+  ]);
+  const site = project.sessions[1]!;
+  expect(site.children).toEqual([]);
+  expect(siteRowConversationCount(site)).toBe(0);
+  expect(summarizeRailNodes([site])).toMatchObject({ total: 0 });
+  // Opening it later is newer activity, so it moves above the chat.
+  const opened = buildPinnedRailSections([chat, older], new Date("2026-09-08T13:00:00Z"), {
+    siteGroups: [{ ...created, updatedAt: "2026-09-08T12:30:00Z" }],
+    siteRowsByProject: true,
+  });
+  expect(
+    channelRailSections(opened.ordinary, [{ id: "project-id", name: "Project" } as never])
+      .find((section) => section.channelId === "project-id")!
+      .sessions.map((n) => n.session.id),
+  ).toEqual([siteRowKey(siteId, "project-id"), "chat"]);
+});
+
 test("Site row keys round-trip their Site and project", () => {
   expect(parseSiteRowKey(siteRowKey(siteId))).toEqual({ siteId });
   expect(parseSiteRowKey(siteRowKey(siteId, null))).toEqual({ siteId, channelId: null });

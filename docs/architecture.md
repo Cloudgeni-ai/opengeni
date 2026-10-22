@@ -2989,6 +2989,12 @@ run-attempt receipts distinguish assertion failures from infrastructure and
 cancellation. Landing requires the exact tested tip, a fast-forward base fence and
 a final head/readiness reread; late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
+Candidate plan/source/selected-unit/ready success may land on red or unknown
+full-main CI. Failed cohorts split sequentially; failed singletons are durably
+parked without attribution, while unrelated ready heads proceed. Parking survives
+main advancement and readiness churn for the same PR head; new heads can re-enter.
+Comparable base evidence and trusted same-way failure fingerprints are not yet
+available; neither full-main success nor matching job names proves member blame.
 `queue-health.yml` records provider batch timing separately from the controller's
 admission/build/landing stages and verified failure classification. Read-only shadow performs no remote
 writes. The separately authorized CI-shadow stage pushes candidate refs only,

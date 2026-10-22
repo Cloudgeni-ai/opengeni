@@ -1,5 +1,11 @@
 {{- if .Values.web.enabled }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.web.priorityClassName "tier" "presentation") }}
+{{- $previousAssetImages := include "opengeni.webPreviousAssetImages" . | fromJsonArray }}
+{{- $previousAssetsMount := "/var/lib/opengeni/previous-web-assets" }}
+{{- $previousAssetRoots := list }}
+{{- range $index, $image := $previousAssetImages }}
+{{- $previousAssetRoots = append $previousAssetRoots (printf "%s/%d" $previousAssetsMount $index) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,6 +13,12 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
+  {{- if $previousAssetImages }}
+  annotations:
+    # The previous web images these pods serve hashed assets from, newest
+    # first. The next `helm upgrade` carries them forward (see _helpers.tpl).
+    opengeni.ai/previous-web-images: {{ join "," $previousAssetImages | quote }}
+  {{- end }}
 spec:
   {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-web" (include "opengeni.fullname" .)) "replicaCount" .Values.web.replicaCount "autoscaling" .Values.web.autoscaling) | indent 2 }}
   {{- with .Values.web.strategy }}
@@ -41,6 +53,35 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if $previousAssetImages }}
+      initContainers:
+        # Each previous web image copies its hashed assets into the shared
+        # emptyDir, so tabs still running that build keep loading lazy chunks
+        # and stylesheets from these pods after the rollout.
+        {{- range $index, $image := $previousAssetImages }}
+        - name: previous-web-assets-{{ $index }}
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ $.Values.web.image.pullPolicy }}
+          command:
+            - bun
+            - -e
+            - {{ $.Files.Get "files/copy-previous-web-assets.js" | toJson }}
+          env:
+            - name: OPENGENI_PREVIOUS_WEB_DIST
+              value: {{ $.Values.web.previousAssets.distPath | default "/app/apps/web/dist" | quote }}
+            - name: OPENGENI_PREVIOUS_WEB_ASSETS_TARGET
+              value: {{ index $previousAssetRoots $index | quote }}
+          securityContext:
+            {{- toYaml $.Values.web.securityContext | nindent 12 }}
+          {{- with $.Values.web.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: previous-web-assets
+              mountPath: {{ $previousAssetsMount }}
+        {{- end }}
+      {{- end }}
       containers:
         - name: web
           image: {{ include "opengeni.image" (dict "root" . "image" .Values.web.image) | quote }}
@@ -53,7 +94,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
-          {{- if or .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.web.demoApiBaseUrl .Values.api.enabled }}
+          {{- if or .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.web.demoApiBaseUrl .Values.api.enabled $previousAssetImages }}
           env:
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- if or .Values.web.demoApiBaseUrl .Values.api.enabled }}
@@ -64,14 +105,25 @@ spec:
               value: /var/run/secrets/opengeni-demo
             {{- end }}
             {{- end }}
+            {{- if $previousAssetImages }}
+            - name: OPENGENI_WEB_PREVIOUS_ASSET_ROOTS
+              value: {{ join "," $previousAssetRoots | quote }}
+            {{- end }}
           {{- else }}
           env: []
           {{- end }}
-          {{- if .Values.web.demoApiCredentialsSecret }}
+          {{- if or .Values.web.demoApiCredentialsSecret $previousAssetImages }}
           volumeMounts:
+            {{- if .Values.web.demoApiCredentialsSecret }}
             - name: demo-api-credentials
               mountPath: /var/run/secrets/opengeni-demo
               readOnly: true
+            {{- end }}
+            {{- if $previousAssetImages }}
+            - name: previous-web-assets
+              mountPath: {{ $previousAssetsMount }}
+              readOnly: true
+            {{- end }}
           {{- end }}
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
@@ -98,11 +150,22 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if .Values.web.demoApiCredentialsSecret }}
+      {{- if or .Values.web.demoApiCredentialsSecret $previousAssetImages }}
       volumes:
+        {{- if .Values.web.demoApiCredentialsSecret }}
         - name: demo-api-credentials
           secret:
             secretName: {{ .Values.web.demoApiCredentialsSecret | quote }}
+        {{- end }}
+        {{- if $previousAssetImages }}
+        - name: previous-web-assets
+          {{- with $.Values.web.previousAssets.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ . | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
       {{- end }}
       {{- if .Values.web.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:

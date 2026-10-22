@@ -1,5 +1,16 @@
 # @opengeni/interaction
 
+## 4.5.0
+
+### Patch Changes
+
+- e142b9e: The browser extension now reconnects to the local agent after Chrome stops and later restarts its service worker. A periodic wake-up alarm (new `alarms` permission) reopens the native connection when it is down, so an attached Chrome no longer stays disconnected until a tab event happens. Browser and computer controllers also log the class, frame and redacted message of any dispatch error the driver did not classify, so `controller_lost` failures leave a cause in the agent log.
+- Updated dependencies [f838cb7]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+
 ## 4.4.1
 
 ### Patch Changes

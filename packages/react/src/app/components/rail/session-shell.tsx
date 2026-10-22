@@ -415,6 +415,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
+  const brand = useSessionUiFeature("brand");
   const context = useAppContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -490,18 +491,22 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     );
   }
 
-  // Mobile, off a session route: the slim brand strip.
+  // Mobile, off a session route: the slim brand strip. A host without
+  // Opengeni's brand keeps only the menu button, or no strip at all.
+  if (!brand && !hamburger) return null;
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
-      <Link
-        to="/workspaces/$workspaceId/sessions"
-        params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-fg"
-      >
-        <BrandMark className="w-5" />
-        <Wordmark className="text-[17px]" />
-      </Link>
+      {brand ? (
+        <Link
+          to="/workspaces/$workspaceId/sessions"
+          params={{ workspaceId: rail.workspaceId }}
+          className="flex items-center gap-2 text-fg"
+        >
+          <BrandMark className="w-5" />
+          <Wordmark className="text-[17px]" />
+        </Link>
+      ) : null}
     </header>
   );
 }

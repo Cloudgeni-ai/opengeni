@@ -7,13 +7,13 @@ import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import type { MachinesResponse, MachineView, SessionEvent } from "@opengeni/sdk";
 import { MessageTimeline, OpenGeniProvider, type AuthNeededItem } from "@opengeni/react";
-import { AppContext } from "../src/app/app-context";
-import { AppHostProvider } from "../src/app/lib/app-host";
-import { SessionCapabilityCard } from "../src/app/components/capabilities/session-capability-card";
+import { AppContext } from "@opengeni/react/app/app-context";
+import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
+import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import { EventLog } from "./timeline-fixtures";
 import { MockOpenGeniClient } from "./mock";
 import { onlineMachine } from "./machines-fixtures";
-import "../../../apps/web/src/styles.css";
+import "./styles.css";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const params = new URLSearchParams(window.location.search);

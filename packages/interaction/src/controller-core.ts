@@ -176,6 +176,10 @@ export type InteractionControllerCoreOptions<
    * The callback must bind every non-secret semantic input while excluding the
    * value bytes themselves and return lowercase SHA-256. */
   commandDigest?: (command: TCommand) => string;
+  /** Operator logging for a dispatch that threw something the driver did not
+   * classify. The caller still sees only outcome_unknown; this hook keeps the
+   * cause from disappearing. It never changes the operation's outcome. */
+  onUnexpectedDispatchError?: (error: unknown, command: TCommand) => void;
 };
 
 type JournalEntry<TReceipt> = InteractionOperationJournalRecord<TReceipt> & {
@@ -232,6 +236,9 @@ export class InteractionControllerCore<
     | ((record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void)
     | undefined;
   private readonly commandDigest: (command: TCommand) => string;
+  private readonly onUnexpectedDispatchError:
+    | ((error: unknown, command: TCommand) => void)
+    | undefined;
   private readonly loadJournalRecord:
     | ((operationId: string) => InteractionOperationJournalRecord<TReceipt> | null)
     | undefined;
@@ -252,6 +259,7 @@ export class InteractionControllerCore<
     this.onJournalRecord = options.onJournalRecord;
     this.loadJournalRecord = options.loadJournalRecord;
     this.commandDigest = options.commandDigest ?? digestJson;
+    this.onUnexpectedDispatchError = options.onUnexpectedDispatchError;
     if (!Number.isSafeInteger(this.maxJournalEntries) || this.maxJournalEntries < 1) {
       throw new Error("maxJournalEntries must be a positive safe integer");
     }
@@ -480,6 +488,11 @@ export class InteractionControllerCore<
             },
           ),
         );
+      }
+      try {
+        this.onUnexpectedDispatchError?.(error, command);
+      } catch {
+        // Diagnostics never change an operation's outcome.
       }
       return await this.settle(
         entry,

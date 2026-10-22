@@ -19,23 +19,24 @@ const hint = (
   ...(siteSessionIds ? { siteSessionIds } : {}),
 });
 
-test("hints that only name Site conversations do not refetch ordinary lists", async () => {
-  let refreshes = 0;
+const context: OpenGeniContextValue = {
+  client: fakeClient({}),
+  workspaceId: WORKSPACE_ID,
+  workspaceControlEvent: null,
+  workspaceControlConnectionState: "live",
+  workspaceInteractionEvent: null,
+  workspaceInteractionConnectionState: "live",
+  registerSessionReconciler: () => () => {},
+  reconcileSession: async () => {},
+};
+
+function harness(options?: { siteConversations: boolean }) {
+  const counter = { refreshes: 0 };
   const refresh = async () => {
-    refreshes++;
-  };
-  const context: OpenGeniContextValue = {
-    client: fakeClient({}),
-    workspaceId: WORKSPACE_ID,
-    workspaceControlEvent: null,
-    workspaceControlConnectionState: "live",
-    workspaceInteractionEvent: null,
-    workspaceInteractionConnectionState: "live",
-    registerSessionReconciler: () => () => {},
-    reconcileSession: async () => {},
+    counter.refreshes++;
   };
   function List() {
-    useSessionListHintRefresh(refresh, null);
+    useSessionListHintRefresh(refresh, null, options);
     return null;
   }
   function Harness({ event }: { event: WorkspaceSessionListEvent }) {
@@ -46,19 +47,49 @@ test("hints that only name Site conversations do not refetch ordinary lists", as
       </OpenGeniContext.Provider>
     );
   }
+  return { counter, Harness };
+}
+
+test("hints that only name Site conversations do not refetch ordinary lists", async () => {
+  const { counter, Harness } = harness();
   const mounted = await renderComponent(<Harness event={hint(null)} />);
   try {
     await flush();
-    expect(refreshes).toBe(1);
+    expect(counter.refreshes).toBe(1);
     await mounted.rerender(<Harness event={hint([], ["site-conversation"])} />);
     await flush();
-    expect(refreshes).toBe(1);
+    expect(counter.refreshes).toBe(1);
     await mounted.rerender(<Harness event={hint(["session-a"], ["site-conversation"])} />);
     await flush();
-    expect(refreshes).toBe(2);
+    expect(counter.refreshes).toBe(2);
     await mounted.rerender(<Harness event={hint(["session-b"])} />);
     await flush();
-    expect(refreshes).toBe(3);
+    expect(counter.refreshes).toBe(3);
+  } finally {
+    await mounted.unmount();
+  }
+});
+
+test("a list of Site conversations refetches for hints naming Site conversations only", async () => {
+  const { counter, Harness } = harness({ siteConversations: true });
+  const mounted = await renderComponent(<Harness event={hint(null)} />);
+  try {
+    await flush();
+    expect(counter.refreshes).toBe(1);
+    await mounted.rerender(<Harness event={hint([], ["site-conversation"])} />);
+    await flush();
+    expect(counter.refreshes).toBe(2);
+    // Ordinary sessions only: nothing this list shows changed.
+    await mounted.rerender(<Harness event={hint(["session-a"])} />);
+    await flush();
+    expect(counter.refreshes).toBe(2);
+    await mounted.rerender(<Harness event={hint(["session-b"], ["site-conversation"])} />);
+    await flush();
+    expect(counter.refreshes).toBe(3);
+    // Workspace-wide hints always reconcile.
+    await mounted.rerender(<Harness event={hint(null)} />);
+    await flush();
+    expect(counter.refreshes).toBe(4);
   } finally {
     await mounted.unmount();
   }

@@ -3,6 +3,14 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { DatabaseTransactionError } from "../src/persistence-errors";
+import { readSessionHistoryToolIdentityPage } from "../src/session-history-tool-identities";
+import { historyCallId, historyItemType } from "../src/session-tool-call-settlement";
+import {
+  fromPostgresLosslessJson,
+  toPostgresLosslessJson,
+  LOSSLESS_JSON_STRING_PREFIX,
+} from "../src/lossless-json";
+import { withRlsContext } from "../src/database";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -405,6 +413,103 @@ describe("atomic tool receipt and timeline checkpoints", () => {
 });
 
 describe("pending tool registration rollback retries", () => {
+  test("receipt identity pages match full history for codec, precedence, malformed fields and pagination", async () => {
+    const { input } = await fixture();
+    const cases: Record<string, unknown>[] = [
+      {
+        type: "function_call",
+        callId: "direct",
+        call_id: "snake",
+        id: "item",
+        providerData: { callId: "provider" },
+      },
+      { type: "function_call_result", callId: "", call_id: "snake" },
+      {
+        type: "tool_search_output",
+        callId: false,
+        call_id: {},
+        providerData: { callId: "provider", call_id: "other" },
+        id: "item",
+      },
+      { type: "shell_call_output", providerData: { callId: "", call_id: "provider-snake" } },
+      { type: "computer_call", providerData: ["ignored"], id: "fallback" },
+      { type: "apply_patch_call_output", providerData: "ignored", id: "fallback" },
+      { type: null, callId: 7, id: [] },
+      { type: {}, callId: "identity" },
+      { type: "function_call", callId: "nul\0surrogate\ud800" },
+      {
+        type: `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+        callId: `${LOSSLESS_JSON_STRING_PREFIX}also-literal`,
+      },
+      { type: "function_call", providerData: { callId: "nested\0\ud800" } },
+      {},
+    ];
+    let position = 100;
+    for (const codec of [null, 1] as const)
+      for (const original of cases) {
+        // Legacy JSON cannot contain NUL/lone surrogates; the versioned form can.
+        if (codec === null && JSON.stringify(original).match(/\\u0000|\\ud800/)) continue;
+        const item = { ...original, output: "large retained output".repeat(4000) };
+        const encoded = codec === 1 ? toPostgresLosslessJson(item) : item;
+        await shared.admin`insert into session_history_items(account_id,workspace_id,session_id,turn_id,position,item,item_codec_version)
+        values (${input.accountId},${input.workspaceId},${input.sessionId},${input.turnId},${position++},${JSON.stringify(encoded)}::jsonb,${codec})`;
+      }
+    const before =
+      await shared.admin`select position,item_ordered,item_codec_version from session_history_items
+      where turn_id=${input.turnId} order by position desc`;
+    const expected = before.map((row) => {
+      const item = fromPostgresLosslessJson(row.item_ordered, row.item_codec_version);
+      return {
+        position: Number(row.position),
+        callId: historyCallId(item),
+        type: historyItemType(item),
+      };
+    });
+    const actual = await withRlsContext(client.db, input, async (tx) => {
+      const narrow = new Proxy(tx, {
+        get(target, key, receiver) {
+          if (key === "execute")
+            return async (query: Parameters<typeof tx.execute>[0]) => {
+              const result = await target.execute(query);
+              // Assert the database response itself is narrow, not just the final
+              // mapped identities after discarding a large retained payload.
+              expect(JSON.stringify(result).length).toBeLessThan(8000);
+              expect(JSON.stringify(result)).not.toContain("large retained output");
+              return result;
+            };
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const rows: typeof expected = [];
+      let cursor: number | null = null;
+      for (;;) {
+        const page = await readSessionHistoryToolIdentityPage(narrow, input, cursor, 7);
+        rows.push(...page);
+        if (page.length < 7) return rows;
+        cursor = page.at(-1)!.position;
+      }
+    });
+    expect(actual).toEqual(expected);
+    expect(JSON.stringify(actual).length).toBeLessThan(8000);
+    expect(
+      await shared.admin`select position,item_ordered,item_codec_version from session_history_items
+      where turn_id=${input.turnId} order by position desc`,
+    ).toEqual(before);
+    const other = await fixture();
+    expect(
+      await withRlsContext(client.db, other.input, (tx) =>
+        readSessionHistoryToolIdentityPage(tx, input, null, 32),
+      ),
+    ).toEqual([]);
+    await shared.admin`insert into session_history_items(account_id,workspace_id,session_id,turn_id,position,item)
+      values (${input.accountId},${input.workspaceId},${input.sessionId},${input.turnId},999,'null'::jsonb)`;
+    await expect(
+      withRlsContext(client.db, input, (tx) =>
+        readSessionHistoryToolIdentityPage(tx, input, null, 32),
+      ),
+    ).rejects.toThrow();
+  });
+
   test("fixture enforces the non-owner FORCE-RLS application role", async () => {
     const rows = await client.db.execute(sql`
       SELECT current_user, r.rolsuper, r.rolbypassrls, c.relforcerowsecurity,

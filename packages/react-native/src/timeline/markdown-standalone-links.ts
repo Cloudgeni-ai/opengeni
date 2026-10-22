@@ -33,3 +33,16 @@ export function isStandaloneLinkGroup(
   const content = (group.children ?? []).filter((child) => !isBlankNode(child));
   return content.length === 1 && content[0]!.type === "link";
 }
+
+/**
+ * The text group a list item holds when that group is its only content,
+ * looking through a lone paragraph (loose lists keep one). A list item whose
+ * only content is a host-drawn block link is drawn without its marker.
+ */
+export function soleTextGroupOf(item: MarkdownAstNode): MarkdownAstNode | undefined {
+  let blocks = (item.children ?? []).filter((child) => !isBlankNode(child));
+  if (blocks.length === 1 && blocks[0]!.type === "paragraph") {
+    blocks = (blocks[0]!.children ?? []).filter((child) => !isBlankNode(child));
+  }
+  return blocks.length === 1 && blocks[0]!.type === "textgroup" ? blocks[0] : undefined;
+}

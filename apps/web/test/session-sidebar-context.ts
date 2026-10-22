@@ -10,6 +10,7 @@ import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
 import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
 import type { Session } from "@opengeni/react/app/types";
+import { siteViewPreviewClient } from "./site-view-preview-client";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const subjectId = "sidebar-preview";
@@ -147,10 +148,54 @@ if (previewParameters.get("scenario") === "keyboard-focus") {
   );
 }
 
+const siteConversationId = (number: number) =>
+  `00000000-0000-4000-9000-${String(number).padStart(12, "0")}`;
+const usageSiteHtml = `<!doctype html><html><head><style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6b66;--line:#e6e5e1;--bar:#4c6fff;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#18181a;--fg:#ededec;--muted:#9b9b97;--line:#2c2c2f;--bar:#7f98ff;--card:#202023}}
+body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+main{padding:28px 32px;max-width:980px}
+h1{font-size:20px;font-weight:600;margin:0 0 4px}p{margin:0;color:var(--muted)}
+.range{display:flex;gap:6px;margin:18px 0 22px}.range span{border:1px solid var(--line);border-radius:999px;padding:3px 12px;font-size:12px;color:var(--muted)}
+.range .on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.card b{display:block;font-size:22px;margin:2px 0 12px}.label{font-size:12px;color:var(--muted)}
+.bars{display:flex;align-items:flex-end;gap:5px;height:84px}.bars i{flex:1;background:var(--bar);border-radius:3px 3px 0 0;opacity:.85}
+</style></head><body><main><h1>Opengeni usage</h1><p>Workspace activity across the organization</p>
+<div class="range"><span>7 days</span><span class="on">30 days</span><span>90 days</span></div>
+<div class="grid">
+<div class="card"><span class="label">Weekly active users</span><b>831</b><div class="bars">${[38, 44, 41, 52, 49, 58, 61, 57, 66, 72, 70, 78].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Sessions</span><b>12,408</b><div class="bars">${[50, 47, 55, 61, 58, 64, 60, 69, 74, 71, 80, 84].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Tokens</span><b>1.9B</b><div class="bars">${[30, 36, 33, 45, 51, 48, 56, 62, 59, 64, 69, 75].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+<div class="card"><span class="label">Spend</span><b>$18,240</b><div class="bars">${[42, 40, 46, 49, 55, 53, 58, 63, 60, 67, 71, 73].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
+</div></main></body></html>`;
+
+/** The same sample layout under another Site's own heading. */
+const siteHtml = (title: string, subtitle: string) =>
+  usageSiteHtml.replace(
+    "<h1>Opengeni usage</h1><p>Workspace activity across the organization</p>",
+    `<h1>${title}</h1><p>${subtitle}</p>`,
+  );
+
 /** Conversations that run inside a Site; ordinary pages leave them out. */
 const siteConversationIds = new Set<string>();
 export const usageSiteId = "00000000-0000-4000-a000-000000000001";
 export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+export const pricingSiteId = "00000000-0000-4000-a000-000000000003";
+export const checklistSiteId = "00000000-0000-4000-a000-000000000004";
+/**
+ * Sites a listed chat created that have no conversations yet. Each sits in
+ * its creating chat's project, ordered by its own latest activity.
+ */
+const createdSites: Array<{
+  siteId: string;
+  title: string;
+  channelId: string | null;
+  updatedAt: string;
+}> = [];
+/** This person's latest open of each Site, which counts as its activity. */
+const siteOpenedAt = new Map<string, string>();
 if (previewParameters.get("scenario") === "sites") {
   const siteConversation = (
     number: number,
@@ -181,6 +226,22 @@ if (previewParameters.get("scenario") === "sites") {
     siteConversation(902, "Weekly active users by plan", usage, null, 180),
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
+  );
+  // "Pricing page copy" (Website redesign) and "Workspace Site planning"
+  // (Default) each made a Site nobody has asked anything yet.
+  createdSites.push(
+    {
+      siteId: pricingSiteId,
+      title: "Pricing calculator",
+      channelId: redesignId,
+      updatedAt: timeBefore(390),
+    },
+    {
+      siteId: checklistSiteId,
+      title: "Launch checklist",
+      channelId: null,
+      updatedAt: timeBefore(2880),
+    },
   );
 }
 
@@ -341,6 +402,8 @@ export type SessionSidebarEvidence = {
     previousChannelId: string | null;
     returnedChannelId: string | null;
   }[];
+  /** Sites this person opened, in order. */
+  siteOpens: string[];
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -357,6 +420,7 @@ export type SessionSidebarEvidence = {
 export const evidence: SessionSidebarEvidence = {
   listCalls: [],
   archiveCalls: [],
+  siteOpens: [],
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -457,6 +521,32 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       activeWork: 0,
     });
   }
+  const later = (a: string, b: string | undefined) => (b && b > a ? b : a);
+  for (const group of groups.values())
+    group.updatedAt = later(group.updatedAt, siteOpenedAt.get(group.siteId));
+  const listed = new Set([...groups.values()].map((group) => group.siteId));
+  if (!options.needsYouOnly && options.archiveStatus !== "archived")
+    for (const created of createdSites) {
+      if (listed.has(created.siteId)) continue;
+      if (options.channelId !== undefined && options.channelId !== created.channelId) continue;
+      groups.set(created.siteId, {
+        siteId: created.siteId,
+        channelId: created.channelId,
+        title: created.title,
+        conversations: 0,
+        updatedAt: later(created.updatedAt, siteOpenedAt.get(created.siteId)),
+        createdAt: created.updatedAt,
+        total: 0,
+        attention: 0,
+        attentionSince: null,
+        failed: 0,
+        active: 0,
+        queued: 0,
+        waiting: 0,
+        unread: 0,
+        activeWork: 0,
+      });
+    }
   return [...groups.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -571,6 +661,73 @@ client.listSessionSummaryPage = async (workspace, options) => {
   };
 };
 
+// The Site view: each Site's page and its conversations' history.
+if (previewParameters.get("scenario") === "sites") {
+  Object.assign(
+    client,
+    siteViewPreviewClient({
+      workspaceId,
+      rows,
+      sites: [
+        { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
+        { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
+        {
+          id: pricingSiteId,
+          title: "Pricing calculator",
+          html: siteHtml("Pricing calculator", "Plans, seats and annual pricing"),
+        },
+        {
+          id: checklistSiteId,
+          title: "Launch checklist",
+          html: siteHtml("Launch checklist", "Readiness across teams for the next release"),
+        },
+      ],
+      history: new Map([
+        [
+          siteConversationId(901),
+          [
+            [
+              "Can the date range apply to every graph at once?",
+              "Yes. The range picker at the top now filters all four graphs together: active users, sessions, tokens and spend. Each graph keeps its own zoom, and the range is kept in the address so a shared link opens the same view.",
+            ],
+          ],
+        ],
+        [
+          siteConversationId(902),
+          [
+            [
+              "Break weekly active users down by plan.",
+              "Weekly active users last week: Team 412, Pro 268, Free 151. Team grew 9% week over week; Free was flat.",
+            ],
+          ],
+        ],
+        [
+          siteConversationId(903),
+          [
+            [
+              "Export the usage table to CSV.",
+              "The export has one row per workspace and week, with sessions, tokens and spend. Use **Download CSV** above the table.",
+            ],
+          ],
+        ],
+      ]),
+    }),
+    {
+      recordSiteOpened: async (_workspace: string, siteId: string) => {
+        const openedAt = new Date().toISOString();
+        siteOpenedAt.set(siteId, openedAt);
+        evidence.siteOpens.push(siteId);
+        return { openedAt };
+      },
+      tools: {
+        forWorkspace: () => ({
+          $catalog: async () => ({ tools: [], revision: "preview" }),
+        }),
+      },
+    },
+  );
+}
+
 // `?hints=1` serves the workspace live stream, so the sidebar runs in commit
 // hint mode: no list polling, and only a published hint invalidates rows.
 const pendingHints: WorkspaceSessionListEvent[] = [];
@@ -624,7 +781,10 @@ const context = {
     const id = /\/sessions\/([^/]+)/u.exec(window.location.pathname)?.[1];
     return (id && rows.find((row) => row.id === id)) || null;
   },
-  accessContext: { subjectId },
+  accessContext: {
+    subjectId,
+    workspaceGrants: [{ workspaceId, permissions: ["sessions:create", "artifacts:read"] }],
+  },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
   captureWorkspaceInvocation: () => invocation,

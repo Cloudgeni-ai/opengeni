@@ -210,9 +210,9 @@ import {
   buildCapabilityCatalog,
   CONNECTED_MACHINE_CAPABILITY_ID,
   EXCEL_ADDIN_CAPABILITY_ID,
+  browserExtension,
   nativeConnectionCapabilityRecommendations,
   userSetupCardPayload,
-  OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -2297,7 +2297,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it. A new file gets this chat's visibility (Only me in an Only me chat, otherwise the workspace) unless you pass visibility; to change an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check the result's access.whoCanOpen before sharing a link with anyone.",
+        "Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.",
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -4471,9 +4471,10 @@ function registerFleetTools(
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.
         await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-        const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
-          (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
-        )!;
+        const item = nativeConnectionCapabilityRecommendations({
+          connectedMachines: true,
+          browserExtension: browserExtension(deps.settings),
+        }).find((candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID)!;
         const setup = await capabilitySetupProjection(
           deps,
           grant.workspaceId,
@@ -4501,7 +4502,7 @@ function registerFleetTools(
             setup.status === "ready"
               ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
               : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on the connected machine.`,
         });
       }
       return json(
@@ -4531,7 +4532,7 @@ function registerConnectedMachineTools(
     {
       description:
         "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
-        OPENGENI_BROWSER_EXTENSION_URL +
+        browserExtension(deps.settings).installUrl +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
     },
@@ -4563,7 +4564,7 @@ function registerConnectedMachineTools(
     {
       description:
         "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
-        OPENGENI_BROWSER_EXTENSION_URL +
+        browserExtension(deps.settings).installUrl +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
     },
@@ -6720,6 +6721,7 @@ function registerCapabilityDiscoveryTools(
         ...current.items,
         ...nativeConnectionCapabilityRecommendations({
           connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+          browserExtension: browserExtension(deps.settings),
         }),
       ];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
@@ -6793,6 +6795,7 @@ function registerCapabilityDiscoveryTools(
         ...current.items,
         ...nativeConnectionCapabilityRecommendations({
           connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+          browserExtension: browserExtension(deps.settings),
         }),
       ].find((candidate) => candidate.id === capabilityId);
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
@@ -6832,7 +6835,7 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {

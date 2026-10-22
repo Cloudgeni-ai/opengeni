@@ -46,6 +46,7 @@ function Fixture() {
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
           summary={{ kind: "active", count: 1, total: 3, label: "1 working" }}
+          count={3}
         />
         {expanded && <p className="px-9 py-2 text-xs text-fg-muted">Conversations expand here</p>}
         <h2 className="px-2 pb-2 pt-8 text-xs text-fg-muted">Growth project</h2>

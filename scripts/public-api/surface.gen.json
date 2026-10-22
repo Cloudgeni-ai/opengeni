@@ -6757,6 +6757,17 @@
       "response": []
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened",
+      "sdk": [
+        "OpenGeniClient.recordSiteOpened"
+      ],
+      "request": [],
+      "response": [
+        "SiteOpenedResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
       "sdk": [
@@ -13078,6 +13089,9 @@
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
         "$.billingMode": "enum!=[\"\\\"disabled\\\"\",\"\\\"stripe\\\"\"]",
+        "$.browserExtension": "object?",
+        "$.browserExtension.installUrl": "string!",
+        "$.browserExtension.name": "string!",
         "$.claudeSubscriptionEnabled": "boolean?",
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",
@@ -26146,6 +26160,15 @@
         "$": "enum=[\"\\\"credits\\\"\",\"\\\"custom\\\"\",\"\\\"free\\\"\",\"\\\"standard\\\"\",\"\\\"unlimited\\\"\"]"
       }
     },
+    "SiteOpenedResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.openedAt": "string!"
+      }
+    },
     "SitePlatformBillingMode": {
       "io": [
         "output"
@@ -31805,6 +31828,7 @@
       "isSessionModelResponsePhase": "value",
       "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
+      "isTransientRequestError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
       "KnowledgeEntryContent": "type",
       "KnowledgeEntryEvidence": "type",
@@ -32023,6 +32047,7 @@
       "OpenGeniInteractionClient": "value",
       "openGeniLinkScheme": "value",
       "OpenGeniLinkTarget": "type",
+      "OpenGeniReadRetryOptions": "type",
       "OpenGeniRequestOptions": "type",
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
@@ -32497,6 +32522,7 @@
       "SiteLimitProfile": "type",
       "SiteLimitProfileKind": "type",
       "SiteLimits": "type",
+      "SiteOpenedResponse": "type",
       "SitePlatformBillingMode": "type",
       "SitePlatformBrakeState": "type",
       "SitePlatformMeter": "type",
@@ -33017,6 +33043,7 @@
       "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
+      "isTransientRequestError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
       "OpenGeniAllowanceExhaustedError": "value",
@@ -33026,6 +33053,7 @@
       "OpenGeniClientOptions": "type",
       "OpenGeniDynamicToolNode": "type",
       "OpenGeniGeneratedTools": "type",
+      "OpenGeniReadRetryOptions": "type",
       "OpenGeniRequestOptions": "type",
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
@@ -33154,6 +33182,7 @@
       "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
+      "isTransientRequestError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
       "OpenGeniApiContractMismatchError": "value",
@@ -33164,6 +33193,7 @@
       "OpenGeniDeprecationNotice": "type",
       "OpenGeniDynamicToolNode": "type",
       "OpenGeniGeneratedTools": "type",
+      "OpenGeniReadRetryOptions": "type",
       "OpenGeniRequestOptions": "type",
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
@@ -35882,6 +35912,7 @@
       "compareSessionActivity": "value",
       "compareSessionPins": "value",
       "findPickerRow": "value",
+      "foldForSearch": "value",
       "GroupedSessions": "type",
       "groupSessionsByProject": "value",
       "groupSessionsForRail": "value",
@@ -35890,8 +35921,10 @@
       "isCodexProductModel": "value",
       "isEffectivelyRunning": "value",
       "isRunningStatus": "value",
+      "LOOSE_MATCH_BELOW": "value",
       "partitionPinnedSessions": "value",
       "PinnedSessionLists": "type",
+      "rankLabel": "value",
       "recencyGroupFor": "value",
       "recentSessionModelPresentation": "value",
       "recentSessionsForHome": "value",
@@ -37765,6 +37798,7 @@
       "readWorkspaceSkill",
       "reclassifyDocumentAuthority",
       "reconnectPersonalGitHub",
+      "recordSiteOpened",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
       "refreshClaudeSubscriptionAccountUsage",
@@ -38478,6 +38512,7 @@
       "readWorkspaceSkill",
       "reclassifyDocumentAuthority",
       "reconnectPersonalGitHub",
+      "recordSiteOpened",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
       "refreshClaudeSubscriptionAccountUsage",
@@ -39227,6 +39262,7 @@
       "readWorkspaceSkill",
       "reclassifyDocumentAuthority",
       "reconnectPersonalGitHub",
+      "recordSiteOpened",
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
       "refreshClaudeSubscriptionAccountUsage",
@@ -41536,6 +41572,9 @@
       ],
       "reconnectPersonalGitHub": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"connectionId\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "recordSiteOpened": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteOpenedResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "recoverSandbox": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -43952,6 +43991,9 @@
       "reconnectPersonalGitHub": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"connectionId\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "recordSiteOpened": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteOpenedResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "recoverSandbox": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46151,6 +46193,9 @@
       ],
       "reconnectPersonalGitHub": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"connectionId\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "recordSiteOpened": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteOpenedResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "recoverSandbox": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48587,6 +48632,9 @@
       "reconnectPersonalGitHub": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"connectionId\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "recordSiteOpened": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteOpenedResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "recoverSandbox": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -50809,6 +50857,9 @@
       ],
       "reconnectPersonalGitHub": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"connectionId\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"PersonalGitHubOAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "recordSiteOpened": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteOpenedResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "recoverSandbox": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SandboxRecoveryResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

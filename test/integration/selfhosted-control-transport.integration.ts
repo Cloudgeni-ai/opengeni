@@ -128,9 +128,14 @@ describe("selfhosted control transport over a REAL local NATS", () => {
   //     responder re-subscribes — the SAME minted session, same connection.
   test("(c) bouncing the responder mid-session: blip → recover on the SAME connection", async () => {
     const mock = new MockAgentResponder({ hostname: "reconnect-vm" });
-    const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
+    // Its own agent subject: delivery negotiation is cached per bus connection and
+    // exact subject, so sharing (a)'s subject made this test inherit (a)'s cache
+    // expiry. When that expiry fell inside the never-sent retries below, the
+    // offline read also waited a fresh recovery window and outran its wait.
+    const bounceAgent = `${AGENT}-bounce`;
+    const subject = subjectFor(WS_A, bounceAgent, CONNECTION_INSTANCE_ID);
     let unsub = bus.subscribeRequests(subject, responderFor(mock));
-    const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
+    const session = await buildClient(bus, WS_A).resume({ agentId: bounceAgent });
 
     // Healthy before the bounce.
     expect(await session.ping()).toBe(true);

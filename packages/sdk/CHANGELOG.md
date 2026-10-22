@@ -1,5 +1,33 @@
 # @opengeni/sdk
 
+## 4.5.0
+
+### Minor Changes
+
+- f838cb7: A deployment that ships its own branded build of the browser extension can now name and link it. Set `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`. Agent tool descriptions, setup notes and errors, `/v1/config/client` (`browserExtension`), the machine card's Chrome step and the browser panel's install hint then use that name and install link. Without them, everything still says Opengeni Browser and links its Chrome Web Store page, unchanged.
+- 3e4426e: Ride out API rolling deploys and short network blips quietly. The SDK client now retries safe JSON reads (`GET`/`HEAD`) that fail with a transport error or a `502`, `503` or `504`: up to 4 attempts within 5 seconds with jittered backoff, honoring `Retry-After`. Tune it with the new `readRetry` client option or turn it off with `readRetry: false`; mutations are never retried. `isTransientRequestError` is exported for callers with their own retry loop.
+
+  In the console, session, session list and workspace reads, the session event stream and the session lookup page keep showing the loading state or the last loaded view through a transient failure and retry on their own, with no error toast. Only a failure that lasts more than 20 seconds shows an error, once, with a Try again action, and the page keeps retrying in the background and recovers by itself.
+
+- 4e8a749: Every Site is a sidebar row, not only Sites with conversations. A Site sits in the project of the chat that created it, and new Site conversations are filed there too. Opening a Site counts as activity for its row, so Sites in use rise and untouched ones sort down. Adds `recordSiteOpened` to the SDK (`POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`), returning `SiteOpenedResponse`.
+
+  `siteGroups[].conversations` can now be 0. An older `@opengeni/react` rail shows such a row with a "0" count until it is updated.
+
+- d0bc2d6: Sites with conversations are rows in the sidebar. Each Site row shows how many conversations it has and their status, sorts by latest activity with other rows and stays in its project. Its conversations are nested under it, collapsed by default, and no longer appear or disappear depending on which session is open. Session lists take a `siteConversations` option: `group` returns complete `siteGroups` for a root page, and `include` lists Site conversations as ordinary rows. Workspace list hints report the viewer's changed Site conversations separately in `siteSessionIds`.
+
+### Patch Changes
+
+- debd64e: When something you can fix blocks the agent, the setup card now appears in the same reply, so you no longer have to ask the agent how. The first case is your own Chrome: if the agent needs it and it isn't connected, a Chrome card shows one step at a time: connect a computer, add the Opengeni Browser extension, then continue. The existing card for allowing a chat to use your personal machine now goes through the same path.
+- 68c3907: Refresh the generated Site browser runtime to match the current SDK source.
+- e38f20d: The packaged session app opens its workspace for external users behind a session proxy. Their access inventory is empty, so the proxy's `access/me` now carries the workspace's effective grant instead of filtering the inventory, which had left the app showing "This workspace isn't available".
+- e22eeca: The session proxy creates chats from the packaged session app. With `sessionApp: true`, a new chat no longer fails with "visibility cannot be set from the browser": the proxy takes the app's first-message id and new-chat draft revision, drops the `visibility` and empty `connectionAccounts` it sends (the server chooses both), and still refuses any other configuration. A browser `modelContext` on create (such as an Excel selection) is now appended after the server's context, as on follow-up messages.
+- Updated dependencies [f838cb7]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/connect@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

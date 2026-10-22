@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { extname, resolve, sep } from "node:path";
+import { extname, relative, resolve, sep } from "node:path";
 
 import {
   OFFICE_MANIFEST_PATH,
@@ -16,6 +16,11 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+// Content-hashed build output. A tab opened on another web build (an older
+// one after a deploy, or a newer one mid-rollout) still requests these names,
+// so a local miss under one of them may be answered from a previous build.
+const HASHED_ASSET_DIRECTORIES = ["assets", "office/assets", "react-demo/assets"] as const;
+const PREVIOUS_ASSET_ROOTS_ENV = "OPENGENI_WEB_PREVIOUS_ASSET_ROOTS";
 // Baseline hardening for every response the shell itself serves. Framing and
 // CSP stay unset on purpose: the console supports embedding (docs/embedding.md).
 // A route-specific value, such as the setup page's no-referrer, wins.
@@ -55,6 +60,13 @@ export type WebHandlerOptions = {
   publicOrigin?: string | undefined;
   /** The Excel add-in's store publisher name and support page, when listed in Microsoft's store. */
   officePublisher?: OfficeManifestPublisher;
+  /**
+   * Dist-shaped directories holding hashed assets of previous web builds,
+   * newest first. A request for a hashed asset this build does not have is
+   * answered from the first root that has it, with the same headers; HTML is
+   * never served from them. Missing roots are ignored.
+   */
+  previousAssetRoots?: readonly string[] | undefined;
 };
 
 type RenderedShell = { html: Uint8Array<ArrayBuffer>; gzip: Uint8Array<ArrayBuffer> };
@@ -73,6 +85,7 @@ export function createWebHandler(
 ) {
   const distRoot = resolve(root);
   const indexPath = resolve(distRoot, "index.html");
+  const previousAssetRoots = (options.previousAssetRoots ?? []).map((path) => resolve(path));
   // Normalize to a bare origin so nothing but scheme, host, and port can reach
   // the rendered HTML attribute.
   const publicOrigin =
@@ -134,6 +147,10 @@ export function createWebHandler(
     if (await requestedFile.exists()) {
       return serveFile(request, requestedPath, cacheControlFor(staticPath));
     }
+    const previousAsset = await findPreviousAsset(requestedPath);
+    if (previousAsset) {
+      return serveFile(request, previousAsset.path, cacheControlFor(previousAsset.pathname));
+    }
     if (
       pathname.startsWith("/assets/") ||
       pathname.startsWith("/react-demo/") ||
@@ -150,6 +167,26 @@ export function createWebHandler(
       return serveShellIndex(request, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
     }
     return serveShellIndex(request, REVALIDATE_CACHE_CONTROL);
+  }
+
+  async function findPreviousAsset(
+    requestedPath: string,
+  ): Promise<{ path: string; pathname: string } | null> {
+    if (previousAssetRoots.length === 0) return null;
+    // Match on the normalized path inside this build's dist so only files under
+    // a hashed asset directory can ever be answered from a previous build.
+    const distRelative = relative(distRoot, requestedPath).split(sep).join("/");
+    if (!HASHED_ASSET_DIRECTORIES.some((directory) => distRelative.startsWith(`${directory}/`))) {
+      return null;
+    }
+    // A previous build only ever supplies code, styles and media, never a page.
+    if (/\.html?$/i.test(distRelative)) return null;
+    const pathname = `/${distRelative}`;
+    for (const previousRoot of previousAssetRoots) {
+      const candidate = safePath(previousRoot, pathname);
+      if (candidate && (await Bun.file(candidate).exists())) return { path: candidate, pathname };
+    }
+    return null;
   }
 
   async function serveShellIndex(
@@ -217,6 +254,20 @@ function httpOrigin(value: string): string | undefined {
   if (!URL.canParse(value)) return undefined;
   const url = new URL(value);
   return url.protocol === "https:" || url.protocol === "http:" ? url.origin : undefined;
+}
+
+/**
+ * Previous builds' asset roots from `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`, a
+ * comma-separated list of directories, newest first. The Helm chart fills them
+ * from the previous web images before the server starts.
+ */
+export function previousAssetRootsFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return (env[PREVIOUS_ASSET_ROOTS_ENV] ?? "")
+    .split(",")
+    .map((path) => path.trim())
+    .filter(Boolean);
 }
 
 function withShellSecurityHeaders(response: Response): Response {
@@ -429,6 +480,7 @@ if (import.meta.main) {
       demoApiProxy: demoApiProxyFromEnvironment(),
       publicOrigin: publicWebOriginFromEnvironment(),
       officePublisher: officeManifestPublisherFromEnvironment(),
+      previousAssetRoots: previousAssetRootsFromEnvironment(),
     }),
   });
   // As a container's PID 1 the process gets no default SIGTERM action, so stop

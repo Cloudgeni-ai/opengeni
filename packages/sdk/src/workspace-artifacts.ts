@@ -30,6 +30,12 @@ export type WorkspaceArtifactVersion = {
   createdAt: string;
 };
 
+/** This person's latest recorded open of a Site, which orders its sidebar row. */
+export type SiteOpenedResponse = {
+  /** When the open was recorded (ISO 8601). */
+  openedAt: string;
+};
+
 /** Who can see a Site: everyone in the workspace, or only its owner ("Only me"). */
 export type WorkspaceArtifactVisibility = "private" | "workspace";
 

@@ -383,7 +383,7 @@ export const englishMessages = {
   "browserViewer.inputResultUnknown": "Input result unknown",
   "browserViewer.inspectThePageBeforeContinuing": "Inspect the page before continuing.",
   "browserViewer.installTheOpengeniBrowserExtension":
-    "Install the Opengeni Browser extension in the profile you want to use.",
+    "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
   "browserViewer.itsPrivateStateIsSaved":
     "Its private state is saved. Opening it creates a fresh, isolated browser process.",
@@ -3992,8 +3992,8 @@ export const englishMessages = {
   "timeline.toolStep.shareFile.running": "Sharing a file",
   "timeline.toolStep.signIn.done": "Signed in",
   "timeline.toolStep.signIn.running": "Signing in",
-  "timeline.toolStep.startHelper.done": "Got help from another assistant",
-  "timeline.toolStep.startHelper.running": "Getting help from another assistant",
+  "timeline.toolStep.startHelper.done": "Started a worker",
+  "timeline.toolStep.startHelper.running": "Starting a worker",
   "timeline.toolStep.switchComputer.done": "Switched computers",
   "timeline.toolStep.switchComputer.running": "Switching computers",
   "timeline.toolStep.syncPosts.done": "Synced posts",

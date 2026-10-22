@@ -6408,6 +6408,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "recordSiteOpened",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened",
+    "request": [],
+    "response": [
+      "SiteOpenedResponse"
+    ]
+  },
+  {
     "id": "recoverSandbox",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery",

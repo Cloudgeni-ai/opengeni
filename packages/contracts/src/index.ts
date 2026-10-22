@@ -171,6 +171,7 @@ export {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  SiteOpenedResponse,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
@@ -16246,9 +16247,11 @@ export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
 export type SessionListTotals = z.infer<typeof SessionListTotals>;
 
 /**
- * One Site's own root conversations in one project, for a rail that shows
- * Sites as rows. Counts cover the complete authorized, unpinned, non-archived
- * set independent of page size; never a guess from loaded rows.
+ * One Site row in one project, for a rail that shows Sites as rows: a Site
+ * with this viewer's conversations, created by a chat the viewer lists, or
+ * opened by the viewer. Counts cover the complete authorized, unpinned set in
+ * the requested archive scope independent of page size; never a guess from
+ * loaded rows.
  */
 export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.object({
@@ -16256,11 +16259,11 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     channelId: z.string().uuid().nullable(),
     /** The Site's current title when the viewer can read it, else its creation label. */
     title: z.string(),
-    /** Root conversations in the group. */
-    conversations: z.number().int().positive(),
-    /** Latest activity across the group's conversations. */
+    /** Root conversations in the group; 0 for a Site with none yet. */
+    conversations: z.number().int().nonnegative(),
+    /** Latest activity: its conversations, its own changes, or the viewer opening it. */
     updatedAt: z.string().datetime(),
-    /** Creation time of the group's newest conversation. */
+    /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: z.string().datetime(),
     /** The same status counts as a project total, over the group's trees. */
     total: z.number().int().nonnegative(),
@@ -22104,6 +22107,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: z.boolean().optional(),
+    // The Chrome extension people add to connect their own Chrome, and its
+    // Chrome Web Store page. Absent on older servers: Opengeni Browser.
+    browserExtension: z.object({ name: z.string(), installUrl: z.string().url() }).optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.

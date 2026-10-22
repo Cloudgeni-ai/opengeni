@@ -205,6 +205,14 @@ export class GitHubActiveExecutor implements Executor {
         lastError: null,
       };
     }
+    if (effect.kind === "park") {
+      const id = addComment(ledger, `parking:${effect.key}`, effect.number, effect.body, now);
+      ledger.parked = (ledger.parked ?? []).map((item) =>
+        item.batchId === effect.key
+          ? { ...item, announced: ledger.effects[id]!.status === "done", effectId: id }
+          : item,
+      );
+    }
     if (effect.kind === "announce") {
       const id = addComment(ledger, `ejection:${effect.key}`, effect.number, effect.body, now);
       ledger.ejected = ledger.ejected.map((item) =>
@@ -276,9 +284,6 @@ export class GitHubActiveExecutor implements Executor {
         throw new Error("Candidate identity changed");
       if (effect.kind === "land") {
         if (effect.expectedBase !== inspected.baseSha) throw new Error("Tested base mismatch");
-        const base = await this.reads.baseCI(inspected.baseSha);
-        if (base.sha !== inspected.baseSha || base.status !== "green")
-          throw new Error("Exact base full main CI is not green; landing held");
         const branch = `${this.config.branchPrefix}${inspected.batchId}`;
         const run = latestRun(
           {
@@ -323,6 +328,10 @@ export class GitHubActiveExecutor implements Executor {
       ledger.effects[id] = { ...ledger.effects[id]!, ...patch } as DurableEffect;
       if (patch.status === "done")
         ledger.ejected = ledger.ejected.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
+      if (patch.status === "done" && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
     });
@@ -395,17 +404,20 @@ export class GitHubActiveExecutor implements Executor {
         return "REST effect blocked by bounded retry budget";
       }
       if (effect.kind === "comment" && effect.body.includes("batcher-ejection:")) {
-        const base = await this.reads.baseCI(state.main);
-        if (
-          base.sha !== state.main ||
-          base.status !== "green" ||
-          (state.ledger.baseHold?.status === "red" && state.ledger.baseHold.sha === state.main)
-        ) {
+        const conflict = state.ledger.ejected.some(
+          (e) =>
+            e.reason === "merge-tree conflict against candidate predecessor" &&
+            e.pull.number === effect.number &&
+            effect.body.includes(`<!-- batcher-ejection:${bindingKey(e.pull)} -->`) &&
+            effect.body.includes(`: ${e.reason}. Batch: ${e.batchId}.`),
+        );
+        if (!conflict) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
-            lastError: "Base CI is not green; ejection announcement held",
+            lastError:
+              "Comparable base batch-suite evidence unavailable; ejection announcement held",
           });
-          return "base CI holds pending culprit announcement";
+          return "base batch-suite evidence holds pending culprit announcement";
         }
       }
       if (effect.kind === "followup" && !(await this.validFollowup(effect.request))) {
@@ -793,6 +805,10 @@ export class GitHubActiveExecutor implements Executor {
       };
       if (observed)
         ledger.ejected = ledger.ejected.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
+      if (observed && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
     });

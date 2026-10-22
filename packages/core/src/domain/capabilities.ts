@@ -1668,6 +1668,20 @@ function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCa
   });
 }
 
+/** How people and agents name the deployment's Chrome extension, and where it is installed. */
+export type BrowserExtension = { name: string; installUrl: string };
+
+/** The deployment's configured Chrome extension, else Opengeni Browser. */
+export function browserExtension(settings: {
+  browserExtensionName?: string | undefined;
+  browserExtensionInstallUrl?: string | undefined;
+}): BrowserExtension {
+  return {
+    name: settings.browserExtensionName ?? "Opengeni Browser",
+    installUrl: settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+  };
+}
+
 /** The catalog id of the Excel add-in tile and its in-chat install card. */
 export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
 
@@ -1793,8 +1807,9 @@ export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 export { OPENGENI_BROWSER_EXTENSION_URL };
 
 export function nativeConnectionCapabilityRecommendations(
-  options: { connectedMachines?: boolean } = {},
+  options: { connectedMachines?: boolean; browserExtension?: BrowserExtension } = {},
 ): CapabilityCatalogItem[] {
+  const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
@@ -1865,7 +1880,7 @@ export function nativeConnectionCapabilityRecommendations(
         tools: [{ kind: "mcp", id: "opengeni" }],
         runtime: {
           available: true,
-          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${extensionUrl}) works only after the machine is connected.`,
         },
         lifecycle: {
           status: "available",
@@ -1882,7 +1897,7 @@ export function nativeConnectionCapabilityRecommendations(
             "connected_machine_enroll_token",
             "connected_machine_enable_screen_control",
           ],
-          browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
+          browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
       }),

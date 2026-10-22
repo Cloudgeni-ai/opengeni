@@ -419,6 +419,15 @@ connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
 
+A product built on Opengeni can ship its own branded build of the extension
+(see `apps/browser-extension/README.md`) as its own Chrome Web Store item. The
+agent then also accepts that item's origin: the desktop kit's
+`browserExtensionIds`, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` (comma-separated
+IDs) when running `opengeni-agent service install`. On the server,
+`OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`
+make agents, the chat's machine card and `/v1/config/client` name and link that
+extension instead of Opengeni Browser.
+
 Where the browser finds the native host depends on the platform. On macOS and
 Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
 browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look

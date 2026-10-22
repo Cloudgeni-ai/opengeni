@@ -1,7 +1,6 @@
 import {
   bindingKey,
   compareText,
-  canonical,
   ejectionKey,
   type BatchSpec,
   type Candidate,
@@ -9,6 +8,7 @@ import {
   type Ejection,
   type Ledger,
   type Observation,
+  type ParkedPull,
   type Pull,
   type Run,
 } from "./model";
@@ -19,7 +19,8 @@ export type Action =
   | { kind: "build"; spec: BatchSpec; publish: boolean; recoveryIndex: number | null }
   | { kind: "land"; candidate: Candidate }
   | { kind: "retry"; candidate: Candidate; run: Run }
-  | { kind: "announce"; ejection: Ejection };
+  | { kind: "announce"; ejection: Ejection }
+  | { kind: "park"; parked: ParkedPull };
 
 export function latestRun(candidate: Candidate, config: Config): Run | undefined {
   return candidate.runs
@@ -91,6 +92,10 @@ export function plan(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
+  // Readiness churn and main advancement must not automatically retry code.
+  // A genuinely different head can re-enter; preserve the old base/run evidence.
+  const parked = (p: Pull) =>
+    ledger.parked?.some((item) => item.pull.number === p.number && item.pull.headSha === p.headSha);
   if (o.telemetry?.status === "stop")
     return {
       kind: "wait",
@@ -149,48 +154,9 @@ export function plan(o: Observation, c: Config): Action {
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
-  if (c.mode === "active") {
-    const base =
-      o.baseCI?.sha === o.baseSha
-        ? o.baseCI
-        : {
-            sha: o.baseSha,
-            status: "unknown" as const,
-            runId: null,
-            attempt: null,
-            reason: "Exact-base full main CI evidence unavailable",
-          };
-    if (
-      ledger.baseHold?.status === "red" &&
-      ledger.baseHold.sha === o.baseSha &&
-      base.status !== "red"
-    )
-      return {
-        kind: "wait",
-        reason: "base_broken: require a later green main tip, not a rerun of the broken base",
-      };
-    if (base.status !== "green") {
-      if (canonical(ledger.baseHold ?? null) !== canonical(base)) {
-        ledger.baseHold = structuredClone(base);
-        return record(
-          base.status === "red"
-            ? "base_broken: hold queue; alert parent/F; no member ejection"
-            : "base_unknown: hold landing and culprit decisions",
-        );
-      }
-      return {
-        kind: "wait",
-        reason:
-          base.status === "red"
-            ? "base_broken: awaiting green main tip"
-            : "base_unknown: awaiting exact full main CI success",
-      };
-    }
-    if (ledger.baseHold) {
-      delete ledger.baseHold;
-      return record("base_recovered: exact current main tip has full CI success");
-    }
-  }
+  // Full main CI is an independent backstop, not candidate admission evidence.
+  // Retain any legacy baseHold for audit; it neither blocks a tested green tip
+  // nor authorizes attribution of a failed subset to one of its members.
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
   if (root) {
     const run = latestRun(root, c);
@@ -215,26 +181,35 @@ export function plan(o: Observation, c: Config): Action {
         ledger.invalidated = [
           ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
         ];
-        const pulls: Pull[] = root.manifest.pulls.map(({ mergeSha, ...p }) => {
+        const pulls = root.manifest.pulls.map(({ mergeSha, ...p }) => {
           void mergeSha;
           return p;
         });
-        if (pulls.length === 1)
-          ledger.ejected.push({
-            pull: pulls[0]!,
-            reason: "non-retryable exact-candidate code failure; no automatic code/test retry",
-            batchId: root.manifest.batchId,
-            announced: false,
-          });
-        else {
+        const cohortId = root.manifest.recoveryOf ?? root.manifest.batchId;
+        if (pulls.length === 1) {
+          ledger.parked ??= [];
+          if (!parked(pulls[0]!))
+            ledger.parked.push({
+              pull: pulls[0]!,
+              baseSha: root.manifest.baseSha,
+              batchId: root.manifest.batchId,
+              cohortId,
+              runId: run.id,
+              attempt: run.attempt,
+              parkedAt: o.now,
+              announced: false,
+            });
+        } else {
           const middle = Math.ceil(pulls.length / 2);
           ledger.recovery.unshift(
-            { batchId: root.manifest.batchId, pulls: pulls.slice(0, middle) },
-            { batchId: root.manifest.batchId, pulls: pulls.slice(middle) },
+            { batchId: cohortId, pulls: pulls.slice(0, middle) },
+            { batchId: cohortId, pulls: pulls.slice(middle) },
           );
         }
         return record(
-          pulls.length === 1 ? "isolate exact-head culprit" : "deterministic bisection",
+          pulls.length === 1
+            ? "park exact failed head without blame; same-way fingerprint unavailable"
+            : "split failed cohort without retry or member blame",
         );
       }
       const intent = ledger.retries[root.manifest.batchId];
@@ -267,16 +242,28 @@ export function plan(o: Observation, c: Config): Action {
       };
   }
   const unannounced = ledger.ejected.find((e) => !e.announced && !e.effectId);
-  if (unannounced) return { kind: "announce", ejection: unannounced };
-  // Recovery groups are tested sequentially against the actual landed base.
+  if (unannounced)
+    return unannounced.reason === "merge-tree conflict against candidate predecessor"
+      ? { kind: "announce", ejection: unannounced }
+      : {
+          kind: "wait",
+          reason: "legacy code-failure ejection held pending comparable base batch-suite evidence",
+        };
+  const pendingPark = ledger.parked?.find((item) => !item.announced && !item.effectId);
+  if (pendingPark) return { kind: "park", parked: pendingPark };
+  // Recovery tests subsets sequentially on the actual current base. No member
+  // is ejected: failed singletons are parked, including legacy recovery groups.
   if (!live.length && ledger.recovery.length) {
     const group = ledger.recovery[0]!;
     const pulls = group.pulls.filter(
-      (p) => matches(p) && !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
+      (p) =>
+        matches(p) &&
+        !parked(p) &&
+        !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
     );
     if (!pulls.length) {
       ledger.recovery.shift();
-      return record("discard obsolete recovery bindings");
+      return record("discard obsolete or parked recovery bindings");
     }
     return makeBuild(
       o.baseSha,
@@ -309,6 +296,7 @@ export function plan(o: Observation, c: Config): Action {
   const queued = o.ready.filter(
     (p) =>
       !assigned.has(p.number) &&
+      !parked(p) &&
       !alreadyLanded(p) &&
       !o.candidates.some(
         (candidate) =>
