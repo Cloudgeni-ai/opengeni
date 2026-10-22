@@ -80,15 +80,30 @@ function writeToken(url, token) {
   writeFileSync(tokenPath, safeStorage.encryptString(token), { mode: 0o600 });
 }
 
+// The server refuses unauthenticated writes from a client that doesn't name its
+// API contract revision; the refusal names the current one, so adopt it and retry.
+let apiContract = null;
 async function api(base, path, init = {}, token) {
-  return net.fetch(`${base}${path}`, {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...init.headers,
-    },
-  });
+  const send = () =>
+    net.fetch(`${base}${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(apiContract ? { "x-opengeni-api-contract": apiContract } : {}),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...init.headers,
+      },
+    });
+  const response = await send();
+  if (response.status !== 409) return response;
+  const body = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  if (body?.code !== "API_CONTRACT_CHANGED" || !body.apiContractRevision) return response;
+  if (body.apiContractRevision === apiContract) return response;
+  apiContract = body.apiContractRevision;
+  return send();
 }
 
 async function tokenStillValid(base, token) {
