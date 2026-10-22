@@ -117,7 +117,7 @@ const TOOL_ICON: Record<ToolIconKind, NativeIconName> = {
   archive: "archive",
   folder: "folder",
   site: "app-window",
-  guide: "book-open",
+  skill: "graduation-cap",
   settings: "settings",
   bell: "bell",
   inbox: "inbox",

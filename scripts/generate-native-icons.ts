@@ -119,7 +119,7 @@ const ICONS: Record<string, string> = {
   file: "FileIcon",
   archive: "ArchiveIcon",
   "app-window": "AppWindowIcon",
-  "book-open": "BookOpenIcon",
+  "graduation-cap": "GraduationCapIcon",
   hand: "HandIcon",
   activity: "ActivityIcon",
   "log-in": "LogInIcon",
