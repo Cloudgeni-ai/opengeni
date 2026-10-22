@@ -17,6 +17,7 @@ import {
   screen,
   session,
   shell,
+  type CookiesSetDetails,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -1297,10 +1298,10 @@ function migrateMacLoginItem(appId: string): void {
 }
 
 /** A Set-Cookie header as Electron cookie details. */
-export function cookieFromHeader(url: string, header: string): Electron.CookiesSetDetails {
+export function cookieFromHeader(url: string, header: string): CookiesSetDetails {
   const [pair = "", ...attributes] = header.split(";");
   const separator = pair.indexOf("=");
-  const details: Electron.CookiesSetDetails = {
+  const details: CookiesSetDetails = {
     url,
     name: pair.slice(0, separator).trim(),
     value: pair.slice(separator + 1).trim(),
