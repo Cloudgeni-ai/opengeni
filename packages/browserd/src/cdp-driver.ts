@@ -4068,7 +4068,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
+          // Such pages usually move focus a frame after the key (React
+          // effects), so the next key waits for that frame; sent at once,
+          // keys land in the old box and overwrite or drop characters.
+          let first = true;
           for (const character of action.text) {
+            if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+            first = false;
             await this.pressKey(state, characterKey(character));
           }
           return;
@@ -7113,6 +7119,15 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
   const done = () => resolve(true);
   setTimeout(done, 300);
   requestAnimationFrame(() => requestAnimationFrame(done));
+})`;
+
+/** Resolves once work a page scheduled in response to the last key (a task
+ * queued in the next animation frame, such as a React effect moving focus)
+ * has run, or after 50 ms in a tab that does not animate (background). */
+const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  setTimeout(done, 50);
+  requestAnimationFrame(() => setTimeout(done, 0));
 })`;
 
 // A child frame's scroll can also move its parent documents, which this frame
