@@ -4,7 +4,8 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { act, createElement } from "react";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { act, createElement, StrictMode } from "react";
 import { registerDom, renderComponent, renderHook, type RenderedComponent } from "./render-hook";
 
 registerDom();
@@ -13,6 +14,7 @@ const { HumanInputForm, HumanInputSurface, useHumanInputRequests } = await impor
 const {
   HUMAN_INPUT_DRAFT_MAX_AGE_MS,
   HUMAN_INPUT_DRAFT_MAX_ENTRIES,
+  forgetAllHumanInputDrafts,
   forgetHumanInputDraft,
   humanInputDraftKey,
   pruneHumanInputDrafts,
@@ -457,6 +459,204 @@ describe("human-input draft store", () => {
     expect(
       window.sessionStorage.getItem(humanInputDraftKey({ ...scope, requestId: "expired" })),
     ).toBeNull();
+    await hook.unmount();
+  });
+});
+
+function storedSavedAt(): number | null {
+  const raw = window.sessionStorage.getItem(humanInputDraftKey(scope));
+  return raw ? (JSON.parse(raw) as { savedAt: number }).savedAt : null;
+}
+
+async function submitForm(): Promise<void> {
+  await act(async () => {
+    container()
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function hookClient(listHumanInputRequests: () => Promise<SessionHumanInputRequest[]>) {
+  return {
+    listHumanInputRequests,
+    submitHumanInputResponse: async () => {
+      throw new Error("unused");
+    },
+    getSession: async () => {
+      throw new Error("unused");
+    },
+    streamEvents: async function* () {},
+  };
+}
+
+describe("human-input draft lifecycle edges", () => {
+  test("restores under StrictMode and mounting does not refresh the draft's age", async () => {
+    const savedAt = Date.now() - 60_000;
+    writeHumanInputDraft(
+      scope,
+      questions,
+      { summary: { values: ["Typed a minute ago"], other: "", otherSelected: false } },
+      savedAt,
+    );
+    mounted = await renderComponent(
+      createElement(
+        StrictMode,
+        null,
+        createElement(HumanInputForm, {
+          request: pendingRequest(),
+          onSubmit: () => undefined,
+          autoFocus: false,
+        }),
+      ),
+    );
+    expect(summaryField().value).toBe("Typed a minute ago");
+    expect(storedSavedAt()).toBe(savedAt);
+
+    // A pending-list read that started after that save, and no longer lists
+    // the request, forgets it even though the card mounted in between.
+    pruneHumanInputDrafts("workspace-1", "session-1", [], Date.now() - 1_000);
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+  });
+
+  test("edits after a failed send are still saved", async () => {
+    await renderForm(pendingRequest(), async () => {
+      throw new Error("offline");
+    });
+    await type(summaryField(), "First try");
+    await click(checkbox("Production"));
+    await submitForm();
+    await type(summaryField(), "Second try");
+    await remount();
+    expect(summaryField().value).toBe("Second try");
+  });
+
+  test("an answer accepted after the card unmounted still clears the draft", async () => {
+    let accept!: () => void;
+    await renderForm(
+      pendingRequest(),
+      () =>
+        new Promise<void>((resolve) => {
+          accept = resolve;
+        }),
+    );
+    await type(summaryField(), "Sent, then left");
+    await click(checkbox("Staging"));
+    await submitForm();
+    await mounted!.unmount();
+    mounted = null;
+    await act(async () => {
+      accept();
+      await Promise.resolve();
+    });
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+  });
+
+  test("a refreshed question list does not bring an accepted draft back", async () => {
+    const element = (request: SessionHumanInputRequest) =>
+      createElement(HumanInputForm, { request, onSubmit: () => undefined, autoFocus: false });
+    mounted = await renderComponent(element(pendingRequest()));
+    await type(summaryField(), "Accepted");
+    await click(checkbox("Staging"));
+    await submitForm();
+    await mounted.rerender(
+      element(pendingRequest({ questions: questions.map((q) => ({ ...q })) })),
+    );
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+  });
+
+  test("keeps drafts in memory when storage refuses writes or they are too large", async () => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = () => {
+      throw new Error("QuotaExceededError");
+    };
+    try {
+      await renderForm();
+      await type(summaryField(), "Quota is full");
+      await remount();
+      expect(summaryField().value).toBe("Quota is full");
+    } finally {
+      Storage.prototype.setItem = original;
+    }
+
+    const large = "x".repeat(70 * 1024);
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: [large], other: "", otherSelected: false },
+    });
+    expect(window.sessionStorage.getItem(humanInputDraftKey(scope))).toBeNull();
+    expect(readHumanInputDraft(scope, { questions })?.summary?.values[0]).toBe(large);
+  });
+
+  test("an unreadable deadline is treated as expired", () => {
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: ["text"], other: "", otherSelected: false },
+    });
+    expect(readHumanInputDraft(scope, { questions, expiresAt: "not a date" })).toBeNull();
+  });
+
+  test("sign-out or account switch forgets every unsent answer", () => {
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: ["a"], other: "", otherSelected: false },
+    });
+    const elsewhere = { workspaceId: "workspace-2", sessionId: "session-9", requestId: "r" };
+    writeHumanInputDraft(elsewhere, questions, {
+      summary: { values: ["b"], other: "", otherSelected: false },
+    });
+    forgetAllHumanInputDrafts();
+    resetHumanInputDraftMemoryForTests();
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+    expect(readHumanInputDraft(elsewhere, { questions })).toBeNull();
+  });
+
+  test("a denied pending-list read forgets that session's drafts", async () => {
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: ["no longer visible"], other: "", otherSelected: false },
+    });
+    const other = { ...scope, sessionId: "session-2" };
+    writeHumanInputDraft(other, questions, {
+      summary: { values: ["other session"], other: "", otherSelected: false },
+    });
+    const client = hookClient(async () => {
+      throw new OpenGeniApiError(403, "forbidden");
+    });
+    const hook = await renderHook(
+      () => useHumanInputRequests("session-1", { client, workspaceId: "workspace-1", events: [] }),
+      undefined,
+    );
+    await act(async () => {
+      await hook.result.current.refresh().catch(() => undefined);
+    });
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+    expect(readHumanInputDraft(other, { questions })).not.toBeNull();
+    await hook.unmount();
+  });
+
+  test("a draft typed while a pending-list read is in flight survives that read", async () => {
+    let release!: (requests: SessionHumanInputRequest[]) => void;
+    const reads: Array<Promise<SessionHumanInputRequest[]>> = [];
+    const client = hookClient(() => {
+      const read = new Promise<SessionHumanInputRequest[]>((resolve) => {
+        release = resolve;
+      });
+      reads.push(read);
+      return read;
+    });
+    const hook = await renderHook(
+      () => useHumanInputRequests("session-1", { client, workspaceId: "workspace-1", events: [] }),
+      undefined,
+    );
+    expect(reads.length).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: ["typed during the read"], other: "", otherSelected: false },
+    });
+    await act(async () => {
+      release([]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(readHumanInputDraft(scope, { questions })).not.toBeNull();
     await hook.unmount();
   });
 });

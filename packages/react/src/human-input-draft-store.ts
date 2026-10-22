@@ -142,7 +142,8 @@ function fitToQuestions(
 function expired(expiresAt: string | null | undefined, now: number): boolean {
   if (!expiresAt) return false;
   const deadline = Date.parse(expiresAt);
-  return Number.isFinite(deadline) && deadline <= now;
+  // An unreadable deadline is not actionable (isActionableHumanInputRequest).
+  return !Number.isFinite(deadline) || deadline <= now;
 }
 
 /**
@@ -209,6 +210,22 @@ export function writeHumanInputDraft(
 /** Forget a request's draft (submitted, skipped, expired or resolved elsewhere). */
 export function forgetHumanInputDraft(scope: HumanInputDraftScope): void {
   removeKey(humanInputDraftKey(scope));
+}
+
+/** Forget every draft in a session the person can no longer see. */
+export function forgetSessionHumanInputDrafts(workspaceId: string, sessionId: string): void {
+  pruneHumanInputDrafts(workspaceId, sessionId, [], Number.POSITIVE_INFINITY);
+}
+
+/**
+ * Forget every unsent answer in this tab. Hosts call it when the signed-in
+ * person changes (sign-out, account switch) so the next person never sees
+ * another person's unsent text.
+ */
+export function forgetAllHumanInputDrafts(): void {
+  const storage = browserStorage();
+  for (const key of [...memory.keys()]) removeKey(key, storage);
+  if (storage) for (const key of storageKeys(storage)) removeKey(key, storage);
 }
 
 /**

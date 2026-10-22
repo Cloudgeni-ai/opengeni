@@ -9,7 +9,7 @@ import {
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
 import { isActionableHumanInputRequest } from "../human-input";
-import { pruneHumanInputDrafts } from "../human-input-draft-store";
+import { forgetSessionHumanInputDrafts, pruneHumanInputDrafts } from "../human-input-draft-store";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   projectionReadThrough,
@@ -88,6 +88,11 @@ export function useHumanInputRequests(
   });
   const loadedRequests = state.data;
   const refreshRequests = state.refresh;
+  // A person who may no longer see this session keeps none of its unsent answers.
+  const readDenied = enabled && Boolean(sessionId) && deniesRetainedView(state.error);
+  useEffect(() => {
+    if (readDenied && sessionId) forgetSessionHumanInputDrafts(workspaceId, sessionId);
+  }, [readDenied, sessionId, workspaceId]);
   const mutation = useMutationRunner(`${workspaceId}\u0000${sessionId ?? ""}`);
   const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
   const [deadlineVersion, setDeadlineVersion] = useState(0);

@@ -61,6 +61,11 @@ export type HumanInputFormProps = {
    */
   request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt"> &
     Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status">>;
+  /**
+   * Resolve only once the response was accepted: the form then forgets the
+   * unsent draft and clears secret fields. Reject when sending failed so the
+   * card keeps what was typed for a retry.
+   */
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   submitting?: boolean | undefined;
   error?: string | null | undefined;
@@ -160,6 +165,10 @@ function HumanInputRequestForm({
   }));
   // Once a response is accepted, nothing typed afterwards becomes a draft again.
   const draftClosed = useRef(false);
+  // Mounting (or StrictMode's second mount) is not an edit: rewriting the
+  // restored draft would refresh its age and let it outlive a pending-list
+  // read that already settled it.
+  const mountedDrafts = useRef(drafts);
   const questionsRef = useRef(request.questions);
   questionsRef.current = request.questions;
   useEffect(() => {
@@ -169,7 +178,7 @@ function HumanInputRequestForm({
       forgetHumanInputDraft(draftScope);
       return;
     }
-    if (draftClosed.current) return;
+    if (draftClosed.current || drafts === mountedDrafts.current) return;
     writeHumanInputDraft(draftScope, questionsRef.current, drafts);
   }, [draftScope, drafts, requestSettled]);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
