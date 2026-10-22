@@ -163,6 +163,19 @@ export class ComposerWorkspaceControlUnavailableError extends Error {
 export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
   "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
 
+/** A rejected account is never silently replaced or retried with new authority. */
+export const COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE =
+  "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.";
+
+export function isConnectionAccountSubmissionError(error: unknown): boolean {
+  return (
+    (error instanceof OpenGeniApiError &&
+      !error.outcomeUnknown &&
+      error.details?.code === "connection_account_selection_unavailable") ||
+    (error instanceof Error && error.message === COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE)
+  );
+}
+
 /** `details.code` the API sets on a 422 for a model missing from the live catalog. */
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
@@ -243,6 +256,7 @@ export function composerSubmissionErrorMessage(t: OpenGeniText, error: Error): s
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
   if (isModelUnavailableSubmissionError(error)) return t("lib.format.modelUnavailable");
+  if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
   const siteRefusal = siteRefusalCode(error);
   if (siteRefusal) return COMPOSER_SITE_REFUSAL_MESSAGES(t)[siteRefusal]!;
@@ -271,6 +285,7 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    isConnectionAccountSubmissionError(error) ||
     isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") ||
     // Only a busy Site assistant is worth an unchanged retry.

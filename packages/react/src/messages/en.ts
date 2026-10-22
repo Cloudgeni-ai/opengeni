@@ -1300,6 +1300,8 @@ export const englishMessages = {
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
+  "lib.format.accountUnavailable":
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
