@@ -2570,6 +2570,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           // automation tell. Console messages and exceptions are read on
           // demand instead (harvestRuntimeDiagnostics).
           connection.send("Page.enable", {}, { sessionId }),
+          // Lightpanda 0.3.5 does not replay earlier console messages when
+          // Runtime is enabled, so an on-demand read would find nothing. It
+          // keeps Runtime enabled and reports them as they happen.
+          ...(this.engine === "lightpanda"
+            ? [connection.send("Runtime.enable", {}, { sessionId })]
+            : []),
           connection.send("DOM.enable", {}, { sessionId }),
           connection.send("Accessibility.enable", {}, { sessionId }),
           connection.send("Network.enable", {}, { sessionId }),
@@ -2698,6 +2704,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         },
         sessionId,
       ),
+      ...(this.engine === "lightpanda"
+        ? [
+            connection.on(
+              "Runtime.consoleAPICalled",
+              (event) => this.appendRuntimeDiagnostic(state, "console", event.params),
+              sessionId,
+            ),
+            connection.on(
+              "Runtime.exceptionThrown",
+              (event) => this.appendRuntimeDiagnostic(state, "page_error", event.params),
+              sessionId,
+            ),
+          ]
+        : []),
       connection.on(
         "Network.requestWillBeSent",
         (event) => {
@@ -6387,6 +6407,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * disable, reads them only when the caller asks for diagnostics.
    */
   private async harvestRuntimeDiagnostics(state: TargetState): Promise<void> {
+    // Lightpanda reports these live (see attachTarget); enabling and disabling
+    // Runtime here would only stop that stream.
+    if (this.engine === "lightpanda") return;
     const connection = await this.ensureConnection();
     const sessionId = state.sessionId;
     const replayed: Array<
@@ -6432,46 +6455,59 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const message of replayed) {
       current.add(message.key);
       if (state.runtimeDiagnosticKeys.has(message.key)) continue;
-      const occurredAt = runtimeTimestamp(message.params.timestamp);
-      if (message.kind === "console") {
-        const level = consoleLevel(message.params.type);
-        if (level === "error") state.diagnostics.consoleErrorCount += 1;
-        this.appendDiagnostic(
-          state,
-          {
-            kind: "console",
-            level,
-            message: consoleMessage(message.params.args, (text) => this.typedSecrets.redact(text)),
-            url: null,
-            method: null,
-            status: null,
-            filename: null,
-          },
-          occurredAt,
-        );
-      } else {
-        state.diagnostics.pageErrorCount += 1;
-        const details = isRecord(message.params.exceptionDetails)
-          ? message.params.exceptionDetails
-          : {};
-        this.appendDiagnostic(
-          state,
-          {
-            kind: "page_error",
-            level: "error",
-            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
-            url: boundedUrlField(details.url),
-            method: null,
-            status: null,
-            filename: null,
-          },
-          occurredAt,
-        );
-      }
+      this.appendRuntimeDiagnostic(
+        state,
+        message.kind,
+        message.params,
+        runtimeTimestamp(message.params.timestamp),
+      );
     }
     // Chrome drops a document's messages with the document, so anything it no
     // longer replays cannot come back; keep only the keys it still holds.
     state.runtimeDiagnosticKeys = current;
+  }
+
+  /** Record one Runtime console message or uncaught exception for the tab.
+   * A replayed message carries when it was logged; a live one happened now. */
+  private appendRuntimeDiagnostic(
+    state: TargetState,
+    kind: "console" | "page_error",
+    params: Record<string, unknown>,
+    occurredAt?: string,
+  ): void {
+    if (kind === "console") {
+      const level = consoleLevel(params.type);
+      if (level === "error") state.diagnostics.consoleErrorCount += 1;
+      this.appendDiagnostic(
+        state,
+        {
+          kind: "console",
+          level,
+          message: consoleMessage(params.args, (text) => this.typedSecrets.redact(text)),
+          url: null,
+          method: null,
+          status: null,
+          filename: null,
+        },
+        occurredAt,
+      );
+    } else {
+      state.diagnostics.pageErrorCount += 1;
+      const details = isRecord(params.exceptionDetails) ? params.exceptionDetails : {};
+      this.appendDiagnostic(
+        state,
+        {
+          kind: "page_error",
+          level: "error",
+          message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
+          url: boundedUrlField(details.url),
+          method: null,
+          status: null,
+          filename: null,
+        },
+        occurredAt,
+      );
+    }
   }
 
   private appendDiagnostic(
