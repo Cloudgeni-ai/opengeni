@@ -281,6 +281,8 @@ function fixtures() {
     failStream: false,
     holdStreams: false,
     streamHold: gate(),
+    // A connection kept open until the test releases it, then ended normally.
+    parkStream: undefined as ReturnType<typeof gate> | undefined,
     streamRequests: [] as { after: number; replayed: number }[],
     failQueue: false,
     deferQueue: false,
@@ -526,6 +528,8 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
         await state.streamHold.wait();
         return route.abort("connectionclosed").catch(() => {});
       }
+      const park = state.parkStream;
+      if (park) await park.wait();
       return route.fulfill({
         contentType: "text/event-stream",
         body: replay
@@ -1627,11 +1631,20 @@ for (const cause of ["reconnect", "sleep"] as const) {
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
       await transcript.getByText("History question 40", { exact: true }).waitFor();
       await waitForStreamAfter(40);
+      // "reconnect": hold the chat on its next open connection, so the
+      // messages arrive between connections rather than between a
+      // reconnect's head check and its stream request (which would hand that
+      // request the whole backlog as if it had been live for it).
+      const park = cause === "reconnect" ? (state.parkStream = gate()) : undefined;
+      if (park) await park.entered;
       const before = state.streamRequests.length;
       // 3,000 messages arrive while the chat is away: far more than the
       // conversation catch-up appends, so the newest window loads instead.
       state.events.push(...Array.from({ length: 3_000 }, (_, index) => message(41 + index)));
       state.session.lastSequence = 3_040;
+      // The held connection ends normally; the SDK reconnects by itself.
+      state.parkStream = undefined;
+      park?.release();
       if (cause === "sleep") await page.clock.fastForward(5 * 60_000);
       await transcript.getByText("History question 3040", { exact: true }).waitFor();
       await waitForStreamAfter(3_040);
@@ -1647,6 +1660,7 @@ for (const cause of ["reconnect", "sleep"] as const) {
       );
       await page.screenshot({ path: `${output}/stream-rejoin-${cause}.png` });
     } finally {
+      state.parkStream?.release();
       state.streamHold.release();
       for (const deferred of Object.values(state.gates)) deferred.release();
       await context.close();
