@@ -63,6 +63,13 @@ Private console Sites may also reach an existing chat only through its owner's
 explicit, viewer-bound Site/chat grant. This uses native session routes and
 live revocation, not a changed origin or audience; see [Site conversations](site-conversations.md).
 Artifact writes use the same native authorization as any other agent session.
+
+New configured sessions persist Knowledge search eagerness through ordinary
+`ToolRef.eager` selection at creation; scheduled occurrences freeze that selection
+with accepted execution. Existing sessions and accepted executions are not
+rewritten. Knowledge search discovery cards are an execution-time model-result
+projection, never a history rewrite; programmatic results remain complete.
+See [Knowledge discovery](knowledge.md#model-visible-discovery-results).
 After a worker claims a turn, its session RLS actor carries the canonical
 authority projection's root into preparation and execution. This lets a guest's
 worker read its own frozen attempt policies without a human identity or a
