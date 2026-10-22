@@ -158,6 +158,7 @@ export class ObservationJournal {
             ciStartedAt: local.ciStartedAt ?? sample.ciStartedAt,
             ciCompletedAt: local.ciCompletedAt ?? sample.ciCompletedAt,
             landedAt: local.landedAt ?? sample.landedAt,
+            ...(sample.retry ? { retry: sample.retry } : {}),
           }
         : structuredClone(sample);
     }

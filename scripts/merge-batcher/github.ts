@@ -10,12 +10,15 @@ import {
   type Headroom,
   type FollowupRequest,
   type FollowupPull,
+  type BaseCiEvidence,
 } from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
 import {
+  capacityDecision,
+  type CapacityHold,
   digest,
   MAX_RUNNER_RELEVANT_RUNS,
   MAX_SCANNED_ACTIVE_RUNS,
@@ -33,6 +36,14 @@ const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
   "incomplete-jobs": "Incomplete or oversized current job observation",
   "unknown-job-status": "Unrecognized job status in current job observation",
   deadline: "Active workflow observation exceeded its scan deadline",
+};
+const CAPACITY_HOLD_REASONS: Record<CapacityHold, string> = {
+  "main-pre-fanout": "A full-main CI run has not instantiated its fan-out yet",
+  "main-queued": "A full-main CI run has jobs waiting for hosted runners",
+  "repository-budget": "Insufficient observed runner headroom after full-main reserve",
+  "provider-limit":
+    "Observed repository jobs plus other-repository allowance and 18 candidate slots exceed the hosted job limit",
+  "invalid-capacity": "Invalid hosted job limit or other-repository allowance",
 };
 export function isControlPlanePath(path: unknown): boolean {
   return (
@@ -279,11 +290,23 @@ export class GitHubReader {
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
     result.occupied = mainDemand + otherDemand;
-    result.reservedMain = Math.max(this.config.mainReserve, mainDemand);
-    result.allowed = otherDemand + result.reservedMain + 18 <= this.config.runnerBudget;
-    result.reason = result.allowed
-      ? "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget"
-      : "Insufficient observed runner headroom after full-main reserve";
+    const decision = capacityDecision({
+      mainDemand,
+      otherDemand,
+      latestMain: scan.latestMain,
+      mainQueuedJobs: scan.mainQueuedJobs,
+      preFanoutMainRuns: scan.preFanoutMainRuns,
+      runnerBudget: this.config.runnerBudget,
+      mainReserve: this.config.mainReserve,
+      providerJobLimit: this.config.providerJobLimit,
+      otherRepositoryAllowance: this.config.otherRepositoryAllowance,
+    });
+    result.reservedMain = decision.reservedMain;
+    result.capacity = decision.capacity;
+    result.allowed = decision.allowed;
+    result.reason = decision.capacity.hold
+      ? CAPACITY_HOLD_REASONS[decision.capacity.hold]
+      : "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget and hosted job limit";
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
@@ -448,10 +471,17 @@ export class GitHubReader {
       if (!Number.isSafeInteger(count) || count < 1 || count > 1000)
         throw new Error("Invalid workflow attempt count");
       for (let attempt = 1; attempt <= count; attempt++) {
+        // Preserve immutable green-cache compatibility; old negative cache
+        // entries did not carry the positive infrastructure-only retry evidence.
         const key = `verified:${manifest.tipSha}:${manifest.batchId}:${run.id}:${attempt}`;
-        const cached = await this.cache.get<{ run: Run; conclusion: unknown }>(key);
+        const cached = await this.cache.get<{
+          run: Run;
+          conclusion: unknown;
+          retryPolicyVersion?: number;
+        }>(key);
         if (
           cached &&
+          (cached.run.outcome === "success" || cached.retryPolicyVersion === 2) &&
           (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
         ) {
           result.push(cached.run);
@@ -478,6 +508,7 @@ export class GitHubReader {
         let outcome: Outcome = details.conclusion === "cancelled" ? "cancelled" : "infrastructure";
         let trusted = false;
         let retryable = false;
+        let infrastructureRetryReason: Run["infrastructureRetryReason"];
         if (status === "completed" && details.conclusion !== "cancelled") {
           const attested = await this.resultArtifact(manifest, Number(run.id), attempt);
           if (
@@ -489,6 +520,37 @@ export class GitHubReader {
             outcome = attested.outcome;
             retryable = attested.retryable;
             trusted = true;
+            if (outcome === "infrastructure" && attested.infrastructureOnly === true)
+              infrastructureRetryReason = "verified-infrastructure";
+          }
+        }
+        if (
+          status === "completed" &&
+          !trusted &&
+          ["cancelled", "infrastructure"].includes(outcome)
+        ) {
+          // An invalid/ambiguous result artifact is never equivalent to no logs.
+          const artifacts = await this.pages(`actions/runs/${run.id}/artifacts`, "artifacts");
+          if (!artifacts.some((a) => a.name === `batch-result-${attempt}`)) {
+            const jobs = await this.pages(
+              `actions/runs/${run.id}/attempts/${attempt}/jobs`,
+              "jobs",
+            );
+            if (
+              jobs.every(
+                (j) =>
+                  j.status === "completed" &&
+                  ["success", "cancelled", "skipped", "neutral"].includes(j.conclusion),
+              )
+            ) {
+              if (outcome === "cancelled") infrastructureRetryReason = "provider-cancelled";
+              else if (
+                jobs.every(
+                  (j) => j.started_at === null && Array.isArray(j.steps) && j.steps.length === 0,
+                )
+              )
+                infrastructureRetryReason = "no-job-logs";
+            }
           }
         }
         const verifiedRun: Run = {
@@ -501,12 +563,17 @@ export class GitHubReader {
           outcome,
           trusted,
           retryable,
+          ...(infrastructureRetryReason ? { infrastructureRetryReason } : {}),
           startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
         };
         result.push(verifiedRun);
         if (status === "completed" && (trusted || outcome === "cancelled"))
-          await this.cache.set(key, { run: verifiedRun, conclusion: details.conclusion });
+          await this.cache.set(key, {
+            run: verifiedRun,
+            conclusion: details.conclusion,
+            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 2 }),
+          });
       }
     }
     return result;
@@ -527,6 +594,147 @@ export class GitHubReader {
     const runs = await this.runs(manifest, branch);
     await this.cache.set(key, runs);
     return runs;
+  }
+  async baseCI(sha: string): Promise<BaseCiEvidence> {
+    try {
+      return await this.readBaseCI(sha);
+    } catch {
+      return {
+        sha,
+        status: "unknown",
+        runId: null,
+        attempt: null,
+        reason: "Exact-base CI observation unavailable",
+      };
+    }
+  }
+  private async readBaseCI(sha: string): Promise<BaseCiEvidence> {
+    const evidence: BaseCiEvidence = {
+      sha,
+      status: "unknown",
+      runId: null,
+      attempt: null,
+      reason: "Missing exact-base main CI",
+    };
+    const rows = await this.pages(
+      `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&head_sha=${sha}&event=push`,
+      "workflow_runs",
+    );
+    const exact = (r: Json) =>
+      r.head_sha === sha &&
+      r.head_branch === this.config.baseBranch &&
+      r.path === ".github/workflows/ci.yml" &&
+      r.event === "push";
+    const run = rows.filter(exact).sort((a, b) => Number(b.id) - Number(a.id))[0];
+    if (!run) return evidence;
+    const id = Number(run.id),
+      attempt = Number(run.run_attempt);
+    if (!Number.isSafeInteger(id) || id < 1 || !Number.isSafeInteger(attempt) || attempt < 1)
+      return evidence;
+    evidence.runId = id;
+    evidence.attempt = attempt;
+    const details = (await this.get(`actions/runs/${id}/attempts/${attempt}`)) as Json;
+    if (
+      !exact(details) ||
+      Number(details.id) !== id ||
+      Number(details.run_attempt) !== attempt ||
+      details.status !== "completed"
+    )
+      return { ...evidence, reason: "Exact-base CI attempt is running or identity unavailable" };
+    if (!["success", "failure"].includes(details.conclusion))
+      return {
+        ...evidence,
+        reason: "Exact-base CI cancelled/skipped/unknown is not policy evidence",
+      };
+    if (details.conclusion === "failure") {
+      evidence.status = "red";
+      evidence.reason = "Exact-base main CI failed; no member attribution";
+    } else {
+      const artifacts = await this.pages(`actions/runs/${id}/artifacts`, "artifacts");
+      const matches = artifacts.filter(
+        (a) =>
+          a.name === `full-green-main-${sha}` &&
+          !a.expired &&
+          a.size_in_bytes <= 1_000_000 &&
+          a.workflow_run?.id === id &&
+          a.workflow_run?.head_sha === sha &&
+          Number.isFinite(Date.parse(a.created_at)) &&
+          Number.isFinite(Date.parse(details.run_started_at)) &&
+          Date.parse(a.created_at) >= Date.parse(details.run_started_at),
+      );
+      if (matches.length !== 1)
+        return { ...evidence, reason: "Unique exact-base full-green artifact unavailable" };
+      const artifact = matches[0]!;
+      if (
+        !Number.isFinite(Date.parse(artifact.created_at)) ||
+        !Number.isFinite(Date.parse(details.run_started_at)) ||
+        Date.parse(artifact.created_at) < Date.parse(details.run_started_at)
+      )
+        return {
+          ...evidence,
+          reason: "Full-green artifact predates current attempt or lacks timing",
+        };
+      const response = await this.transport(
+        `https://api.github.com/repos/${this.config.repository}/actions/artifacts/${artifact.id}/zip`,
+        {
+          headers: { Authorization: `Bearer ${await this.auth.token()}` },
+          redirect: "manual",
+          signal: AbortSignal.timeout(30_000),
+        },
+      );
+      this.checkRateLimit(response);
+      let download = response;
+      if (response.status === 302) {
+        const target = new URL(response.headers.get("location") ?? "");
+        if (target.protocol !== "https:") return evidence;
+        download = await this.transport(target, { signal: AbortSignal.timeout(30_000) });
+      }
+      if (!download.ok) {
+        this.checkRateLimit(download);
+        return { ...evidence, reason: "Full-green artifact download unavailable" };
+      }
+      try {
+        const receipt = JSON.parse(
+          readResultZip(new Uint8Array(await download.arrayBuffer()), ["full-green-main.json"]),
+        );
+        if (
+          receipt.schemaVersion !== 1 ||
+          receipt.mode !== "full" ||
+          receipt.sha !== sha ||
+          receipt.runId !== String(id) ||
+          receipt.runAttempt !== String(attempt) ||
+          receipt.url !==
+            `https://github.com/${this.config.repository}/actions/runs/${id}/attempts/${attempt}`
+        )
+          return {
+            ...evidence,
+            reason: "Full-green receipt does not bind exact full main attempt",
+          };
+        evidence.status = "green";
+        evidence.reason = "Exact-tip full main CI receipt verified";
+      } catch {
+        return { ...evidence, reason: "Malformed full-green receipt" };
+      }
+    }
+    // Do not preserve green across a rerun/new attempt or a newer run observed
+    // during this read. No negative or positive baseline verdict is cached.
+    const latest = (
+      await this.pages(
+        `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&head_sha=${sha}&event=push`,
+        "workflow_runs",
+      )
+    )
+      .filter(exact)
+      .sort((a, b) => Number(b.id) - Number(a.id))[0];
+    if (
+      !latest ||
+      Number(latest.id) !== id ||
+      Number(latest.run_attempt) !== attempt ||
+      latest.status !== "completed" ||
+      latest.conclusion !== details.conclusion
+    )
+      return { ...evidence, status: "unknown", reason: "Main CI changed during evidence read" };
+    return evidence;
   }
   async mainOutcomes(headSha: string): Promise<MainOutcome[]> {
     const key = `baseline:${headSha}`;
@@ -607,7 +815,10 @@ export class GitHubReader {
 
 // Small bounded ZIP reader: no extraction paths, subprocesses, third-party APIs,
 // or artifact-controlled filenames written to disk. Uses central-directory sizes.
-export function readResultZip(bytes: Uint8Array): string {
+export function readResultZip(
+  bytes: Uint8Array,
+  allowedNames = ["batch-result.json", "result.json"],
+): string {
   if (bytes.byteLength > 1_000_000) throw new Error("Artifact too large");
   const b = Buffer.from(bytes);
   let end = -1;
@@ -633,7 +844,7 @@ export function readResultZip(bytes: Uint8Array): string {
     const name = b.subarray(position + 46, position + 46 + nameLength).toString();
     const offset = b.readUInt32LE(position + 42);
     position += 46 + nameLength + extra + comment;
-    if (!["batch-result.json", "result.json"].includes(name)) continue;
+    if (!allowedNames.includes(name)) continue;
     if (
       flags & 1 ||
       size > 65_536 ||
@@ -705,6 +916,26 @@ export class GitHubMutations {
     if (!response.ok) throw new ProviderError(response.status, "mutation");
   }
   async retry(run: Run): Promise<void> {
+    if (
+      run.status !== "completed" ||
+      run.attempt !== 1 ||
+      run.workflow !== ".github/workflows/batch-ci.yml" ||
+      run.workflow !== this.reader.config.workflow ||
+      !run.branch.startsWith(this.reader.config.branchPrefix) ||
+      !/^[a-f0-9]{64}$/.test(run.branch.slice(this.reader.config.branchPrefix.length)) ||
+      !Number.isSafeInteger(run.id) ||
+      run.id < 1 ||
+      !(
+        (run.infrastructureRetryReason === "verified-infrastructure" &&
+          run.trusted &&
+          run.outcome === "infrastructure") ||
+        (run.infrastructureRetryReason === "provider-cancelled" && run.outcome === "cancelled") ||
+        (run.infrastructureRetryReason === "no-job-logs" && run.outcome === "infrastructure")
+      )
+    )
+      throw new Error(
+        "Only a first-attempt terminal candidate infrastructure failure may be retried",
+      );
     await this.post(`actions/runs/${run.id}/rerun`, {});
   }
   async announce(number: number, body: string): Promise<void> {

@@ -807,7 +807,17 @@ describe("traffic recovery and bounded reads", () => {
     const reader = {
       fresh: async (path: string) =>
         path.includes("/jobs?")
-          ? { total_count: 2, jobs: [{ status: "in_progress" }, { status: "queued" }] }
+          ? {
+              // Two running jobs after the fan-out (3 pre-plan jobs completed).
+              total_count: 5,
+              jobs: [
+                { status: "in_progress" },
+                { status: "in_progress" },
+                { status: "completed" },
+                { status: "completed" },
+                { status: "completed" },
+              ],
+            }
           : {
               total_count: 1,
               workflow_runs: [
@@ -897,7 +907,8 @@ describe("traffic recovery and bounded reads", () => {
       const reader = scan(
         [
           { id: 1, status: "in_progress", ...MAIN },
-          { id: 2, status: "waiting", ...MAIN },
+          // Job-less placeholder: no demand (a job-less main run holds as pre-fan-out).
+          { id: 2, status: "waiting", ...OTHER },
           { id: 3, status: "queued", ...MAIN, head_branch: "production" },
           { id: 4, status: "queued", ...MAIN, event: "pull_request" },
           { id: 5, status: "pending", ...OTHER },
@@ -911,14 +922,16 @@ describe("traffic recovery and bounded reads", () => {
         },
       );
       // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
-      expect(await readHeadroom(reader, 66, 40)).toMatchObject({
+      // The hosted job limit and allowance are isolated here; see capacity.test.ts.
+      const isolated = { providerJobLimit: 100000, otherRepositoryAllowance: 0 };
+      expect(await readHeadroom(reader, 66, 40, undefined, isolated)).toMatchObject({
         allowed: true,
         occupied: 48,
         reservedMain: 45,
       });
-      expect((await readHeadroom(reader, 65, 40)).allowed).toBe(false);
+      expect((await readHeadroom(reader, 65, 40, undefined, isolated)).allowed).toBe(false);
       const quiet = scan([{ id: 1, status: "queued", ...MAIN }], {
-        1: page(jobs("waiting", "waiting")),
+        1: page(jobs("waiting", "waiting", "completed", "completed")),
       });
       expect(await readHeadroom(quiet, 58, 40)).toMatchObject({
         allowed: true,

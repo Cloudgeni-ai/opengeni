@@ -20,7 +20,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, type Action } from "./planner";
+import { plan, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 
@@ -173,6 +173,7 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
+      ...(this.config.mode === "active" ? { baseCI: await this.github.baseCI(baseSha) } : {}),
       ...admission,
       ready: eligible,
       candidates,
@@ -218,7 +219,10 @@ export class Controller {
     const records = await this.journal.records(observation.now);
     const stamp = (stages: Ledger["stages"]) =>
       Object.fromEntries(
-        Object.entries(stages).map(([id, { observedAt: _, ...sample }]) => [id, sample]),
+        Object.entries(stages).map(([id, { observedAt, ...sample }]) => {
+          void observedAt;
+          return [id, sample];
+        }),
       );
     const checkpoint =
       this.config.mode === "active" &&
@@ -305,20 +309,17 @@ export class Controller {
       effect = { kind: "land", manifest, expectedBase: observation.baseSha };
       ledger.landed.push(manifest.batchId);
     } else if (action.kind === "retry") {
-      if (action.run.trusted && action.run.outcome === "code_failure") {
-        const id = action.candidate.manifest.batchId;
-        ledger.codeFailures[id] = [
-          ...new Set([
-            ...(ledger.codeFailures[id] ?? []),
-            `${action.run.id}/${action.run.attempt}`,
-          ]),
-        ];
-      }
-      ledger.retries[action.candidate.manifest.batchId] = {
+      const reason = infrastructureRetryReason(action.candidate, action.run, this.config);
+      if (!reason) throw new Error("Ineligible infrastructure retry");
+      const id = action.candidate.manifest.batchId;
+      const retry = {
         runId: action.run.id,
         fromAttempt: action.run.attempt,
         requestedAt: observation.now,
+        reason,
       };
+      ledger.retries[id] = retry;
+      if (ledger.stages[id]) ledger.stages[id]!.retry = retry;
       effect = { kind: "retry", run: action.run };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
@@ -345,6 +346,10 @@ export class Controller {
           Date.parse(observation.now) + this.config.leaseSeconds * 1000,
         ).toISOString();
         Object.assign(ledger, await this.journal.records(observation.now));
+        if (action.kind === "retry") {
+          const id = action.candidate.manifest.batchId;
+          if (ledger.stages[id]) ledger.stages[id]!.retry = ledger.retries[id]!;
+        }
         if (effect.kind === "publish" || effect.kind === "land") {
           const sample = ledger.stages[effect.manifest.batchId];
           if (sample)
@@ -381,6 +386,7 @@ export class Controller {
       schemaVersion: 1,
       observedAt: observation.now,
       baseSha: observation.baseSha,
+      baseCI: observation.baseCI ?? null,
       ready: observation.ready,
       excluded: observation.excluded,
       candidates: observation.candidates,

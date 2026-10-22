@@ -102,6 +102,16 @@ async function fixture() {
   });
   let clock = Date.parse(NOW);
   class MockGitHub extends GitHubReader {
+    baseStatus: "green" | "red" | "unknown" = "green";
+    override async baseCI(sha: string) {
+      return {
+        sha,
+        status: this.baseStatus,
+        runId: 50,
+        attempt: 1,
+        reason: "fixture exact-base CI",
+      };
+    }
     pulls = [makePull()];
     snapshot: PullSnapshot = {
       number: 1,
@@ -259,6 +269,9 @@ async function fixture() {
       outcome,
       trusted: true,
       retryable: outcome === "code_failure",
+      ...(outcome === "infrastructure"
+        ? { infrastructureRetryReason: "verified-infrastructure" as const }
+        : {}),
       completedAt: NOW,
     };
     api.workflowRuns.push(run);
@@ -455,7 +468,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect((await f.state()).sha).toBeNull();
     f.api.busy = false;
     const m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "infrastructure");
+    f.advance(61);
     f.api.busy = true;
     expect((await f.controller().step()).action.kind).toBe("wait");
     expect(f.api.calls).toHaveLength(0);
@@ -467,8 +481,12 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("whole-run retry lost response is observed by attempt after restart, never duplicated", async () => {
     const f = await fixture(),
       m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "infrastructure");
+    f.advance(61);
     expect((await f.controller().step()).action.kind).toBe("retry");
+    const persistedRetry = (await f.state()).ledger.retries[m.batchId]!;
+    expect(persistedRetry.reason).toBe("verified-infrastructure");
+    expect((await f.state()).ledger.stages[m.batchId]?.retry).toEqual(persistedRetry);
     f.api.response = "lost";
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(1);
@@ -477,6 +495,142 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await f.executor().maintain();
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
+  });
+  test.each(["main-advance", "invalidated", "after-claim"] as const)(
+    "R8 obsolete retry %s never submits",
+    async (change) => {
+      const f = await fixture(),
+        m = await f.publish();
+      f.verdict(m, "infrastructure");
+      f.advance(61);
+      expect((await f.controller().step()).action.kind).toBe("retry");
+      if (change === "invalidated")
+        await f.seed((l) => {
+          l.invalidated.push(m.batchId);
+        });
+      else if (change === "main-advance")
+        await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      else
+        f.git.beforePush = async () => {
+          await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+        };
+      await f.executor().maintain();
+      expect(f.api.calls).toEqual([]);
+      expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+      f.advance(61);
+      if (change === "invalidated") await f.executor().maintain();
+      else {
+        await f.controller().step();
+        expect((await f.state()).ledger.invalidated).toContain(m.batchId);
+      }
+      expect(f.api.calls).toEqual([]);
+    },
+  );
+  test("unknown retry outcome remains reconciliation-only after main advances", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    await f.controller().step();
+    f.api.response = "unknown";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+    f.advance(180);
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("uncertain");
+  });
+  test.each(["live", "invalidated-parent", "obsolete-parent"] as const)(
+    "predecessor retry chain %s is checked exactly",
+    async (parentState) => {
+      const f = await fixture(),
+        root = await f.publish();
+      f.verdict(root);
+      const p = f.makePull(f.newer);
+      f.api.pulls = [p];
+      const child = await f.git.build({
+        schemaVersion: 1,
+        baseSha: root.tipSha,
+        predecessor: root.batchId,
+        recoveryOf: null,
+        createdAt: NOW,
+        pulls: [p],
+      });
+      const prior = await f.state();
+      const next = await f.git.stateCommit(prior.ledger, prior.sha, NOW);
+      await f.writer.transaction([
+        { ref: f.cfg.stateRef, expected: prior.sha, next },
+        {
+          ref: `refs/heads/${f.cfg.branchPrefix}${child.batchId}`,
+          expected: null,
+          next: child.tipSha,
+        },
+      ]);
+      const r = f.verdict(child, "infrastructure");
+      r.id = 101;
+      await f.seed((l) => {
+        l.retries[child.batchId] = {
+          runId: r.id,
+          fromAttempt: 1,
+          requestedAt: NOW,
+          reason: "verified-infrastructure",
+        };
+        Object.assign(l, f.executor().prepareLedger(l, { kind: "retry", run: r }, NOW));
+        if (parentState === "invalidated-parent") l.invalidated.push(root.batchId);
+      });
+      if (parentState === "obsolete-parent")
+        await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      f.advance(61);
+      await f.executor().maintain();
+      expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(
+        parentState === "live" ? 1 : 0,
+      );
+    },
+  );
+  test("a stale code-failure retry intent cannot submit, even if a prior controller persisted it", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    const observed = f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    observed.outcome = "code_failure";
+    observed.retryable = true;
+    delete observed.infrastructureRetryReason;
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(0);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+  });
+  test("once retried infrastructure holds after second terminal failure without ejecting", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    await f.executor().maintain();
+    const second = f.api.workflowRuns.at(-1)!;
+    second.status = "completed";
+    second.completedAt = NOW;
+    f.advance(61);
+    await f.executor().maintain();
+    expect((await f.controller().step()).action.kind).toBe("wait");
+    expect(f.api.calls).toHaveLength(1);
+    expect((await f.state()).ledger.ejected).toEqual([]);
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+  });
+  test("a rejected infrastructure rerun POST is not automatically submitted again", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "infrastructure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    f.api.response = "forbidden";
+    await f.executor().maintain();
+    f.advance(3601);
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("blocked");
+    expect((await f.state()).ledger.ejected).toEqual([]);
   });
   test.each(["lost", "forbidden", "unknown"] as const)(
     "comment %s outcome is durable and never blindly repeated",
@@ -644,6 +798,59 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
+  test.each(["red", "unknown"] as const)(
+    "inherited #5243-style %s base holds innocent batch and recovers on green main",
+    async (status) => {
+      const f = await fixture();
+      const m = await f.publish();
+      f.verdict(m, "code_failure");
+      f.api.baseStatus = status;
+      expect((await f.controller().step()).action.kind).toBe("record");
+      const held = (await f.state()).ledger;
+      expect(held.baseHold?.status).toBe(status);
+      expect(held.ejected).toEqual([]);
+      expect(held.recovery).toEqual([]);
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect(f.api.calls).toEqual([]);
+      await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+      f.api.baseStatus = "green";
+      expect((await f.controller().step()).action.kind).toBe("record"); // invalidate old base
+      expect((await f.controller().step()).action.kind).toBe("record"); // clear durable hold
+      const replacement = await f.publish();
+      expect(replacement.baseSha).toBe(f.divergent);
+      expect((await f.state()).ledger.baseHold).toBeUndefined();
+      expect((await f.state()).ledger.ejected).toEqual([]);
+    },
+  );
+  test("exact green base permits singleton code-failure exclusion without retry", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "code_failure");
+    expect((await f.controller().step()).action.kind).toBe("record");
+    expect((await f.state()).ledger.ejected).toHaveLength(1);
+    expect((await f.state()).ledger.retries).toEqual({});
+  });
+  test("base CI becoming unknown before landing or pending ejection comment prevents the effect", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m);
+    f.api.onReady = () => {
+      f.api.baseStatus = "unknown";
+    };
+    await f.controller().step();
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    expect((await f.state()).ledger.landed).toEqual([]);
+    f.api.onReady = null;
+    f.api.baseStatus = "green";
+    await f.controller().step(); // clear hold
+    f.api.workflowRuns = [];
+    f.verdict(m, "code_failure");
+    await f.controller().step(); // isolate on green base
+    await f.controller().step(); // persist announcement intent
+    f.api.baseStatus = "unknown";
+    await f.executor().maintain();
+    expect(f.api.calls).toEqual([]);
+  });
   test("main race outside tested ancestry rejects entire atomic landing", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -654,6 +861,21 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.controller().step()).rejects.toThrow();
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.divergent);
     expect((await f.state()).ledger.landed).toEqual([]);
+    // Restart after an emergency/admin main advance: the old green tip cannot
+    // be reused, and the exact replacement must earn its own provider verdict.
+    expect((await f.controller().step()).action.kind).toBe("record");
+    expect((await f.state()).ledger.invalidated).toContain(m.batchId);
+    const rebuilt = await f.publish();
+    expect(rebuilt.baseSha).toBe(f.divergent);
+    expect(rebuilt.tipSha).not.toBe(m.tipSha);
+    expect(rebuilt.batchId).not.toBe(m.batchId);
+    expect((await f.controller().step()).action.kind).toBe("wait");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.divergent);
+    f.verdict(rebuilt);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(rebuilt.tipSha);
+    expect(await f.origin.exec(["show", `${rebuilt.tipSha}:replacement`])).toBe("new");
+    expect(await f.origin.exec(["show", `${rebuilt.tipSha}:feature`])).toBe("old");
   });
   test("newer source branch is detected even if merged PR metadata still names old head", async () => {
     const f = await fixture(),
@@ -789,6 +1011,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         BATCHER_MODE: "active",
         BATCHER_RUNNER_BUDGET: budget,
         BATCHER_MAIN_RESERVE: "40",
+        // These cases isolate the repository allocation arithmetic; the hosted
+        // job limit and other-repository allowance are covered in capacity.test.ts.
+        BATCHER_PROVIDER_JOB_LIMIT: "100000",
+        BATCHER_OTHER_REPOSITORY_ALLOWANCE: "0",
       });
       const transport = (async (url: string | URL | Request) => {
         const text = String(url);
@@ -839,7 +1065,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         reader(
           [
             { id: 1, status: "in_progress", ...MAIN },
-            { id: 2, status: "waiting", ...MAIN },
+            // A job-less placeholder adds no demand. (A job-less *main* run is
+            // before its fan-out and holds admission; see capacity.test.ts.)
+            { id: 2, status: "waiting", ...OTHER },
             { id: 3, status: "queued", ...MAIN, head_branch: "production" },
             { id: 4, status: "queued", ...MAIN, event: "pull_request" },
             { id: 5, status: "pending", ...OTHER },
@@ -866,7 +1094,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           { id: 1, status: "queued", ...MAIN },
           { id: 3, status: "queued", ...MAIN, head_branch: "production" },
         ],
-        { 1: page(jobs("waiting", "waiting")), 3: page(jobs("queued", "in_progress")) },
+        // Fan-out already instantiated (more than the 3 pre-plan jobs listed).
+        {
+          1: page(jobs("waiting", "waiting", "completed", "completed")),
+          3: page(jobs("queued", "in_progress")),
+        },
       );
       expect(await quiet.mainBusy()).toBe(false);
       expect(quiet.lastHeadroom).toMatchObject({ occupied: 2, reservedMain: 40 });
@@ -1077,7 +1309,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         run: { id: 1000, status: "waiting", ...MAIN },
         jobs: () =>
           approved
-            ? page(jobs("queued", "queued", "completed"))
+            ? page(jobs("queued", "queued", "completed", "completed"))
             : page(jobs("waiting", "waiting", "completed")),
       };
       const fixtures = [transition, ...idleOther(32)];
@@ -1089,14 +1321,20 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       const after = reader(fixtures, "1000");
       expect(await after.github.mainBusy()).toBe(true);
       expect(after.github.lastHeadroom?.reason).toContain("32-run");
-      // With room under the cap, the queued main jobs are main demand.
+      // With room under the cap, the queued main jobs are main demand, and
+      // because they wait for runners on the newest main run, admission holds.
       const roomy = reader([transition, ...idleOther(3)], "1000");
-      expect(await roomy.github.mainBusy()).toBe(false);
+      expect(await roomy.github.mainBusy()).toBe(true);
       expect(roomy.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
+      expect(roomy.github.lastHeadroom?.capacity?.hold).toBe("main-queued");
       transition.run.status = "queued";
       const queued = reader([transition, ...idleOther(3)], "1000");
-      expect(await queued.github.mainBusy()).toBe(false);
+      expect(await queued.github.mainBusy()).toBe(true);
       expect(queued.github.lastHeadroom).toMatchObject({ occupied: 2, approvalOnlyRuns: 0 });
+      expect(queued.github.lastHeadroom?.capacity?.latestMain).toMatchObject({
+        runId: 1000,
+        queuedJobs: 2,
+      });
     });
     test("mixed, job-less and non-waiting runs are never treated as approval-only", async () => {
       const mixed: Array<[string, string, unknown[], number]> = [
@@ -1374,6 +1612,14 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 10,
         approvalOnlyRuns: 10,
         runnerRelevantRuns: 0,
+        latestMain: {
+          runId: 10,
+          queuedJobs: 0,
+          oldestQueuedSeconds: null,
+          maxStartWaitSeconds: null,
+        },
+        mainQueuedJobs: 0,
+        preFanoutMainRuns: [],
       });
       // A smaller explicit scan bound holds before reading jobs.
       const bounded = listed({ waiting });
@@ -1424,6 +1670,15 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 1,
         approvalOnlyRuns: 0,
         runnerRelevantRuns: 1,
+        latestMain: {
+          runId: 1,
+          queuedJobs: 1,
+          oldestQueuedSeconds: null,
+          maxStartWaitSeconds: null,
+        },
+        // One queued job: the newly approved run has not instantiated its fan-out.
+        mainQueuedJobs: 1,
+        preFanoutMainRuns: [1],
       });
       // Completed runs listed between pages are not scanned; invalid identities hold.
       expect(
@@ -1615,7 +1870,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("latency stop signal also holds an already-durable whole-run retry intent", async () => {
     const f = await fixture(),
       manifest = await f.publish();
-    f.verdict(manifest, "code_failure");
+    f.verdict(manifest, "infrastructure");
+    f.advance(61);
     expect((await f.controller().step()).action.kind).toBe("retry");
     await f.seed((ledger) => {
       ledger.stages[manifest.batchId]!.ciStartedAt = "2026-10-21T12:40:00Z";

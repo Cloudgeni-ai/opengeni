@@ -35,7 +35,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { fifo, plan } from "./planner";
+import { fifo, plan, infrastructureRetryReason } from "./planner";
 import { classifyExit, verifyResult } from "./result";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { ObservationJournal, latencySummary } from "./journal";
@@ -92,6 +92,15 @@ function run(c: Candidate, outcome: Run["outcome"], attempt = 1, trusted = true)
     outcome,
     trusted,
     retryable: outcome === "code_failure",
+    ...(outcome === "infrastructure"
+      ? {
+          infrastructureRetryReason: trusted
+            ? ("verified-infrastructure" as const)
+            : ("no-job-logs" as const),
+        }
+      : outcome === "cancelled"
+        ? { infrastructureRetryReason: "provider-cancelled" as const }
+        : {}),
     completedAt: NOW,
   };
 }
@@ -125,6 +134,7 @@ function observation(ready = [pull(1)], candidates: Candidate[] = []): Observati
   return {
     now: "2026-10-21T12:00:00.000Z",
     baseSha: SHA,
+    baseCI: { sha: SHA, status: "green", runId: 50, attempt: 1, reason: "fixture exact-base CI" },
     ready,
     excluded: [],
     candidates,
@@ -297,11 +307,9 @@ describe("readiness and deterministic planning", () => {
     o.ledger.recovery = [{ batchId: digest("failed-parent"), pulls: [pull(2)] }];
     expect(plan(o, { ...cfg, maxInflight: 2 }).kind).toBe("wait");
   });
-  test("one whole-candidate code retry, then deterministic bisection", () => {
+  test("first trusted code failure bisects immediately without retry", () => {
     const c = candidate([pull(1), pull(2), pull(3)]);
     c.runs = [run(c, "code_failure")];
-    expect(plan(observation(c.manifest.pulls, [c]), cfg).kind).toBe("retry");
-    c.runs.push(run(c, "code_failure", 2));
     const action = plan(observation(c.manifest.pulls, [c]), cfg);
     expect(action.kind).toBe("record");
     if (action.kind === "record")
@@ -314,13 +322,13 @@ describe("readiness and deterministic planning", () => {
     "%s never incriminates PRs and backs off",
     (outcome) => {
       const c = candidate();
-      c.runs = [run(c, outcome, 1, false), run(c, outcome, 2, false)];
+      c.runs = [run(c, outcome, 1, false)];
       const o = observation([pull(1)], [c]);
       o.now = NOW;
       expect(plan(o, cfg).kind).toBe("wait");
       o.now = "2026-10-21T12:00:00Z";
-      expect(plan(o, cfg).kind).toBe("retry");
-      c.runs = Array.from({ length: 8 }, (_, i) => run(c, outcome, i + 1, false));
+      expect(plan(o, cfg).kind).toBe(outcome === "unknown" ? "wait" : "retry");
+      c.runs.push(run(c, outcome, 2, false));
       expect(plan(o, cfg).kind).toBe("wait");
       expect(o.ledger.ejected).toEqual([]);
     },
@@ -331,7 +339,7 @@ describe("readiness and deterministic planning", () => {
       run(c, "code_failure", 1, false),
       { ...run(c, "code_failure", 2), workflow: "evil.yml" },
     ];
-    expect(plan(observation([pull(1)], [c]), cfg).kind).toBe("retry");
+    expect(plan(observation([pull(1)], [c]), cfg).kind).toBe("wait");
   });
   test("ejected exact head stays out after evidence edit; changed/re-ready heads return", () => {
     const c = candidate();
@@ -351,7 +359,7 @@ describe("readiness and deterministic planning", () => {
   });
   test("restart retry intent does not duplicate uncertain provider request", () => {
     const c = candidate();
-    c.runs = [run(c, "code_failure")];
+    c.runs = [run(c, "infrastructure")];
     const o = observation([pull(1)], [c]);
     o.ledger.retries[c.manifest.batchId] = { runId: 100, fromAttempt: 1, requestedAt: NOW };
     expect(plan(o, cfg).kind).toBe("wait");
@@ -568,7 +576,11 @@ describe("controller isolation and fencing", () => {
       containedInBase: false,
     };
     c.runs = [run(c, "success")];
-    const o = { ...observation(m.pulls, [c]), baseSha: f.base };
+    const o = {
+      ...observation(m.pulls, [c]),
+      baseSha: f.base,
+      baseCI: { ...observation().baseCI!, sha: f.base },
+    };
     let reads = 0,
       writes = 0;
     const reader: Reader = {
@@ -594,7 +606,11 @@ describe("controller isolation and fencing", () => {
   });
   test("two controllers race: only one fenced publication; stale lease cannot land", async () => {
     const f = await fixture(),
-      o = { ...observation([pull(1, f.first)]), baseSha: f.base };
+      o = {
+        ...observation([pull(1, f.first)]),
+        baseSha: f.base,
+        baseCI: { ...observation().baseCI!, sha: f.base },
+      };
     const writer = new AtomicGitWriter(f.git, f.origin.dir, cfg.stateRef, "refs/heads/main");
     const coordinator: AdmissionCoordinator = {
       capabilities,
@@ -642,7 +658,11 @@ describe("controller isolation and fencing", () => {
       containedInBase: false,
     };
     c.runs = [run(c, "success")];
-    const o = { ...observation(m.pulls, [c]), baseSha: f.base };
+    const o = {
+      ...observation(m.pulls, [c]),
+      baseSha: f.base,
+      baseCI: { ...observation().baseCI!, sha: f.base },
+    };
     let changed = true;
     const executor = new FencedGitExecutor(
       new AtomicGitWriter(f.git, f.origin.dir, cfg.stateRef, "refs/heads/main"),
@@ -668,7 +688,7 @@ describe("controller isolation and fencing", () => {
     expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(m.tipSha);
     await expect(controller.step()).rejects.toThrow();
   });
-  test("end-to-end restart each tick: retry, bisect, land good exact tip, eject bad head and announce once", async () => {
+  test("end-to-end restart each tick: no code retry, bisect, land good exact tip, eject bad head and announce once", async () => {
     const f = await fixture();
     const ready = [pull(1, f.first), pull(2, f.second)];
     const histories = new Map<string, Run[]>();
@@ -694,6 +714,7 @@ describe("controller isolation and fencing", () => {
         return {
           ...observation(ready, candidates),
           baseSha,
+          baseCI: { ...observation().baseCI!, sha: baseSha },
           stateSha,
           ledger: stateSha ? await f.git.readLedger(stateSha) : emptyLedger(),
         };
@@ -756,7 +777,7 @@ describe("controller isolation and fencing", () => {
       if (last === "wait") break;
     }
     expect(last).toBe("wait");
-    expect(retryCalls).toBe(2);
+    expect(retryCalls).toBe(0);
     expect(comments).toBe(1);
     const final = await reader.observe();
     expect(final.ledger.ejected.map((e) => e.pull.number)).toEqual([2]);
@@ -810,6 +831,18 @@ describe("wire adapters and CLI", () => {
     Object.assign(data, { outcome: "cancelled", retryable: false });
     expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe("cancelled");
   });
+  test("partial or malformed infrastructure receipts never authorize an infra-only retry", () => {
+    const c = candidate(),
+      data = receiptResult(c);
+    Object.assign(data.tasks[1]!, { exitCode: 75, outcome: "infrastructure", retryable: false });
+    data.outcome = "infrastructure";
+    data.jobs.source = "failure";
+    expect(verifyResult(data, c.manifest, 100, 1)?.infrastructureOnly).toBe(true);
+    data.tasks.shift();
+    expect(verifyResult(data, c.manifest, 100, 1)?.infrastructureOnly).toBeUndefined();
+    data.tasks.push({ ...data.tasks[0]!, job: "plan", exitCode: 1, outcome: "success" });
+    expect(verifyResult(data, c.manifest, 100, 1)?.infrastructureOnly).toBeUndefined();
+  });
   test("process-leak code-red is never retried away", () => {
     const c = candidate();
     c.runs = [{ ...run(c, "code_failure"), retryable: false }];
@@ -844,13 +877,13 @@ describe("wire adapters and CLI", () => {
         transport,
       ),
     );
-    await expect(active.retry(run(candidate(), "code_failure"))).rejects.toThrow(
+    await expect(active.retry(run(candidate(), "infrastructure"))).rejects.toThrow(
       "GitHub mutation failed (403)",
     );
     expect(calls).toBe(1);
   });
-  function zipResult(data: unknown): Uint8Array<ArrayBuffer> {
-    const name = Buffer.from("batch-result.json"),
+  function zipResult(data: unknown, member = "batch-result.json"): Uint8Array<ArrayBuffer> {
+    const name = Buffer.from(member),
       payload = Buffer.from(JSON.stringify(data));
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50);
@@ -872,6 +905,96 @@ describe("wire adapters and CLI", () => {
     end.writeUInt32LE(local.length + name.length + payload.length, 16);
     return new Uint8Array(Buffer.concat([local, name, payload, central, name, end]));
   }
+  test.each([
+    "green",
+    "red",
+    "missing",
+    "entry",
+    "cancelled",
+    "running",
+    "other-workflow",
+    "wrong-sha",
+    "wrong-attempt",
+    "wrong-url",
+    "not-full",
+    "stale-artifact",
+    "prior-and-current",
+    "duplicate",
+    "rerun",
+  ])("exact-base full CI gate: %s", async (kind) => {
+    const sha = SHA,
+      id = 51;
+    let listings = 0;
+    const row = {
+      id,
+      run_attempt: 2,
+      head_sha: sha,
+      head_branch: cfg.baseBranch,
+      path:
+        kind === "other-workflow" ? ".github/workflows/agent-ci.yml" : ".github/workflows/ci.yml",
+      event: "push",
+      status: kind === "running" ? "in_progress" : "completed",
+      conclusion: kind === "red" ? "failure" : kind === "cancelled" ? "cancelled" : "success",
+      run_started_at: NOW,
+    };
+    const receipt = {
+      schemaVersion: 1,
+      mode: kind === "not-full" ? "entry" : "full",
+      sha: kind === "wrong-sha" ? "b".repeat(40) : sha,
+      runId: String(id),
+      runAttempt: kind === "wrong-attempt" ? "1" : "2",
+      url:
+        kind === "wrong-url"
+          ? "https://example.test/"
+          : `https://github.com/${cfg.repository}/actions/runs/${id}/attempts/2`,
+    };
+    const artifact = {
+      id: 99,
+      name: `full-green-main-${sha}`,
+      expired: false,
+      size_in_bytes: 500,
+      created_at: kind === "stale-artifact" ? "2026-10-20T00:00:00Z" : NOW,
+      workflow_run: { id, head_sha: sha },
+    };
+    const transport = (async (url: string) => {
+      if (url.includes("/workflows/ci.yml/runs")) {
+        listings++;
+        return Response.json({
+          workflow_runs:
+            kind === "missing"
+              ? []
+              : [
+                  {
+                    ...row,
+                    ...(kind === "rerun" && listings > 1
+                      ? { run_attempt: 3, status: "queued" }
+                      : {}),
+                  },
+                ],
+        });
+      }
+      if (url.endsWith("/attempts/2")) return Response.json(row);
+      if (url.endsWith("/artifacts?per_page=100&page=1"))
+        return Response.json({
+          artifacts:
+            kind === "entry"
+              ? []
+              : kind === "duplicate"
+                ? [artifact, artifact]
+                : kind === "prior-and-current"
+                  ? [{ ...artifact, id: 98, created_at: "2026-10-20T00:00:00Z" }, artifact]
+                  : [artifact],
+        });
+      if (url.endsWith("/zip")) return new Response(zipResult(receipt, "full-green-main.json"));
+      throw new Error(`Unexpected fixture path ${url}`);
+    }) as unknown as typeof fetch;
+    const reader = new GitHubReader(cfg, new GitHubAuth({ GH_TOKEN: "fixture" }), transport);
+    const result = await reader.baseCI(sha);
+    expect(result.status).toBe(
+      ["green", "prior-and-current"].includes(kind) ? "green" : kind === "red" ? "red" : "unknown",
+    );
+    expect(result.sha).toBe(sha);
+  });
   test.each([
     "success",
     "head",
@@ -949,8 +1072,10 @@ describe("wire adapters and CLI", () => {
     const c = candidate();
     let conclusion = "failure";
     let path = cfg.workflow;
-    const transport = (async () =>
-      Response.json({
+    const transport = (async (url: string) => {
+      if (url.includes("/artifacts"))
+        return Response.json({ artifacts: [{ name: "batch-result-1" }] });
+      return Response.json({
         workflow_runs: [
           {
             id: 100,
@@ -964,7 +1089,8 @@ describe("wire adapters and CLI", () => {
             updated_at: NOW,
           },
         ],
-      })) as unknown as typeof fetch;
+      });
+    }) as unknown as typeof fetch;
     class ReaderWithArtifact extends GitHubReader {
       override async resultArtifact() {
         return { outcome: "success" as const, retryable: false, reason: "fixture" };
@@ -1050,6 +1176,131 @@ describe("wire adapters and CLI", () => {
 });
 
 describe("integration boundaries and queue-only shadow CI", () => {
+  test.each(["red", "unknown"] as const)(
+    "#5243 inherited %s base never bisects or ejects multiple innocent members",
+    (status) => {
+      const c = candidate([pull(5436), pull(5439), pull(5440)]);
+      c.runs = [run(c, "code_failure")];
+      const o = observation(c.manifest.pulls, [c]);
+      o.baseCI!.status = status;
+      const action = plan(o, { ...cfg, mode: "active" });
+      expect(action.kind).toBe("record");
+      if (action.kind !== "record") throw new Error("Expected durable hold");
+      expect(action.ledger.baseHold?.status).toBe(status);
+      expect(action.ledger.ejected).toEqual([]);
+      expect(action.ledger.recovery).toEqual([]);
+      o.ledger = action.ledger;
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      c.runs = [run(c, "success")];
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      if (status === "red") {
+        o.baseCI!.status = "green";
+        expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      }
+    },
+  );
+  test("infra retry eligibility rejects code, ambiguous, second-attempt, Version and unrelated runs", () => {
+    const c = candidate();
+    const good = run(c, "infrastructure");
+    expect(infrastructureRetryReason(c, good, cfg)).toBe("verified-infrastructure");
+    for (const bad of [
+      run(c, "code_failure"),
+      run(c, "unknown"),
+      run(c, "infrastructure", 2),
+      { ...good, status: "in_progress" as const },
+      { ...good, workflow: ".github/workflows/ci.yml" },
+      { ...good, workflow: ".github/workflows/release-candidate.yml" },
+      { ...good, branch: "main" },
+      { ...good, headSha: "b".repeat(40) },
+      { ...good, trusted: false },
+    ])
+      expect(infrastructureRetryReason(c, bad, cfg)).toBeNull();
+    const absent = { ...good };
+    delete absent.infrastructureRetryReason;
+    expect(infrastructureRetryReason(c, absent, cfg)).toBeNull();
+    const version = candidate([{ ...pull(1), headRef: "changeset-release/main" }]);
+    expect(infrastructureRetryReason(version, run(version, "infrastructure"), cfg)).toBeNull();
+  });
+  test("mutation boundary refuses code/main/running/repeated retries without any POST", async () => {
+    let posts = 0;
+    const transport = (async () => {
+      posts++;
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    const reader = new GitHubReader(
+      { ...cfg, mode: "active" },
+      new GitHubAuth({ GH_TOKEN: "fixture" }),
+      transport,
+    );
+    const writer = new GitHubMutations(reader);
+    const c = candidate();
+    for (const bad of [
+      run(c, "code_failure"),
+      run(c, "infrastructure", 2),
+      { ...run(c, "infrastructure"), branch: "main" },
+      { ...run(c, "infrastructure"), status: "in_progress" as const },
+    ]) {
+      await expect(writer.retry(bad)).rejects.toThrow("Only a first-attempt");
+    }
+    expect(posts).toBe(0);
+  });
+  test.each([
+    ["cancelled", [], [], "provider-cancelled"],
+    ["failure", [], [], "no-job-logs"],
+    ["cancelled", [], [{ status: "completed", conclusion: "failure" }], null],
+    ["cancelled", [], [{ status: "in_progress", conclusion: null }], null],
+    [
+      "failure",
+      [],
+      [{ status: "completed", conclusion: "success", started_at: NOW, steps: [] }],
+      null,
+    ],
+    ["failure", [{ name: "batch-result-1" }], [], null],
+    ["cancelled", [{ name: "batch-result-1" }], [], null],
+  ] as const)(
+    "provider infra classification %s case %# is positive evidence only",
+    async (conclusion, artifacts, jobs, reason) => {
+      const c = candidate();
+      const { root } = await fixture();
+      const transport = (async (url: string) => {
+        if (url.includes("/artifacts")) return Response.json({ artifacts });
+        if (url.includes("/jobs")) return Response.json({ jobs });
+        return Response.json({
+          workflow_runs: [
+            {
+              id: 100,
+              run_attempt: 1,
+              head_sha: c.manifest.tipSha,
+              head_branch: c.branch,
+              path: cfg.workflow,
+              event: "push",
+              status: "completed",
+              conclusion,
+              updated_at: NOW,
+            },
+          ],
+        });
+      }) as unknown as typeof fetch;
+      class MissingReceiptReader extends GitHubReader {
+        override async resultArtifact() {
+          return null;
+        }
+      }
+      const reader = new MissingReceiptReader(
+        { ...cfg, outputDir: join(root, "policy-cache") },
+        new GitHubAuth({}),
+        transport,
+      );
+      await reader.cache.set(`verified:${c.manifest.tipSha}:${c.manifest.batchId}:100:1`, {
+        run: run(c, "infrastructure"),
+        conclusion,
+      }); // Legacy negative caches cannot authorize retries without fresh classification.
+      const observed = (await reader.runs(c.manifest, c.branch))[0]!;
+      expect(observed.infrastructureRetryReason ?? null).toBe(reason);
+      expect(observed.trusted).toBe(false);
+      expect(observed.outcome).not.toBe("code_failure");
+    },
+  );
   test("Version commit carries the literal main-CI isolation marker", async () => {
     const f = await fixture();
     const p = { ...pull(1, f.first), headRef: "changeset-release/main" };
@@ -1551,6 +1802,9 @@ describe("review regressions: observation, admission and telemetry", () => {
       }
     }
     class FakeReader extends GitHubReader {
+      override async baseCI(sha: string) {
+        return { ...observation().baseCI!, sha };
+      }
       override async ready() {
         return { ready: [], excluded: [] };
       }

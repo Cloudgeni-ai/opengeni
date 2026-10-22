@@ -8,12 +8,17 @@ import { GitHubAuth, GitHubReader } from "../merge-batcher/github";
 import {
   assertSha,
   canonical,
+  capacityDecision,
   config,
+  DEFAULT_OTHER_REPOSITORY_ALLOWANCE,
+  DEFAULT_PROVIDER_JOB_LIMIT,
   digest,
   emptyLedger,
   MAX_RUNNER_RELEVANT_RUNS,
   MAX_SCANNED_ACTIVE_RUNS,
   scanRunnerDemand,
+  type CapacityHold,
+  type CapacityObservation,
   type RunnerScanHold,
   type Config,
   type Ledger,
@@ -967,6 +972,25 @@ export interface Headroom {
   budget: number | null;
   scannedRuns?: number;
   approvalOnlyRuns?: number;
+  capacity?: CapacityObservation;
+}
+const TRAFFIC_CAPACITY_HOLD_REASONS: Record<CapacityHold, string> = {
+  "main-pre-fanout": "A full-main CI run has not instantiated its fan-out yet",
+  "main-queued": "A full-main CI run has jobs waiting for hosted runners",
+  "repository-budget": "Insufficient full-main runner headroom",
+  "provider-limit":
+    "Repository jobs plus other-repository allowance and 18 candidate slots exceed the hosted job limit",
+  "invalid-capacity": "Invalid hosted job limit or other-repository allowance",
+};
+/**
+ * Parses an optional non-negative integer capacity setting. Unset uses the
+ * documented default; anything else that is not a safe integer becomes NaN,
+ * which `capacityDecision` rejects (fail closed, no publication).
+ */
+export function capacitySetting(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return raw.trim() !== "" && Number.isSafeInteger(n) && n >= 0 ? n : Number.NaN;
 }
 const TRAFFIC_HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
   "incomplete-runs": "Runner observation exceeds bounded scan or is incomplete",
@@ -984,6 +1008,7 @@ export async function readHeadroom(
   runnerBudget: number | undefined,
   mainReserve: number | undefined,
   now?: () => number,
+  capacity: { providerJobLimit?: number; otherRepositoryAllowance?: number } = {},
 ): Promise<Headroom> {
   const result: Headroom = {
     allowed: false,
@@ -1014,11 +1039,24 @@ export async function readHeadroom(
   if (!scan.ok) return { ...result, reason: TRAFFIC_HEADROOM_HOLD_REASONS[scan.hold] };
   const { mainDemand: mainBusy, otherDemand: otherBusy } = scan;
   result.occupied = mainBusy + otherBusy;
-  result.reservedMain = Math.max(mainReserve, mainBusy);
-  result.allowed = otherBusy + result.reservedMain + result.candidateSlots <= runnerBudget;
-  result.reason = result.allowed
-    ? "Configured full-main reserve fits after current repository demand and 18 candidate slots"
-    : "Insufficient full-main runner headroom";
+  const decision = capacityDecision({
+    mainDemand: mainBusy,
+    otherDemand: otherBusy,
+    latestMain: scan.latestMain,
+    mainQueuedJobs: scan.mainQueuedJobs,
+    preFanoutMainRuns: scan.preFanoutMainRuns,
+    runnerBudget,
+    mainReserve,
+    providerJobLimit: capacity.providerJobLimit ?? DEFAULT_PROVIDER_JOB_LIMIT,
+    otherRepositoryAllowance:
+      capacity.otherRepositoryAllowance ?? DEFAULT_OTHER_REPOSITORY_ALLOWANCE,
+  });
+  result.reservedMain = decision.reservedMain;
+  result.capacity = decision.capacity;
+  result.allowed = decision.allowed;
+  result.reason = decision.capacity.hold
+    ? TRAFFIC_CAPACITY_HOLD_REASONS[decision.capacity.hold]
+    : "Configured full-main reserve fits after current repository demand and 18 candidate slots";
   return result;
 }
 interface PublicationRecord {
@@ -1513,6 +1551,17 @@ export async function main(argv = process.argv.slice(2), env = process.env): Pro
                       reader,
                       Number(env.TRAFFIC_SHADOW_RUNNER_BUDGET) || undefined,
                       Number(env.TRAFFIC_SHADOW_MAIN_RESERVE) || undefined,
+                      undefined,
+                      {
+                        providerJobLimit: capacitySetting(
+                          env.TRAFFIC_SHADOW_PROVIDER_JOB_LIMIT,
+                          DEFAULT_PROVIDER_JOB_LIMIT,
+                        ),
+                        otherRepositoryAllowance: capacitySetting(
+                          env.TRAFFIC_SHADOW_OTHER_REPOSITORY_ALLOWANCE,
+                          DEFAULT_OTHER_REPOSITORY_ALLOWANCE,
+                        ),
+                      },
                     ),
                 },
               )
