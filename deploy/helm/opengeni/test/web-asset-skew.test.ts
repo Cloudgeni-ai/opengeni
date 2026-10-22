@@ -355,7 +355,7 @@ describe("previous web asset copy script", () => {
   });
 });
 
-function ingressValues(ingress: Record<string, unknown>): Record<string, unknown> {
+function ingressValues(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
     ingress: {
       enabled: true,
@@ -379,7 +379,7 @@ function ingressValues(ingress: Record<string, unknown>): Record<string, unknown
         },
         { host: "api.example.test", paths: [{ path: "/v1", pathType: "Prefix", service: "api" }] },
       ],
-      ...ingress,
+      ...overrides,
     },
   };
 }
