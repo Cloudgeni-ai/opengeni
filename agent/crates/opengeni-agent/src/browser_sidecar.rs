@@ -429,13 +429,7 @@ impl BrowserSidecarManager {
         let authority_dir = root.join("authority");
         let token_file = authority_dir.join("admin-token");
         write_owner_only(&token_file, format!("{admin_token}\n").as_bytes())?;
-        let scope_record = serde_json::to_vec(&ScopeRecord {
-            scope_id: scope_id.to_string(),
-            scope_generation: scope_generation.to_string(),
-            allowed_origins: allowed_origins.to_vec(),
-        })
-        .map_err(|_| PlatformError::os("browser controller scope record is unencodable"))?;
-        write_owner_only(&authority_dir.join(SCOPE_RECORD_FILE), &scope_record)?;
+        write_scope_record(&authority_dir, scope_id, scope_generation, allowed_origins)?;
 
         let mut command = Command::new(&self.binary);
         command
@@ -1392,6 +1386,23 @@ struct ScopeRecord {
     scope_id: String,
     scope_generation: String,
     allowed_origins: Vec<String>,
+}
+
+/// Record the scope a controller starts for, so a later agent can restart
+/// that controller to release browsers it left running.
+fn write_scope_record(
+    authority_dir: &Path,
+    scope_id: &str,
+    scope_generation: &str,
+    allowed_origins: &[String],
+) -> PlatformResult<()> {
+    let record = serde_json::to_vec(&ScopeRecord {
+        scope_id: scope_id.to_string(),
+        scope_generation: scope_generation.to_string(),
+        allowed_origins: allowed_origins.to_vec(),
+    })
+    .map_err(|_| PlatformError::os("browser controller scope record is unencodable"))?;
+    write_owner_only(&authority_dir.join(SCOPE_RECORD_FILE), &record)
 }
 
 /// Whether any session under this scope root holds a browser its previous
