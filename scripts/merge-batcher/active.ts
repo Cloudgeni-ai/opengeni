@@ -5,6 +5,7 @@ import {
   bindingKey,
   digest,
   emptyLedger,
+  requireInitializedState,
   type Config,
   type DurableEffect,
   type LandedPull,
@@ -148,7 +149,9 @@ export class GitHubActiveExecutor implements Executor {
     if (!main) throw new Error("Main ref missing");
     const sha = refs.get(this.writer.stateRef) ?? null;
     await this.git.fetch(this.writer.remote, [main, ...(sha ? [sha] : [])]);
-    return { main, sha, ledger: sha ? await this.git.readLedger(sha) : emptyLedger() };
+    const ledger = sha ? await this.git.readLedger(sha) : emptyLedger();
+    requireInitializedState(sha, ledger);
+    return { main, sha, ledger };
   }
   private async committed(updates: RefUpdate[]): Promise<boolean> {
     // Handles lost push responses, including a subsequent owner advancing the
@@ -247,6 +250,10 @@ export class GitHubActiveExecutor implements Executor {
     return ledger;
   }
   async transact(t: Transaction): Promise<void> {
+    requireInitializedState(t.expectedState, t.expectedLedger);
+    requireInitializedState(t.nextState, t.nextLedger);
+    if (digest(t.expectedLedger.initialization) !== digest(t.nextLedger.initialization))
+      throw new Error("Initialization provenance must remain unchanged");
     if (
       t.expectedLedger.owner !== this.owner &&
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(this.now())

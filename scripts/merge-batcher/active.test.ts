@@ -277,7 +277,17 @@ async function fixture() {
     api.workflowRuns.push(run);
     return run;
   };
+  const initializedSha = await seed((ledger) => {
+    ledger.initialization = {
+      schemaVersion: 1,
+      operationId: "12345678-1234-4123-8123-123456789abc",
+      serviceUid: "fixture-service",
+      serviceGeneration: "1",
+      initializedAt: NOW,
+    };
+  });
   return {
+    initializedSha,
     root,
     origin,
     git,
@@ -327,6 +337,15 @@ async function mergedOriginalWithDelta() {
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
+  test("missing initialized state alerts and refuses activation without provider writes", async () => {
+    const f = await fixture();
+    await f.origin.exec(["update-ref", "-d", f.cfg.stateRef]);
+    await expect(f.controller().step()).rejects.toMatchObject({
+      name: "ActiveStateInitializationError",
+    });
+    expect(f.api.calls).toHaveLength(0);
+    expect((await f.git.remoteRefs(f.origin.dir)).has(f.cfg.stateRef)).toBe(false);
+  });
   test("publishes create-only, lands exact tested tip, reconstructs without duplicate landing", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -458,14 +477,14 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       await f.origin.exec(["update-ref", candidate.split(":")[1]!, f.base]);
     };
     await expect(f.publish()).rejects.toThrow();
-    expect((await f.state()).sha).toBeNull();
+    expect((await f.state()).sha).toBe(f.initializedSha);
   });
   test("main headroom blocks hosted publication, retry and landing", async () => {
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
     expect(local.manifest).not.toBeNull();
-    expect((await f.state()).sha).toBeNull();
+    expect((await f.state()).sha).toBe(f.initializedSha);
     f.api.busy = false;
     const m = await f.publish();
     f.verdict(m, "infrastructure");
