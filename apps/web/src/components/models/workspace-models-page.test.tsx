@@ -2379,6 +2379,7 @@ describe("One Models page for the organization and the workspace", () => {
               id: "acct-r",
               label: "Research plan",
               source: "organization",
+              weekly: cachedWindow,
               reach: { ...everyone, ownerWorkspaceId: "workspace-b", everyWorkspace: false },
             }),
             codexAccount({
@@ -2425,6 +2426,18 @@ describe("One Models page for the organization and the workspace", () => {
       expect(rowsNamed(view.container, "Research plan")[0]!.textContent).toContain(
         "Belongs to Research",
       );
+      // A workspace's own account shows its stored reading: the organization
+      // route never reads its credential live (that would only say
+      // "Usage unavailable").
+      expect(rowsNamed(view.container, "Research plan")[0]!.textContent).toContain("10% left");
+      expect(rowsNamed(view.container, "Research plan")[0]!.textContent).not.toContain(
+        "Usage unavailable",
+      );
+      expect(
+        (client.requestJson.mock.calls as unknown[][]).some(
+          ([, path]) => path === "/v1/organizations/organization-a/codex/accounts/acct-r/overview",
+        ),
+      ).toBe(false);
       expect(rowsNamed(view.container, "People plan")[0]!.textContent).toContain("2 people");
       expect(rowsNamed(view.container, "Two places plan")[0]!.textContent).toContain("Design only");
       lastNavigation = null;
