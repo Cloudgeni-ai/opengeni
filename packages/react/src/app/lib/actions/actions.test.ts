@@ -125,6 +125,20 @@ describe("chords", () => {
       }
     }
   });
+
+  test("⌘B toggles the sidebar, as a formatting key with a standard key beside it", () => {
+    const sidebar = APP_ACTIONS.find((candidate) => candidate.id === "view.sidebar")!;
+    for (const platform of ["mac", "other"] as const) {
+      const chords = applicableChords(sidebar.chords, "desktop", platform);
+      expect(chordLabel(chords[0]!, platform)).toBe(platform === "mac" ? "⌘B" : "Ctrl+B");
+      expect(chords[0]!.formatting).toBe(true);
+      // The menu bar takes the first key that is not a formatting key.
+      const menuKey = chords.find((chord) => !chord.formatting)!;
+      expect(chordAccelerator(menuKey)).toBe(
+        platform === "mac" ? "Ctrl+CmdOrCtrl+S" : "CmdOrCtrl+Shift+S",
+      );
+    }
+  });
 });
 
 describe("ranking", () => {

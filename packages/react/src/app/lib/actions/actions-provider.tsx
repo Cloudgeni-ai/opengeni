@@ -92,6 +92,10 @@ export function useActionShortcut(
 
 const surface: ActionSurface = desktopBridge ? "desktop" : "web";
 
+function isRichTextEditor(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.isContentEditable;
+}
+
 function insideOtherOverlay(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   const overlay = target.closest(
@@ -103,8 +107,9 @@ function insideOtherOverlay(target: EventTarget | null): boolean {
 /** The chord the desktop menu bar shows and owns for an action. */
 function menuOwnedChord(action: AppAction, platform: ChordPlatform): Chord | undefined {
   // ⌥ chords stay with the page: a menu would take ⌥↑ from the composer's caret.
+  // Formatting keys stay with the page too, so ⌘B can still bold rich text.
   return applicableChords(action.chords, "desktop", platform).find(
-    (chord) => !chord.alt || chord.mod,
+    (chord) => (!chord.alt || chord.mod) && !chord.formatting,
   );
 }
 
@@ -135,6 +140,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const uiEvents = useUiEventTarget("document");
   const windowEvents = useUiEventTarget("window");
   const chatList = useSessionUiFeature("chatList");
+  const workspacePanel = useSessionUiFeature("dock");
+  const { inspectorOpen, setInspectorOpen } = app;
   const keyboardShortcuts = useSessionUiFeature("keyboardShortcuts");
   const platform = useMemo(() => currentPlatform(), []);
   const workspaceId = rail.workspaceId;
@@ -206,6 +213,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       currentChat,
       ops,
       chatList,
+      workspacePanel,
       newChat: () => rail.startNewSession(),
       openChat: (chatId) => rail.openSession(chatId),
       openInbox: () => {
@@ -214,6 +222,10 @@ export function ActionsProvider(props: { children: ReactNode }) {
       },
       toggleSidebar: () =>
         rail.isMobile ? rail.setDrawerOpen(!rail.drawerOpen) : rail.toggleCollapsed(),
+      toggleWorkspacePanel: () => {
+        if (!inspectorOpen && rail.isMobile) rail.setDrawerOpen(false);
+        setInspectorOpen((open) => !open);
+      },
       findInChat: () => requestConversationFind(uiEvents),
       searchMessages: (query) => requestSessionSearch(windowEvents, workspaceId, undefined, query),
       renameCurrentChat: () => uiEvents.dispatchEvent(new Event(RENAME_CURRENT_CHAT_EVENT)),
@@ -239,6 +251,9 @@ export function ActionsProvider(props: { children: ReactNode }) {
       routeChatId,
       ops,
       chatList,
+      workspacePanel,
+      inspectorOpen,
+      setInspectorOpen,
       rail,
       navigate,
       uiEvents,
@@ -329,6 +344,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
         // Inside the ⌘K menu, chat chords act on the highlighted chat; the menu handles them.
         if (action.forChat && insideCommandMenu(event.target)) return;
         if (!toggleMenu && insideOtherOverlay(event.target)) return;
+        // Rich-text editors keep their formatting keys.
+        if (chord.formatting && isRichTextEditor(event.target)) return;
         // Chords without ⌘/Ctrl leave text editing alone unless the field is empty.
         if (!chord.mod && isTextEntry(event.target) && !textEntryIsEmpty(event.target)) return;
         if (!action.available(current, action.forChat ? current.currentChat : null)) return;

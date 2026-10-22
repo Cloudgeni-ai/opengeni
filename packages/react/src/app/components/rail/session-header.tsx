@@ -231,6 +231,8 @@ export function SessionHeader({
   const findKeys = useActionShortcut("chat.find");
   const copyLinkKeys = useActionShortcut("chat.copyLink");
   const pinKeys = useActionShortcut("chat.pin");
+  const archiveKeys = useActionShortcut("chat.archive");
+  const panelKeys = useActionShortcut("view.workspacePanel");
   // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
   const startRenaming = rename.startEditing;
   useEffect(() => {
@@ -415,7 +417,11 @@ export function SessionHeader({
             size="icon-sm"
             onClick={onToggleInspector}
             aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
-            title={inspectorOpen ? "Hide workspace" : "Open workspace"}
+            aria-keyshortcuts={panelKeys?.ariaKeys}
+            title={
+              (inspectorOpen ? "Hide workspace" : "Open workspace") +
+              (panelKeys ? ` (${panelKeys.label})` : "")
+            }
             className="pointer-coarse:size-11"
           >
             {inspectorOpen ? (
@@ -538,10 +544,17 @@ export function SessionHeader({
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void onArchive?.(session, !session.archived)}>
+                <DropdownMenuItem
+                  aria-keyshortcuts={archiveKeys?.ariaKeys}
+                  onSelect={() => void onArchive?.(session, !session.archived)}
+                >
                   {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
                   {session.archived ? "Restore" : "Archive"}
-                  {session.archived ? <DropdownMenuMeta>Archived</DropdownMenuMeta> : null}
+                  {session.archived ? (
+                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
+                  ) : archiveKeys ? (
+                    <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
+                  ) : null}
                 </DropdownMenuItem>
               </>
             ) : null}

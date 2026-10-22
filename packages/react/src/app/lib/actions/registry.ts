@@ -17,6 +17,7 @@ import {
   MailIcon,
   MailOpenIcon,
   PanelLeftIcon,
+  PanelRightIcon,
   PencilIcon,
   PinIcon,
   PinOffIcon,
@@ -44,10 +45,13 @@ export type ActionEnv = {
   ops: ChatOperations;
   /** Whether the sidebar's chat list is part of this surface. */
   chatList: boolean;
+  /** Whether chats have the right-hand workspace panel on this surface. */
+  workspacePanel: boolean;
   newChat(): void;
   openChat(chatId: string): void;
   openInbox(): void;
   toggleSidebar(): void;
+  toggleWorkspacePanel(): void;
   findInChat(): void;
   searchMessages(query?: string): void;
   renameCurrentChat(): void;
@@ -205,6 +209,12 @@ export const APP_ACTIONS: readonly AppAction[] = [
     icon: ArchiveIcon,
     iconFor: (chat) => (chat?.archived ? ArchiveRestoreIcon : ArchiveIcon),
     keywords: ["restore", "hide", "done"],
+    // Apple Mail's Archive key; Ctrl+Alt elsewhere, as Pin, since browsers there
+    // keep Ctrl+Shift+A for tab search.
+    chords: [
+      { code: "KeyA", mod: true, control: true, platform: "mac" },
+      { code: "KeyA", mod: true, alt: true, platform: "other" },
+    ],
     forChat: true,
     desktopMenu: "chat",
     available: (_env, chat) => chat !== null && chat.parentSessionId === null,
@@ -307,13 +317,28 @@ export const APP_ACTIONS: readonly AppAction[] = [
     group: "view",
     icon: PanelLeftIcon,
     keywords: ["hide", "show", "collapse", "rail"],
+    // ⌘B as in most editors and chat apps. It is bold in rich text, so the menu
+    // bar shows the platform's standard sidebar key instead, which also works.
     chords: [
+      { code: "KeyB", mod: true, formatting: true },
       { code: "KeyS", mod: true, control: true, platform: "mac" },
       { code: "KeyS", mod: true, shift: true, platform: "other" },
     ],
     desktopMenu: "view",
     available: (env) => env.chatList,
     run: (env) => env.toggleSidebar(),
+  },
+  {
+    id: "view.workspacePanel",
+    title: "Toggle workspace panel",
+    group: "view",
+    icon: PanelRightIcon,
+    keywords: ["right", "inspector", "files", "browser", "terminal", "hide", "show"],
+    // The second sidebar's key in VS Code and Cursor.
+    chords: [{ code: "KeyB", mod: true, alt: true }],
+    desktopMenu: "view",
+    available: (env) => env.workspacePanel && env.currentChat !== null,
+    run: (env) => env.toggleWorkspacePanel(),
   },
   {
     id: "help.shortcuts",
