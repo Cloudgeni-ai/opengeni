@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
+import { BASE_PURPOSE, inspectBase } from "./base-comparison";
 import { Controller, LiveReader, type StepResult } from "./controller";
 import { AtomicGitWriter, GitStore } from "./git";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
@@ -48,8 +49,38 @@ export async function main(
     );
     return;
   }
+  if (command === "inspect-run") {
+    // Batch CI entry: a queue tip is either an exact candidate or a
+    // deterministic base-comparison commit. Anything else fails closed.
+    if (!values.tip || !values["git-dir"])
+      throw new Error("inspect-run requires --tip and --git-dir");
+    const git = new GitStore(values["git-dir"]);
+    const tip = assertSha(values.tip);
+    let candidate: Awaited<ReturnType<GitStore["inspect"]>> | null = null;
+    try {
+      candidate = await git.inspect(tip);
+    } catch {
+      /* not a candidate; try the base-comparison protocol */
+    }
+    if (candidate) {
+      console.log(JSON.stringify({ ...candidate, purpose: "candidate" }));
+      return;
+    }
+    const base = await inspectBase(git, tip);
+    console.log(
+      JSON.stringify({
+        ...base.manifest,
+        purpose: BASE_PURPOSE,
+        batchId: base.baseRunId,
+        tipSha: base.tipSha,
+      }),
+    );
+    return;
+  }
   if (!["shadow", "run", "recover-effect", "recover-missing-run"].includes(command))
-    throw new Error("Expected inspect, shadow, run, recover-effect or recover-missing-run");
+    throw new Error(
+      "Expected inspect, inspect-run, shadow, run, recover-effect or recover-missing-run",
+    );
   const settings = config({ ...env, ...(command === "shadow" ? { BATCHER_MODE: "shadow" } : {}) });
   if (
     command === "recover-missing-run" &&

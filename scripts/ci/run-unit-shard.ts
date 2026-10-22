@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ImpactPlan } from "./impact";
@@ -224,6 +224,7 @@ export async function runBoundedTestProcesses<T>(
   tasks: readonly T[],
   concurrency: number,
   execute: (task: T, index: number) => Promise<number>,
+  options: { continueOnFailure?: boolean } = {},
 ): Promise<number> {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
     throw new Error("unit process concurrency must be a positive integer");
@@ -231,7 +232,10 @@ export async function runBoundedTestProcesses<T>(
   let next = 0;
   let failure = 0;
   const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
-    while (failure === 0) {
+    // Fail-fast candidates stop scheduling after the first failure. Base
+    // comparison runs keep scheduling so every expected process gets a verdict;
+    // the returned status is still the first failure.
+    while (failure === 0 || options.continueOnFailure) {
       const index = next;
       next += 1;
       if (index >= tasks.length) return;
@@ -348,46 +352,126 @@ export function resolveUnitTestSelection(
   return { selected, index, count };
 }
 
+/** Files per Bun process; one is the measured safe default. */
+export function configuredFilesPerProcess(
+  source: Readonly<Record<string, string | undefined>> = process.env,
+): number {
+  return Number(source.OPENGENI_TEST_FILES_PER_PROCESS ?? "1");
+}
+
+/** The exact process plan one shard executes; shared with the comparison inventory. */
+export function shardProcessPlan(
+  root: string,
+  selected: readonly string[],
+  batchSize: number,
+): UnitTestProcessPlan {
+  const batch = selected.filter((path) => !fileUsesProcessGlobalTestState(root, path));
+  const isolated = selected.filter((path) => fileUsesProcessGlobalTestState(root, path));
+  return planUnitTestProcesses(root, batch, isolated, batchSize);
+}
+
+/** Execution order of the categories; fail-fast stops at the first failing one. */
+export const UNIT_PROCESS_CATEGORIES = [
+  "parallel",
+  "explicitConcurrency",
+  "wallClockSensitive",
+  "sharedPostgresExclusive",
+  "clusterRoleSensitive",
+] as const satisfies readonly (keyof UnitTestProcessPlan)[];
+export type UnitProcessCategory = (typeof UNIT_PROCESS_CATEGORIES)[number];
+
+/** One executed Bun process; exitCode null means it never completed. */
+export type UnitProcessOutcome = {
+  category: UnitProcessCategory;
+  files: string[];
+  exitCode: number | null;
+};
+
+/** Removes the comparison-only flags before shard selection parses its arguments. */
+export function parseUnitShardOptions(args: readonly string[]): {
+  selection: string[];
+  continueOnFailure: boolean;
+  outcomes: string | null;
+} {
+  const selection: string[] = [];
+  let continueOnFailure = false;
+  let outcomes: string | null = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--continue") continueOnFailure = true;
+    else if (args[i] === "--outcomes") {
+      const value = args[++i];
+      if (!value) throw new Error("--outcomes requires a path");
+      outcomes = value;
+    } else selection.push(args[i]!);
+  }
+  return { selection, continueOnFailure, outcomes };
+}
+
 async function main(): Promise<void> {
-  const { selected, index, count } = resolveUnitTestSelection(process.cwd(), process.argv.slice(2));
-  const batch = selected.filter((path) => !fileUsesProcessGlobalTestState(process.cwd(), path));
-  const isolated = selected.filter((path) => fileUsesProcessGlobalTestState(process.cwd(), path));
+  const options = parseUnitShardOptions(process.argv.slice(2));
+  const { selected, index, count } = resolveUnitTestSelection(process.cwd(), options.selection);
   // One file per Bun process is the measured safe default: larger batches keep
   // process-global test state and heap pages alive across files and raise the
   // full-suite cgroup peak substantially. Measured larger runners may opt into
   // a higher, still deterministic batch size explicitly.
-  const configuredBatchSize = Number(process.env.OPENGENI_TEST_FILES_PER_PROCESS ?? "1");
+  const configuredBatchSize = configuredFilesPerProcess();
   const budget = testConcurrencyBudget();
-  const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
+  const processes = shardProcessPlan(process.cwd(), selected, configuredBatchSize);
   process.stdout.write(
     `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
   );
-  const parallelStatus = await runBoundedTestProcesses(
-    processes.parallel,
-    budget.concurrency,
-    (task) => run(task, budget, budget.concurrency, 1),
-  );
-  if (parallelStatus !== 0) process.exit(parallelStatus);
-  const explicitStatus = await runBoundedTestProcesses(processes.explicitConcurrency, 1, (task) =>
-    run(task, budget, 1, budget.concurrency),
-  );
-  if (explicitStatus !== 0) process.exit(explicitStatus);
-  const wallClockStatus = await runBoundedTestProcesses(processes.wallClockSensitive, 1, (task) =>
-    run(task, budget, 1, 1),
-  );
-  if (wallClockStatus !== 0) process.exit(wallClockStatus);
-  const sharedPostgresStatus = await runBoundedTestProcesses(
-    processes.sharedPostgresExclusive,
-    1,
-    (task) => run(task, budget, 1, 1),
-  );
-  if (sharedPostgresStatus !== 0) process.exit(sharedPostgresStatus);
-  const clusterRoleStatus = await runBoundedTestProcesses(
-    processes.clusterRoleSensitive,
-    1,
-    (task) => run(task, budget, 1, 1),
-  );
-  if (clusterRoleStatus !== 0) process.exit(clusterRoleStatus);
+  // Comparison evidence only: every expected process starts as not completed
+  // (null) and the file is rewritten after each process, so a killed shard
+  // leaves partial evidence that can never read as complete. Failing to record
+  // never changes the shard's own verdict.
+  const entries = new Map<UnitTestProcess, UnitProcessOutcome>();
+  for (const category of UNIT_PROCESS_CATEGORIES)
+    for (const task of processes[category])
+      entries.set(task, { category, files: [...task.files], exitCode: null });
+  const record = () => {
+    if (!options.outcomes) return;
+    try {
+      writeFileSync(
+        options.outcomes,
+        JSON.stringify({
+          schemaVersion: 1,
+          shard: index,
+          shards: count,
+          units: [...entries.values()],
+        }) + "\n",
+      );
+    } catch (error) {
+      process.stderr.write(
+        `[unit-shard] comparison outcomes not recorded: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  };
+  record();
+  const settings: Record<UnitProcessCategory, { pool: number; inner: number }> = {
+    parallel: { pool: budget.concurrency, inner: 1 },
+    explicitConcurrency: { pool: 1, inner: budget.concurrency },
+    wallClockSensitive: { pool: 1, inner: 1 },
+    sharedPostgresExclusive: { pool: 1, inner: 1 },
+    clusterRoleSensitive: { pool: 1, inner: 1 },
+  };
+  let firstFailure = 0;
+  for (const category of UNIT_PROCESS_CATEGORIES) {
+    const { pool, inner } = settings[category];
+    const status = await runBoundedTestProcesses(
+      processes[category],
+      pool,
+      async (task) => {
+        const exitCode = await run(task, budget, pool, inner);
+        entries.get(task)!.exitCode = exitCode;
+        record();
+        return exitCode;
+      },
+      { continueOnFailure: options.continueOnFailure },
+    );
+    if (status !== 0 && firstFailure === 0) firstFailure = status;
+    if (firstFailure !== 0 && !options.continueOnFailure) process.exit(firstFailure);
+  }
+  if (firstFailure !== 0) process.exit(firstFailure);
   process.stdout.write(
     `[unit-shard] shard ${index + 1}/${count} passed (${selected.length} files)\n`,
   );

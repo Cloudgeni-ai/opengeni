@@ -25,6 +25,7 @@ jobs:
     outputs:
       batch_id: ${{ steps.plan.outputs.batch_id }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
+      purpose: ${{ steps.plan.outputs.purpose }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
       unit_shards: ${{ steps.plan.outputs.unit_shards }}
       unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
@@ -40,23 +41,40 @@ jobs:
         name: Verify candidate provenance and plan the complete combined tree
         run: |
           set -euo pipefail
-          bun scripts/merge-batcher/main.ts inspect --tip "$GITHUB_SHA" --git-dir .git > "$RUNNER_TEMP/batch.json"
+          bun scripts/merge-batcher/main.ts inspect-run --tip "$GITHUB_SHA" --git-dir .git > "$RUNNER_TEMP/batch.json"
           base="$(jq -er '.baseSha' "$RUNNER_TEMP/batch.json")"
+          purpose="$(jq -er '.purpose' "$RUNNER_TEMP/batch.json")"
           export BATCH_ID="$(jq -er '.batchId' "$RUNNER_TEMP/batch.json")"
           echo "batch_id=$BATCH_ID" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base" >> "$GITHUB_OUTPUT"
-          bun scripts/ci/batch-result.ts run --job plan --output "$RUNNER_TEMP/receipt-plan.json" -- bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+          echo "purpose=$purpose" >> "$GITHUB_OUTPUT"
+          if [ "$purpose" = "base-comparison" ]; then
+            # The failed candidate's frozen plan on the exact base tree; no impact recompute.
+            bun scripts/ci/batch-result.ts run --job plan --output "$RUNNER_TEMP/receipt-plan.json" -- bun scripts/ci/batch-comparison.ts freeze --manifest "$RUNNER_TEMP/batch.json" --output "$RUNNER_TEMP/impact-plan.json"
+            cp "$RUNNER_TEMP/impact-plan.json" "$RUNNER_TEMP/execution-plan.json"
+          else
+            bun scripts/ci/batch-result.ts run --job plan --output "$RUNNER_TEMP/receipt-plan.json" -- bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+            bun scripts/ci/batch-comparison.ts plan --impact "$RUNNER_TEMP/impact-plan.json" --output "$RUNNER_TEMP/execution-plan.json" || echo "::warning::Comparison plan unavailable; failure attribution will hold"
+          fi
           count="$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")"
           shards="$(jq '.unitTests | length | ((. / 240) | ceil | if . > 16 then 16 else . end)' "$RUNNER_TEMP/impact-plan.json")"
           echo "unit_count=$count" >> "$GITHUB_OUTPUT"
           echo "unit_shards=$shards" >> "$GITHUB_OUTPUT"
           echo "unit_matrix=$(jq -nc --argjson n "$shards" '[range(0; (if $n == 0 then 1 else $n end)) | {index: ., total: $n}]')" >> "$GITHUB_OUTPUT"
+          if [ "$purpose" = "base-comparison" ]; then
+            bun scripts/ci/batch-result.ts run --job plan --output "$RUNNER_TEMP/receipt-plan.json" -- bun scripts/ci/batch-comparison.ts inventory --plan "$RUNNER_TEMP/execution-plan.json" --shards "$shards" --output "$RUNNER_TEMP/inventory.json"
+          elif [ -f "$RUNNER_TEMP/execution-plan.json" ]; then
+            # Candidate comparison evidence is best-effort and never changes its verdict.
+            bun scripts/ci/batch-comparison.ts inventory --plan "$RUNNER_TEMP/execution-plan.json" --shards "$shards" --output "$RUNNER_TEMP/inventory.json" || echo "::warning::Comparison inventory unavailable; failure attribution will hold"
+          fi
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: batch-plan-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/impact-plan.json
             ${{ runner.temp }}/batch.json
+            ${{ runner.temp }}/execution-plan.json
+            ${{ runner.temp }}/inventory.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
@@ -72,6 +90,7 @@ jobs:
     timeout-minutes: 25
     env:
       BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+      BATCH_CONTINUE: ${{ needs.plan.outputs.purpose == 'base-comparison' && '--continue' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -94,8 +113,10 @@ jobs:
           path: ${{ runner.temp }}/batch-plan
       - name: Run source contracts and record an exact code verdict
         run: >-
-          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" --
+          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json"
+          --role source --steps "$RUNNER_TEMP/source-steps.json" --
           bun scripts/ci/batch-source.ts "$RUNNER_TEMP/batch-plan/impact-plan.json"
+          --steps "$RUNNER_TEMP/source-steps.json" $BATCH_CONTINUE
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
@@ -116,6 +137,7 @@ jobs:
     env:
       BATCH_ID: ${{ needs.plan.outputs.batch_id }}
       OPENGENI_REQUIRE_REAL_DB: "1"
+      BATCH_CONTINUE: ${{ needs.plan.outputs.purpose == 'base-comparison' && '--continue' || '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -138,16 +160,20 @@ jobs:
           path: ${{ runner.temp }}/batch-plan
       - name: Separate real database infrastructure setup from test assertions
         run: >-
+          BATCH_POSTGRES_EVIDENCE="$RUNNER_TEMP/batch-postgres.json"
           bun scripts/ci/batch-result.ts run --failure-only --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json" --
           bun scripts/ci/batch-setup.ts postgres
       # No in-job retry: the controller owns the single unchanged-batch retry.
       - name: Run all selected unit files with the unchanged per-attempt deadline
         run: >-
-          bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json" --
+          bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json"
+          --role unit --postgres-evidence "$RUNNER_TEMP/batch-postgres.json"
+          --units "$RUNNER_TEMP/unit-outcomes-${{ matrix.index }}.json" --
           bun scripts/ci/profile-command.ts --name batch-unit-${{ matrix.index }}
           --output "$RUNNER_TEMP/batch-unit-${{ matrix.index }}.json" --timeout-seconds 1200 --
           bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/batch-plan/impact-plan.json"
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          --outcomes "$RUNNER_TEMP/unit-outcomes-${{ matrix.index }}.json" $BATCH_CONTINUE
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
@@ -187,14 +213,27 @@ jobs:
           pattern: batch-receipt-${{ github.run_attempt }}-*
           merge-multiple: true
           path: ${{ runner.temp }}/batch-receipts
+      # Comparison inputs of this exact attempt; absent when planning failed.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: batch-plan-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/batch-plan
       - name: Bind receipts to this exact candidate and run attempt
         if: ${{ always() }}
         run: >-
           bun scripts/ci/batch-result.ts aggregate --receipts "$RUNNER_TEMP/batch-receipts"
-          --output "$RUNNER_TEMP/batch-result.json"
+          --output "$RUNNER_TEMP/batch-result.json" --plan-dir "$RUNNER_TEMP/batch-plan"
+          --comparison-output "$RUNNER_TEMP/batch-comparison.json"
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
           name: batch-result-${{ github.run_attempt }}
           path: ${{ runner.temp }}/batch-result.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-comparison-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/batch-comparison.json
           if-no-files-found: ignore

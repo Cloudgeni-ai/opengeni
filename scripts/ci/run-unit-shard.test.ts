@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   explicitUnitTestPaths,
+  parseUnitShardOptions,
   planUnitTestProcesses,
   runBoundedTestProcesses,
   resolveUnitTestSelection,
@@ -259,6 +260,111 @@ describe("bounded unit process execution", () => {
       "positive integer",
     );
   });
+
+  test("base-comparison continue mode runs every task and still returns the first failure", async () => {
+    const started: number[] = [];
+    const status = await runBoundedTestProcesses(
+      [0, 1, 2, 3, 4],
+      2,
+      async (task) => {
+        started.push(task);
+        await Bun.sleep(1);
+        return task === 1 ? 9 : task === 3 ? 4 : 0;
+      },
+      { continueOnFailure: true },
+    );
+    expect(status).toBe(9);
+    expect([...started].sort()).toEqual([0, 1, 2, 3, 4]);
+  });
+});
+
+describe("comparison shard options", () => {
+  test("comparison flags never reach shard selection", () => {
+    expect(
+      parseUnitShardOptions([
+        "--plan",
+        "p.json",
+        "--outcomes",
+        "o.json",
+        "--shard",
+        "1",
+        "--continue",
+        "--shards",
+        "2",
+      ]),
+    ).toEqual({
+      selection: ["--plan", "p.json", "--shard", "1", "--shards", "2"],
+      continueOnFailure: true,
+      outcomes: "o.json",
+    });
+    expect(parseUnitShardOptions(["--all"])).toEqual({
+      selection: ["--all"],
+      continueOnFailure: false,
+      outcomes: null,
+    });
+    expect(() => parseUnitShardOptions(["--outcomes"])).toThrow("requires a path");
+  });
+
+  test.each([false, true])(
+    "records every expected process; continue=%p decides whether later categories run",
+    async (continueOnFailure) => {
+      const root = mkdtempSync(join(tmpdir(), "unit-shard-outcomes-"));
+      try {
+        const pass = 'import { test } from "bun:test";\ntest("ok", () => {});\n';
+        writeFileSync(join(root, "a.test.ts"), pass);
+        writeFileSync(
+          join(root, "b.test.ts"),
+          'import { expect, test } from "bun:test";\ntest("red", () => expect(1).toBe(2));\n',
+        );
+        // Wall-clock-sensitive files run in a later category than ordinary files.
+        writeFileSync(join(root, "c.test.ts"), `// opengeni:test-wall-clock-sensitive\n${pass}`);
+        writeFileSync(
+          join(root, "plan.json"),
+          JSON.stringify({ schemaVersion: 1, unitTests: ["a.test.ts", "b.test.ts", "c.test.ts"] }),
+        );
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "run-unit-shard.ts"),
+            "--plan",
+            "plan.json",
+            "--shard",
+            "0",
+            "--shards",
+            "1",
+            "--outcomes",
+            "outcomes.json",
+            ...(continueOnFailure ? ["--continue"] : []),
+          ],
+          {
+            cwd: root,
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, OPENGENI_TEST_MAX_CONCURRENCY: "2" },
+          },
+        );
+        expect(await child.exited).toBe(1);
+        const recorded = JSON.parse(readFileSync(join(root, "outcomes.json"), "utf8"));
+        expect(recorded).toEqual({
+          schemaVersion: 1,
+          shard: 0,
+          shards: 1,
+          units: [
+            { category: "parallel", files: ["a.test.ts"], exitCode: 0 },
+            { category: "parallel", files: ["b.test.ts"], exitCode: 1 },
+            {
+              category: "wallClockSensitive",
+              files: ["c.test.ts"],
+              exitCode: continueOnFailure ? 0 : null,
+            },
+          ],
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 });
 
 describe("unit process planning", () => {

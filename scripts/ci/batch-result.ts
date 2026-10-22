@@ -1,6 +1,19 @@
 #!/usr/bin/env bun
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+
+import {
+  BASE_PURPOSE,
+  COMPARISON_SCHEMA,
+  inventoryDigest,
+  recipeDigestOf,
+  SOURCE_STEPS,
+  unitKey,
+  validateExecutionPlan,
+  type ComparisonEvidence,
+} from "../merge-batcher/base-comparison";
+import { canonical, digest } from "../merge-batcher/model";
+import { environmentIdentity, executionStatus, nodeVersion } from "./batch-comparison";
 
 export type BatchOutcome = "success" | "code_failure" | "infrastructure" | "cancelled";
 export type BatchIdentity = {
@@ -18,6 +31,29 @@ export type BatchTaskReceipt = BatchIdentity & {
   startedAt: string;
   finishedAt: string;
 };
+/** Comparison-only receipt fields; they never enter the aggregated verdict. */
+export type ComparisonTaskFields = {
+  environment?: Record<string, string | null>;
+  units?: { category: string; files: string[]; exitCode: number | null }[];
+  steps?: { step: string; exitCode: number | null }[];
+};
+const TASK_FIELDS = [
+  "schemaVersion",
+  "batchId",
+  "headSha",
+  "runId",
+  "runAttempt",
+  "job",
+  "outcome",
+  "retryable",
+  "exitCode",
+  "startedAt",
+  "finishedAt",
+] as const;
+/** The verdict-bearing receipt only; keeps the result artifact within its bound. */
+function verdictTask(row: BatchTaskReceipt): BatchTaskReceipt {
+  return Object.fromEntries(TASK_FIELDS.map((key) => [key, row[key]])) as BatchTaskReceipt;
+}
 
 export function classifyBatchExit(code: number): { outcome: BatchOutcome; retryable: boolean } {
   if (code === 0) return { outcome: "success", retryable: false };
@@ -83,7 +119,7 @@ export function aggregateBatchResult(
       continue;
     }
     seen.add(row.job);
-    verified.push(row as BatchTaskReceipt);
+    verified.push(verdictTask(row as BatchTaskReceipt));
   }
   if (jobs.plan !== "success") invalid("Candidate planning did not complete successfully");
   if (expectedJobs.some((job) => !seen.has(job)))
@@ -142,10 +178,174 @@ export function aggregateBatchResult(
   };
 }
 
-function argument(name: string): string {
-  const index = process.argv.indexOf(name);
-  const value = index < 0 ? undefined : process.argv[index + 1];
-  if (!value) throw new Error(`Missing ${name}`);
+/**
+ * Comparison evidence for batch-base-comparison/v1, built by the base-checked-out
+ * verifier from the plan artifact and the task receipts of this exact attempt.
+ * It never changes the verdict. Returns null when the run carries no
+ * comparison inventory (absent metadata: the consumer holds attribution).
+ */
+export function buildComparisonEvidence(input: {
+  identity: BatchIdentity;
+  unitShards: number;
+  receipts: readonly unknown[];
+  verifiedJobs: readonly string[];
+  batch: unknown;
+  plan: unknown;
+  inventory: unknown;
+}): ComparisonEvidence | null {
+  const inventory = input.inventory as {
+    schemaVersion?: unknown;
+    comparisonSchema?: unknown;
+    planDigest?: unknown;
+    shards?: unknown;
+    absent?: unknown;
+    units?: unknown;
+    recipePaths?: unknown;
+  } | null;
+  const batch = input.batch as { purpose?: unknown; baseSha?: unknown; planDigest?: unknown };
+  if (
+    !inventory ||
+    inventory.schemaVersion !== 1 ||
+    inventory.comparisonSchema !== COMPARISON_SCHEMA ||
+    !batch ||
+    typeof batch.baseSha !== "string" ||
+    !Array.isArray(inventory.units) ||
+    !Array.isArray(inventory.absent) ||
+    !Array.isArray(inventory.recipePaths)
+  )
+    return null;
+  let planDigest: string;
+  try {
+    planDigest = digest(validateExecutionPlan(input.plan));
+  } catch {
+    return null;
+  }
+  const purpose = batch.purpose === BASE_PURPOSE ? BASE_PURPOSE : "candidate";
+  const reasons: string[] = [];
+  if (inventory.planDigest !== planDigest) reasons.push("inventory was built from another plan");
+  if (purpose === BASE_PURPOSE && batch.planDigest !== planDigest)
+    reasons.push("executed plan differs from the frozen base manifest");
+  if (inventory.shards !== input.unitShards)
+    reasons.push("unit shard count differs from inventory");
+  const id = input.identity;
+  const rows = new Map<string, BatchTaskReceipt & ComparisonTaskFields>();
+  for (const item of input.receipts) {
+    const row = item as (BatchTaskReceipt & ComparisonTaskFields) | null;
+    if (
+      !row ||
+      row.schemaVersion !== 1 ||
+      row.batchId !== id.batchId ||
+      row.headSha !== id.headSha ||
+      row.runId !== id.runId ||
+      row.runAttempt !== id.runAttempt ||
+      !input.verifiedJobs.includes(row.job)
+    )
+      continue;
+    if (rows.has(row.job)) reasons.push(`duplicate ${row.job} receipt`);
+    rows.set(row.job, row);
+  }
+  const expected = (inventory.units as { category: string; files: string[] }[]).map((unit) => ({
+    category: String(unit?.category),
+    files: Array.isArray(unit?.files) ? unit.files.map(String) : [],
+  }));
+  const exits = new Map<string, number | null>();
+  const known = new Set(expected.map(unitKey));
+  for (let shard = 0; shard < input.unitShards; shard++) {
+    const units = rows.get(`unit-${shard}`)?.units;
+    if (!Array.isArray(units)) continue;
+    for (const unit of units) {
+      const key = unitKey({
+        category: String(unit?.category),
+        files: Array.isArray(unit?.files) ? unit.files.map(String) : [],
+      });
+      if (!known.has(key)) reasons.push("a shard executed a unit outside the inventory");
+      else if (exits.has(key)) reasons.push("a unit executed in more than one shard");
+      else exits.set(key, Number.isSafeInteger(unit?.exitCode) ? unit.exitCode : null);
+    }
+  }
+  const units = expected.map((unit) => {
+    const exitCode = exits.get(unitKey(unit)) ?? null;
+    return { ...unit, status: executionStatus(exitCode), exitCode };
+  });
+  const recorded = rows.get("source")?.steps;
+  const sourceSteps = SOURCE_STEPS.map((step) => {
+    const entry = Array.isArray(recorded) ? recorded.find((item) => item?.step === step) : null;
+    const exitCode = Number.isSafeInteger(entry?.exitCode) ? entry!.exitCode : null;
+    return { step, status: executionStatus(exitCode), exitCode };
+  });
+  // Environment is bound by execution role; plan and ready never ran tests.
+  const usable = (value: unknown): Record<string, string | null> | null =>
+    value &&
+    typeof value === "object" &&
+    Object.values(value).length &&
+    Object.values(value).every((item) => typeof item === "string" && item)
+      ? (value as Record<string, string | null>)
+      : null;
+  const source = usable(rows.get("source")?.environment);
+  if (!source) reasons.push("source environment evidence missing");
+  const unitEnvironments = Array.from({ length: input.unitShards }, (_, shard) =>
+    usable(rows.get(`unit-${shard}`)?.environment),
+  );
+  let unit: Record<string, string | null> | null = null;
+  if (input.unitShards > 0) {
+    if (unitEnvironments.some((value) => !value)) reasons.push("unit environment evidence missing");
+    else if (new Set(unitEnvironments.map((value) => canonical(value))).size !== 1)
+      reasons.push("unit shards ran in different environments");
+    else unit = unitEnvironments[0]!;
+  }
+  const recipePaths = inventory.recipePaths as [string, string | null][];
+  const environment = { source, unit };
+  const recipeDigest =
+    source && (unit || units.length === 0) ? recipeDigestOf(recipePaths, environment) : null;
+  const absent = (inventory.absent as unknown[]).map(String);
+  const complete =
+    reasons.length === 0 &&
+    recipeDigest !== null &&
+    absent.length === 0 &&
+    units.every((item) => item.status === "pass" || item.status === "fail") &&
+    sourceSteps.every((item) => item.status === "pass" || item.status === "fail");
+  return {
+    schemaVersion: 1,
+    comparisonSchema: COMPARISON_SCHEMA,
+    purpose,
+    batchId: id.batchId,
+    headSha: id.headSha,
+    runId: id.runId,
+    runAttempt: id.runAttempt,
+    baseSha: batch.baseSha,
+    planDigest,
+    recipeDigest,
+    recipePaths,
+    environment,
+    coverage: {
+      inventoryDigest: inventoryDigest(units),
+      absent,
+      units,
+      sourceSteps,
+      complete,
+    },
+    reasons,
+  };
+}
+
+function readJson(path: string): unknown {
+  try {
+    return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null;
+  } catch {
+    return null;
+  }
+}
+
+function argument(name: string, optional = false): string {
+  // Wrapper options precede `--`; never read the wrapped command's arguments.
+  const split = process.argv.indexOf("--");
+  const own = split < 0 ? process.argv : process.argv.slice(0, split);
+  const index = own.indexOf(name);
+  const value = index < 0 ? undefined : own[index + 1];
+  if (!value) {
+    if (optional) return "";
+    throw new Error(`Missing ${name}`);
+  }
   return value;
 }
 function save(path: string, data: unknown) {
@@ -185,6 +385,33 @@ if (import.meta.main) {
       );
     }
     if (interrupted) exitCode = 130;
+    // Comparison-only evidence for this task; never part of its verdict.
+    const comparison: ComparisonTaskFields = {};
+    const role = argument("--role", true);
+    if (role === "source" || role === "unit") {
+      try {
+        const postgres =
+          role === "unit"
+            ? (
+                readJson(argument("--postgres-evidence", true)) as {
+                  serverVersion?: unknown;
+                } | null
+              )?.serverVersion
+            : null;
+        comparison.environment = environmentIdentity(role, process.env, {
+          node: nodeVersion(),
+          postgres: typeof postgres === "string" && postgres ? postgres : null,
+        });
+      } catch {
+        /* missing environment evidence makes the run non-comparable, never red */
+      }
+    }
+    const units = (readJson(argument("--units", true)) as { units?: unknown } | null)?.units;
+    if (Array.isArray(units))
+      comparison.units = units as NonNullable<ComparisonTaskFields["units"]>;
+    const steps = (readJson(argument("--steps", true)) as { steps?: unknown } | null)?.steps;
+    if (Array.isArray(steps))
+      comparison.steps = steps as NonNullable<ComparisonTaskFields["steps"]>;
     // Setup success is not test success. If a later test is killed, do not
     // leave a stale green setup receipt masquerading as that test's result.
     if (exitCode !== 0 || !process.argv.slice(0, split).includes("--failure-only")) {
@@ -196,6 +423,7 @@ if (import.meta.main) {
         exitCode,
         startedAt,
         finishedAt: new Date().toISOString(),
+        ...comparison,
       });
     }
     process.exit(exitCode < 0 ? 1 : exitCode);
@@ -223,7 +451,41 @@ if (import.meta.main) {
         units: process.env.UNITS_RESULT ?? "unknown",
       },
     );
-    save(argument("--output"), result);
+    const output: Record<string, unknown> = { ...result };
+    const planDirectory = argument("--plan-dir", true);
+    const comparisonOutput = argument("--comparison-output", true);
+    if (planDirectory) {
+      const batch = readJson(join(planDirectory, "batch.json")) as { purpose?: unknown } | null;
+      // A base-comparison result can never verify as a candidate result.
+      if (batch?.purpose === BASE_PURPOSE) output.purpose = BASE_PURPOSE;
+      if (comparisonOutput) {
+        try {
+          const evidence = buildComparisonEvidence({
+            identity,
+            unitShards: units,
+            receipts,
+            verifiedJobs: result.tasks.map((task) => task.job),
+            batch,
+            plan: readJson(join(planDirectory, "execution-plan.json")),
+            inventory: readJson(join(planDirectory, "inventory.json")),
+          });
+          if (evidence) {
+            save(comparisonOutput, evidence);
+            output.comparison = {
+              comparisonSchema: COMPARISON_SCHEMA,
+              purpose: evidence.purpose,
+              evidenceDigest: digest(evidence),
+            };
+          }
+        } catch (error) {
+          console.error(
+            "Comparison evidence unavailable; attribution will hold:",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+    }
+    save(argument("--output"), output);
     console.log(
       JSON.stringify({
         outcome: result.outcome,
