@@ -1,9 +1,15 @@
 import { expect, test } from "bun:test";
 import { waitFor } from "@opengeni/testing/process";
 import type { SessionListChangeSource, SessionListNotification } from "@opengeni/db";
-import { subscribeSessionListHints, type SessionListHint } from "../src/http/session-list-hints";
+import {
+  subscribeSessionListHints,
+  type SessionListHint,
+  type SessionListHintIds,
+} from "../src/http/session-list-hints";
 
-function fixture(authorizeIds: (ids: string[]) => Promise<string[]> = async (ids) => ids) {
+function fixture(
+  authorizeIds: (ids: string[]) => Promise<SessionListHintIds> = async (ids) => ids,
+) {
   let listener: ((event: SessionListNotification) => void) | undefined;
   const source: SessionListChangeSource = {
     subscribe(fn) {
@@ -129,4 +135,33 @@ test("workspace reconciliation reveals no revoked IDs and unsubscribe releases t
   f.change("late");
   await Bun.sleep(15);
   expect(f.frames).toHaveLength(2);
+});
+
+test("Site conversations travel separately so ordinary lists can ignore them", async () => {
+  const f = fixture(async (ids) => ({
+    sessionIds: ids.filter((id) => !id.startsWith("site-")),
+    siteSessionIds: ids.filter((id) => id.startsWith("site-")),
+  }));
+  try {
+    await waitFor(() => f.frames.length === 1);
+    f.change("site-a");
+    await waitFor(() => f.frames.length === 2);
+    expect(f.frames[1]).toEqual({
+      type: "workspace.sessions.changed",
+      workspaceId: "workspace",
+      available: true,
+      sessionIds: [],
+      siteSessionIds: ["site-a"],
+    });
+    f.change("plain");
+    await waitFor(() => f.frames.length === 3);
+    expect(f.frames[2]).toEqual({
+      type: "workspace.sessions.changed",
+      workspaceId: "workspace",
+      available: true,
+      sessionIds: ["plain"],
+    });
+  } finally {
+    f.stop();
+  }
 });

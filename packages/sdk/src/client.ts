@@ -825,6 +825,13 @@ export type SessionListPageOptions = {
   mineOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
+  /**
+   * Conversations that run inside a Site are left out of ordinary lists.
+   * `include` lists them as ordinary rows; `group` (a root page) keeps them
+   * out of the rows and returns one `siteGroups` entry per Site and project.
+   * Older servers omit the `siteConversations` receipt and the Site rows.
+   */
+  siteConversations?: "include" | "group";
   limit?: number;
   parentSessionId?: string | null;
   /** Only sessions carrying this exact opaque end-user label. */
@@ -1998,6 +2005,7 @@ export class OpenGeniClient {
       if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
+      if (options.siteConversations) query.siteConversations = options.siteConversations;
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
         "GET",
         path,

@@ -1042,6 +1042,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
           ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
+          ...(query.siteConversations ? { siteConversations: query.siteConversations } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -5891,6 +5892,7 @@ export function sessionListQuery(
 ): {
   originSiteId: string | undefined;
   siteAccessId: string | undefined;
+  siteConversations: "include" | "group" | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -5925,6 +5927,33 @@ export function sessionListQuery(
     });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
+  const siteConversations = query.siteConversations;
+  if (siteConversations !== undefined) {
+    if (siteConversations !== "include" && siteConversations !== "group")
+      throw new HTTPException(400, { message: 'siteConversations must be "include" or "group"' });
+    if (!allowCursor)
+      throw new HTTPException(400, { message: 'siteConversations requires view="page"' });
+    // A Site's own history is already explicit; Site frames never reach this.
+    if (originSiteId !== undefined || siteAccessId !== undefined)
+      throw new HTTPException(400, {
+        message: "siteConversations cannot be combined with a Site filter",
+      });
+    if (
+      siteConversations === "group" &&
+      (query.parentSessionId !== "null" || query.pinsOnly === "true")
+    )
+      throw new HTTPException(400, {
+        message: 'siteConversations="group" requires a root page (parentSessionId=null)',
+      });
+    // Archived is a flat list: its Site conversations are ordinary rows.
+    if (
+      siteConversations === "group" &&
+      (query.archiveStatus === "archived" || query.archivedOnly === "true")
+    )
+      throw new HTTPException(400, {
+        message: 'siteConversations="group" cannot list archived sessions; use "include"',
+      });
+  }
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -6092,6 +6121,7 @@ export function sessionListQuery(
     limit: query.limit,
     originSiteId,
     siteAccessId,
+    siteConversations,
     parentSessionId:
       parentSessionId === undefined
         ? undefined

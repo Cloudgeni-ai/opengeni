@@ -18,12 +18,27 @@
   Site service execution and limits, with an immutable Site/viewer audience on
   the native session and descendants. A guest's existing cookie/visitor principal
   supplies continuity; losing it does not grant access to another visit.
-- Site sessions are omitted from ordinary workspace lists, sidebar, pins,
-  message search and discovery snapshots, including for their owner. Explicit
-  Site history is still available through the Site's Conversations tab and
-  `originSiteId` filter, only for the authorized viewer. Hiding is presentation;
-  native authorization and restrictive RLS independently protect reads, events,
-  files, controls and agent descendants, including direct guessed URLs.
+- Site sessions are omitted from ordinary workspace lists, message search and
+  discovery snapshots, including for their owner. Explicit Site history is
+  available through the Site's Conversations tab and `originSiteId` filter,
+  only for the authorized viewer. Hiding is presentation; native authorization
+  and restrictive RLS independently protect reads, events, files, controls and
+  agent descendants, including direct guessed URLs.
+- The console sidebar opts in with the session list's `siteConversations`
+  option. `group` (a non-archived root page) keeps Site conversations out of
+  the rows and returns `siteGroups` with its first page: one complete row per
+  Site and project with the viewer's conversation count over the requested
+  archive scope, latest activity and status counts, bounded to the 200 most
+  recently active (`siteGroupsTruncated` marks more). Its continuation pages
+  are ordinary default pages. `include` lists them as ordinary rows and is
+  bound into its cursor; the sidebar uses it for search, Archived, pins and
+  work a Site conversation spawned. Both use the same viewer authorization,
+  so another viewer's private Site conversation is never counted, titled or
+  listed, and agent callers keep their own-root bound. List hints report the
+  viewer's changed Site conversations separately as `siteSessionIds`, so
+  ordinary lists ignore them. A Site row is stable: its conversations stay
+  nested under it, collapsed by default, whichever session is open. A Site's
+  title in its row refreshes with the next list read.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

@@ -15,6 +15,13 @@ export type WorkspaceSessionListEvent = {
   workspaceId: string;
   available: boolean;
   sessionIds: string[] | null;
+  /**
+   * Changed Site conversations visible to this viewer. Ordinary lists omit
+   * them; only a surface that shows Site conversations needs these. A hint
+   * whose `sessionIds` is empty and that carries only these changes nothing
+   * for ordinary lists.
+   */
+  siteSessionIds?: string[];
 };
 
 export type WorkspaceLiveEvent =
@@ -117,7 +124,11 @@ export function parseWorkspaceLiveEvent(data: string): WorkspaceLiveEvent | null
     (value.sessionIds === null ||
       (Array.isArray(value.sessionIds) && value.sessionIds.every((id) => typeof id === "string")))
   ) {
-    return value as WorkspaceSessionListEvent;
+    const { siteSessionIds, ...hint } = value as WorkspaceSessionListEvent;
+    // An unexpected extension is dropped rather than failing the whole hint.
+    return Array.isArray(siteSessionIds) && siteSessionIds.every((id) => typeof id === "string")
+      ? { ...hint, siteSessionIds }
+      : hint;
   }
   if (typeof value.sequence !== "number") return null;
   if (

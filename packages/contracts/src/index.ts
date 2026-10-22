@@ -16246,6 +16246,37 @@ export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
 export type SessionListTotals = z.infer<typeof SessionListTotals>;
 
 /**
+ * One Site's own root conversations in one project, for a rail that shows
+ * Sites as rows. Counts cover the complete authorized, unpinned, non-archived
+ * set independent of page size; never a guess from loaded rows.
+ */
+export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    channelId: z.string().uuid().nullable(),
+    /** The Site's current title when the viewer can read it, else its creation label. */
+    title: z.string(),
+    /** Root conversations in the group. */
+    conversations: z.number().int().positive(),
+    /** Latest activity across the group's conversations. */
+    updatedAt: z.string().datetime(),
+    /** Creation time of the group's newest conversation. */
+    createdAt: z.string().datetime(),
+    /** The same status counts as a project total, over the group's trees. */
+    total: z.number().int().nonnegative(),
+    attention: z.number().int().nonnegative(),
+    attentionSince: z.string().datetime().nullable(),
+    failed: z.number().int().nonnegative(),
+    active: z.number().int().nonnegative(),
+    queued: z.number().int().nonnegative(),
+    waiting: z.number().int().nonnegative(),
+    unread: z.number().int().nonnegative(),
+    activeWork: z.number().int().nonnegative(),
+  }),
+);
+export type SiteConversationGroup = z.infer<typeof SiteConversationGroup>;
+
+/**
  * The canonical session-list page. Pinned rows are returned separately and are
  * excluded from `sessions`, so a cursor can page ordinary recency rows without
  * duplicating a pin. The newest 100 matching pins are returned, ordered by
@@ -16269,6 +16300,16 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     sortBy: z.enum(["updatedAt", "createdAt", "name", "archivedAt"]).optional(),
     archiveStatus: z.enum(["active", "archived", "all"]).optional(),
     originSiteId: z.string().uuid().optional(),
+    /**
+     * Receipt for `siteConversations`. `include` lists Site conversations as
+     * ordinary rows; `group` keeps them out of the rows and returns
+     * `siteGroups` instead. Absent: they are omitted, as before.
+     */
+    siteConversations: z.enum(["include", "group"]).optional(),
+    /** Complete Site rows for a `group` root page, newest activity first. */
+    siteGroups: z.array(SiteConversationGroup).optional(),
+    /** True when Site rows beyond the server bound were omitted. */
+    siteGroupsTruncated: z.literal(true).optional(),
     /** True when older matching pins were omitted from this bounded page. */
     pinnedTruncated: z.boolean().optional(),
     sessions: z.array(Session),

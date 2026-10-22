@@ -188,9 +188,11 @@ import {
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
+  parseSiteRowKey,
   relativeTimeLabel,
   sessionBrowseResultCount,
   selectedDescendantNode,
+  siteRowConversationCount,
   sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
@@ -450,6 +452,9 @@ export function SessionList() {
     mineOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
+    // Sites are rows of their own: their conversations nest under them and
+    // arrive as complete Site rows. Search and Archived list them as rows.
+    siteConversations: hierarchyMode && browseStatus !== "archived" ? "group" : "include",
     archiveStatus: browseStatus,
     ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
@@ -463,6 +468,7 @@ export function SessionList() {
     projection: "summary",
     limit: 1,
     pinsOnly: true,
+    siteConversations: "include",
     includeTotals: !hierarchyMode || browseStatus === "archived",
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
@@ -526,8 +532,16 @@ export function SessionList() {
   );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
-    if (workspaceSessionListEvent.available)
-      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+    if (!workspaceSessionListEvent.available) return;
+    const { sessionIds, siteSessionIds = [] } = workspaceSessionListEvent;
+    // A Site conversation the rail has not loaded sits in a collapsed Site
+    // row, whose summary arrives with the root page this always re-reads.
+    // Only loaded ones dirty their own branch; none forces a full reload.
+    void refreshSessionPages(
+      sessionIds === null
+        ? null
+        : [...sessionIds, ...siteSessionIds.filter((id) => knownListSessions.current.has(id))],
+    );
   }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
   useEffect(() => {
     if (workspaceControlEvent) void refreshSessionPages();
@@ -716,7 +730,8 @@ export function SessionList() {
     branchSummaryKeys.current.clear();
     activeBranchHydration.current = null;
     setChildPages(new Map());
-  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
+    // Site rows list root conversations, so the root filters scope them too.
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus, needsYouOnly, mineOnly]);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -1475,9 +1490,22 @@ export function SessionList() {
   const railSections = useMemo(
     () =>
       buildPinnedRailSections(projectedSessions, new Date(), {
-        groupSites: hierarchyMode && browseGroupBy === "project",
+        // Sites are stable rows whenever the rail is a hierarchy. Search is
+        // flat: a matching conversation is listed as itself.
+        groupSites: hierarchyMode,
+        siteGroups: rootPage.siteGroups ?? undefined,
+        siteRowsByProject: channelMode,
+        workspaceId: rail.workspaceId,
+        creator: { kind: "subject", subjectId: context.accessContext.subjectId },
       }),
-    [projectedSessions, hierarchyMode, browseGroupBy],
+    [
+      projectedSessions,
+      hierarchyMode,
+      rootPage.siteGroups,
+      channelMode,
+      rail.workspaceId,
+      context.accessContext.subjectId,
+    ],
   );
   const forest = useMemo(
     () =>
@@ -1939,8 +1967,15 @@ export function SessionList() {
       for (const node of bucket.sessions) visit(node);
     }
     for (const node of archivedNodes) visit(node);
+    // Site rows are presentation-only; register them by key for disclosure.
+    for (const node of [
+      ...railSections.ordinary.running,
+      ...railSections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ]) {
+      if (node.siteGroup && !result.has(node.session.id)) result.set(node.session.id, node);
+    }
     return result;
-  }, [archivedNodes, railSections.complete]);
+  }, [archivedNodes, railSections.complete, railSections.ordinary]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -2007,11 +2042,24 @@ export function SessionList() {
       );
       try {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        // A Site row's "children" are the Site's own root conversations.
+        const siteRow = parseSiteRowKey(parentSessionId);
         const page = await readLoadedSessionBranchWindow(
           (pageCursor) =>
             context.client.listSessionSummaryPage(rail.workspaceId, {
               limit: 50,
-              parentSessionId,
+              ...(siteRow
+                ? {
+                    parentSessionId: null,
+                    originSiteId: siteRow.siteId,
+                    ...(siteRow.channelId !== undefined ? { channelId: siteRow.channelId } : {}),
+                    // Its conversations are roots: list exactly the set the
+                    // Site row's count was computed over.
+                    ...(needsYouOnly ? { needsYouOnly: true } : {}),
+                    ...(mineOnly ? { mineOnly: true } : {}),
+                  }
+                : // Work spawned by a Site conversation runs inside the Site too.
+                  { parentSessionId, siteConversations: "include" as const }),
               ...(pageCursor ? { cursor: pageCursor } : {}),
               archiveStatus: browseStatus,
               sortBy: browseSortBy,
@@ -2051,6 +2099,8 @@ export function SessionList() {
       branchReadRevision,
       browseSortBy,
       browseStatus,
+      needsYouOnly,
+      mineOnly,
     ],
   );
   // The active route supplies exact child + ancestor detail even before the
@@ -2146,6 +2196,46 @@ export function SessionList() {
       });
     }
   }, [allSessions, childPages, context.session, expanded, loadChildPage, branchReadRevision]);
+  // A loaded Site row follows its complete server summary: a new or newly
+  // active conversation reloads an open Site and marks a closed one stale.
+  const siteRowSummaryKeys = useRef(new Map<string, string>());
+  useEffect(() => {
+    const newlyStale = new Set<string>();
+    for (const [key, page] of childPages) {
+      if (!parseSiteRowKey(key)) continue;
+      const summary = nodesById.get(key)?.siteSummary;
+      // Membership and status always matter; activity time only when the
+      // rows are ordered by it.
+      const next = summary
+        ? [
+            summary.conversations,
+            summary.total,
+            summary.attention,
+            summary.failed,
+            summary.active,
+            summary.queued,
+            summary.waiting,
+            summary.unread,
+            browseSortBy === "updatedAt" ? summary.updatedAt : "",
+          ].join(":")
+        : "";
+      const previous = siteRowSummaryKeys.current.get(key);
+      if (page.loading) continue;
+      siteRowSummaryKeys.current.set(key, next);
+      if (previous === undefined || previous === next) continue;
+      if (expanded.has(key)) void loadChildPage(key, undefined, { feedbackVisible: false });
+      else if (!page.stale) newlyStale.add(key);
+    }
+    if (newlyStale.size === 0) return;
+    setChildPages((current) => {
+      const next = new Map(current);
+      for (const key of newlyStale) {
+        const page = next.get(key);
+        if (page) next.set(key, { ...page, stale: true });
+      }
+      return next;
+    });
+  }, [childPages, expanded, loadChildPage, nodesById, browseSortBy]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -2162,9 +2252,9 @@ export function SessionList() {
         return next;
       });
       const node = nodesById.get(sessionId);
-      if (sessionId.startsWith("site:")) return;
-      const knownDirectChildren =
-        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      const knownDirectChildren = node?.siteGroup
+        ? siteRowConversationCount(node)
+        : (node?.session.treeStats?.directChildren ?? node?.children.length ?? 0);
       if (
         opening &&
         hierarchyMode &&
@@ -3502,6 +3592,11 @@ export function SessionList() {
                 ) : null}
               </>
             ) : null}
+            {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+              <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                Some older Sites aren&apos;t shown. Search to find their conversations.
+              </p>
+            ) : null}
             {browseStatus === "archived" ? null : channelMode ? (
               renderedChannelSections.map((section) => (
                 <SessionGroup
@@ -4209,15 +4304,20 @@ function SessionGroup(props: {
   );
 }
 
-/** A node plus, when expanded, its spawned children rendered one level deeper. */
+/**
+ * A Site row. Its conversations stay nested under it whichever session is
+ * open: collapsed it shows only the selected one, expanded it lists them all.
+ */
 function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
   const { node } = props;
   const origin = node.siteGroup!;
-  const key = `site:${origin.siteId}`;
+  const key = node.session.id;
   const expanded = props.expanded.has(key);
-  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const summary = summarizeRailNodes([node], props.localDeliveryAttention);
   const selected = selectedDescendantNode(node, props.activeSessionId);
   const children = expanded ? node.children : selected ? [selected] : [];
+  const page = props.childPages.get(key);
+  const count = siteRowConversationCount(node);
   return (
     <div role="listitem" className="min-w-0">
       <SiteSessionGroupHeading
@@ -4226,8 +4326,11 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
         expanded={expanded}
         onToggle={() => props.onToggleExpand(key)}
         summary={summary}
+        count={count}
+        relativeTime={relativeTimeLabel(t, node.session.updatedAt)}
+        depth={props.depth}
       />
-      {children.length > 0 && (
+      {children.length > 0 || (expanded && page) ? (
         <div role="list" aria-label={`Conversations from ${origin.title}`}>
           {children.map((child) => (
             <SessionTreeRow
@@ -4235,10 +4338,28 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
               {...props}
               node={child}
               depth={props.depth + 1}
+              siteNested
             />
           ))}
+          {expanded && page?.loading && page.feedbackVisible ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading conversations…" />
+          ) : null}
+          {expanded && page?.failed && page.feedbackVisible ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading conversations"
+              onClick={() => void props.onLoadMoreChildren(key, page.retryCursor ?? undefined)}
+            />
+          ) : null}
+          {expanded && !page?.loading && !page?.failed && page?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(key, page.nextCursor!)}
+            />
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -4262,6 +4383,8 @@ function SessionTreeRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  /** Listed under its Site row, which already names the Site. */
+  siteNested?: boolean | undefined;
 }) {
   const { node } = props;
   if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
@@ -4306,6 +4429,7 @@ function SessionTreeRow(props: {
         onUpdateAttention={props.onUpdateAttention}
         onArchive={props.onArchive}
         onRequestDelete={props.onRequestDelete}
+        siteNested={props.siteNested}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -4435,6 +4559,7 @@ function SessionRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  siteNested?: boolean | undefined;
 }) {
   const rail = useRail();
   const context = useAppContext();
@@ -4581,7 +4706,7 @@ function SessionRow(props: {
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
-          <SiteOriginLink session={props.session} compact />
+          {props.siteNested ? null : <SiteOriginLink session={props.session} compact />}
           <HoverCard
             openDelay={100}
             closeDelay={80}

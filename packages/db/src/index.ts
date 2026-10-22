@@ -783,6 +783,7 @@ import type {
   SessionMemoryScope,
   SessionListResponse,
   SessionListTotals,
+  SiteConversationGroup,
   SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -32021,6 +32022,13 @@ export type SessionListFilterOptions = {
   siteAccessId?: string;
   /** Sessions created through this published Site, independent of project. */
   originSiteId?: string;
+  /**
+   * Ordinary discovery omits conversations that run inside a Site. `include`
+   * lists them as ordinary rows (search, pins, branches); `group` keeps them
+   * out of root rows but counts them in totals and returns `siteGroups`.
+   * Presentation only: native ownership and Site RLS still decide access.
+   */
+  siteConversations?: "include" | "group";
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
   /** Exact frozen creator identity. */
@@ -33037,12 +33045,17 @@ async function sessionListTotalsInScope(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
-): Promise<SessionListTotals> {
+  withSiteRows = false,
+): Promise<SessionListTotals & { sites: SiteConversationGroup[]; sitesTruncated: boolean }> {
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+  // A grouped rail counts Site conversations in its project totals and gets
+  // their Site rows here; its ordinary rows still omit them.
+  const siteConversations = options.siteConversations ? "include" : undefined;
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
     ...sessionFilters({
       ...options,
+      ...(siteConversations ? { siteConversations } : {}),
       parentSessionId: null,
       needsYouOnly: false,
       archiveStatus: "all",
@@ -33051,7 +33064,11 @@ async function sessionListTotalsInScope(
       ? []
       : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
   );
-  const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
+  const rows = await rawRows<{
+    needsYouCount: number;
+    groups: SessionListTotals["groups"];
+    sites: SiteConversationGroup[] | null;
+  }>(
     db,
     sql`
     -- Inline this subject's state so each lateral lookup can use the session
@@ -33072,6 +33089,11 @@ async function sessionListTotalsInScope(
         ${schema.sessions.activeTurnId} as active_turn_id,
         ${schema.sessions.inputWaitUntil} as input_wait_until,
         ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${schema.sessions.siteId} as site_id,
+        ${schema.sessions.siteAccessRootId} is not null as site_conversation,
+        ${schema.sessions.updatedAt} as updated_at,
+        ${schema.sessions.createdAt} as created_at,
+        ${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'title' as origin_title,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
         coalesce(root_personal.archived, false) as archived,
         coalesce(root_personal.pinned, false) as pinned,
@@ -33142,6 +33164,9 @@ async function sessionListTotalsInScope(
       from roots root left join attention_roots attention on attention.root_id = root.id
     ), measured as (
       select nodes.*,
+        root.site_conversation as root_site_conversation, root.site_id as root_site_id,
+        root.updated_at as root_updated_at, root.created_at as root_created_at,
+        root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
         nodes.actively_working as active_work,
         case when nodes.status = 'requires_action' then (
@@ -33198,20 +33223,90 @@ async function sessionListTotalsInScope(
         count(*) filter (where unread)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
+    ), site_rows as (
+      -- One row per Site and project over the requested archive scope; pinned
+      -- conversations live in the pinned section. The title is the Site's
+      -- current one when its audience includes this viewer (the catalog's
+      -- rule; RLS only isolates the workspace), else the creation-time label.
+      -- One extra row reports truncation.
+      select root.site_id as "siteId", root.channel_id as "channelId",
+        coalesce((
+          select site.title from ${schema.workspaceArtifacts} site
+          where site.workspace_id = ${workspaceId} and site.id = root.site_id
+            and (site.visibility = 'workspace_shared' or site.owner_subject_id = ${options.subjectId})
+        ), (array_agg(root.origin_title order by root.updated_at desc, root.id desc)
+          filter (where root.origin_title is not null))[1], '') as title,
+        count(*)::int as conversations,
+        max(root.updated_at) as "updatedAt",
+        max(root.created_at) as "createdAt"
+      from roots root
+      where ${
+        withSiteRows
+          ? sql`root.site_conversation and root.site_id is not null and not root.pinned
+            ${
+              options.needsYouOnly
+                ? sql`and root.id in (select id from root_attention where needs_you)`
+                : sql``
+            }`
+          : sql`false`
+      }
+      group by root.site_id, root.channel_id
+      order by max(root.updated_at) desc, root.site_id, root.channel_id
+      limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
+    ), site_status as (
+      -- Status counts follow project totals: active, unpinned trees only.
+      select root_site_id, channel_id, count(*)::int as total,
+        count(*) filter (where status = 'requires_action')::int as attention,
+        min(attention_since) as "attentionSince",
+        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where pause_revision is null and
+          (status in ('running', 'recovering') or input_wait))::int as active,
+        count(*) filter (where pause_revision is null and
+          status in ('queued', 'waiting_capacity'))::int as queued,
+        count(*) filter (where pause_revision is null and input_wait)::int as waiting,
+        count(*) filter (where unread)::int as unread,
+        count(*) filter (where active_work)::int as "activeWork"
+      from measured
+      where ${withSiteRows ? sql`root_site_conversation and root_site_id is not null` : sql`false`}
+      group by root_site_id, channel_id
+    ), site_grouped as (
+      select site_rows.*, coalesce(status.total, 0) as total,
+        coalesce(status.attention, 0) as attention, status."attentionSince",
+        coalesce(status.failed, 0) as failed, coalesce(status.active, 0) as active,
+        coalesce(status.queued, 0) as queued, coalesce(status.waiting, 0) as waiting,
+        coalesce(status.unread, 0) as unread, coalesce(status."activeWork", 0) as "activeWork"
+      from site_rows left join site_status status
+        on status.root_site_id = site_rows."siteId"
+        and status.channel_id is not distinct from site_rows."channelId"
     )
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
-      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups
+      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
+      coalesce((select jsonb_agg(to_jsonb(site_grouped)
+        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        from site_grouped), '[]'::jsonb) as sites
   `,
   );
   const result = rows[0];
+  const iso = (value: string | null) => (value ? new Date(value).toISOString() : null);
+  const sites = result?.sites ?? [];
   return {
     needsYouCount: Number(result?.needsYouCount ?? 0),
     groups: (result?.groups ?? []).map((group) => ({
       ...group,
-      attentionSince: group.attentionSince ? new Date(group.attentionSince).toISOString() : null,
+      attentionSince: iso(group.attentionSince),
     })),
+    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map((site) => ({
+      ...site,
+      updatedAt: iso(site.updatedAt)!,
+      createdAt: iso(site.createdAt)!,
+      attentionSince: iso(site.attentionSince),
+    })),
+    sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
+
+/** Defensive bound on Site rows; a person rarely has conversations in more. */
+export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
 function sessionFilters(
   options: Pick<
@@ -33225,6 +33320,7 @@ function sessionFilters(
     | "channelId"
     | "originSiteId"
     | "siteAccessId"
+    | "siteConversations"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -33258,9 +33354,14 @@ function sessionFilters(
       eq(schema.sessions.siteId, options.originSiteId),
       sql`${schema.sessions.siteAccessRootId} is not null`,
     );
-  } else {
+  } else if (
+    options.siteConversations !== "include" ||
+    options.authorizationScope?.agentAccessViewer
+  ) {
     // App-internal execution is not ordinary workspace conversation discovery.
     // This is presentation scope only: native ownership and Site RLS still apply.
+    // The console rail opts in explicitly (`include` or `group`); agent
+    // callers keep their own-root bound so the option never widens discovery.
     const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
     filters.push(
       ownRoot
@@ -33511,6 +33612,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !hasChannel &&
     !options.originSiteId &&
     !options.siteAccessId &&
+    options.siteConversations !== "include" &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33526,6 +33628,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   return JSON.stringify([
     ...(options.siteAccessId ? [["siteAccess", options.siteAccessId]] : []),
     ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
+    // `group` returns the same rows as the default; only `include` changes them.
+    ...(options.siteConversations === "include" ? [["siteConversations", "include"]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
@@ -33883,7 +33987,27 @@ export async function listVisibleSessionInvalidationIds(
   sessionIds: string[],
   authority: SessionListReadAuthority,
 ): Promise<string[]> {
-  if (!sessionIds.length) return [];
+  return (await listVisibleSessionInvalidationHints(db, workspaceId, sessionIds, authority))
+    .sessionIds;
+}
+
+/**
+ * Ordinary IDs plus, separately, the viewer's own visible Site conversations.
+ * A rail with Site rows refreshes their summaries for the latter without
+ * treating every unknown Site conversation as a full list invalidation.
+ */
+export async function listVisibleSessionInvalidationHints(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<{ sessionIds: string[]; siteSessionIds: string[] }> {
+  if (!sessionIds.length) return { sessionIds: [], siteSessionIds: [] };
+  // Exactly the rows ordinary discovery omits (an agent keeps its own root).
+  const ownRoot = authority.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+  const siteOnly = ownRoot
+    ? sql<boolean>`(${schema.sessions.siteAccessRootId} is not null and ${schema.sessions.rootSessionId} is distinct from ${ownRoot}::uuid)`
+    : sql<boolean>`${schema.sessions.siteAccessRootId} is not null`;
   return await withWorkspaceSubjectRls(
     db,
     workspaceId,
@@ -33891,16 +34015,24 @@ export async function listVisibleSessionInvalidationIds(
     async (tx) => {
       await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
       const rows = await tx
-        .select({ id: schema.sessions.id })
+        .select({
+          id: schema.sessions.id,
+          site: siteOnly,
+        })
         .from(schema.sessions)
         .where(
           and(
             eq(schema.sessions.workspaceId, workspaceId),
             inArray(schema.sessions.id, sessionIds),
-            ...sessionFilters({ ...authority, archiveStatus: "all" }),
+            // Hints carry no content. Site conversations use the same viewer
+            // authorization (and agent bound) as `siteConversations=include`.
+            ...sessionFilters({ ...authority, archiveStatus: "all", siteConversations: "include" }),
           ),
         );
-      return rows.map((row) => row.id);
+      return {
+        sessionIds: rows.filter((row) => !row.site).map((row) => row.id),
+        siteSessionIds: rows.filter((row) => row.site).map((row) => row.id),
+      };
     },
     { isolationLevel: "read committed" },
   );
@@ -33931,16 +34063,43 @@ async function readSessionListForSubject(
         }
         if (options.includeTotals && options.parentSessionId !== null && !options.pinsOnly)
           throw new SessionListCursorError("Attention totals require root or global pin pages");
-        const totals = options.includeTotals
-          ? await sessionListTotalsInScope(
-              tx,
-              workspaceId,
-              options.pinsOnly
-                ? { ...options, archiveStatus: "active", parentSessionId: null }
-                : options,
-            )
-          : undefined;
+        const groupSites = options.siteConversations === "group";
+        if (
+          groupSites &&
+          (options.parentSessionId !== null ||
+            options.pinsOnly ||
+            archiveMode === "archived" ||
+            options.originSiteId ||
+            options.siteAccessId)
+        )
+          throw new SessionListCursorError("Site rows require an ordinary, non-archived root page");
+        // Site rows are a complete section like pins: read once, with page one.
+        const siteGroupsRequested = groupSites && !options.cursor;
+        const completeTotals =
+          options.includeTotals || siteGroupsRequested
+            ? await sessionListTotalsInScope(
+                tx,
+                workspaceId,
+                options.pinsOnly
+                  ? { ...options, archiveStatus: "active", parentSessionId: null }
+                  : options,
+                siteGroupsRequested,
+              )
+            : undefined;
+        const totals =
+          options.includeTotals && completeTotals
+            ? { needsYouCount: completeTotals.needsYouCount, groups: completeTotals.groups }
+            : undefined;
+        const siteGroups = siteGroupsRequested ? (completeTotals?.sites ?? []) : undefined;
+        const siteGroupsTruncated = siteGroupsRequested && completeTotals?.sitesTruncated === true;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
+        // A pinned Site conversation is a personal shortcut like any other pin.
+        const pinnedFilters = groupSites
+          ? [
+              eq(schema.sessions.workspaceId, workspaceId),
+              ...sessionFilters({ ...options, siteConversations: "include" }),
+            ]
+          : filters;
         const ordinaryPinFilter =
           archiveMode === "archived"
             ? sql`true`
@@ -34270,7 +34429,7 @@ async function readSessionListForSubject(
                     eq(schema.sessionPins.workspaceId, workspaceId),
                     eq(schema.sessionPins.subjectId, options.subjectId),
                     eq(schema.sessionPins.pinned, true),
-                    ...filters,
+                    ...pinnedFilters,
                   ),
                 )
                 .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
@@ -34403,6 +34562,9 @@ async function readSessionListForSubject(
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             ...(options.mineOnly ? { mineOnly: true as const } : {}),
+            ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
+            ...(siteGroups ? { siteGroups } : {}),
+            ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -34415,6 +34577,9 @@ async function readSessionListForSubject(
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           ...(options.mineOnly ? { mineOnly: true as const } : {}),
+          ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
+          ...(siteGroups ? { siteGroups } : {}),
+          ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),

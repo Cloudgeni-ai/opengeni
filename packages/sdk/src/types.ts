@@ -2046,6 +2046,32 @@ export type SessionListTotals = {
   }>;
 };
 
+/**
+ * One Site's own root conversations in one project (`siteConversations:
+ * "group"`). Counts are complete for the viewer, independent of page size.
+ */
+export type SiteConversationGroup = {
+  siteId: string;
+  channelId: string | null;
+  /** The Site's current title when the viewer can read it, else its creation label. */
+  title: string;
+  /** Root conversations in the group. */
+  conversations: number;
+  /** Latest activity across the group's conversations. */
+  updatedAt: string;
+  /** Creation time of the group's newest conversation. */
+  createdAt: string;
+  total: number;
+  attention: number;
+  attentionSince: string | null;
+  failed: number;
+  active: number;
+  queued: number;
+  waiting: number;
+  unread: number;
+  activeWork: number;
+};
+
 export type SessionListResponse = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
@@ -2066,6 +2092,12 @@ export type SessionListResponse = {
   originSiteId?: string;
   /** Server-resolved Site access filter, when requested. */
   siteAccessId?: string;
+  /** Receipt for the requested Site conversation mode. */
+  siteConversations?: "include" | "group";
+  /** Complete Site rows for a `group` root page, newest activity first. */
+  siteGroups?: SiteConversationGroup[];
+  /** True when Site rows beyond the server bound were omitted. */
+  siteGroupsTruncated?: true;
   sessions: Session[];
   nextCursor: string | null;
 };

@@ -890,3 +890,60 @@ test("the row hover explains status, model and activity from the compact list ro
   expect(box.x + box.width).toBeLessThanOrEqual(390);
   expect(await card.innerText()).toContain("Waiting on you for 24 min");
 }, 30_000);
+
+const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
+const siteRow = (title: string) =>
+  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
+const railConversation = (title: string) =>
+  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
+const usageConversations = [
+  "Time filters across all graphs",
+  "Weekly active users by plan",
+  "Export usage to CSV",
+];
+
+/** Each conversation is listed exactly once, and still is after the rail settles. */
+async function expectEachConversationOnce(titles: string[]) {
+  const counts = () => Promise.all(titles.map((title) => railConversation(title).count()));
+  const deadline = Date.now() + 5_000;
+  while ((await counts()).some((count) => count !== 1) && Date.now() < deadline)
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  expect(await counts()).toEqual(titles.map(() => 1));
+}
+
+test("a Site row keeps its conversations nested whichever session is selected", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  await siteRow("Opengeni usage").waitFor();
+  // Collapsed by default with a count; nothing from the Site at the top level.
+  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) await railConversation(title).waitFor();
+  // Opening a nested conversation and then another session leaves the Site's
+  // conversations where they are.
+  const currentUrl = page.url();
+  await railConversation("Export usage to CSV").click();
+  await page.waitForURL((next) => next.toString() !== currentUrl);
+  await expectEachConversationOnce(usageConversations);
+  const nestedUrl = page.url();
+  await railConversation("Slack community connection test").click();
+  await page.waitForURL(
+    (next) => next.toString() !== nestedUrl && /\/sessions\//u.test(next.toString()),
+  );
+  await siteRow("Opengeni usage").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(1);
+  await expectEachConversationOnce(usageConversations);
+  // Collapsing and reopening lists them again.
+  await sidebar()
+    .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) await railConversation(title).waitFor();
+}, 30_000);
