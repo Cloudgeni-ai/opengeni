@@ -155,6 +155,113 @@ e2e(
 );
 
 e2e(
+  "a fenced action's locator wait stops at a navigation instead of acting on the next document",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-fence-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/next"
+            ? `<!doctype html><title>Next</title>
+              <input id="next" aria-label="Next field" oninput="document.querySelector('output').textContent = 'Got ' + this.value"><output></output>`
+            : `<!doctype html><title>Start</title>
+              <button onclick="setTimeout(() => { location.href = '/next'; }, 1000)">Go later</button>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    const goLater = { kind: "role", role: "button", name: "Go later" } as const;
+    const restart = async () => {
+      const observation = await driver.dispatch(
+        command(await driver.observe(initial.target.id), {
+          type: "navigate",
+          url: String(server.url),
+        }),
+      );
+      return observation!;
+    };
+    const afterNavigation = async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const observation = await driver.observe(initial.target.id);
+        if (new URL(observation.target.url).pathname === "/next") return observation;
+        await Bun.sleep(50);
+      }
+      throw new Error("the page did not navigate");
+    };
+    let initial!: BrowserObservation;
+    try {
+      initial = await driver.start(String(server.url));
+      for (const locator of [
+        { kind: "css", selector: "#next" },
+        { kind: "label", text: "Next field" },
+      ] as const) {
+        const start = await restart();
+        await expect(
+          driver.dispatch(
+            command(start, {
+              type: "batch",
+              fenceEachAction: true,
+              actions: [
+                { type: "click", locator: goLater },
+                { type: "fill", locator, value: "crossed" },
+              ],
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: "outcome_unknown",
+          message: expect.stringContaining("document_stale"),
+        });
+        expect(names(await afterNavigation())).not.toContain("Got crossed");
+      }
+
+      const clicked = await driver.dispatch(
+        command(await restart(), { type: "click", locator: goLater }),
+      );
+      await expect(
+        driver.dispatch(
+          command(clicked!, {
+            type: "fill",
+            locator: { kind: "css", selector: "#next" },
+            value: "crossed",
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "document_stale" });
+      expect(names(await afterNavigation())).not.toContain("Got crossed");
+
+      // Without fenceEachAction, a later action still follows the page.
+      const followed = await driver.dispatch(
+        command(await restart(), {
+          type: "batch",
+          actions: [
+            { type: "click", locator: goLater },
+            { type: "fill", locator: { kind: "css", selector: "#next" }, value: "crossed" },
+          ],
+        }),
+      );
+      expect(names(followed!)).toContain("Got crossed");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+e2e(
   "counts a page's own failed request but not the browser's missing-icon fetch",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-icon-failure-");
