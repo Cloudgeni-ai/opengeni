@@ -424,7 +424,10 @@ export class DesktopShell {
           this.config.productName,
           this.config.updates,
           app.getVersion(),
-          () => Menu.setApplicationMenu(this.menu()),
+          () => {
+            Menu.setApplicationMenu(this.menu());
+            if (this.updates) this.broadcast(DESKTOP_IPC.updatesChanged, this.updates.pageState);
+          },
           () => {
             this.quitConfirmed = true;
             this.quitting = true;
@@ -1129,6 +1132,10 @@ export class DesktopShell {
       if (typeof url === "string") openExternalSafely(url);
     });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
+    handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
+    handle(DESKTOP_IPC.updatesInstall, () => {
+      this.updates?.install();
+    });
     handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
     handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
       if (id === "screenRecording" || id === "accessibility") {
