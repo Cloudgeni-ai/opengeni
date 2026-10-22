@@ -91,6 +91,9 @@ async function render(node: React.ReactNode) {
   });
   return {
     container,
+    async rerender(next: React.ReactNode) {
+      await act(async () => root.render(next));
+    },
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -161,4 +164,64 @@ test("nothing to show renders no heading; failures say what didn't load", async 
   expect(text).toContain("Couldn't load Site platform activity.");
   expect(text).not.toContain("private diagnostics");
   await failed.unmount();
+});
+
+test.each([403, 503])("platform activity %i hides like 404", async (status) => {
+  const { value } = client({
+    getSitePlatformUsage: async () => {
+      throw new OpenGeniApiError(status, "unavailable", {});
+    },
+  });
+  const view = await render(
+    <module.SitesUsageSection client={value} workspaceId={WORKSPACE} range={null} />,
+  );
+  expect(view.container.textContent).toBe("");
+  await view.unmount();
+});
+
+test("a new range refetches model costs and ignores the superseded response", async () => {
+  const pending = new Map<string, (usage: InsightsSiteUsageResponse) => void>();
+  const signals = new Map<string, AbortSignal>();
+  const value = {
+    getWorkspaceInsightsSiteUsage: (
+      _workspaceId: string,
+      query: { range: string },
+      options: { signal: AbortSignal },
+    ) =>
+      new Promise<InsightsSiteUsageResponse>((resolve) => {
+        pending.set(query.range, resolve);
+        signals.set(query.range, options.signal);
+      }),
+    getSitePlatformUsage: async () => {
+      throw new OpenGeniApiError(404, "missing", {});
+    },
+  } as unknown as Client;
+  const titled = (range: "week" | "month", title: string): InsightsSiteUsageResponse => ({
+    ...siteUsage,
+    range,
+    rows: [{ ...siteUsage.rows[0]!, title }],
+  });
+
+  const view = await render(
+    <module.SitesUsageSection client={value} workspaceId={WORKSPACE} range="week" />,
+  );
+  await view.rerender(
+    <module.SitesUsageSection client={value} workspaceId={WORKSPACE} range="month" />,
+  );
+  expect([...pending.keys()]).toEqual(["week", "month"]);
+  expect(signals.get("week")?.aborted).toBe(true);
+
+  await act(async () => pending.get("week")!(titled("week", "Stale week site")));
+  expect(view.container.textContent).not.toContain("Stale week site");
+  await act(async () => pending.get("month")!(titled("month", "Month site")));
+  expect(view.container.textContent).toContain("Month site");
+
+  // A response landing after unmount is dropped too.
+  await view.rerender(
+    <module.SitesUsageSection client={value} workspaceId={WORKSPACE} range="week" />,
+  );
+  await view.unmount();
+  expect(signals.get("week")?.aborted).toBe(true);
+  await act(async () => pending.get("week")!(titled("week", "Late site")));
+  expect(view.container.textContent).not.toContain("Late site");
 });

@@ -591,7 +591,6 @@ function changeDelta(
   };
 }
 
-/** "—" with an explanation, for an amount nobody priced. */
 function MoneyValue(props: { measures: UsageMeasures; compact?: boolean }) {
   const { measures } = props;
   if (measures.calls > 0 && costUnknown(measures)) return <Unpriced />;

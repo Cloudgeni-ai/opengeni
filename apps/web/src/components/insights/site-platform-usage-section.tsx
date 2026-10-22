@@ -59,6 +59,14 @@ function platformNote(usage: SitePlatformUsage): string {
   }
 }
 
+/** "of 1M included", and how far over it when use passed the allowance. */
+function allowanceCaption(meter: SitePlatformUsage["meters"][number]): string {
+  const included = `of ${formatPlatformAmount(meter.meter, meter.allowance)} included`;
+  return meter.used > meter.allowance
+    ? `${included} · ${formatPlatformAmount(meter.meter, meter.used - meter.allowance)} over`
+    : included;
+}
+
 /**
  * One value per meter in the KPI tiles' style. Without a limit (usage_only)
  * a meter is a plain value; with one, the tile says how much is included.
@@ -79,9 +87,7 @@ export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
               key={meter.meter}
               label={PLATFORM_METER_LABELS[meter.meter]}
               value={formatPlatformAmount(meter.meter, meter.used)}
-              {...(usage.billingMode === "usage_only"
-                ? {}
-                : { caption: `of ${formatPlatformAmount(meter.meter, meter.allowance)} included` })}
+              {...(usage.billingMode === "usage_only" ? {} : { caption: allowanceCaption(meter) })}
             />
           ))}
         </StatGroup>

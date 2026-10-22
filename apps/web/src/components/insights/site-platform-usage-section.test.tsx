@@ -102,11 +102,19 @@ test("credits mode shows what's included and charged, and an engaged brake expla
       usage={platformUsage({
         billingMode: "credits",
         chargedMicros: 1_500_000,
+        meters: [
+          meter("requests", 250_000, 1_000_000),
+          meter("sql_rows_read", 12_000_000, 10_000_000),
+        ],
         brake: { engaged: true, engagedAt: "2026-10-14T10:00:00.000Z" },
       })}
     />,
   );
-  expect(tiles(view.container)[0]).toBe("Requests|250K|of 1M included");
+  // Going past what's included stays visible without a bar.
+  expect(tiles(view.container)).toEqual([
+    "Requests|250K|of 1M included",
+    "Rows read|12M|of 10M included · 2M over",
+  ]);
   const text = view.container.textContent ?? "";
   expect(text).toContain("Use above what's included is paid with credits; $1.50 charged so far.");
   expect(text).toContain("Sites are paused");

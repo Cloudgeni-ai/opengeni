@@ -6,6 +6,7 @@ import type {
 import { useEffect, useState } from "react";
 
 import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { ReasonTooltip } from "@opengeni/react/ui/disabled-reason";
 
 import { formatMoney } from "./usage-format";
 import { PartlyUnpricedMark, Quiet, Unpriced } from "./usage-values";
@@ -51,7 +52,7 @@ export function useSiteAiUsage(
 
 const SITE_COLUMNS: RowListColumn[] = [
   { id: "calls", label: "Calls", width: 76, align: "end" },
-  { id: "charged", label: "Charged", width: 96, align: "end" },
+  { id: "charged", label: "Charged", width: 96, align: "end", leadsWhenFolded: true },
   { id: "apiEquivalent", label: "API-equivalent", width: 120, align: "end", leadsWhenFolded: true },
 ];
 
@@ -78,12 +79,14 @@ export function SiteAiUsageTable({ usage }: { usage: InsightsSiteUsageResponse }
             apiEquivalent:
               row.pricedCalls > 0 ? (
                 <span className="text-sm text-fg tabular-nums">
-                  <span
-                    title={`Subscriptions: ${formatMoney(row.subscriptionApiEquivalentMicros)}; own API keys: ${formatMoney(row.ownKeyApiEquivalentMicros)}. ${row.pricedCalls} of ${row.calls} calls priced.`}
+                  <ReasonTooltip
+                    reason={`Subscriptions: ${formatMoney(row.subscriptionApiEquivalentMicros)}; own API keys: ${formatMoney(row.ownKeyApiEquivalentMicros)}.`}
                   >
-                    {row.apiEquivalentMicros > 0 ? "~" : ""}
-                    {formatMoney(row.apiEquivalentMicros)}
-                  </span>
+                    <span tabIndex={0} className="cursor-help">
+                      {row.apiEquivalentMicros > 0 ? "~" : ""}
+                      {formatMoney(row.apiEquivalentMicros)}
+                    </span>
+                  </ReasonTooltip>
                   {row.pricedCalls < row.calls ? (
                     <PartlyUnpricedMark calls={row.calls} pricedCalls={row.pricedCalls} />
                   ) : null}

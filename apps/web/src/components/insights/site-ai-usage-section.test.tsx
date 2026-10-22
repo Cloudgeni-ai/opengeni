@@ -96,9 +96,24 @@ test("model costs by Site use the Breakdown table with its money formatting", as
   // Nothing priced: a dash with its reason, never a misleading $0.
   expect(cellTexts(container, "Unpriced app").join("|")).toContain("3|$0.00|—");
   expect(container.querySelector('[aria-label="Not priced"]')).not.toBeNull();
-  expect(container.querySelector("[title]")?.getAttribute("title")).toBe(
-    "Subscriptions: $5.00; own API keys: $1.00. 18 of 20 calls priced.",
+  // The subscription / own-key split is a focusable tooltip, not a hover-only title.
+  expect(container.querySelector("[title]")).toBeNull();
+  const estimate = [...container.querySelectorAll<HTMLElement>('[tabindex="0"]')].find(
+    (element) => element.textContent === "~$9.00",
   );
+  expect(estimate).toBeDefined();
+  await act(async () => estimate!.click());
+  expect(estimate!.getAttribute("data-state")).toEndWith("open");
+  // Radix skips portals when it first loaded without a DOM (other files in one process).
+  const tooltip = document.querySelector('[data-slot="reason-tooltip"]');
+  if (tooltip) expect(tooltip.textContent).toContain("Subscriptions: $5.00; own API keys: $1.00.");
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+  // Folded on a phone, a row keeps the charge and the estimate, not just the estimate.
+  const phoneHidden = [...container.querySelectorAll("span")]
+    .filter((span) => span.textContent === "Charged " || span.textContent === "API-equivalent ")
+    .map((label) => label.parentElement?.className.includes("@max-[479px]/list:hidden"));
+  expect(phoneHidden.length).toBeGreaterThan(0);
+  expect(phoneHidden.every((hidden) => hidden === false)).toBe(true);
   expect(container.querySelectorAll("a")).toHaveLength(0);
   expect(container.innerHTML).not.toContain(usage.rows[0]!.siteId!);
   await view.unmount();
