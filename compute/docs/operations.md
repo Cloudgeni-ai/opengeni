@@ -793,9 +793,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   names at every boot, so first move it to the new template:
   `gcloud compute instance-groups managed update-instances <group>
   --instances <host> --minimal-action refresh
-  --most-disruptive-allowed-action refresh` changes only its metadata,
-  without restarting it, and refuses a template that would need the
-  machine restarted (such as a new machine type: replace those hosts).
+  --most-disruptive-allowed-action refresh` applies the new template
+  without stopping or restarting the VM (for a new bundle, that is its
+  metadata), and refuses a template that would need the machine
+  restarted (such as a new machine type: replace those hosts).
   Then run `install.sh` from the new bundle on it. A host upgraded in
   place without the refresh goes back to its old bundle when it reboots.
 - **The control service** is a Deployment: upgrade the chart with the new
