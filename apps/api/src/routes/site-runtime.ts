@@ -35,7 +35,6 @@ import {
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
   admissibleWorkspaceModel,
-  loadWorkspaceModelSelectionInput,
   resolveWorkspaceModelSelection,
   hasPermission,
   type ApiRouteDeps,
@@ -79,6 +78,7 @@ import {
 } from "../site-publishing/agent-session";
 import {
   isSubscriptionBilledModel,
+  loadSiteModelSelectionInput,
   resolveSiteOutsideModel,
   siteCreditModelIds,
   siteCreditModelSelections,
@@ -932,7 +932,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!viewer.subjectId)
         throw siteNotAvailableForViewer("agent_model", "Sign in to use your workspace's models");
       const selections = resolveWorkspaceModelSelection(
-        await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+        await loadSiteModelSelectionInput(deps, {
           ...host.scope,
           subjectId: viewer.subjectId,
         }),

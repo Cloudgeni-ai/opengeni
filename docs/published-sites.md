@@ -167,6 +167,11 @@ model instead, and when the workspace has none they are refused
 existing conversation holds a subscription model. The publication's
 `outsideAgentModel` names the model they get.
 
+Published model lists, admission checks, and the outside-workspace fallback
+resolve the current deployment and workspace catalog, as the console does.
+Database catalog changes take effect without restarting the API; the viewer's
+credential readiness, workspace policy, and subscription restrictions still apply.
+
 Direct page tools (`site.tools`) work for signed-in workspace members on the
 published host, including pages with older bundled SDKs. Catalog, declarations
 and calls, plus targeted resolve/invoke, use the same gateway as the console.
