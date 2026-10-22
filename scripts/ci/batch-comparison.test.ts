@@ -12,9 +12,11 @@ import {
 import { digest } from "../merge-batcher/model";
 import { allowlisted, validateAllowlist } from "../public-api/surface";
 import {
+  configExtends,
   executedScripts,
   executionStatus,
   expectedUnits,
+  harnessConfigs,
   policyInputs,
   RECIPE_ENTRIES,
   recipePaths,
@@ -26,6 +28,7 @@ import {
   shardProcessPlan,
   UNIT_PROCESS_CATEGORIES,
 } from "./run-unit-shard";
+import { HARNESS_TYPECHECK_PROJECTS, typecheckConfig, typecheckProjects } from "./workspace";
 
 const git = (...args: string[]) => {
   const child = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -33,6 +36,66 @@ const git = (...args: string[]) => {
   return child.stdout.toString();
 };
 const head = () => trackedBlobs(git("ls-tree", "-r", "-z", "--full-tree", "HEAD"));
+const blobId = (text: string) =>
+  new Bun.CryptoHasher("sha1")
+    .update(`blob ${Buffer.byteLength(text)}\0`)
+    .update(text)
+    .digest("hex");
+/**
+ * Compares a candidate whose source `step` failed with a base on which it
+ * passed, each with complete evidence under its own recipe.
+ */
+const sourceStepComparison = (
+  step: (typeof SOURCE_STEPS)[number],
+  baseRecipe: [string, string | null][],
+  candidateRecipe: [string, string | null][],
+) => {
+  const plan = executionPlan({
+    schemaVersion: 1,
+    unitTests: [],
+    typecheckProjects: step === "typecheck" ? ["scripts/operator"] : [],
+    guards: step === "guards" ? ["public-api"] : [],
+    exampleBuildProjects: [],
+    buildPackages: [],
+  });
+  const identity = {
+    batchId: "a".repeat(64),
+    headSha: "b".repeat(40),
+    runId: "1",
+    runAttempt: 1,
+  };
+  const evidence = (purpose: string, failed: number, recipe: [string, string | null][]) =>
+    buildComparisonEvidence({
+      identity,
+      unitShards: 0,
+      verifiedJobs: ["plan", "source"],
+      sidecars: [
+        {
+          schemaVersion: 1,
+          comparisonSchema: COMPARISON_SCHEMA,
+          ...identity,
+          job: "source",
+          environment: { runnerOs: "Linux" },
+          steps: SOURCE_STEPS.map((name) => ({ step: name, exitCode: name === step ? failed : 0 })),
+        },
+      ],
+      batch: { purpose, baseSha: "c".repeat(40), planDigest: digest(plan) },
+      plan,
+      inventory: {
+        schemaVersion: 1,
+        comparisonSchema: COMPARISON_SCHEMA,
+        planDigest: digest(plan),
+        shards: 0,
+        absent: [],
+        units: [],
+        recipePaths: recipe,
+      },
+    })!;
+  const base = evidence("base-comparison", 0, baseRecipe);
+  const candidate = evidence("candidate", step === "typecheck" ? 2 : 1, candidateRecipe);
+  expect(base.coverage.complete && candidate.coverage.complete).toBe(true);
+  return compareFailures({ outcome: "code_failure", evidence: candidate }, { evidence: base });
+};
 
 describe("execution statuses", () => {
   test("only an ordinary assertion exit is a failure verdict", () => {
@@ -257,62 +320,134 @@ describe("recipe identity", () => {
     expect(allowlisted(finding as never, allowlist, baseMajor)).not.toBeNull();
     expect(allowlisted(finding as never, narrowed, baseMajor)).toBeNull();
     const text = `${JSON.stringify(narrowed, null, 2)}\n`;
-    const oid = new Bun.CryptoHasher("sha1")
-      .update(`blob ${Buffer.byteLength(text)}\0`)
-      .update(text)
-      .digest("hex");
     const baseRecipe = recipePaths(blobs, read);
-    const candidateRecipe = recipePaths(new Map(blobs).set(path, oid), (file) =>
+    const candidateRecipe = recipePaths(new Map(blobs).set(path, blobId(text)), (file) =>
       file === path ? text : read(file),
     );
     expect(digest(candidateRecipe)).not.toBe(digest(baseRecipe));
-    const plan = executionPlan({
-      schemaVersion: 1,
-      unitTests: [],
-      typecheckProjects: [],
-      guards: ["public-api"],
-      exampleBuildProjects: [],
-      buildPackages: [],
+    expect(sourceStepComparison("guards", baseRecipe, candidateRecipe)).toMatchObject({
+      verdict: "not-comparable",
     });
-    const identity = {
-      batchId: "a".repeat(64),
-      headSha: "b".repeat(40),
-      runId: "1",
-      runAttempt: 1,
+  });
+
+  test("a harness typecheck config change is a recipe change, so the comparison holds", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    // A missing type root fails the operator project (TS2688) while every file
+    // it compiles is unchanged: the failure belongs to the config, not the code.
+    const path = typecheckConfig("scripts/operator");
+    const config = Bun.JSONC.parse(read(path)) as { compilerOptions: Record<string, unknown> };
+    config.compilerOptions.types = ["opengeni-missing-type-root"];
+    const text = `${JSON.stringify(config, null, 2)}\n`;
+    const baseRecipe = recipePaths(blobs, read);
+    const candidateRecipe = recipePaths(new Map(blobs).set(path, blobId(text)), (file) =>
+      file === path ? text : read(file),
+    );
+    expect(new Map(candidateRecipe).get(path)).toBe(blobId(text));
+    expect(digest(candidateRecipe)).not.toBe(digest(baseRecipe));
+    expect(sourceStepComparison("typecheck", baseRecipe, candidateRecipe)).toMatchObject({
+      verdict: "not-comparable",
+    });
+    // The same failure with an identical recipe is attributed to the candidate.
+    expect(sourceStepComparison("typecheck", baseRecipe, baseRecipe)).toMatchObject({
+      verdict: "new-failure-demonstrated",
+    });
+  });
+
+  test("configs found by composed path are recipe; product package configs are not", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const before = recipePaths(blobs, read);
+    const bound = new Map(before);
+    const changes = (changed: Map<string, string>, reader = read) =>
+      digest(recipePaths(changed, reader)) !== digest(before);
+    // Every harness project the typecheck step can discover is compiled with
+    // the config it composes, and each discovered one exists on this tree.
+    const harnessProjects = typecheckProjects().filter((project) => project.startsWith("scripts/"));
+    expect(harnessProjects).toEqual([...HARNESS_TYPECHECK_PROJECTS]);
+    // The runtime config of the batch controller, found by walking up.
+    for (const path of [
+      ...HARNESS_TYPECHECK_PROJECTS.map(typecheckConfig),
+      "scripts/merge-batcher/tsconfig.json",
+      "tsconfig.base.json",
+    ]) {
+      expect(bound.get(path)).toBe(blobs.get(path)!);
+      expect(changes(new Map(blobs).set(path, "0".repeat(40)))).toBe(true);
+    }
+    // Configs consulted on the way up that do not exist are bound as absent, so
+    // adding one (which would take over those sources) changes the recipe.
+    for (const path of ["scripts/tsconfig.json", "scripts/jsconfig.json", "tsconfig.json"]) {
+      expect(blobs.has(path)).toBe(false);
+      expect(bound.has(path)).toBe(true);
+      expect(bound.get(path)).toBeNull();
+      expect(
+        changes(new Map(blobs).set(path, "1".repeat(40)), (file) =>
+          file === path ? "{}" : read(file),
+        ),
+      ).toBe(true);
+    }
+    // Product package configs are compiled as code under comparison.
+    for (const path of ["packages/sdk/tsconfig.json", "apps/api/tsconfig.json"]) {
+      expect(blobs.has(path)).toBe(true);
+      expect(bound.has(path)).toBe(false);
+      expect(changes(new Map(blobs).set(path, "0".repeat(40)))).toBe(false);
+    }
+    // A harness config's extends chain is followed, with `.json` implied and an
+    // untracked link bound as absent.
+    const operator = typecheckConfig("scripts/operator");
+    const extra: Record<string, string> = {
+      [operator]: '{ "extends": "./shared" /* chained */ }',
+      "scripts/operator/shared.json": '{ "extends": ["../release/tsconfig.json", "../missing"] }',
     };
-    const evidence = (purpose: string, guards: number, recipe: [string, string | null][]) =>
-      buildComparisonEvidence({
-        identity,
-        unitShards: 0,
-        verifiedJobs: ["plan", "source"],
-        sidecars: [
-          {
-            schemaVersion: 1,
-            comparisonSchema: COMPARISON_SCHEMA,
-            ...identity,
-            job: "source",
-            environment: { runnerOs: "Linux" },
-            steps: SOURCE_STEPS.map((step) => ({ step, exitCode: step === "guards" ? guards : 0 })),
-          },
-        ],
-        batch: { purpose, baseSha: "c".repeat(40), planDigest: digest(plan) },
-        plan,
-        inventory: {
-          schemaVersion: 1,
-          comparisonSchema: COMPARISON_SCHEMA,
-          planDigest: digest(plan),
-          shards: 0,
-          absent: [],
-          units: [],
-          recipePaths: recipe,
-        },
-      })!;
-    const base = evidence("base-comparison", 0, baseRecipe);
-    const candidate = evidence("candidate", 1, candidateRecipe);
-    expect(base.coverage.complete && candidate.coverage.complete).toBe(true);
+    const overlay = (path: string) => extra[path] ?? read(path);
+    const chained = new Map(blobs).set("scripts/operator/shared.json", "1".repeat(40));
+    const linked = new Map(recipePaths(chained, overlay));
+    expect(linked.get("scripts/operator/shared.json")).toBe("1".repeat(40));
+    expect(linked.has("scripts/missing.json")).toBe(true);
+    expect(linked.get("scripts/missing.json")).toBeNull();
     expect(
-      compareFailures({ outcome: "code_failure", evidence: candidate }, { evidence: base }),
-    ).toMatchObject({ verdict: "not-comparable" });
+      digest(
+        recipePaths(new Map(chained).set("scripts/operator/shared.json", "2".repeat(40)), overlay),
+      ),
+    ).not.toBe(digest(recipePaths(chained, overlay)));
+  });
+
+  test("composed configs: typecheck roots, nearest runtime config walking up, extends", () => {
+    const oid = "1".repeat(40);
+    const blobs = new Map(
+      ["scripts/a/tsconfig.json", "scripts/j/jsconfig.json"].map((path) => [path, oid]),
+    );
+    const configs = harnessConfigs(
+      ["scripts/a/b/x.ts", "scripts/a/y.ts", "scripts/j/z.ts", "apps/api/src/app.ts"],
+      blobs,
+    );
+    expect(configs.sort()).toEqual(
+      [
+        ...HARNESS_TYPECHECK_PROJECTS.map(typecheckConfig),
+        "scripts/a/b/tsconfig.json",
+        "scripts/a/b/jsconfig.json",
+        "scripts/a/tsconfig.json",
+        "scripts/j/tsconfig.json",
+        "scripts/j/jsconfig.json",
+      ].sort(),
+    );
+    // A root-level harness source walks to the repository root.
+    expect(
+      harnessConfigs(["scripts/x.ts"], new Map()).filter((path) => !path.includes("/")),
+    ).toEqual(["tsconfig.json", "jsconfig.json"]);
+    const tracked = new Map([["scripts/a/base", oid]]);
+    expect(configExtends("scripts/a/tsconfig.json", '{"extends":"./base"}', tracked)).toEqual([
+      "scripts/a/base",
+    ]);
+    expect(
+      configExtends(
+        "scripts/a/tsconfig.json",
+        '{\n  // comment\n  "extends": ["../../tsconfig.base.json", "./other", "@tsconfig/bun"],\n}',
+        tracked,
+      ),
+    ).toEqual(["tsconfig.base.json", "scripts/a/other.json"]);
+    expect(configExtends("scripts/a/tsconfig.json", "{ not json", tracked)).toEqual([]);
+    expect(configExtends("scripts/a/tsconfig.json", "null", tracked)).toEqual([]);
   });
 
   test("policy inputs: named, relative or beside, in code only, inside the harness", () => {

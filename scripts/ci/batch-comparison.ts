@@ -21,6 +21,7 @@ import {
   shardProcessPlan,
   UNIT_PROCESS_CATEGORIES,
 } from "./run-unit-shard";
+import { HARNESS_TYPECHECK_PROJECTS, typecheckConfig } from "./workspace";
 
 /** Mirrors the receipt exit classification; only `fail` is an assertion verdict. */
 export function executionStatus(code: number | null | undefined): ExecutionStatus {
@@ -78,6 +79,9 @@ const DATA_LITERAL = /["'`]((?:\.{1,2}\/)*[\w@-][\w.@-]*(?:\/[\w.@-]+)*\.[A-Za-z
 /** Generated snapshots are derived from product code and checked for freshness. */
 const GENERATED = /(?:^|\/)[^/]*\.gen\.[^/]+$/;
 const SOURCE = /\.(?:ts|tsx|js|mjs)$/;
+/** The configs Bun's runtime consults for a source, nearest directory first. */
+const RUNTIME_CONFIGS = ["tsconfig.json", "jsconfig.json"] as const;
+const CONFIG = /(?:^|\/)[tj]sconfig[^/]*\.json$/;
 
 /**
  * Harness scripts reached by execution rather than import: subprocesses the
@@ -141,6 +145,66 @@ export function policyInputs(
   return { tracked: [...tracked], absent: [...absent] };
 }
 
+/**
+ * Harness configuration a tool finds by composing a path rather than reading a
+ * named one: the project config `scripts/typecheck.ts` compiles for every
+ * harness typecheck root (`typecheckConfig`; a root without one is no project,
+ * so its absence is bound too), and, for every harness source, each config
+ * Bun's runtime consults walking up to the nearest `tsconfig.json` or
+ * `jsconfig.json`, whose paths, jsx and module settings decide how the source
+ * runs. Product package configs are compiled as code under comparison and are
+ * never listed here.
+ */
+export function harnessConfigs(
+  sources: Iterable<string>,
+  blobs: ReadonlyMap<string, string>,
+): string[] {
+  const configs = new Set<string>(HARNESS_TYPECHECK_PROJECTS.map(typecheckConfig));
+  for (const source of sources) {
+    if (!source.startsWith(HARNESS_ROOT)) continue;
+    let directory = posix.dirname(source);
+    nearest: for (;;) {
+      for (const name of RUNTIME_CONFIGS) {
+        const path = directory === "." ? name : `${directory}/${name}`;
+        configs.add(path);
+        if (blobs.has(path)) break nearest;
+      }
+      if (directory === ".") break;
+      directory = posix.dirname(directory);
+    }
+  }
+  return [...configs];
+}
+
+/**
+ * The relative `extends` targets of a TypeScript config, in string or array
+ * form, resolved as the compiler does (`.json` is implied). Package targets
+ * resolve through the bound lockfile and manifests. An unreadable config has
+ * none: it is bound itself, and the compiler reports it.
+ */
+export function configExtends(
+  path: string,
+  text: string,
+  blobs: ReadonlyMap<string, string>,
+): string[] {
+  let config: unknown;
+  try {
+    config = Bun.JSONC.parse(text);
+  } catch {
+    return [];
+  }
+  const value = (config as { extends?: unknown } | null)?.extends;
+  return (Array.isArray(value) ? value : [value])
+    .filter(
+      (item): item is string =>
+        typeof item === "string" && (item.startsWith("./") || item.startsWith("../")),
+    )
+    .map((item) => {
+      const target = posix.normalize(posix.join(posix.dirname(path), item));
+      return blobs.has(target) || target.endsWith(".json") ? target : `${target}.json`;
+    });
+}
+
 /** Exact tracked blobs of a commit: path -> object id. */
 export function trackedBlobs(listing: string): Map<string, string> {
   const blobs = new Map<string, string>();
@@ -170,11 +234,13 @@ function resolveLocalImport(from: string, specifier: string, blobs: Map<string, 
  * Recipe identity: the transitive local import closure of every harness entry,
  * every harness script those files execute (subprocesses and root package
  * scripts, with their own imports and executions inside the harness tree), the
- * harness-owned policy inputs those sources read (`policyInputs`), the workflow,
- * tool configuration, toolchain pins, lockfile and every package manifest.
+ * harness-owned policy inputs those sources read (`policyInputs`), the harness
+ * configuration tools find by composed path (`harnessConfigs`) with the
+ * `extends` chain of every bound config, the workflow, tool configuration,
+ * toolchain pins, lockfile and every package manifest.
  * Package imports resolve through the lockfile and manifests, which are bound
- * here. An executed harness script or named policy input that is not tracked is
- * bound as absent (null), so adding it later changes the recipe.
+ * here. An executed harness script, named policy input or consulted config that
+ * is not tracked is bound as absent (null), so adding it later changes the recipe.
  */
 export function recipePaths(
   blobs: Map<string, string>,
@@ -237,6 +303,26 @@ export function recipePaths(
     const inputs = policyInputs(path, read(path), blobs);
     for (const input of inputs.tracked) closure.add(input);
     for (const input of inputs.absent) absent.add(input);
+  }
+  // Phase 4: harness configuration found by composed path, and the extends
+  // chain of every bound config wherever it leads (a base config is harness
+  // configuration too).
+  const sources = [...closure].filter((source) => SOURCE.test(source));
+  for (const path of harnessConfigs(sources, blobs)) (blobs.has(path) ? closure : absent).add(path);
+  const configs = [...closure, ...RECIPE_FILES].filter(
+    (path) => CONFIG.test(path) && blobs.has(path),
+  );
+  while (configs.length) {
+    const path = configs.pop()!;
+    for (const target of configExtends(path, read(path), blobs)) {
+      if (closure.has(target) || absent.has(target)) continue;
+      if (!blobs.has(target)) {
+        absent.add(target);
+        continue;
+      }
+      closure.add(target);
+      configs.push(target);
+    }
   }
   const manifests = [...blobs.keys()].filter(
     (path) => path === "package.json" || path.endsWith("/package.json"),

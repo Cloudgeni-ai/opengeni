@@ -187,17 +187,27 @@ export function transitiveDependencies(
   return result;
 }
 
+/** Harness typecheck roots; each one that has a project config is a typecheck project. */
+export const HARNESS_TYPECHECK_PROJECTS = [
+  "scripts/ci",
+  "scripts/operator",
+  "scripts/public-api",
+  "scripts/release",
+  "scripts/agent-behavior-eval",
+  "scripts/verify",
+] as const;
+
+/** The config `scripts/typecheck.ts` compiles for a typecheck project. */
+export function typecheckConfig(project: string): string {
+  return `${project}/tsconfig.json`;
+}
+
 export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
-  const projects = [
-    "scripts/ci",
-    "scripts/operator",
-    "scripts/public-api",
-    "scripts/release",
-    "scripts/agent-behavior-eval",
-    "scripts/verify",
-  ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
+  const projects: string[] = HARNESS_TYPECHECK_PROJECTS.filter((directory) =>
+    existsSync(typecheckConfig(directory)),
+  );
   for (const pkg of graph.packages) {
-    if (existsSync(join(pkg.dir, "tsconfig.json"))) projects.push(normalizePath(pkg.dir));
+    if (existsSync(typecheckConfig(pkg.dir))) projects.push(normalizePath(pkg.dir));
   }
   return projects;
 }
