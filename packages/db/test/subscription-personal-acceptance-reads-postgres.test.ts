@@ -509,7 +509,7 @@ beforeAll(async () => {
     await stageSiteSessionAudienceColumns(database.ownerUrl);
     // Current event readers also project 0810's nullable usage source key and
     // 0889's nullable tool name.
-    await staging`alter table session_events add column usage_source_key text, add column tool_name text`;
+    await staging`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();

@@ -64,7 +64,7 @@ beforeAll(async () => {
     await stageSiteSessionAudienceColumns(shared.ownerUrl);
     // Current event readers also project 0810's nullable usage source key and
     // 0889's nullable tool name.
-    await owner`alter table session_events add column usage_source_key text, add column tool_name text`;
+    await owner`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
     await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
   } finally {
     await owner.end();

@@ -9725,6 +9725,9 @@ export const sessionEvents = pgTable(
     // readers fall back to the payload only then, so the presented-tool filter
     // does not detoast every excluded call's arguments.
     toolName: text("tool_name"),
+    // The shared metadata trigger also extracts the exact coalesced call ID
+    // for created/output rows (0913). NULL retains the legacy payload fallback.
+    toolCallId: text("tool_call_id"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
