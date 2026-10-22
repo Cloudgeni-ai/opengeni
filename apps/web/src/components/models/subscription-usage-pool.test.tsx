@@ -135,12 +135,15 @@ test("an exhausted pool with an unknown or elapsed return time waits for updated
 test("the real Claude rows and pool agree in the six-account regression preview", async () => {
   const now = Date.now();
   await act(async () => root.render(<ExhaustedClaudePreview now={now} />));
-  expect(container.textContent!.match(/Limit reached/g)).toHaveLength(7);
+  const rows = () => [...container.querySelectorAll("li")].slice(1);
+  expect(rows()).toHaveLength(6);
+  expect(rows().every((row) => row.textContent!.includes("Limit reached"))).toBe(true);
   expect(container.textContent).toContain("No capacity available. Next reset");
   expect(container.textContent).not.toContain("8% left");
   await act(async () => root.render(<ExhaustedClaudePreview now={now} mixed />));
   expect(container.textContent).toContain("12% left");
-  expect(container.textContent!.match(/Limit reached/g)).toHaveLength(5);
+  expect(rows().filter((row) => row.textContent!.includes("Limit reached"))).toHaveLength(5);
+  expect(rows()[1]!.textContent).toContain("60% left");
   expect(container.textContent).not.toContain("No capacity available.");
 });
 
