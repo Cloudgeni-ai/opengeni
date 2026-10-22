@@ -129,7 +129,9 @@ async function listSessionEventSlicesInternal(
   )
     predicates.push(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`${schema.sessionEvents.payload}->>'name' = ${options.toolName}`,
+      // The trigger-maintained name avoids detoasting every skipped call's
+      // arguments. Pre-projection rows retain the exact payload fallback.
+      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload}->>'name') = ${options.toolName}`,
     );
   if (options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId)
     predicates.push(
