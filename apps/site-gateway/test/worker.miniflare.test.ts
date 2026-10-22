@@ -58,6 +58,7 @@ function record(label: string, overrides: Partial<SiteHostMapRecord> = {}): Site
 const RECORDS = new Map<string, SiteHostMapRecord>(
   [
     record("pub"),
+    record("transition"),
     record("cache", { siteId: "44444444-4444-4444-8444-444444444444" }),
     record("team", { access: "members", siteId: "55555555-5555-4555-8555-555555555555" }),
     record("gone", { status: "suspended" }),
@@ -152,6 +153,10 @@ async function fakeApi(request: Request): Promise<Response> {
   }
   if (suffix.startsWith("/versions/")) {
     htmlFetches += 1;
+    if (site.access !== "public" && session === NO_ACCESS_SESSION)
+      return json({ error: { code: "forbidden" } }, { status: 403 });
+    if (site.access !== "public" && session !== SESSION)
+      return json({ error: { code: "site_sign_in_required" } }, { status: 401 });
     if (suffix !== `/versions/${VERSION}/html` && suffix !== `/versions/${OLD_VERSION}/html`)
       return new Response(null, { status: 404 });
     return new Response(
@@ -526,6 +531,67 @@ describe("site gateway in workerd", () => {
     expect(await response.text()).not.toContain("/_og/v/");
   });
 
+  test("a stale public shell renders live access denials with a working sign-in escape", async () => {
+    const host = `transition.${DOMAIN}`;
+    const original = RECORDS.get(host)!;
+    const kv = await hostMap();
+    // The shell and KV still advertise public access when the origin narrows it.
+    await kv.put(siteHostMapKey(host), JSON.stringify(original));
+    const shell = await get("transition", "/");
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain(`/_og/v/${VERSION}`);
+    expect(shell.headers.get("x-frame-options")).toBe("DENY");
+    RECORDS.set(host, { ...original, access: "members", generation: 2 });
+    try {
+      for (const [cookie, status] of [
+        ["", 401],
+        [`__Host-og_session=${NO_ACCESS_SESSION}`, 403],
+      ] as const) {
+        const denied = await get("transition", `/_og/v/${VERSION}`, {
+          headers: { ...FRAME, cookie },
+        });
+        expect(denied.status).toBe(status);
+        expect(denied.headers.get("cache-control")).toBe("no-store");
+        expect(denied.headers.get("etag")).toBeNull();
+        expect(denied.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+        expect(denied.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+        expect(denied.headers.get("content-security-policy")).toContain("default-src 'none'");
+        const html = await denied.text();
+        expect(html).not.toContain("Hello Site");
+        expect(html).not.toContain("__opengeniSiteBridgeBootstrapV2");
+        expect(html).not.toContain("<script");
+        expect(html).toContain(
+          'href="/_og/auth/login?return=%2F" target="_blank" rel="noopener noreferrer"',
+        );
+      }
+      // Denials never poison the shared HTML cache: an authorized member can load.
+      const member = await get("transition", `/_og/v/${VERSION}`, {
+        headers: { ...FRAME, cookie: `__Host-og_session=${SESSION}` },
+      });
+      expect(member.status).toBe(200);
+      expect(await member.text()).toContain("Hello Site");
+    } finally {
+      RECORDS.set(host, original);
+    }
+  });
+
+  test("member-frame access checks render denials without fetching protected HTML", async () => {
+    const before = htmlFetches;
+    for (const [cookie, status] of [
+      ["", 401],
+      [`__Host-og_session=${NO_ACCESS_SESSION}`, 403],
+    ] as const) {
+      const denied = await get("team", `/_og/v/${VERSION}`, {
+        headers: { ...FRAME, cookie },
+      });
+      expect(denied.status).toBe(status);
+      expect(denied.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+      expect(denied.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+      expect(await denied.text()).toContain("Sign in in a new tab");
+    }
+    expect(htmlFetches).toBe(before);
+  });
+
   test("version HTML loads only in the frame, revalidates with an ETag and is edge-cached", async () => {
     const before = htmlFetches;
     // A request that says it is a top-level navigation or a fetch goes back to the shell.
@@ -576,6 +642,8 @@ describe("site gateway in workerd", () => {
     expect(htmlFetches).toBe(settled);
     const bad = await get("cache", "/_og/v/not-a-version", { headers: FRAME });
     expect(bad.status).toBe(404);
+    expect(bad.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(bad.headers.get("x-frame-options")).toBe("SAMEORIGIN");
     await bad.text();
     expect(htmlFetches).toBe(settled);
   });
@@ -595,6 +663,8 @@ describe("site gateway in workerd", () => {
     await kv.put(key, JSON.stringify({ ...base, status: "suspended", generation: 3 }));
     const gone = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
     expect(gone.status).toBe(410);
+    expect(gone.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(gone.headers.get("x-frame-options")).toBe("SAMEORIGIN");
     expect(await gone.text()).not.toContain("Hello Site");
   });
 
@@ -769,6 +839,8 @@ describe("site gateway in workerd", () => {
   test("the report form posts a signed abuse report with a CSRF token", async () => {
     const form = await get("pub", "/_og/report");
     expect(form.status).toBe(200);
+    expect(form.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(form.headers.get("x-frame-options")).toBe("DENY");
     const html = await form.text();
     expect(html).not.toContain("<script");
     const token = /name="token" value="([^"]+)"/u.exec(html)?.[1];
