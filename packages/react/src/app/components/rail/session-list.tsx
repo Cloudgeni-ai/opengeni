@@ -2240,8 +2240,8 @@ export function SessionList() {
   // and ⌘1 to ⌘9 follow the order shown here.
   const directorySubject = context.accessContext.subjectId;
   useEffect(() => {
-    rememberChats(directorySubject, rail.workspaceId, [...pinned, ...sessions]);
-  }, [directorySubject, rail.workspaceId, pinned, sessions]);
+    rememberChats(directorySubject, [...pinned, ...sessions]);
+  }, [directorySubject, pinned, sessions]);
   useEffect(() => {
     setSidebarOrder(
       directorySubject,

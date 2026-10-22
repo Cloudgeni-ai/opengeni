@@ -11,9 +11,11 @@ import type { ChatRecord } from "../../lib/actions/chat-directory";
 import { readChatDirectory } from "../../lib/actions/chat-directory";
 import type { ChatSwitcherState } from "../../lib/actions/chat-switcher";
 import type { ChordPlatform } from "../../lib/actions/chords";
+import type { WorkspaceChoice } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
+import { WorkspaceTag } from "./workspace-tag";
 
 function chatIcon(record: ChatRecord | undefined): LucideIcon {
   return record?.pinned ? PinIcon : MessageSquareIcon;
@@ -23,6 +25,7 @@ export default function ChatSwitcher(props: {
   state: ChatSwitcherState;
   subjectId: string;
   workspaceId: string;
+  workspaces: readonly WorkspaceChoice[];
   currentChatId: string | null;
   platform: ChordPlatform;
   onHover(index: number): void;
@@ -40,6 +43,9 @@ export default function ChatSwitcher(props: {
   if (!visible || typeof document === "undefined") return null;
   const directory = readChatDirectory(props.subjectId, props.workspaceId);
   const now = Date.now();
+  const workspaceNames = new Map(
+    props.workspaces.map((workspace) => [workspace.id, workspace.name]),
+  );
   const activeId = `og-chat-switcher-${index}`;
   return createPortal(
     <div
@@ -78,6 +84,11 @@ export default function ChatSwitcher(props: {
                 : record?.updatedAt
                   ? formatRelativeTime(record.updatedAt, { now })
                   : undefined;
+            // Chats in other workspaces say where they are.
+            const elsewhere =
+              record && record.workspaceId !== props.workspaceId
+                ? (workspaceNames.get(record.workspaceId) ?? null)
+                : null;
             return (
               <div
                 key={id}
@@ -104,6 +115,7 @@ export default function ChatSwitcher(props: {
                   className={cn("size-4 shrink-0", selected ? "text-fg" : "text-fg-muted")}
                 />
                 <span className="min-w-0 flex-1 truncate">{record?.title ?? "Untitled chat"}</span>
+                {elsewhere ? <WorkspaceTag name={elsewhere} /> : null}
                 {meta ? (
                   <span className="shrink-0 text-xs text-fg-muted tabular-nums">{meta}</span>
                 ) : null}

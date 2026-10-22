@@ -2069,6 +2069,9 @@
 :where(.og-root).max-w-\[18em\],:where(.og-root) .max-w-\[18em\] {
     max-width: 18em;
   }
+:where(.og-root).max-w-\[40\%\],:where(.og-root) .max-w-\[40\%\] {
+    max-width: 40%;
+  }
 :where(.og-root).max-w-\[45\%\],:where(.og-root) .max-w-\[45\%\] {
     max-width: 45%;
   }

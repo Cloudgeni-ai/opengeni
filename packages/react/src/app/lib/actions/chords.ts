@@ -122,6 +122,8 @@ const KEY_NAMES: Record<string, { mac: string; other: string; accelerator: strin
   Tab: { mac: "⇥", other: "Tab", accelerator: "Tab" },
   Space: { mac: "Space", other: "Space", accelerator: "Space" },
   Backspace: { mac: "⌫", other: "Backspace", accelerator: "Backspace" },
+  PageUp: { mac: "⇞", other: "PgUp", accelerator: "PageUp" },
+  PageDown: { mac: "⇟", other: "PgDn", accelerator: "PageDown" },
 };
 
 function keyName(code: string, platform: ChordPlatform | "accelerator"): string {

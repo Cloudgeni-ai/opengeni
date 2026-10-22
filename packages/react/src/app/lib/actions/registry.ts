@@ -9,7 +9,9 @@ import {
   ArchiveRestoreIcon,
   ArrowDownIcon,
   ArrowUpIcon,
+  ChevronsUpDownIcon,
   CommandIcon,
+  GitForkIcon,
   HistoryIcon,
   InboxIcon,
   KeyboardIcon,
@@ -35,6 +37,16 @@ export type ActionGroup = "chat" | "navigate" | "view" | "help";
 /** Where the desktop menu bar shows an action. */
 export type DesktopMenuPlacement = "file" | "view" | "go" | "chat" | "help";
 
+/** A workspace someone can switch to, in the workspace picker's order. */
+export type WorkspaceChoice = {
+  id: string;
+  name: string;
+  /** The workspace's organization, by name. */
+  organization: string;
+  /** A Personal workspace, private to its owner. */
+  personal: boolean;
+};
+
 export type ActionEnv = {
   workspaceId: string;
   subjectId: string;
@@ -47,14 +59,24 @@ export type ActionEnv = {
   chatList: boolean;
   /** Whether chats have the right-hand workspace panel on this surface. */
   workspacePanel: boolean;
+  /** Every workspace open to the person, in the workspace picker's order. */
+  workspaces: readonly WorkspaceChoice[];
+  /** Whether the person may fork the chat on screen. */
+  canForkCurrentChat: boolean;
   newChat(): void;
-  openChat(chatId: string): void;
+  /** Opens a chat; one in another workspace switches to that workspace. */
+  openChat(chatId: string, workspaceId?: string): void;
+  openWorkspace(workspaceId: string): void;
+  /** The ⌘K menu, listing workspaces to switch to. */
+  openWorkspacePicker(): void;
   openInbox(): void;
   toggleSidebar(): void;
   toggleWorkspacePanel(): void;
   findInChat(): void;
   searchMessages(query?: string): void;
   renameCurrentChat(): void;
+  /** Asks the chat on screen to fork from its latest message. */
+  forkCurrentChat(): void;
   openCommandMenu(): void;
   openShortcutSheet(): void;
   /** Back to the most recently viewed other chat (a quick Control+Tab). */
@@ -116,6 +138,30 @@ function stepChat(env: ActionEnv, direction: 1 | -1): void {
   if (next < 0 || next >= order.length) return;
   env.openChat(order[next]!);
 }
+
+/** The previous or next workspace in the picker's order, wrapping around. */
+export function stepWorkspace(
+  workspaces: readonly Pick<WorkspaceChoice, "id">[],
+  currentId: string,
+  direction: 1 | -1,
+): string | null {
+  if (workspaces.length < 2) return null;
+  const index = workspaces.findIndex((workspace) => workspace.id === currentId);
+  const next =
+    index < 0
+      ? direction === 1
+        ? 0
+        : workspaces.length - 1
+      : (index + direction + workspaces.length) % workspaces.length;
+  return workspaces[next]!.id;
+}
+
+function switchWorkspace(env: ActionEnv, direction: 1 | -1): void {
+  const id = stepWorkspace(env.workspaces, env.workspaceId, direction);
+  if (id && id !== env.workspaceId) env.openWorkspace(id);
+}
+
+const hasOtherWorkspaces = (env: ActionEnv) => env.workspaces.length > 1;
 
 const PINNED_CHORDS: Chord[] = Array.from({ length: 9 }, (_, index) => ({
   code: `Digit${index + 1}`,
@@ -189,6 +235,21 @@ export const APP_ACTIONS: readonly AppAction[] = [
     // Renaming happens in the chat's own title, so only for the chat on screen.
     available: (env, chat) => chat !== null && env.currentChat?.id === chat.id,
     run: (env) => env.renameCurrentChat(),
+  },
+  {
+    id: "chat.fork",
+    title: "Fork chat",
+    group: "chat",
+    icon: GitForkIcon,
+    keywords: ["copy", "duplicate", "branch", "clone"],
+    forChat: true,
+    opensDialog: true,
+    desktopMenu: "chat",
+    // From the latest message, as the fork button under a message does; only
+    // for the chat on screen, whose messages are loaded.
+    available: (env, chat) =>
+      chat !== null && env.currentChat?.id === chat.id && env.canForkCurrentChat,
+    run: (env) => env.forkCurrentChat(),
   },
   {
     id: "chat.unread",
@@ -310,6 +371,47 @@ export const APP_ACTIONS: readonly AppAction[] = [
     desktopMenu: "go",
     available: ALWAYS,
     run: (env) => env.searchMessages(),
+  },
+  {
+    id: "go.switchWorkspace",
+    title: "Switch workspace…",
+    group: "navigate",
+    icon: ChevronsUpDownIcon,
+    keywords: ["workspace", "organization", "team", "change", "go to"],
+    desktopMenu: "go",
+    available: hasOtherWorkspaces,
+    run: (env) => env.openWorkspacePicker(),
+  },
+  {
+    // The workspace picker's order, wrapping around. ⌥⌘ and arrows sit in the
+    // same place on every keyboard layout, and browsers leave them alone.
+    id: "go.previousWorkspace",
+    title: "Previous workspace",
+    group: "navigate",
+    icon: ArrowUpIcon,
+    chords: [
+      { code: "ArrowUp", mod: true, alt: true },
+      // Some Linux desktops take Ctrl+Alt+arrows to switch their own workspaces.
+      { code: "PageUp", mod: true, shift: true, platform: "other", only: "desktop" },
+    ],
+    inCommandMenu: false,
+    desktopMenu: "go",
+    available: hasOtherWorkspaces,
+    run: (env) => switchWorkspace(env, -1),
+  },
+  {
+    id: "go.nextWorkspace",
+    title: "Next workspace",
+    group: "navigate",
+    icon: ArrowDownIcon,
+    chords: [
+      { code: "ArrowDown", mod: true, alt: true },
+      { code: "PageDown", mod: true, shift: true, platform: "other", only: "desktop" },
+    ],
+    inCommandMenu: false,
+    desktopMenu: "go",
+    available: hasOtherWorkspaces,
+    run: (env) => switchWorkspace(env, 1),
   },
   {
     id: "view.sidebar",

@@ -19,12 +19,12 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
-  organizationLandingWorkspaceId,
   organizationsForSubject,
   shortAccountId,
-  workspacesInOrg,
+  workspacesByOrganization,
   type OrgOption,
 } from "@opengeni/react/app/lib/org";
+import { useActionShortcut } from "@opengeni/react/app/lib/actions/actions-provider";
 import {
   isPersonalWorkspace,
   type ManagedSelfContext,
@@ -37,10 +37,6 @@ import {
 } from "@opengeni/react/app/lib/return-to";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
-import {
-  organizationWorkspacePreferenceStorageId,
-  readLastWorkspaceIdsByOrganization,
-} from "@opengeni/react/app/lib/workspace-navigation-preference";
 import type { Workspace } from "@opengeni/react/app/types";
 
 /** The switcher menu's width; surface and rows are the one menu spec (menu-styles.ts). */
@@ -105,14 +101,6 @@ export function useCanCreateWorkspaceIn(accountId: string | null): boolean {
     clientConfig: context.clientConfig,
     accountId,
   });
-}
-
-/** The last workspace used in each organization, for switching back to it. */
-export function useRememberedWorkspaceIds(): Record<string, string> {
-  const context = useAppContext();
-  return readLastWorkspaceIdsByOrganization(
-    organizationWorkspacePreferenceStorageId(context.accessContext.subjectId),
-  );
 }
 
 /**
@@ -192,9 +180,9 @@ export function WorkspaceMenuItems(props: {
 
 /**
  * The workspace picker at the top of the main rail. It shows the workspace and
- * its organization, lists that organization's workspaces, and, when the person
- * belongs to more than one organization, the others to switch to. Switching
- * organization opens a workspace there. People who can create workspaces get a
+ * its organization, and lists every workspace open to the person, grouped by
+ * organization in the order the previous and next workspace keys walk them.
+ * People who can create workspaces get a
  * quiet "New workspace" row that opens the organization's create page; new
  * organizations and organization settings live in the account menu and the
  * settings rail. Callers own where a workspace selection lands.
@@ -216,7 +204,6 @@ export function WorkspaceSwitcherMenu(props: {
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const administers = useCanCreateWorkspaceIn(activeAccountId);
-  const rememberedWorkspaceIds = useRememberedWorkspaceIds();
   // Owners and admins create on the organization's New workspace page. A
   // session that holds workspace:create without administering the
   // organization (a configured deployment key or token) can't reach that page,
@@ -261,7 +248,6 @@ export function WorkspaceSwitcherMenu(props: {
         onCreateHere={createHereAccountId ? () => setCreateOpen(true) : undefined}
         canCreate={administers}
         createReturnTo={currentPageReturnTo(activeWorkspace?.name ?? "Back")}
-        rememberedWorkspaceIds={rememberedWorkspaceIds}
         onSelect={props.onSelect}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
@@ -361,14 +347,16 @@ export function WorkspaceMenu(props: {
   canCreate?: boolean;
   /** Where that page's back link returns. */
   createReturnTo?: ReturnTo | undefined;
-  /** The last workspace used in each organization. */
-  rememberedWorkspaceIds?: Record<string, string>;
   onSelect: (workspaceId: string) => void;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
   children: ReactNode;
 }) {
-  const currentOrg =
+  const context = useAppContext();
+  // Every organization with a workspace open to the person, in the keys' order.
+  // The current organization always shows, so its create row has a home.
+  const groups = workspacesByOrganization(t, context.accessContext, props.workspaces);
+  const activeOrg =
     props.orgs.find((org) => org.accountId === props.activeAccountId) ??
     (props.activeAccountId
       ? {
@@ -377,20 +365,13 @@ export function WorkspaceMenu(props: {
           canManage: false,
         }
       : null);
-  const currentWorkspaces = currentOrg
-    ? workspacesInOrg(props.workspaces, currentOrg.accountId)
-    : [];
-  const otherOrgs = props.orgs
-    .filter((org) => org.accountId !== props.activeAccountId)
-    .map((org) => ({
-      org,
-      landing: organizationLandingWorkspaceId(
-        props.workspaces,
-        org.accountId,
-        props.rememberedWorkspaceIds?.[org.accountId],
-      ),
-    }))
-    .filter(({ landing }) => landing !== null);
+  if (activeOrg && !groups.some((group) => group.org.accountId === activeOrg.accountId)) {
+    groups.unshift({ org: activeOrg, workspaces: [] });
+  }
+  const severalOrgs = groups.length > 1;
+  const previousKeys = useActionShortcut("go.previousWorkspace");
+  const nextKeys = useActionShortcut("go.nextWorkspace");
+  const workspaceCount = groups.reduce((count, group) => count + group.workspaces.length, 0);
   const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
   return (
     <DropdownMenu>
@@ -409,58 +390,67 @@ export function WorkspaceMenu(props: {
         className={SWITCHER_MENU_CLASS}
         side={props.collapsed ? "right" : "bottom"}
       >
-        {currentOrg ? (
-          <DropdownMenuGroup aria-label={`Workspaces in ${currentOrg.label}`}>
-            <DropdownMenuLabel className="flex min-w-0 items-center gap-2.5 pt-1.5 pb-1.5">
-              <OrganizationTile className="size-7 rounded-md [&_svg]:size-3.5" />
-              <span className="grid min-w-0">
-                <span
-                  className="truncate text-sm leading-5 font-medium text-fg"
-                  title={currentOrg.label}
-                >
-                  {currentOrg.label}
-                </span>
-                <span className="text-xs leading-4.5 font-normal text-fg-muted">Organization</span>
-              </span>
-            </DropdownMenuLabel>
-            <WorkspaceMenuItems
-              workspaces={currentWorkspaces}
-              activeWorkspaceId={props.activeWorkspaceId}
-              managedSelfContext={props.managedSelfContext}
-              onSelect={props.onSelect}
-            />
-            {props.canCreate ? (
-              <CreateWorkspaceLinkMenuItem
-                workspaceId={props.activeWorkspaceId}
-                returnTo={props.createReturnTo}
+        {groups.map((group, index) => {
+          const current = group.org.accountId === props.activeAccountId;
+          return (
+            <DropdownMenuGroup
+              key={group.org.accountId}
+              aria-label={`Workspaces in ${group.org.label}`}
+            >
+              {index > 0 ? <DropdownMenuSeparator /> : null}
+              {severalOrgs ? (
+                <DropdownMenuLabel className="flex min-w-0 items-center gap-2">
+                  <OrganizationTile />
+                  <span className="truncate" title={group.org.label}>
+                    {group.org.label}
+                  </span>
+                </DropdownMenuLabel>
+              ) : (
+                <DropdownMenuLabel className="flex min-w-0 items-center gap-2.5 pt-1.5 pb-1.5">
+                  <OrganizationTile className="size-7 rounded-md [&_svg]:size-3.5" />
+                  <span className="grid min-w-0">
+                    <span
+                      className="truncate text-sm leading-5 font-medium text-fg"
+                      title={group.org.label}
+                    >
+                      {group.org.label}
+                    </span>
+                    <span className="text-xs leading-4.5 font-normal text-fg-muted">
+                      Organization
+                    </span>
+                  </span>
+                </DropdownMenuLabel>
+              )}
+              <WorkspaceMenuItems
+                workspaces={group.workspaces}
+                activeWorkspaceId={props.activeWorkspaceId}
+                managedSelfContext={props.managedSelfContext}
+                onSelect={props.onSelect}
               />
-            ) : props.onCreateHere ? (
-              <CreateWorkspaceHereMenuItem
-                organizationLabel={currentOrg.label}
-                onCreate={props.onCreateHere}
-              />
-            ) : null}
-          </DropdownMenuGroup>
-        ) : null}
-        {otherOrgs.length > 0 ? (
+              {current && props.canCreate ? (
+                <CreateWorkspaceLinkMenuItem
+                  workspaceId={props.activeWorkspaceId}
+                  returnTo={props.createReturnTo}
+                />
+              ) : current && props.onCreateHere ? (
+                <CreateWorkspaceHereMenuItem
+                  organizationLabel={group.org.label}
+                  onCreate={props.onCreateHere}
+                />
+              ) : null}
+            </DropdownMenuGroup>
+          );
+        })}
+        {workspaceCount > 1 && previousKeys && nextKeys ? (
+          // The keys that walk this list, for people who reach for the mouse first.
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuGroup aria-label="Switch organization">
-              <DropdownMenuLabel>Switch organization</DropdownMenuLabel>
-              {otherOrgs.map(({ org, landing }) => (
-                <DropdownMenuItem
-                  key={org.accountId}
-                  onSelect={() => {
-                    if (landing) props.onSelect(landing);
-                  }}
-                >
-                  <OrganizationTile />
-                  <span className="min-w-0 flex-1 truncate" title={org.label}>
-                    {org.label}
-                  </span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
+            <div className="flex items-center justify-between gap-3 px-2 py-1.5 text-xs text-fg-muted pointer-coarse:hidden">
+              <span>Previous or next workspace</span>
+              <span className="shrink-0 tabular-nums opacity-80">
+                {previousKeys.label} {nextKeys.label}
+              </span>
+            </div>
           </>
         ) : null}
       </DropdownMenuContent>

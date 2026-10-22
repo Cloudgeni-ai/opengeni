@@ -24,6 +24,10 @@ import { useNavigate, useRouterState } from "../navigation";
 import { requestSessionSearch } from "../session-search-route";
 import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
+import { t } from "../console-text";
+import { isPersonalWorkspace } from "../managed-self-context";
+import { workspacesByOrganization } from "../org";
+import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
 import {
   isSwitcherKey,
@@ -45,8 +49,19 @@ import {
   type ChordPlatform,
 } from "./chords";
 import { useChatOperations } from "./chat-operations";
-import { OPEN_COMMAND_MENU_EVENT, RENAME_CURRENT_CHAT_EVENT } from "./events";
-import { APP_ACTIONS, actionTitle, findAction, type ActionEnv, type AppAction } from "./registry";
+import {
+  FORK_CURRENT_CHAT_EVENT,
+  OPEN_COMMAND_MENU_EVENT,
+  RENAME_CURRENT_CHAT_EVENT,
+} from "./events";
+import {
+  APP_ACTIONS,
+  actionTitle,
+  findAction,
+  type ActionEnv,
+  type AppAction,
+  type WorkspaceChoice,
+} from "./registry";
 
 const CommandMenu = lazy(() => import("../../components/command-menu/command-menu"));
 const ShortcutSheet = lazy(() => import("../../components/command-menu/shortcut-sheet"));
@@ -153,11 +168,33 @@ export function ActionsProvider(props: { children: ReactNode }) {
       ? app.session
       : null;
 
+  // Every workspace open to the person, in the workspace picker's order.
+  const workspaces = useMemo<WorkspaceChoice[]>(
+    () =>
+      workspacesByOrganization(t, app.accessContext, app.workspaces).flatMap((group) =>
+        group.workspaces.map((workspace) => ({
+          id: workspace.id,
+          name: workspace.name,
+          organization: group.org.label,
+          personal: isPersonalWorkspace(workspace, app.managedSelfContext),
+        })),
+      ),
+    [app.accessContext, app.workspaces, app.managedSelfContext],
+  );
+  // The same rule as the fork button under a message.
+  const canForkCurrentChat =
+    currentChat !== null &&
+    app.clientConfig.auth.mode === "managedSession" &&
+    app.authSession !== null &&
+    Boolean(app.session?.tenancy) &&
+    hasWorkspacePermission(app.accessContext, workspaceId, "sessions:create");
+
   const [menu, setMenu] = useState<{
     open: boolean;
     mounted: boolean;
-    chat: SessionListRow | null;
-  }>({ open: false, mounted: false, chat: null });
+    /** Opened to pick a workspace rather than search everything. */
+    workspaces: boolean;
+  }>({ open: false, mounted: false, workspaces: false });
   const [sheet, setSheet] = useState({ open: false, mounted: false });
 
   const railRef = useRef(rail);
@@ -184,14 +221,21 @@ export function ActionsProvider(props: { children: ReactNode }) {
     const active = document.activeElement;
     returnFocus.current = active instanceof HTMLElement && active !== document.body ? active : null;
   }, []);
-  const openCommandMenu = useCallback(() => {
-    rememberFocus();
-    setSheet((current) => (current.open ? { ...current, open: false } : current));
-    // The phone drawer is a modal of its own; the menu replaces it and returns
-    // focus itself, so the retiring drawer must not take focus back.
-    railRef.current.handOffDrawer();
-    setMenu((current) => ({ open: !current.open, mounted: true, chat: null }));
-  }, [rememberFocus]);
+  const openCommandMenu = useCallback(
+    (pickWorkspace = false) => {
+      rememberFocus();
+      setSheet((current) => (current.open ? { ...current, open: false } : current));
+      // The phone drawer is a modal of its own; the menu replaces it and returns
+      // focus itself, so the retiring drawer must not take focus back.
+      railRef.current.handOffDrawer();
+      setMenu((current) => ({
+        open: pickWorkspace ? true : !current.open,
+        mounted: true,
+        workspaces: pickWorkspace,
+      }));
+    },
+    [rememberFocus],
+  );
   const openShortcutSheet = useCallback(() => {
     rememberFocus();
     setMenu((current) => (current.open ? { ...current, open: false } : current));
@@ -200,9 +244,15 @@ export function ActionsProvider(props: { children: ReactNode }) {
 
   // Recent chats follow what is actually opened, in any way.
   useEffect(() => {
-    if (currentChat) recordChatVisit(subjectId, workspaceId, currentChat);
+    if (currentChat) recordChatVisit(subjectId, currentChat);
     // Title and pin changes refresh the record without reordering.
-  }, [currentChat?.id, subjectId, workspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentChat?.id, subjectId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Control+Tab and ⌘K leave out chats in workspaces no longer open to the person.
+  const reachable = useMemo(() => {
+    const ids = new Set(workspaces.map((workspace) => workspace.id));
+    return (id: string) => ids.has(id) || id === workspaceId;
+  }, [workspaces, workspaceId]);
 
   const env = useMemo<ActionEnv>(
     () => ({
@@ -214,8 +264,12 @@ export function ActionsProvider(props: { children: ReactNode }) {
       ops,
       chatList,
       workspacePanel,
+      workspaces,
+      canForkCurrentChat,
       newChat: () => rail.startNewSession(),
-      openChat: (chatId) => rail.openSession(chatId),
+      openChat: (chatId, inWorkspaceId) => rail.openSession(chatId, inWorkspaceId),
+      openWorkspace: (id) => rail.openWorkspace(id),
+      openWorkspacePicker: () => openCommandMenu(true),
       openInbox: () => {
         rail.setDrawerOpen(false);
         void navigate({ to: "/workspaces/$workspaceId/inbox", params: { workspaceId } });
@@ -229,16 +283,14 @@ export function ActionsProvider(props: { children: ReactNode }) {
       findInChat: () => requestConversationFind(uiEvents),
       searchMessages: (query) => requestSessionSearch(windowEvents, workspaceId, undefined, query),
       renameCurrentChat: () => uiEvents.dispatchEvent(new Event(RENAME_CURRENT_CHAT_EVENT)),
-      openCommandMenu,
+      forkCurrentChat: () => uiEvents.dispatchEvent(new Event(FORK_CURRENT_CHAT_EVENT)),
+      openCommandMenu: () => openCommandMenu(),
       openShortcutSheet,
       switchToRecentChat: () => {
-        const target = openChatSwitcher(
-          readChatDirectory(subjectId, workspaceId),
-          routeChatId,
-          false,
-        );
+        const directory = readChatDirectory(subjectId, workspaceId);
+        const target = openChatSwitcher(directory, routeChatId, false, reachable);
         const id = target?.ids[target.index];
-        if (id) rail.openSession(id);
+        if (id) rail.openSession(id, directory.rows.get(id)?.workspaceId);
       },
       sidebarOrder: () => readChatDirectory(subjectId, workspaceId).sidebarOrder,
       pinnedOrder: () => readChatDirectory(subjectId, workspaceId).pinnedOrder,
@@ -252,6 +304,9 @@ export function ActionsProvider(props: { children: ReactNode }) {
       ops,
       chatList,
       workspacePanel,
+      workspaces,
+      canForkCurrentChat,
+      reachable,
       inspectorOpen,
       setInspectorOpen,
       rail,
@@ -368,6 +423,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
   }, []);
   const routeChatIdRef = useRef(routeChatId);
   routeChatIdRef.current = routeChatId;
+  const reachableRef = useRef(reachable);
+  reachableRef.current = reachable;
   const switcherEnabled = keyboardShortcuts && chatList && surface === "desktop";
   const pickSwitcherChat = useCallback(
     (index?: number) => {
@@ -375,7 +432,12 @@ export function ActionsProvider(props: { children: ReactNode }) {
       if (!state) return;
       const id = state.ids[index ?? state.index];
       setSwitcher(null);
-      if (id && id !== routeChatIdRef.current) envRef.current.openChat(id);
+      if (!id || id === routeChatIdRef.current) return;
+      const current = envRef.current;
+      current.openChat(
+        id,
+        readChatDirectory(current.subjectId, current.workspaceId).rows.get(id)?.workspaceId,
+      );
     },
     [setSwitcher],
   );
@@ -406,6 +468,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           readChatDirectory(subjectId, workspaceId),
           routeChatIdRef.current,
           event.shiftKey,
+          reachableRef.current,
         );
         if (!opened) return;
         void loadChatSwitcher();
@@ -467,6 +530,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
         <Suspense fallback={null}>
           <CommandMenu
             open={menu.open}
+            pickWorkspace={menu.workspaces}
             onOpenChange={(open) => setMenu((current) => ({ ...current, open }))}
             returnFocus={returnFocus}
           />
@@ -487,6 +551,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
             state={switcher}
             subjectId={subjectId}
             workspaceId={workspaceId}
+            workspaces={workspaces}
             currentChatId={routeChatId}
             platform={platform}
             onHover={(index) => {

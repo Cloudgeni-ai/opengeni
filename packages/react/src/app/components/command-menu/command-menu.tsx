@@ -3,8 +3,10 @@
  *
  * It opens instantly from what the app already knows (chats the sidebar has
  * loaded and the chats opened recently) and merges the server's title search as
- * it arrives. Tab on a chat shows that chat's actions; the chords of chat
- * actions work on the highlighted chat while the menu is open.
+ * it arrives. Chats in the person's other workspaces show too, tagged with
+ * their workspace, and so do workspaces to switch to. Tab on a chat shows that
+ * chat's actions; the chords of chat actions work on the highlighted chat
+ * while the menu is open.
  */
 import {
   useCallback,
@@ -24,6 +26,7 @@ import {
   ArrowUpRightIcon,
   ChevronRightIcon,
   CornerDownLeftIcon,
+  LockIcon,
   MessageSquareIcon,
   PinIcon,
   SearchIcon,
@@ -52,21 +55,27 @@ import {
   actionTitle,
   type ActionEnv,
   type AppAction,
+  type WorkspaceChoice,
 } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
 import { DialogOverlay, DialogPortal } from "../../../ui/dialog";
 import { formatRelativeTime } from "../../../ui/relative-time";
 import { Keycaps } from "./keycaps";
+import { WorkspaceTag } from "./workspace-tag";
 
 type Item = {
   key: string;
   group: string;
   icon: LucideIcon;
+  /** A workspace's initial, drawn as the workspace picker draws it, instead of the icon. */
+  tile?: string | undefined;
   title: string;
   /** Text to mark as matched in the title. */
   highlight?: string | undefined;
   /** Quiet text on the right (when, "Archived"). */
   meta?: string | undefined;
+  /** The workspace a chat lives in, when it is not the one on screen. */
+  workspaceTag?: string | undefined;
   chord?: Chord | undefined;
   /** Present on chat rows: Tab opens their actions, chat chords act on them. */
   chat?: ChatRecord | undefined;
@@ -78,7 +87,12 @@ type Group = { label: string; items: Item[]; best: number };
 const RECENT_LIMIT = 6;
 const CHAT_RESULT_LIMIT = 8;
 const ACTION_RESULT_LIMIT = 6;
+const WORKSPACE_RESULT_LIMIT = 4;
 const SERVER_DEBOUNCE_MS = 120;
+/** Other workspaces whose titles the server searches too, most used first. */
+const OTHER_WORKSPACES_SEARCHED = 9;
+/** A chat in another workspace ranks just below an equal match here. */
+const ELSEWHERE_PENALTY = 10;
 
 function relativeMeta(record: ChatRecord, now: number): string | undefined {
   if (record.archived) return "Archived";
@@ -165,8 +179,13 @@ function Highlighted(props: { text: string; query: string | undefined }) {
   return <>{parts}</>;
 }
 
+/**
+ * The server's title search: this workspace, and the person's other workspaces
+ * they use most, side by side. Each workspace's matches join the list as they
+ * arrive.
+ */
 function useServerTitleSearch(
-  workspaceId: string,
+  workspaceIds: readonly string[],
   subjectId: string,
   query: string,
   open: boolean,
@@ -177,42 +196,62 @@ function useServerTitleSearch(
     rows: [],
     loading: false,
   });
+  const searchKey = workspaceIds.join(",");
   useEffect(() => {
     const trimmed = query.trim();
-    if (!open || !trimmed) {
+    if (!open || !trimmed || !searchKey) {
       setState({ query: "", rows: [], loading: false });
       return;
     }
     setState((current) => ({ ...current, loading: true }));
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      client
-        .listSessionPage(workspaceId, {
-          search: trimmed,
-          archiveStatus: "all",
-          limit: 20,
-          signal: controller.signal,
-        })
-        .then((page) => {
-          const rows = [...(page.pinned ?? []), ...page.sessions];
-          rememberChats(subjectId, workspaceId, rows);
-          setState({ query: trimmed, rows, loading: false });
-        })
-        .catch(() => {
-          // Local results still show; the server search is an addition.
-          if (!controller.signal.aborted) setState({ query: trimmed, rows: [], loading: false });
-        });
+      const targets = searchKey.split(",");
+      let pending = targets.length;
+      let first = true;
+      const settle = (rows: SessionListRow[]) => {
+        if (controller.signal.aborted) return;
+        pending -= 1;
+        const replace = first;
+        first = false;
+        setState((current) => ({
+          query: trimmed,
+          rows: replace || current.query !== trimmed ? rows : [...current.rows, ...rows],
+          loading: pending > 0,
+        }));
+      };
+      targets.forEach((workspaceId, index) => {
+        client
+          .listSessionPage(workspaceId, {
+            search: trimmed,
+            archiveStatus: "all",
+            // This workspace first and fullest; a few from each of the others.
+            limit: index === 0 ? 20 : 6,
+            signal: controller.signal,
+          })
+          .then((page) => {
+            const rows = [...(page.pinned ?? []), ...page.sessions];
+            rememberChats(subjectId, rows);
+            settle(rows);
+          })
+          .catch(() => {
+            // Local results still show; the server search is an addition.
+            settle([]);
+          });
+      });
     }, SERVER_DEBOUNCE_MS);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [client, workspaceId, subjectId, query, open]);
+  }, [client, searchKey, subjectId, query, open]);
   return state;
 }
 
 export default function CommandMenu(props: {
   open: boolean;
+  /** Opens listing workspaces to switch to. */
+  pickWorkspace: boolean;
   onOpenChange: (open: boolean) => void;
   /** Where focus goes back to after a plain close. */
   returnFocus: RefObject<HTMLElement | null>;
@@ -231,6 +270,7 @@ export default function CommandMenu(props: {
 
 function CommandMenuDialog(props: {
   open: boolean;
+  pickWorkspace: boolean;
   onOpenChange: (open: boolean) => void;
   returnFocus: RefObject<HTMLElement | null>;
   env: ActionEnv;
@@ -238,10 +278,11 @@ function CommandMenuDialog(props: {
   chordsFor(action: AppAction): Chord[];
 }) {
   const { env, run, chordsFor, onOpenChange } = props;
-  const { workspaceId, subjectId, platform, surface } = env;
-  const directoryVersion = useChatDirectoryVersion(subjectId, workspaceId);
+  const { workspaceId, subjectId, platform, surface, workspaces } = env;
+  const directoryVersion = useChatDirectoryVersion(subjectId);
   const [query, setQuery] = useState("");
   const [focusChat, setFocusChat] = useState<ChatRecord | null>(null);
+  const [pickingWorkspace, setPickingWorkspace] = useState(props.pickWorkspace);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -249,17 +290,47 @@ function CommandMenuDialog(props: {
   /** Runs right after the menu has returned focus (see `AppAction.opensDialog`). */
   const afterClose = useRef<(() => void) | null>(null);
   const listId = useId();
-  const server = useServerTitleSearch(workspaceId, subjectId, focusChat ? "" : query, props.open);
+  const workspaceNames = useMemo(
+    () => new Map(workspaces.map((workspace) => [workspace.id, workspace.name])),
+    [workspaces],
+  );
+  /** Chats the menu may show: this workspace's, and those of other workspaces still open to the person. */
+  const reachable = useCallback(
+    (id: string) => id === workspaceId || workspaceNames.has(id),
+    [workspaceId, workspaceNames],
+  );
+  // The server searches this workspace and the other workspaces used most recently.
+  const searchWorkspaceIds = useMemo(() => {
+    void directoryVersion;
+    const directory = readChatDirectory(subjectId, workspaceId);
+    const used: string[] = [];
+    for (const id of directory.recent) {
+      const record = directory.rows.get(id);
+      if (record && !used.includes(record.workspaceId)) used.push(record.workspaceId);
+    }
+    const others = [...used, ...workspaces.map((workspace) => workspace.id)].filter(
+      (id, index, all) => id !== workspaceId && reachable(id) && all.indexOf(id) === index,
+    );
+    return [workspaceId, ...others.slice(0, OTHER_WORKSPACES_SEARCHED)];
+    // Which workspaces to search changes only when the menu opens.
+  }, [props.open, subjectId, workspaceId, workspaces, reachable]); // eslint-disable-line react-hooks/exhaustive-deps
+  const server = useServerTitleSearch(
+    searchWorkspaceIds,
+    subjectId,
+    focusChat || pickingWorkspace ? "" : query,
+    props.open,
+  );
 
   // Every open starts fresh.
   useEffect(() => {
     if (!props.open) return;
     setQuery("");
     setFocusChat(null);
+    setPickingWorkspace(props.pickWorkspace);
     setActive(0);
     ranAction.current = false;
     afterClose.current = null;
-  }, [props.open]);
+  }, [props.open, props.pickWorkspace]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
@@ -285,10 +356,26 @@ function CommandMenuDialog(props: {
         window.open(env.ops.linkTo(record), "_blank", "noopener");
         return;
       }
-      env.openChat(record.id);
+      env.openChat(record.id, record.workspaceId);
     },
     [close, env, surface],
   );
+
+  const openWorkspace = useCallback(
+    (id: string) => {
+      ranAction.current = true;
+      close();
+      if (id !== workspaceId) env.openWorkspace(id);
+    },
+    [close, env, workspaceId],
+  );
+
+  const startPickingWorkspace = useCallback(() => {
+    setFocusChat(null);
+    setPickingWorkspace(true);
+    setQuery("");
+    inputRef.current?.focus();
+  }, []);
 
   const actionItem = useCallback(
     (action: AppAction, chat: SessionListRow | null, group: string, highlight?: string): Item => ({
@@ -298,9 +385,11 @@ function CommandMenuDialog(props: {
       title: actionTitle(action, env, chat),
       highlight,
       chord: chordsFor(action)[0],
-      run: () => runAction(action, chat),
+      // Switching workspace lists the workspaces right here.
+      run: () =>
+        action.id === "go.switchWorkspace" ? startPickingWorkspace() : runAction(action, chat),
     }),
-    [chordsFor, env, runAction],
+    [chordsFor, env, runAction, startPickingWorkspace],
   );
 
   const groups = useMemo<Group[]>(() => {
@@ -316,13 +405,66 @@ function CommandMenuDialog(props: {
       title: record.title,
       highlight,
       meta: current?.id === record.id ? "Open now" : relativeMeta(record, now),
+      workspaceTag:
+        record.workspaceId === workspaceId ? undefined : workspaceNames.get(record.workspaceId),
       chat: record,
       run: ({ newTab }) => openChat(record, newTab),
     });
 
+    const workspaceItem = (choice: WorkspaceChoice, group: string, highlight?: string): Item => ({
+      key: `workspace:${choice.id}`,
+      group,
+      icon: LockIcon,
+      // A Personal workspace shows its lock, as in the workspace picker.
+      tile: choice.personal ? undefined : (choice.name.trim()[0] ?? "W").toUpperCase(),
+      title: choice.name,
+      highlight,
+      meta: choice.id === workspaceId ? "Current" : undefined,
+      run: () => openWorkspace(choice.id),
+    });
+
+    // Workspaces to switch to, by organization.
+    if (pickingWorkspace) {
+      const trimmed = query.trim();
+      const organizations = new Set(workspaces.map((choice) => choice.organization));
+      const scored = workspaces.flatMap((choice) => {
+        if (!trimmed) return [{ choice, rank: 0 }];
+        const rank =
+          rankLabel(choice.name, trimmed) ??
+          (organizations.size > 1 ? rankLabel(choice.organization, trimmed) : null);
+        return rank === null ? [] : [{ choice, rank }];
+      });
+      const realMatch = scored.some((entry) => entry.rank >= LOOSE_MATCH_BELOW);
+      const kept = scored.filter(
+        (entry) => !trimmed || !realMatch || entry.rank >= LOOSE_MATCH_BELOW,
+      );
+      if (trimmed) {
+        kept.sort((a, b) => b.rank - a.rank);
+        return [
+          {
+            label: "Workspaces",
+            items: kept.map((entry) => workspaceItem(entry.choice, "Workspaces", trimmed)),
+            best: 0,
+          },
+        ];
+      }
+      const byOrganization = new Map<string, Item[]>();
+      for (const { choice } of kept) {
+        const label = organizations.size > 1 ? choice.organization : "Workspaces";
+        const list = byOrganization.get(label) ?? [];
+        list.push(workspaceItem(choice, label));
+        byOrganization.set(label, list);
+      }
+      return [...byOrganization].map(([label, items]) => ({ label, items, best: 0 }));
+    }
+
     // A chat's own actions (after Tab).
     if (focusChat) {
-      const row = focusChat.row ?? (current?.id === focusChat.id ? current : null);
+      // Chats in other workspaces offer what works from here: open and copy link.
+      const sameWorkspace = focusChat.workspaceId === workspaceId;
+      const row = sameWorkspace
+        ? (focusChat.row ?? (current?.id === focusChat.id ? current : null))
+        : null;
       const items: Array<{ item: Item; rank: number }> = [];
       const openRank = rankLabel("Open", query);
       if (openRank !== null) {
@@ -378,7 +520,7 @@ function CommandMenuDialog(props: {
       const recent = recentIds
         .map((id) => directory.rows.get(id))
         .filter((record): record is ChatRecord =>
-          Boolean(record && listable(record) && !record.archived),
+          Boolean(record && listable(record) && !record.archived && reachable(record.workspaceId)),
         )
         .slice(0, RECENT_LIMIT);
       if (recent.length > 0) {
@@ -426,7 +568,7 @@ function CommandMenuDialog(props: {
     const serverIds = new Set(server.query === trimmed ? server.rows.map((row) => row.id) : []);
     const scored: Array<{ record: ChatRecord; rank: number; loose: boolean }> = [];
     for (const record of directory.rows.values()) {
-      if (!listable(record)) continue;
+      if (!listable(record) || !reachable(record.workspaceId)) continue;
       let rank = rankLabel(record.title, trimmed);
       const loose = rank !== null && rank < LOOSE_MATCH_BELOW;
       // The server matched every word in the title or first message.
@@ -436,6 +578,7 @@ function CommandMenuDialog(props: {
       if (visited !== undefined) rank += Math.max(0, 20 - visited);
       if (record.pinned) rank += 5;
       if (record.archived) rank -= 300;
+      if (record.workspaceId !== workspaceId) rank -= ELSEWHERE_PENALTY;
       scored.push({ record, rank, loose });
     }
 
@@ -453,10 +596,23 @@ function CommandMenuDialog(props: {
         item: actionItem(action, target, "Actions", trimmed),
       });
     }
+    const workspaceScores: Array<{ item: Item; rank: number; loose: boolean }> = [];
+    for (const choice of workspaces) {
+      if (choice.id === workspaceId) continue;
+      const rank = rankLabel(choice.name, trimmed);
+      if (rank === null) continue;
+      workspaceScores.push({
+        rank,
+        loose: rank < LOOSE_MATCH_BELOW,
+        item: workspaceItem(choice, "Workspaces", trimmed),
+      });
+    }
     // Letters-in-order guesses only help when nothing really matches; next to
     // real matches they are noise ("pin" → "Postgres … investigation").
     const hasRealMatch =
-      scored.some((entry) => !entry.loose) || actionScores.some((entry) => !entry.loose);
+      scored.some((entry) => !entry.loose) ||
+      actionScores.some((entry) => !entry.loose) ||
+      workspaceScores.some((entry) => !entry.loose);
     const chats = scored
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt)
@@ -465,6 +621,10 @@ function CommandMenuDialog(props: {
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank)
       .slice(0, ACTION_RESULT_LIMIT);
+    const workspacesFound = workspaceScores
+      .filter((entry) => !hasRealMatch || !entry.loose)
+      .sort((a, b) => b.rank - a.rank)
+      .slice(0, WORKSPACE_RESULT_LIMIT);
 
     const result: Group[] = [];
     if (chats.length > 0) {
@@ -479,6 +639,14 @@ function CommandMenuDialog(props: {
         label: "Actions",
         items: actionsFound.map((entry) => entry.item),
         best: actionsFound[0]!.rank,
+      });
+    }
+    if (workspacesFound.length > 0) {
+      result.push({
+        label: "Workspaces",
+        items: workspacesFound.map((entry) => entry.item),
+        // Chats and actions first on a tie: a workspace is a bigger jump.
+        best: workspacesFound[0]!.rank - 1,
       });
     }
     // A clearly better action match ("new" → New chat) comes before chats.
@@ -507,21 +675,33 @@ function CommandMenuDialog(props: {
     env,
     focusChat,
     openChat,
+    openWorkspace,
+    pickingWorkspace,
     query,
+    reachable,
     server.query,
     server.rows,
     subjectId,
     surface,
     workspaceId,
+    workspaceNames,
+    workspaces,
   ]);
 
   const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
   const activeIndex = items.length === 0 ? -1 : Math.min(active, items.length - 1);
   const activeItem = activeIndex >= 0 ? items[activeIndex] : undefined;
-  const searching = Boolean(query.trim()) && !focusChat && server.loading;
+  const searching = Boolean(query.trim()) && !focusChat && !pickingWorkspace && server.loading;
 
-  // Typing starts at the best match.
-  useEffect(() => setActive(0), [query, focusChat]);
+  // Typing starts at the best match; the workspace list starts at the current workspace's neighbour.
+  useEffect(() => {
+    if (pickingWorkspace && !query) {
+      const index = workspaces.findIndex((choice) => choice.id === workspaceId);
+      setActive(index >= 0 && workspaces.length > 1 ? (index + 1) % workspaces.length : 0);
+      return;
+    }
+    setActive(0);
+  }, [query, focusChat, pickingWorkspace, workspaces, workspaceId]);
 
   // Keep the highlighted row in view without scrolling the page.
   useLayoutEffect(() => {
@@ -539,6 +719,7 @@ function CommandMenuDialog(props: {
   }, []);
   const leaveChat = useCallback(() => {
     setFocusChat(null);
+    setPickingWorkspace(false);
     setQuery("");
   }, []);
 
@@ -581,14 +762,14 @@ function CommandMenuDialog(props: {
         case "Tab": {
           event.preventDefault();
           if (event.shiftKey) {
-            if (focusChat) leaveChat();
+            if (focusChat || pickingWorkspace) leaveChat();
             return;
           }
           if (!focusChat && activeItem?.chat) enterChat(activeItem.chat);
           return;
         }
         case "Backspace": {
-          if (focusChat && !query) {
+          if ((focusChat || pickingWorkspace) && !query) {
             event.preventDefault();
             leaveChat();
           }
@@ -600,6 +781,7 @@ function CommandMenuDialog(props: {
       // A chat action's chord acts on the highlighted chat, as in Linear.
       const chatRecord = focusChat ?? activeItem?.chat;
       if (!chatRecord) return;
+      const sameWorkspace = chatRecord.workspaceId === workspaceId;
       for (const action of APP_ACTIONS) {
         if (!action.forChat) continue;
         const chord = chordsFor(action).find((candidate) =>
@@ -607,9 +789,9 @@ function CommandMenuDialog(props: {
         );
         if (!chord) continue;
         const row =
-          chatRecord.row ??
-          (env.currentChat?.id === chatRecord.id ? env.currentChat : null) ??
-          (action.id === "chat.copyLink" ? pseudoRow(chatRecord) : null);
+          (sameWorkspace
+            ? (chatRecord.row ?? (env.currentChat?.id === chatRecord.id ? env.currentChat : null))
+            : null) ?? (action.id === "chat.copyLink" ? pseudoRow(chatRecord) : null);
         event.preventDefault();
         event.stopPropagation();
         if (row && action.available(env, row)) runAction(action, row, chord);
@@ -624,13 +806,19 @@ function CommandMenuDialog(props: {
       focusChat,
       items.length,
       leaveChat,
+      pickingWorkspace,
       platform,
       query,
       runAction,
+      workspaceId,
     ],
   );
 
-  const placeholder = focusChat ? "Search actions…" : "Search chats or run an action…";
+  const placeholder = focusChat
+    ? "Search actions…"
+    : pickingWorkspace
+      ? "Switch to workspace…"
+      : "Search chats or run an action…";
   const optionId = (item: Item) => `${listId}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
   return (
@@ -662,8 +850,9 @@ function CommandMenuDialog(props: {
             next?.();
           }}
           onEscapeKeyDown={(event) => {
-            // Esc steps back out of a chat's actions before it closes the menu.
-            if (!focusChat) return;
+            // Esc steps back out of a chat's actions, or the workspace list
+            // reached from the menu, before it closes the menu.
+            if (!focusChat && !(pickingWorkspace && !props.pickWorkspace)) return;
             event.preventDefault();
             leaveChat();
           }}
@@ -689,6 +878,16 @@ function CommandMenuDialog(props: {
                 <span className="truncate">{focusChat.title}</span>
                 <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
               </button>
+            ) : pickingWorkspace ? (
+              <button
+                type="button"
+                onClick={leaveChat}
+                title="Back to all results"
+                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-hover py-0.5 pr-1.5 pl-2.5 text-xs font-medium text-fg outline-hidden hover:bg-selection focus-visible:outline-2 focus-visible:outline-ring/55"
+              >
+                Workspaces
+                <ChevronRightIcon aria-hidden="true" className="size-3.5 text-fg-muted" />
+              </button>
             ) : null}
             <input
               ref={inputRef}
@@ -697,7 +896,13 @@ function CommandMenuDialog(props: {
               aria-controls={listId}
               aria-autocomplete="list"
               aria-activedescendant={activeItem ? optionId(activeItem) : undefined}
-              aria-label={focusChat ? `Actions for ${focusChat.title}` : "Search chats and actions"}
+              aria-label={
+                focusChat
+                  ? `Actions for ${focusChat.title}`
+                  : pickingWorkspace
+                    ? "Search workspaces"
+                    : "Search chats and actions"
+              }
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
@@ -721,7 +926,7 @@ function CommandMenuDialog(props: {
             ref={listRef}
             id={listId}
             role="listbox"
-            aria-label={focusChat ? "Chat actions" : "Results"}
+            aria-label={focusChat ? "Chat actions" : pickingWorkspace ? "Workspaces" : "Results"}
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5"
           >
             {items.length === 0 ? (
@@ -760,16 +965,26 @@ function CommandMenuDialog(props: {
                             selected ? "bg-hover text-fg" : null,
                           )}
                         >
-                          <Icon
-                            aria-hidden="true"
-                            className={cn(
-                              "size-4 shrink-0",
-                              selected ? "text-fg" : "text-fg-muted",
-                            )}
-                          />
+                          {item.tile ? (
+                            <span
+                              aria-hidden="true"
+                              className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted"
+                            >
+                              {item.tile}
+                            </span>
+                          ) : (
+                            <Icon
+                              aria-hidden="true"
+                              className={cn(
+                                "size-4 shrink-0",
+                                selected ? "text-fg" : "text-fg-muted",
+                              )}
+                            />
+                          )}
                           <span className="min-w-0 flex-1 truncate">
                             <Highlighted text={item.title} query={item.highlight} />
                           </span>
+                          {item.workspaceTag ? <WorkspaceTag name={item.workspaceTag} /> : null}
                           {item.meta ? (
                             <span className="shrink-0 text-xs text-fg-muted tabular-nums">
                               {item.meta}
@@ -797,13 +1012,17 @@ function CommandMenuDialog(props: {
               label="Move"
               platform={platform}
             />
-            <FooterHint keys={[{ code: "Enter" }]} label="Open" platform={platform} />
-            {focusChat ? (
+            <FooterHint
+              keys={[{ code: "Enter" }]}
+              label={pickingWorkspace ? "Switch" : "Open"}
+              platform={platform}
+            />
+            {focusChat || pickingWorkspace ? (
               <FooterHint keys={[{ code: "Escape" }]} label="Back" platform={platform} />
             ) : (
               <FooterHint keys={[{ code: "Tab" }]} label="Chat actions" platform={platform} />
             )}
-            {surface === "web" && !focusChat ? (
+            {surface === "web" && !focusChat && !pickingWorkspace ? (
               <FooterHint
                 keys={[{ code: "Enter", mod: true }]}
                 label="New tab"

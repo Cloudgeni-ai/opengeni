@@ -1,8 +1,8 @@
 /**
  * What the app already knows about chats, so the command menu can answer
- * instantly: rows the sidebar has loaded, the chats someone opened recently
- * (kept across reloads), and the sidebar's visible order for next and previous
- * chat. It is a cache for speed, never a source of authority: opening a chat
+ * instantly: rows the sidebar and searches have loaded, the chats someone
+ * opened recently in any of their workspaces (kept across reloads), and each
+ * workspace's sidebar order for next and previous chat. It is a cache for speed, never a source of authority: opening a chat
  * still goes through the normal authorized reads.
  */
 import { useSyncExternalStore } from "react";
@@ -19,61 +19,94 @@ export type ChatRecord = {
   row: SessionListRow | null;
 };
 
+type WorkspaceOrder = { sidebarOrder: string[]; pinnedOrder: string[] };
+
 type DirectoryState = {
+  /** Every chat the app knows, in any of the person's workspaces. */
   rows: Map<string, ChatRecord>;
-  /** Recently opened chat ids, most recent first. */
+  /** Recently opened chat ids across workspaces, most recent first. */
   recent: string[];
-  /** Sidebar order of visible chats (pinned first), for next and previous. */
-  sidebarOrder: string[];
-  pinnedOrder: string[];
+  /** Each workspace's sidebar order (pinned first), for next and previous. */
+  orders: Map<string, WorkspaceOrder>;
   version: number;
 };
 
-const RECENT_LIMIT = 30;
+const RECENT_LIMIT = 50;
+const EMPTY_ORDER: WorkspaceOrder = { sidebarOrder: [], pinnedOrder: [] };
 const directories = new Map<string, DirectoryState>();
 const listeners = new Map<string, Set<() => void>>();
 
-function key(subjectId: string, workspaceId: string): string {
-  return `${subjectId}\u0000${workspaceId}`;
+function storageKey(subjectId: string): string {
+  return `opengeni.recentChats.${subjectId}`;
 }
 
-function storageKey(subjectId: string, workspaceId: string): string {
-  return `opengeni.recentChats.${subjectId}.${workspaceId}`;
-}
+type StoredRecent = { id: string; workspaceId: string; title: string; at: number };
 
-type StoredRecent = { id: string; title: string; at: number };
-
-function readStoredRecent(subjectId: string, workspaceId: string): StoredRecent[] {
-  if (typeof window === "undefined") return [];
+function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
   try {
-    const raw = window.localStorage.getItem(storageKey(subjectId, workspaceId));
     const parsed: unknown = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is StoredRecent =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof (item as StoredRecent).id === "string" &&
-        typeof (item as StoredRecent).title === "string" &&
-        typeof (item as StoredRecent).at === "number",
-    );
+    return parsed.flatMap((item): StoredRecent[] => {
+      if (typeof item !== "object" || item === null) return [];
+      const entry = item as Partial<StoredRecent>;
+      const ws = typeof entry.workspaceId === "string" ? entry.workspaceId : workspaceId;
+      if (
+        typeof entry.id !== "string" ||
+        typeof ws !== "string" ||
+        typeof entry.title !== "string" ||
+        typeof entry.at !== "number"
+      ) {
+        return [];
+      }
+      return [{ id: entry.id, workspaceId: ws, title: entry.title, at: entry.at }];
+    });
   } catch {
     return [];
   }
 }
 
-function directory(subjectId: string, workspaceId: string): DirectoryState {
-  const id = key(subjectId, workspaceId);
-  let state = directories.get(id);
+/**
+ * The recent chats kept across reloads. Earlier versions kept one list per
+ * workspace (`opengeni.recentChats.<subject>.<workspace>`); those merge into
+ * the one list the first time it is read.
+ */
+function readStoredRecent(subjectId: string): StoredRecent[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const storage = window.localStorage;
+    const key = storageKey(subjectId);
+    const current = storage.getItem(key);
+    if (current !== null) return parseStored(current);
+    const prefix = `${key}.`;
+    const legacyKeys: string[] = [];
+    for (let index = 0; index < storage.length; index++) {
+      const name = storage.key(index);
+      if (name?.startsWith(prefix)) legacyKeys.push(name);
+    }
+    if (legacyKeys.length === 0) return [];
+    const merged = legacyKeys
+      .flatMap((name) => parseStored(storage.getItem(name), name.slice(prefix.length)))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, RECENT_LIMIT);
+    storage.setItem(key, JSON.stringify(merged));
+    for (const name of legacyKeys) storage.removeItem(name);
+    return merged;
+  } catch {
+    return [];
+  }
+}
+
+function directory(subjectId: string): DirectoryState {
+  let state = directories.get(subjectId);
   if (!state) {
-    const stored = readStoredRecent(subjectId, workspaceId);
+    const stored = readStoredRecent(subjectId);
     state = {
       rows: new Map(
         stored.map((item) => [
           item.id,
           {
             id: item.id,
-            workspaceId,
+            workspaceId: item.workspaceId,
             title: item.title,
             updatedAt: item.at,
             pinned: false,
@@ -83,29 +116,30 @@ function directory(subjectId: string, workspaceId: string): DirectoryState {
         ]),
       ),
       recent: stored.map((item) => item.id),
-      sidebarOrder: [],
-      pinnedOrder: [],
+      orders: new Map(),
       version: 0,
     };
-    directories.set(id, state);
+    directories.set(subjectId, state);
   }
   return state;
 }
 
-function emit(subjectId: string, workspaceId: string): void {
-  const state = directory(subjectId, workspaceId);
+function emit(subjectId: string): void {
+  const state = directory(subjectId);
   state.version += 1;
-  for (const listener of listeners.get(key(subjectId, workspaceId)) ?? []) listener();
+  for (const listener of listeners.get(subjectId) ?? []) listener();
 }
 
-function persistRecent(subjectId: string, workspaceId: string, state: DirectoryState): void {
+function persistRecent(subjectId: string, state: DirectoryState): void {
   if (typeof window === "undefined") return;
   const stored: StoredRecent[] = state.recent.flatMap((id) => {
     const record = state.rows.get(id);
-    return record ? [{ id, title: record.title, at: record.updatedAt }] : [];
+    return record
+      ? [{ id, workspaceId: record.workspaceId, title: record.title, at: record.updatedAt }]
+      : [];
   });
   try {
-    window.localStorage.setItem(storageKey(subjectId, workspaceId), JSON.stringify(stored));
+    window.localStorage.setItem(storageKey(subjectId), JSON.stringify(stored));
   } catch {
     // Storage full or blocked: recent chats then last only for this page.
   }
@@ -124,16 +158,11 @@ export function chatRecordFromRow(row: SessionListRow): ChatRecord {
 }
 
 /** Remember rows the app has read (sidebar pages, search results, the open chat). */
-export function rememberChats(
-  subjectId: string,
-  workspaceId: string,
-  rows: readonly SessionListRow[],
-): void {
+export function rememberChats(subjectId: string, rows: readonly SessionListRow[]): void {
   if (rows.length === 0) return;
-  const state = directory(subjectId, workspaceId);
+  const state = directory(subjectId);
   let changed = false;
   for (const row of rows) {
-    if (row.workspaceId !== workspaceId) continue;
     const next = chatRecordFromRow(row);
     const current = state.rows.get(row.id);
     if (
@@ -150,29 +179,29 @@ export function rememberChats(
     state.rows.set(row.id, next);
     changed = true;
   }
-  if (changed) emit(subjectId, workspaceId);
+  if (changed) emit(subjectId);
 }
 
 /** The chat was opened: move it to the front of the recent list. */
-export function recordChatVisit(subjectId: string, workspaceId: string, row: SessionListRow): void {
-  const state = directory(subjectId, workspaceId);
+export function recordChatVisit(subjectId: string, row: SessionListRow): void {
+  const state = directory(subjectId);
   const record = { ...chatRecordFromRow(row), updatedAt: Date.now() };
   const previous = state.rows.get(row.id);
   state.rows.set(row.id, previous?.row && !record.row ? { ...previous, ...record } : record);
   if (state.recent[0] !== row.id) {
     state.recent = [row.id, ...state.recent.filter((id) => id !== row.id)].slice(0, RECENT_LIMIT);
   }
-  persistRecent(subjectId, workspaceId, state);
-  emit(subjectId, workspaceId);
+  persistRecent(subjectId, state);
+  emit(subjectId);
 }
 
 /** A chat was deleted or is no longer reachable: forget it. */
-export function forgetChat(subjectId: string, workspaceId: string, chatId: string): void {
-  const state = directory(subjectId, workspaceId);
+export function forgetChat(subjectId: string, chatId: string): void {
+  const state = directory(subjectId);
   if (!state.rows.delete(chatId) && !state.recent.includes(chatId)) return;
   state.recent = state.recent.filter((id) => id !== chatId);
-  persistRecent(subjectId, workspaceId, state);
-  emit(subjectId, workspaceId);
+  persistRecent(subjectId, state);
+  emit(subjectId);
 }
 
 /** The sidebar reports the chats it shows, in order, so next and previous follow it. */
@@ -182,38 +211,48 @@ export function setSidebarOrder(
   order: readonly string[],
   pinnedOrder: readonly string[],
 ): void {
-  const state = directory(subjectId, workspaceId);
+  const state = directory(subjectId);
+  const current = state.orders.get(workspaceId) ?? EMPTY_ORDER;
   if (
-    state.sidebarOrder.length === order.length &&
-    state.sidebarOrder.every((id, index) => id === order[index]) &&
-    state.pinnedOrder.length === pinnedOrder.length &&
-    state.pinnedOrder.every((id, index) => id === pinnedOrder[index])
+    current.sidebarOrder.length === order.length &&
+    current.sidebarOrder.every((id, index) => id === order[index]) &&
+    current.pinnedOrder.length === pinnedOrder.length &&
+    current.pinnedOrder.every((id, index) => id === pinnedOrder[index])
   ) {
     return;
   }
-  state.sidebarOrder = [...order];
-  state.pinnedOrder = [...pinnedOrder];
-  emit(subjectId, workspaceId);
+  state.orders.set(workspaceId, { sidebarOrder: [...order], pinnedOrder: [...pinnedOrder] });
+  emit(subjectId);
 }
 
 export type ChatDirectorySnapshot = Readonly<{
+  /** Chats in every workspace; each record names its workspace. */
   rows: ReadonlyMap<string, ChatRecord>;
+  /** Recently opened chats across workspaces, most recent first. */
   recent: readonly string[];
+  /** The given workspace's sidebar order and pinned order. */
   sidebarOrder: readonly string[];
   pinnedOrder: readonly string[];
   version: number;
 }>;
 
 export function readChatDirectory(subjectId: string, workspaceId: string): ChatDirectorySnapshot {
-  return directory(subjectId, workspaceId);
+  const state = directory(subjectId);
+  const order = state.orders.get(workspaceId) ?? EMPTY_ORDER;
+  return {
+    rows: state.rows,
+    recent: state.recent,
+    sidebarOrder: order.sidebarOrder,
+    pinnedOrder: order.pinnedOrder,
+    version: state.version,
+  };
 }
 
-function subscribe(subjectId: string, workspaceId: string, listener: () => void): () => void {
-  const id = key(subjectId, workspaceId);
-  let set = listeners.get(id);
+function subscribe(subjectId: string, listener: () => void): () => void {
+  let set = listeners.get(subjectId);
   if (!set) {
     set = new Set();
-    listeners.set(id, set);
+    listeners.set(subjectId, set);
   }
   set.add(listener);
   return () => {
@@ -222,10 +261,10 @@ function subscribe(subjectId: string, workspaceId: string, listener: () => void)
 }
 
 /** Re-renders when the directory changes; read the snapshot through `readChatDirectory`. */
-export function useChatDirectoryVersion(subjectId: string, workspaceId: string): number {
+export function useChatDirectoryVersion(subjectId: string): number {
   return useSyncExternalStore(
-    (listener) => subscribe(subjectId, workspaceId, listener),
-    () => directory(subjectId, workspaceId).version,
+    (listener) => subscribe(subjectId, listener),
+    () => directory(subjectId).version,
     () => 0,
   );
 }
