@@ -305,3 +305,31 @@ long sessions could lose their own cached history on later turns, which is
 most of the cached volume. The cohort stays workspace and person, and the body
 `prompt_cache_key` stays the session id. A finer design, such as a few stable
 buckets per shared prefix, needs measurement under real concurrent load first.
+
+## Decision: no cross-session caching on other routes (October 22, 2026)
+
+This question has been reopened several times; this section settles it.
+
+- The body `prompt_cache_key` stays the session id on every route that sends
+  one. Later turns of a session are 97–98% cached on every measured route, and
+  that is where nearly all input spend is. Nothing may weaken that affinity.
+- The Codex workspace-and-person affinity header above stays as it is.
+- OpenAI/Azure API, Claude and other routes get no cross-session prefix sharing:
+  no shared cache key, no reordering of instructions or tools to create a shared
+  prefix, and no warm-up requests. A new session's first request may be cold.
+
+Why: on one deployment over seven days, a session's first request carried
+1.1% of Codex input cost and 0.2% of Claude input cost (cached tokens weighted
+at 10%); fully cold first requests would still be a low single-digit share. On
+another, Azure first requests were 0% cached while later turns were 98% cached
+at about 130K tokens each. The only ways to share prefixes across sessions on
+the API routes are a shared key (the reverted account cohort above) or a
+model-facing restructuring of the prompt prefix; both risk the in-session hit
+rate for a small saving. Cache warmth also does not explain first-response
+latency: a replayed Azure request took 12.6 s cold and 19.0 s warm with about
+280 tools, and about 2.4 s with 30. Fewer eagerly loaded tools is the latency
+lever.
+
+Reopen only with a measurement showing a route's first-request uncached input
+above 10% of that route's input cost over seven days, or when a provider offers
+an explicit cross-request cache handle that does not depend on routing keys.
