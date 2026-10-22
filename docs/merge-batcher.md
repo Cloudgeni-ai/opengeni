@@ -1,6 +1,6 @@
 # Portable merge batcher
 
-This is the in-house batcher core. It uses Bun 1.4.3, built-in APIs and
+This is the in-house batcher core. It uses Bun 1.4.4, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
 The default mode is **read-only shadow**. Opt-in `shadow-ci` publishes candidates

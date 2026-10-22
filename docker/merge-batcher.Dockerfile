@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.3
+ARG BUN_VERSION=1.4.4
 # Apply the shared embedded-root mitigation natively on the build machine to
 # the target architecture's binary, without executing a foreign-architecture Bun.
 FROM oven/bun:${BUN_VERSION} AS bun-target
