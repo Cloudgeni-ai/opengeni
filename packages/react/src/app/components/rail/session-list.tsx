@@ -3594,7 +3594,7 @@ export function SessionList() {
             ) : null}
             {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
               <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                Showing the 200 most recently active Sites. Search to find older Site conversations.
+                Some older Sites aren&apos;t shown. Search to find their conversations.
               </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (

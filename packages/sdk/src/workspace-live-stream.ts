@@ -17,7 +17,9 @@ export type WorkspaceSessionListEvent = {
   sessionIds: string[] | null;
   /**
    * Changed Site conversations visible to this viewer. Ordinary lists omit
-   * them; only a surface that shows Site conversations needs these.
+   * them; only a surface that shows Site conversations needs these. A hint
+   * whose `sessionIds` is empty and that carries only these changes nothing
+   * for ordinary lists.
    */
   siteSessionIds?: string[];
 };

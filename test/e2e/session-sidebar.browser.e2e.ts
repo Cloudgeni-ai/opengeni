@@ -902,6 +902,18 @@ const usageConversations = [
   "Export usage to CSV",
 ];
 
+/** Each conversation is listed exactly once, and still is after the rail settles. */
+async function expectEachConversationOnce(titles: string[]) {
+  const counts = () => Promise.all(titles.map((title) => railConversation(title).count()));
+  const deadline = Date.now() + 5_000;
+  while ((await counts()).some((count) => count !== 1) && Date.now() < deadline)
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  expect(await counts()).toEqual(titles.map(() => 1));
+}
+
 test("a Site row keeps its conversations nested whichever session is selected", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteRow("Opengeni usage").waitFor();
@@ -913,14 +925,18 @@ test("a Site row keeps its conversations nested whichever session is selected", 
   for (const title of usageConversations) await railConversation(title).waitFor();
   // Opening a nested conversation and then another session leaves the Site's
   // conversations where they are.
+  const currentUrl = page.url();
   await railConversation("Export usage to CSV").click();
-  await page.waitForTimeout(250);
-  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(1);
+  await page.waitForURL((next) => next.toString() !== currentUrl);
+  await expectEachConversationOnce(usageConversations);
+  const nestedUrl = page.url();
   await railConversation("Slack community connection test").click();
-  await page.waitForURL(/\/sessions\//u);
-  await page.waitForTimeout(250);
+  await page.waitForURL(
+    (next) => next.toString() !== nestedUrl && /\/sessions\//u.test(next.toString()),
+  );
+  await siteRow("Opengeni usage").waitFor();
   expect(await siteRow("Opengeni usage").count()).toBe(1);
-  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(1);
+  await expectEachConversationOnce(usageConversations);
   // Collapsing and reopening lists them again.
   await sidebar()
     .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
