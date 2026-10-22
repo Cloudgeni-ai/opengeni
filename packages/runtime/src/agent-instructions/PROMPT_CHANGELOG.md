@@ -7,7 +7,7 @@ when there is no card, and continues once it is fixed. It never only reports
 that something is unavailable. This one rule in Autonomy and persistence
 replaces case-by-case wording: the Integration setup ending "If blocked or a
 setup tool is unavailable, explain the specific gap" now says to give the exact
-next step, and `browser_open` and `interaction_discover` no longer tell the
+next step, or, when the user can't fix it, to explain the gap and who can, and `browser_open` and `interaction_discover` no longer tell the
 agent to explain that the Chrome extension must be connected. Before, an agent
 asked to use LinkedIn in the person's browser answered "Browser isn't
 connected" and showed the setup card only after the person asked how. Tools

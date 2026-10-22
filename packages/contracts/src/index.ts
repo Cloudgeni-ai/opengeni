@@ -4149,7 +4149,7 @@ export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
     problem:
       "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
     rationale: "Allow this chat to use your computer.",
-    nextStep: "allow this chat to use the machine from the machine card in this chat",
+    nextStep: "open this chat in Opengeni and allow it to use their machine",
   },
 ];
 

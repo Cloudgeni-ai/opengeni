@@ -3339,7 +3339,9 @@ async function withUserSetupCard(
       : posted
         ? userSetupCardShownMessage(blocker, posted.chatUrl)
         : userSetupCardUnpostedMessage(blocker),
-    { code: blocker.code, retryable: false },
+    // Not retryable: finishing the card continues the chat, so a retry only
+    // repeats the refusal. The reference ID stays for support.
+    { code: blocker.code, retryable: false, correlationId: error.correlationId },
   );
 }
 

@@ -1488,7 +1488,9 @@ Two refusals are registered today:
   allowed this chat yet. The plain machine card, naming the requested machine.
   `personal_machine_not_permitted` (not the owner, or not the owner's turn) and
   every other failure stay plain refusals, and callers without an exact agent
-  attempt get no card.
+  attempt get no card. Only these API tools emit it today; the worker poster
+  passes no requested machine, so an interaction tool that emitted it would get
+  a machine card that names no machine.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`

@@ -1909,7 +1909,8 @@ export function userSetupCardPayload(
   return ToolAuthNeededPayload.parse({
     serverId: "opengeni",
     toolName: options.toolName,
-    providerDomain: item.providerDomain,
+    // Built-in capabilities are Opengeni's own; a blank domain must not fail the card.
+    providerDomain: item.providerDomain?.trim() || "opengeni.local",
     reason: "missing_connection",
     capability: {
       id: item.id,
