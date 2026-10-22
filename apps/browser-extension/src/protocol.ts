@@ -92,7 +92,17 @@ export type BridgeCommand =
       method: string;
       params: Record<string, unknown>;
     }
-  | { type: "debugger.poll"; afterSequence: number; limit: number };
+  | { type: "debugger.poll"; afterSequence: number; limit: number }
+  /** Where Chrome saved completed downloads of `url` (before or after
+   * redirects) that started at or after `startedAfter`, oldest first. A
+   * controlled tab's download events name the download but not its file. */
+  | { type: "downloads.find"; url: string; startedAfter: string };
+
+export type FoundDownload = {
+  id: number;
+  filePath: string;
+  sizeBytes: number;
+};
 
 export type BridgeDebuggerEvent = {
   sequence: number;
@@ -274,6 +284,14 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
         afterSequence: boundedInteger(command.afterSequence, 0, Number.MAX_SAFE_INTEGER),
         limit: boundedInteger(command.limit, 1, 1_000),
       };
+    case "downloads.find": {
+      exactKeys(command, ["type", "url", "startedAfter"]);
+      const startedAfter = boundedString(command.startedAfter, 20, 40, "download start time");
+      if (!Number.isFinite(Date.parse(startedAfter))) {
+        throw new Error("download start time is invalid");
+      }
+      return { type: command.type, url: boundedUrl(command.url), startedAfter };
+    }
     default:
       throw new Error("bridge command type is unsupported");
   }

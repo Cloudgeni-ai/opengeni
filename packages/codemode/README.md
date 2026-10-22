@@ -160,7 +160,7 @@ uses `browser_download_save`, requiring both `sessions:control` and `files:uploa
 It publishes and materializes the exact completed bytes into the browser's
 source session workspace, retaining size/SHA-256 verification and the durable
 operation id. Downloads stay controller-private until this explicit save.
-Attached browsers and Lightpanda do not support managed download export.
+Lightpanda browsers have no downloads to export.
 
 Editable artifacts use the same path. The object remains in Opengeni; files are
 only explicit import/export boundaries:

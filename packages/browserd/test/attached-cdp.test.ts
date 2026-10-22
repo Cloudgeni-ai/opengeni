@@ -73,6 +73,156 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("reports a tab's download browser-wide with the file Chrome saved", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    let polls = 0;
+    let finds = 0;
+    const bridge: AttachedBrowserBridgeTransport = {
+      async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        commands.push({ ...payload });
+        if (payload.type === "downloads.find") {
+          finds += 1;
+          // Chrome lists the download as complete a moment after reporting it,
+          // beside an earlier file of the same address and another size.
+          return {
+            downloads:
+              finds === 1
+                ? []
+                : [
+                    { id: 3, filePath: "/Users/person/Downloads/report.pdf", sizeBytes: 9 },
+                    { id: 4, filePath: "/Users/person/Downloads/report (1).pdf", sizeBytes: 5 },
+                  ],
+          } as T;
+        }
+        if (payload.type !== "debugger.poll") return {} as T;
+        polls += 1;
+        if (polls === 1) return { events: [], cursor: 0, truncated: false } as T;
+        if (polls === 2) {
+          const event = (sequence: number, method: string, params: Record<string, unknown>) => ({
+            sequence,
+            tabId: "7",
+            sessionId: null,
+            method,
+            params,
+          });
+          return {
+            events: [
+              event(1, "Page.downloadWillBegin", {
+                frameId: "main",
+                guid: "guid-1",
+                url: "https://example.test/report",
+                suggestedFilename: "report.pdf",
+              }),
+              event(2, "Page.downloadProgress", {
+                guid: "guid-1",
+                totalBytes: 5,
+                receivedBytes: 5,
+                state: "inProgress",
+              }),
+              event(3, "Page.downloadProgress", {
+                guid: "guid-1",
+                totalBytes: 5,
+                receivedBytes: 5,
+                state: "completed",
+              }),
+              // A repeated completion cannot settle it twice.
+              event(4, "Page.downloadProgress", {
+                guid: "guid-1",
+                totalBytes: 5,
+                receivedBytes: 5,
+                state: "completed",
+              }),
+            ],
+            cursor: 4,
+            truncated: false,
+          } as T;
+        }
+        return { events: [], cursor: 4, truncated: false } as T;
+      },
+      close() {},
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    const began: Array<Record<string, unknown>> = [];
+    const progress: Array<Record<string, unknown>> = [];
+    connection.on("Browser.downloadWillBegin", (event) => began.push(event.params));
+    connection.on("Browser.downloadProgress", (event) => progress.push(event.params));
+    const deadline = Date.now() + 5_000;
+    while (!progress.some((event) => event.state === "completed") && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    connection.close();
+
+    expect(began).toEqual([
+      expect.objectContaining({ guid: "guid-1", suggestedFilename: "report.pdf" }),
+    ]);
+    expect(progress.map((event) => event.state)).toEqual(["inProgress", "completed"]);
+    expect(progress[1]).toMatchObject({
+      guid: "guid-1",
+      receivedBytes: 5,
+      filePath: "/Users/person/Downloads/report (1).pdf",
+    });
+    const find = commands.find((command) => command.type === "downloads.find")!;
+    expect(find.url).toBe("https://example.test/report");
+    expect(Date.parse(String(find.startedAfter))).toBeLessThanOrEqual(Date.now());
+    expect(finds).toBe(2);
+  });
+
+  test("reports a download without a path when the extension cannot find files", async () => {
+    let polls = 0;
+    const bridge: AttachedBrowserBridgeTransport = {
+      async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "downloads.find") {
+          throw new AttachedBrowserBridgeError(
+            "bridge_failed",
+            "bridge command type is unsupported",
+            false,
+          );
+        }
+        if (payload.type !== "debugger.poll") return {} as T;
+        polls += 1;
+        if (polls !== 2) return { events: [], cursor: polls > 2 ? 2 : 0, truncated: false } as T;
+        return {
+          events: [
+            {
+              sequence: 1,
+              tabId: "7",
+              sessionId: null,
+              method: "Page.downloadWillBegin",
+              params: { frameId: "main", guid: "guid-2", url: "https://example.test/a" },
+            },
+            {
+              sequence: 2,
+              tabId: "7",
+              sessionId: null,
+              method: "Page.downloadProgress",
+              params: { guid: "guid-2", totalBytes: 1, receivedBytes: 1, state: "completed" },
+            },
+          ],
+          cursor: 2,
+          truncated: false,
+        } as T;
+      },
+      close() {},
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    const completed = await connection.waitForEvent("Browser.downloadProgress", {
+      timeoutMs: 5_000,
+    });
+    connection.close();
+    expect(completed.params).toEqual({
+      guid: "guid-2",
+      totalBytes: 1,
+      receivedBytes: 1,
+      state: "completed",
+    });
+  });
+
   test("reports Chrome's protocol refusals as definite CDP errors that keep the tab", async () => {
     const bridge = new FakeBridge();
     const connection = new AttachedChromeCdpConnection(bridge, {
