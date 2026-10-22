@@ -335,6 +335,13 @@ function Home() {
                 unstable_headerRightItems: () => [
                   {
                     type: "button" as const,
+                    label: "Search",
+                    accessibilityLabel: "Search chats and workspaces",
+                    icon: { type: "sfSymbol" as const, name: "magnifyingglass" },
+                    onPress: openSearch,
+                  },
+                  {
+                    type: "button" as const,
                     label: "Inbox",
                     accessibilityLabel: waiting > 0 ? `Inbox, ${waiting} waiting` : "Inbox",
                     icon: {
@@ -579,10 +586,31 @@ function HeaderRightButtons() {
   return (
     <AppThemeProvider>
       <View style={{ flexDirection: "row", alignItems: "center" }}>
+        <SearchButton />
         <InboxButton />
         <AccountMenuButton />
       </View>
     </AppThemeProvider>
+  );
+}
+
+/** Chat search across workspaces opens ready to type, as ⌘K does on the web. */
+function openSearch() {
+  router.push("/sessions?search=1");
+}
+
+function SearchButton() {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Search chats and workspaces"
+      hitSlop={8}
+      onPress={openSearch}
+      style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}
+    >
+      <Icon name="search" size={20} color={theme.colors.fg} />
+    </Pressable>
   );
 }
 

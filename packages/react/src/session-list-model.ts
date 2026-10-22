@@ -16,6 +16,10 @@ import { findPickerRow, type PickerModelRow } from "./model-policy";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
 import { type OpenGeniText } from "./messages/runtime";
 
+// Title ranking shared with the web command menu, so chat search on every
+// surface orders matches the same way.
+export { foldForSearch, LOOSE_MATCH_BELOW, rankLabel } from "./app/lib/actions/rank";
+
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
 

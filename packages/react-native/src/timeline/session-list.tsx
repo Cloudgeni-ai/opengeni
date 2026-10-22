@@ -130,11 +130,20 @@ export interface SessionRowProps {
    * When set, a long press offers Pin or Unpin, and so does an accessibility action.
    */
   onTogglePin?: (() => void) | undefined;
+  /** The workspace the chat lives in, when it is not the one on screen (search results). */
+  workspaceName?: string | undefined;
   now?: Date | undefined;
 }
 
 /** One recent-session row, as the web home canvas renders it. */
-export function SessionRow({ session, models, onPress, onTogglePin, now }: SessionRowProps) {
+export function SessionRow({
+  session,
+  models,
+  onPress,
+  onTogglePin,
+  workspaceName,
+  now,
+}: SessionRowProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -145,6 +154,12 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
   const model = recentSessionModelPresentation(session.model, rows);
   const repo = sessionRepoLabel(session);
   const meta = [model.label, repo].filter(Boolean).join(" · ");
+  const metaStyle = {
+    ...fontStyle(theme, 400),
+    fontSize: 11,
+    lineHeight: 16,
+    color: c["fg-subtle"],
+  };
   const pinned = Boolean(session.pinned);
   const pinLabel = pinned ? m.unpin : m.pin;
   const offerPin = () => {
@@ -170,7 +185,9 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={pinned ? `${title}, ${m.pinned}` : title}
+      accessibilityLabel={[title, pinned ? m.pinned : null, workspaceName ?? null]
+        .filter(Boolean)
+        .join(", ")}
       accessibilityActions={onTogglePin ? [{ name: "pin", label: pinLabel }] : undefined}
       onAccessibilityAction={(event) => {
         if (event.nativeEvent.actionName === "pin") onTogglePin?.();
@@ -195,21 +212,28 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
         >
           {title}
         </Text>
-        {meta ? (
+        {meta || workspaceName ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2 }}>
-            <ModelMark model={session.model} size={12} color={c["fg-muted"]} />
-            <Text
-              numberOfLines={1}
-              style={{
-                ...fontStyle(theme, 400),
-                fontSize: 11,
-                lineHeight: 16,
-                color: c["fg-subtle"],
-                flexShrink: 1,
-              }}
-            >
-              {meta}
-            </Text>
+            {workspaceName ? (
+              <>
+                <Icon name="folder" size={11} color={c["fg-muted"]} />
+                <Text
+                  numberOfLines={1}
+                  style={{ ...metaStyle, color: c["fg-muted"], flexShrink: 2 }}
+                >
+                  {workspaceName}
+                </Text>
+                {meta ? <Text style={metaStyle}>·</Text> : null}
+              </>
+            ) : null}
+            {meta ? (
+              <>
+                <ModelMark model={session.model} size={12} color={c["fg-muted"]} />
+                <Text numberOfLines={1} style={{ ...metaStyle, flexShrink: 1 }}>
+                  {meta}
+                </Text>
+              </>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -260,6 +284,8 @@ export function SessionRowList(props: {
   onOpen: (sessionId: string) => void;
   /** Pin or unpin a chat from its row (long press); omitted, rows offer no pin. */
   onTogglePin?: ((session: Session) => void) | undefined;
+  /** Labels rows from another workspace with that workspace's name. */
+  workspaceNameOf?: ((session: Session) => string | undefined) | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   return (
@@ -282,6 +308,7 @@ export function SessionRowList(props: {
             models={props.models}
             onPress={() => props.onOpen(session.id)}
             onTogglePin={props.onTogglePin ? () => props.onTogglePin?.(session) : undefined}
+            workspaceName={props.workspaceNameOf?.(session)}
           />
         </View>
       ))}
