@@ -166,6 +166,33 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     expect(opened).toBe(1);
     await act(async () => root.render(render(false)));
     expect(container.querySelector('button[title="Open schedules for this session"]')).toBeNull();
+    // A paused or finished schedule still links to its settings, marked inactive.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, hasSchedules: true, hasUpcomingSchedules: false }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenSchedule={() => {
+            opened++;
+          }}
+        />,
+      ),
+    );
+    const inactive = container.querySelector<HTMLButtonElement>(
+      'button[title="No upcoming runs. Open schedules for this session"]',
+    );
+    expect(inactive?.textContent?.trim()).toBe("Schedule");
+    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-calendar-off");
+    await act(async () => inactive?.click());
+    expect(opened).toBe(2);
   } finally {
     await act(async () => root.unmount());
     container.remove();

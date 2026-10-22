@@ -5,7 +5,7 @@ import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../timeline-mo
 
 import type { SemanticTone } from "../../ui/status-dot";
 import { formatAbsoluteTime, inSentence } from "../../ui/relative-time";
-import { sessionStatusLabel, sessionInputWait } from "./session-rail";
+import { sessionHasUpcomingSchedule, sessionStatusLabel, sessionInputWait } from "./session-rail";
 import type { RailSession } from "./session-list-entry";
 import { sessionSiteOrigin } from "./session-site-origin";
 import { sessionDescendantCountText } from "./session-tree-count";
@@ -212,7 +212,7 @@ export function sessionHoverFacts(
     ? { kind: "site" as const, label: `Started from ${site.title}` }
     : scheduledTaskIdOf(session)
       ? { kind: "schedule" as const, label: "Started by a schedule" }
-      : session.hasSchedules
+      : sessionHasUpcomingSchedule(session)
         ? { kind: "schedule" as const, label: "On a schedule" }
         : null;
 

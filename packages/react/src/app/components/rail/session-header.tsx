@@ -26,6 +26,7 @@ import {
   BellIcon,
   BellOffIcon,
   CalendarClockIcon,
+  CalendarOffIcon,
   GaugeIcon,
   LinkIcon,
   LockIcon,
@@ -66,7 +67,11 @@ import { RENAME_CURRENT_CHAT_EVENT } from "../../lib/actions/events";
 import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
-import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
+import {
+  sessionControlPaused,
+  sessionHasUpcomingSchedule,
+  sessionInputWait,
+} from "../../lib/session-rail";
 import { useSessionStartup } from "../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -181,6 +186,8 @@ export function SessionHeader({
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
+  // A paused or finished schedule still links to its settings, marked inactive.
+  const upcomingSchedule = sessionHasUpcomingSchedule(session);
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -276,9 +283,17 @@ export function SessionHeader({
               type="button"
               onClick={onOpenSchedule}
               className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title="Open schedules for this session"
+              title={
+                upcomingSchedule
+                  ? "Open schedules for this session"
+                  : "No upcoming runs. Open schedules for this session"
+              }
             >
-              <CalendarClockIcon aria-hidden className="size-3" />
+              {upcomingSchedule ? (
+                <CalendarClockIcon aria-hidden className="size-3" />
+              ) : (
+                <CalendarOffIcon aria-hidden className="size-3" />
+              )}
               Schedule
             </button>
           ) : null}

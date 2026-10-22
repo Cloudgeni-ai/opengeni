@@ -10,6 +10,7 @@ import {
   recentSessionStatus,
   recentSessionsForHome,
   relativeTimeLabel,
+  sessionHasUpcomingSchedule,
   sessionRepoLabel,
 } from "../src/session-list-model";
 import { createOpenGeniText } from "../src/messages/runtime";
@@ -228,5 +229,23 @@ describe("applySessionPinToLists", () => {
     );
     expect(ids(restored)).toEqual(ids(lists));
     expect(restored.sessions[0]).toMatchObject({ pinned: false, pinVersion: 0 });
+  });
+});
+
+describe("sessionHasUpcomingSchedule", () => {
+  test("only a schedule that can still fire shows as upcoming", () => {
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: true })).toBe(
+      true,
+    );
+    // Paused, or a one-time schedule whose time passed: still linked, not upcoming.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    expect(sessionHasUpcomingSchedule({ hasSchedules: false, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    // Servers that predate the upcoming flag keep the earlier meaning.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
+    expect(sessionHasUpcomingSchedule({})).toBe(false);
   });
 });

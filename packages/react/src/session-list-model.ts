@@ -101,6 +101,17 @@ export function sessionInputWait(
     : null;
 }
 
+/**
+ * A schedule targeting this session can still start a run. Paused schedules
+ * and one-time schedules whose time has passed are not upcoming. Servers
+ * without the field keep the earlier any-schedule meaning.
+ */
+export function sessionHasUpcomingSchedule(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules">,
+): boolean {
+  return session.hasUpcomingSchedules ?? session.hasSchedules === true;
+}
+
 export function hasActiveEffectiveControl(session: SessionListRow): boolean {
   return (session.effectiveControl?.state ?? "active") === "active";
 }

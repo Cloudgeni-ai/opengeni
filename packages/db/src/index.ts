@@ -19196,10 +19196,66 @@ export async function scheduledSessionIds(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Set<string>> {
-  if (sessionIds.length === 0) return new Set();
+  return (await sessionScheduleTargets(db, workspaceId, sessionIds)).scheduled;
+}
+
+/**
+ * Whether a schedule can still start a run on its own: it is active, and its
+ * cadence has a run left after `now`. A paused schedule, a one-time schedule
+ * whose time has passed (fired or missed), an interval past its end, and a
+ * manual task never fire by themselves. Malformed specs are not upcoming.
+ *
+ * A one-time run stops being upcoming as soon as `runAt` passes, even while
+ * 0761's 24-hour missed-run catch-up could still start it: the indicator shows
+ * what is ahead, not a late catch-up. Nothing writes at `runAt`/`endAt`, so a
+ * list read before that moment keeps the icon until its next refresh.
+ */
+export function scheduledTaskHasUpcomingRun(
+  task: { status: string; schedule: unknown },
+  now: Date,
+): boolean {
+  if (task.status !== "active") return false;
+  const spec =
+    task.schedule && typeof task.schedule === "object"
+      ? (task.schedule as Record<string, unknown>)
+      : null;
+  const later = (value: unknown) => {
+    const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(at) && at > now.getTime();
+  };
+  switch (spec?.type) {
+    case "once":
+      return later(spec.runAt);
+    case "interval":
+      return spec.endAt === undefined || spec.endAt === null || later(spec.endAt);
+    case "calendar":
+      return true;
+    default:
+      return false;
+  }
+}
+
+export type SessionScheduleTargets = {
+  /** Sessions any current schedule targets, including paused and finished ones. */
+  scheduled: Set<string>;
+  /** Sessions an active schedule targets that can still start a run. */
+  upcoming: Set<string>;
+};
+
+export async function sessionScheduleTargets(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  now: Date = new Date(),
+): Promise<SessionScheduleTargets> {
+  if (sessionIds.length === 0) return { scheduled: new Set(), upcoming: new Set() };
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
-      .selectDistinct({ sessionId: schema.scheduledTasks.reusableSessionId })
+      .select({
+        sessionId: schema.scheduledTasks.reusableSessionId,
+        status: schema.scheduledTasks.status,
+        schedule: schema.scheduledTasks.schedule,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -19209,7 +19265,13 @@ export async function scheduledSessionIds(
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
       );
-    return new Set(rows.flatMap((row) => (row.sessionId ? [row.sessionId] : [])));
+    const targets: SessionScheduleTargets = { scheduled: new Set(), upcoming: new Set() };
+    for (const row of rows) {
+      if (!row.sessionId) continue;
+      targets.scheduled.add(row.sessionId);
+      if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+    }
+    return targets;
   });
 }
 
