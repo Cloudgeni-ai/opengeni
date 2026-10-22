@@ -3089,13 +3089,11 @@ export async function listWorkspacesForSubject(
     .where(eq(schema.workspaceMemberships.subjectId, subjectId))
     .orderBy(desc(schema.workspaces.createdAt))
     .limit(limit);
-  return await Promise.all(
-    rows.map(async (row) =>
-      mapWorkspace(
-        row.workspace,
-        await workspaceControlProjection(db, row.workspace.id),
-        await workspaceKindProjection(db, row.workspace),
-      ),
+  return await mapWorkspaceProjections(db, rows, async (row) =>
+    mapWorkspace(
+      row.workspace,
+      await workspaceControlProjection(db, row.workspace.id),
+      await workspaceKindProjection(db, row.workspace),
     ),
   );
 }
@@ -3125,10 +3123,8 @@ export async function listSharedWorkspacesForAccount(
       )
       .orderBy(desc(schema.workspaces.createdAt));
   });
-  return await Promise.all(
-    rows.map(async (row) =>
-      mapWorkspace(row, await workspaceControlProjection(db, row.id), "shared"),
-    ),
+  return await mapWorkspaceProjections(db, rows, async (row) =>
+    mapWorkspace(row, await workspaceControlProjection(db, row.id), "shared"),
   );
 }
 
@@ -89251,6 +89247,25 @@ function mapCapabilityCatalogItem(
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Each workspace projection opens its own RLS scope. On a pool handle those are
+ * independent transactions and may run concurrently. On a transaction handle
+ * they are savepoints on one backend that share its transaction-local tenant
+ * settings, so they must run one at a time: concurrent savepoints overwrite each
+ * other's scope, and the first failure ends the caller's transaction while the
+ * rest still issue SAVEPOINT on the released backend.
+ */
+async function mapWorkspaceProjections<Row>(
+  db: Database,
+  rows: readonly Row[],
+  project: (row: Row) => Promise<Workspace>,
+): Promise<Workspace[]> {
+  if (!isTransactionHandle(db)) return await Promise.all(rows.map(project));
+  const workspaces: Workspace[] = [];
+  for (const row of rows) workspaces.push(await project(row));
+  return workspaces;
 }
 
 async function workspaceControlProjection(
