@@ -1,5 +1,29 @@
 # @opengeni/core
 
+## 4.4.1
+
+### Patch Changes
+
+- 6930cf0: An agent in a private chat can again save files to that chat's cloud workspace through the API, for example when stopping a browser recording. The write is now attributed to the person who started the chat instead of the internal worker identity, which the private-chat owner check rejected.
+- 2677b14: Read router-history presence for session response pages in one scoped transaction instead of one transaction per session. Preserve the indexed history predicate and existing effective-tool response fields.
+- Updated dependencies [2677b14]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [6282659]
+- Updated dependencies [f0c2065]
+  - @opengeni/db@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+
 ## 4.3.1
 
 ### Patch Changes

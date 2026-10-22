@@ -1,5 +1,42 @@
 # @opengeni/worker-bundle
 
+## 4.4.1
+
+### Patch Changes
+
+- Updated dependencies [6930cf0]
+- Updated dependencies [2677b14]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [6282659]
+- Updated dependencies [f0c2065]
+  - @opengeni/core@4.4.0
+  - @opengeni/db@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/decisions@4.4.0
+  - @opengeni/github@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/jev@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/subscriptions@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/vaults-keeper@4.4.0
+  - @opengeni/vaults-onepassword@4.4.0
+  - @opengeni/vaults-protonpass@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes
