@@ -568,7 +568,10 @@ describe("compact session view on the live local workspace route (API fixture)",
     const startedByInvalidation = await page.evaluate(
       async ({ targetWorkspaceId, moduleUrl, header }) => {
         const { notifySessionListChanged } = await import(moduleUrl);
-        const originalFetch = window.fetch;
+        // This runs in the page. Bun's global fetch type adds members such as
+        // preconnect, so use the DOM's own fetch type for the page global.
+        const pageScope: WindowOrWorkerGlobalScope = window;
+        const originalFetch = pageScope.fetch;
         const isRootBrowseRead = (input: RequestInfo | URL) => {
           const url = new URL(input instanceof Request ? input.url : String(input), location.href);
           return (
@@ -578,7 +581,11 @@ describe("compact session view on the live local workspace route (API fixture)",
           );
         };
         let started = false;
-        const taggingFetch: typeof window.fetch = function (this: unknown, input, init) {
+        const taggingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
+          this: unknown,
+          input,
+          init,
+        ) {
           if (!isRootBrowseRead(input)) return originalFetch.call(this, input, init);
           started = true;
           const headers = new Headers(input instanceof Request ? input.headers : undefined);
@@ -587,7 +594,11 @@ describe("compact session view on the live local workspace route (API fixture)",
           return originalFetch.call(this, input, { ...init, headers });
         };
         const pendingReads = new Set<Promise<unknown>>();
-        const watchingFetch: typeof window.fetch = function (this: unknown, input, init) {
+        const watchingFetch: WindowOrWorkerGlobalScope["fetch"] = function (
+          this: unknown,
+          input,
+          init,
+        ) {
           const response = originalFetch.call(this, input, init);
           if (isRootBrowseRead(input)) {
             const read: Promise<unknown> = response
@@ -601,21 +612,21 @@ describe("compact session view on the live local workspace route (API fixture)",
         const deadline = performance.now() + 5_000;
         try {
           for (;;) {
-            window.fetch = taggingFetch;
+            pageScope.fetch = taggingFetch;
             try {
               notifySessionListChanged({
                 workspaceId: targetWorkspaceId,
                 sessionId: "remote-change",
               });
             } finally {
-              window.fetch = watchingFetch;
+              pageScope.fetch = watchingFetch;
             }
             if (started || performance.now() > deadline) return started;
             do await new Promise((resolve) => setTimeout(resolve, 50));
             while (pendingReads.size > 0 && performance.now() <= deadline);
           }
         } finally {
-          window.fetch = originalFetch;
+          pageScope.fetch = originalFetch;
         }
       },
       { targetWorkspaceId: workspaceId, moduleUrl: modulePath, header: INVALIDATION_READ_HEADER },
