@@ -187,7 +187,7 @@ async function referenceBytes(
       );
     }
   } else {
-    file = await artifactFile(input.db, input.workspaceId, reference.artifactId);
+    file = await artifactFile(input, reference.artifactId);
   }
   if (!(await input.authorizeFile(file))) {
     throw new ImageGenerationReferenceError(
@@ -228,18 +228,33 @@ export async function readStoredImageReferenceFile(
 }
 
 async function artifactFile(
-  db: Database,
-  workspaceId: string,
+  input: ResolveImageGenerationReferencesInput,
   artifactId: string,
 ): Promise<FileAsset> {
-  const artifact = await getGeneratedImageArtifact(db, workspaceId, artifactId);
+  const artifact = await getGeneratedImageArtifact(input.db, input.workspaceId, artifactId);
   if (!artifact || artifact.status !== "ready") {
     throw new ImageGenerationReferenceError(
       "reference_unavailable",
       "The generated-image artifact reference is unavailable.",
     );
   }
-  return artifact.file;
+  // The artifact projection is not an authorized File projection. Re-read its
+  // exact File through File RLS so the source-session marker accompanies it.
+  try {
+    return await requireFileForSubject(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      fileId: artifact.file.id,
+    });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith("File not found:")) throw error;
+    throw new ImageGenerationReferenceError(
+      "reference_unavailable",
+      "The generated-image artifact reference is unavailable.",
+      { cause: error },
+    );
+  }
 }
 
 function assertStoredFileMatches(
