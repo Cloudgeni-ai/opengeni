@@ -123,6 +123,13 @@ export interface MissingRun {
   };
 }
 export interface Ledger {
+  initialization?: {
+    schemaVersion: 1;
+    operationId: string;
+    serviceUid: string;
+    serviceGeneration: string;
+    initializedAt: string;
+  };
   baseHold?: BaseCiEvidence;
   schemaVersion: 1;
   epoch: number;
@@ -630,6 +637,24 @@ export const emptyLedger = (): Ledger => ({
   stages: {},
   missingRuns: {},
 });
+export function requireInitializedState(stateSha: string | null, ledger: Ledger): void {
+  const init = ledger.initialization;
+  if (
+    !stateSha ||
+    !SHA.test(stateSha) ||
+    init?.schemaVersion !== 1 ||
+    !/^[a-f0-9-]{36}$/.test(init.operationId) ||
+    !init.serviceUid ||
+    !/^[1-9][0-9]*$/.test(init.serviceGeneration) ||
+    !Number.isFinite(Date.parse(init.initializedAt))
+  ) {
+    const error = new Error(
+      "Active state uninitialized or missing: operator initialization required; never auto-reinitialize",
+    );
+    error.name = "ActiveStateInitializationError";
+    throw error;
+  }
+}
 export interface Observation {
   baseCI?: BaseCiEvidence;
   now: string;

@@ -1,5 +1,41 @@
 # Portable merge batcher
 
+## Explicit first activation initialization
+
+Active mode requires a present, operator-initialized `refs/heads/batcher-state`.
+It never bootstraps an empty ledger when that ref is absent. Missing or unstamped
+state raises `ActiveStateInitializationError` and holds all effects; subsequent
+state loss is an anomaly, not permission to initialize again.
+
+The operator-only `initializeActiveState` function in
+`scripts/merge-batcher/initialize.ts` is invoked by a separately reviewed deployment
+adapter, not by the runtime loop. It requires fresh persisted OFF, reconciled
+manual0, writer-exit evidence, complete zero-instance observations and no pending
+effects. The adapter must obtain these facts from current provider reads and the
+matching deployment receipt, not user-supplied boolean assertions.
+
+Initialization creates a generation-stamped empty ledger through one create-only
+Git transaction. Before submission the operator exclusively creates and syncs a
+permanent intent journal in its canonical deployment directory. Preserve that
+journal through cleanup, upgrades and rollback: an existing intent, an existing
+state ref or an unknown submission is never replayed. Lost responses require
+read-only reconciliation of the exact intended SHA; they never trigger another
+initialization attempt. Do not delete an intent to recover missing state.
+
+The supported scope is `batcher-state` plus `queue/live/`. All other `queue/`
+refs also refuse initialization except historical `queue/shadow-traffic/`, which
+belongs to its separate shadow state fence and is retained unchanged. Thus live
+candidate, diagnostic, malformed and no-run reservation refs block initialization;
+historical shadow CI still counts in ordinary global capacity observations.
+The deployment adapter must also reject unresolved effects in the stopped
+controller's existing ledger. Do not delete historical refs to pass these checks.
+
+The existing present-state STOP proof is unchanged. Initialization is a separate
+explicit operational mutation, not an OFF fallback or an empty-state proof.
+No init, rules change or start is authorized by installation of this code.
+
+## Core
+
 This is the in-house batcher core. It uses Bun 1.4.4, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
