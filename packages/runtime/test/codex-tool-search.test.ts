@@ -591,11 +591,13 @@ describe("searchToolPool native CUA working set", () => {
       parameters: { type: "object", properties: {} },
     } as unknown as Tool;
   }
-  const POOL = ["click", "type_text", "get_window_state", "run_steps", "zoom"].map(cuaTool);
+  const CUA_POOL = ["click", "type_text", "get_window_state", "run_steps", "zoom"].map(cuaTool);
   const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
 
   test("any CUA tool brings the window read and the batch tool", () => {
-    expect(names(searchToolPool(POOL, { query: "", names: ["interaction__cua_click"] }))).toEqual([
+    expect(
+      names(searchToolPool(CUA_POOL, { query: "", names: ["interaction__cua_click"] })),
+    ).toEqual([
       "interaction__cua_click",
       "interaction__cua_get_window_state",
       "interaction__cua_run_steps",
@@ -612,7 +614,10 @@ describe("searchToolPool native CUA working set", () => {
     } as unknown as Tool;
     expect(
       names(
-        searchToolPool([other, ...POOL], { query: "", names: ["interaction__computer_targets"] }),
+        searchToolPool([other, ...CUA_POOL], {
+          query: "",
+          names: ["interaction__computer_targets"],
+        }),
       ),
     ).toEqual(["interaction__computer_targets"]);
   });
