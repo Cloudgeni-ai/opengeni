@@ -7530,12 +7530,17 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
   );
-  // The MCP SDK's HTTP transports report the response status as a numeric
-  // `code` (StreamableHTTPError, SseError), with no `status`. JSON-RPC error
-  // codes are negative, so a code in the HTTP range is that status.
+  // The MCP SDK's HTTP transports (StreamableHTTPError, SseError) report the
+  // response status as a numeric `code`, with no `status`. McpError's `code` is
+  // the server's JSON-RPC error code, which can be any integer (including
+  // positive ones such as 403) and is never an HTTP status. Match McpError by
+  // name, which its subclasses inherit, so duplicate SDK copies are covered.
   const status =
     fields.status ??
-    (fields.causeNumber !== undefined && fields.causeNumber >= 100 && fields.causeNumber <= 599
+    (fields.causeName !== "McpError" &&
+    fields.causeNumber !== undefined &&
+    fields.causeNumber >= 100 &&
+    fields.causeNumber <= 599
       ? fields.causeNumber
       : undefined);
   const code =

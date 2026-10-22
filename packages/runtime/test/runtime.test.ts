@@ -13062,6 +13062,84 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("an unavailable integration's positive JSON-RPC error code is not read as an HTTP status", async () => {
+    // A server may answer HTTP 200 with a JSON-RPC error whose application code
+    // is positive. The SDK surfaces it as McpError with that code; it is not an
+    // HTTP status, so it must not claim one or suggest signing in again.
+    const jsonRpcError = (method: string) =>
+      Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: async (request) => {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          const message = (await request.json()) as { id?: unknown; method?: string };
+          if (message.id === undefined) return new Response(null, { status: 202 });
+          if (message.method === method) {
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              error: { code: method === "initialize" ? 401 : 403, message: "provider text" },
+            });
+          }
+          if (message.method === "initialize") {
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "json-rpc-error", version: "1.0.0" },
+              },
+            });
+          }
+          return Response.json({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32_601, message: "method not found" },
+          });
+        },
+      });
+    const connectError = jsonRpcError("initialize");
+    const listError = jsonRpcError("tools/list");
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "connect-rpc",
+              url: `http://127.0.0.1:${connectError.port}/mcp`,
+              cacheToolsList: false,
+            },
+            {
+              id: "list-rpc",
+              url: `http://127.0.0.1:${listError.port}/mcp`,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "connect-rpc", optional: true },
+          { kind: "mcp", id: "list-rpc", optional: true },
+        ],
+      );
+      try {
+        await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        expect(Object.fromEntries(prepared.unavailableMcpServers)).toEqual({
+          "connect-rpc": "could not connect (McpError code 401)",
+          "list-rpc": "connected but could not list its tools (McpError code 403)",
+        });
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      connectError.stop(true);
+      listError.stop(true);
+    }
+  });
+
   test("unavailable reasons read only HTTP-range numeric codes as a status", () => {
     const failure = (fields: Record<string, unknown>) =>
       Object.assign(new Error("provider body that must not be quoted"), fields);
@@ -13078,6 +13156,14 @@ describe("runtime event normalization", () => {
     );
     expect(mcpUnavailableReason(failure({ status: 401, code: 401 }), "connect")).toBe(
       "could not connect (HTTP 401, Error); its connection may need to be signed in again",
+    );
+    // McpError's code is the server's JSON-RPC code, never an HTTP status, even
+    // when positive and in the HTTP range, including from another SDK copy.
+    expect(mcpUnavailableReason(new McpError(403, "provider text"), "list")).toBe(
+      "connected but could not list its tools (McpError code 403)",
+    );
+    expect(mcpUnavailableReason(failure({ name: "McpError", code: 401 }), "connect")).toBe(
+      "could not connect (McpError code 401)",
     );
   });
 
