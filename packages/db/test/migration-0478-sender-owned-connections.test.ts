@@ -138,6 +138,8 @@ const withheldMigrations = [
   // The schedule list trigger reads the audience column of 0720, withheld
   // with the allowance tail below; replay after it.
   "0888_session_list_invalidation.sql",
+  // Adds a schedule-spec hint using 0888's notify function; replay after it.
+  "0905_schedule_timing_session_list_hints.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

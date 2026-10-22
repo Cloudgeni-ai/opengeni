@@ -19204,6 +19204,11 @@ export async function scheduledSessionIds(
  * cadence has a run left after `now`. A paused schedule, a one-time schedule
  * whose time has passed (fired or missed), an interval past its end, and a
  * manual task never fire by themselves. Malformed specs are not upcoming.
+ *
+ * A one-time run stops being upcoming as soon as `runAt` passes, even while
+ * 0761's 24-hour missed-run catch-up could still start it: the indicator shows
+ * what is ahead, not a late catch-up. Nothing writes at `runAt`/`endAt`, so a
+ * list read before that moment keeps the icon until its next refresh.
  */
 export function scheduledTaskHasUpcomingRun(
   task: { status: string; schedule: unknown },

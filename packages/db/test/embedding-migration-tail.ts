@@ -7,6 +7,8 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 export const embeddingMigrationTail = [
   // Session list notifications reference the final imported/archive/site fields.
   "0888_session_list_invalidation.sql",
+  // Adds a schedule-spec hint using 0888's notify function; replay after it.
+  "0905_schedule_timing_session_list_hints.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",

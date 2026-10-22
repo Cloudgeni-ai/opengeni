@@ -461,13 +461,20 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
+    // Both schedule facts come from one read, so a newer lineage never pairs
+    // with an older session read (an older server sends no upcoming flag).
+    const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
       <SessionRouteHeader
         session={{
           ...context.session,
-          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
-          hasUpcomingSchedules:
-            lineage.lineage?.sessionHasUpcomingSchedules ?? context.session.hasUpcomingSchedules,
+          ...(lineageSchedules === undefined
+            ? {}
+            : {
+                hasSchedules: lineageSchedules,
+                hasUpcomingSchedules:
+                  lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+              }),
         }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}

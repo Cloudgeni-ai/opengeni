@@ -183,4 +183,18 @@ test("reaper and other infrastructure events no longer move a stopped session's 
   expect(afterLate.updated_at).toEqual(afterMixed.updated_at);
   expect(afterLate.xid).toBe(afterMixed.xid);
   expect(afterLate.last_sequence).toBe(afterLate.cursor_sequence);
+
+  // Applying the patch again finds no anchors and fails closed, unchanged.
+  const definitionBefore = await shared.admin`select pg_get_functiondef(
+    'advance_session_event_cursors_for_inserted_events()'::regprocedure) as body`;
+  const migrationSql = await readFile(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
+  // postgres.js runs a query only when awaited, so await it inside the promise.
+  await expect(
+    (async () => {
+      await shared.admin.unsafe(migrationSql);
+    })(),
+  ).rejects.toThrow("0904 session activity projection prerequisites differ");
+  const definitionAfter = await shared.admin`select pg_get_functiondef(
+    'advance_session_event_cursors_for_inserted_events()'::regprocedure) as body`;
+  expect(definitionAfter[0]!.body).toBe(definitionBefore[0]!.body);
 }, 60_000);
