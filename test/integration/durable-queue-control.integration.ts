@@ -35,6 +35,7 @@ import { startTestServices, type TestServices } from "@opengeni/testing/compose"
 import { testSettings } from "@opengeni/testing/settings";
 import { waitFor } from "@opengeni/testing/process";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
+import { goalContinuationPrompt } from "../../apps/worker/src/activities/goals";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
@@ -510,7 +511,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     async () => {
       const grant = await testGrant(dbClient.db, "lost-wake");
       const session = await createDurableSession(dbClient.db, grant, "repair a lost Temporal wake");
-      await createSessionGoal(dbClient.db, {
+      const goal = await createSessionGoal(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -586,8 +587,8 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
         // The child result is delivered to exactly one system turn. The active
         // goal may then legitimately continue in its own goal turn, and the
-        // global dispatcher may run other sessions on this worker, so count
-        // this session's turns rather than the shared model's calls.
+        // global dispatcher may run other sessions on this worker, so wait on
+        // this session's turns rather than the shared model's total call count.
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         let observedTurns: Awaited<ReturnType<typeof listSessionTurns>> = [];
         await waitFor(
@@ -635,6 +636,21 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(turns.every((turn) => turn.source === "system" || turn.source === "goal")).toBe(
           true,
         );
+        // Turn counts alone miss a duplicate model call inside the one system
+        // turn. Attribute the shared model's requests instead: this session's
+        // requests that are not goal continuations belong to the system turn,
+        // which has finished, so exactly one inference consumed the update.
+        const goalContinuationMarker = JSON.stringify(
+          goalContinuationPrompt(goal, 1, null).split("\n")[0]!,
+        ).slice(1, -1);
+        expect(
+          model.requests.filter((request) => {
+            const serialized = JSON.stringify(request);
+            return (
+              serialized.includes(session.id) && !serialized.includes(goalContinuationMarker)
+            );
+          }),
+        ).toHaveLength(1);
         expect(
           await listSessionSystemUpdatesForTurn(
             dbClient.db,
