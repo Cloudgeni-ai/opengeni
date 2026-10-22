@@ -1058,6 +1058,7 @@ import {
   historyItemType,
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
+import { readSessionHistoryToolIdentityPage } from "./session-history-tool-identities";
 import {
   assertAgentCommandAuthorityInTransaction,
   canonicalSessionCommandHash,
@@ -41153,7 +41154,7 @@ const DURABLE_TOOL_CALL_SCAN_PAGE = 32;
  * calls still read the whole turn before staying pending.
  */
 async function durableToolCallPairIdsTx(
-  tx: Pick<Database, "select">,
+  tx: Pick<Database, "execute">,
   scope: { workspaceId: string; sessionId: string; turnId: string },
   pending: Array<{ id: string; callId: string; callType: string }>,
 ): Promise<string[]> {
@@ -41167,32 +41168,16 @@ async function durableToolCallPairIdsTx(
   const durable: string[] = [];
   let before: number | null = null;
   while (unproven.size > 0) {
-    const page = await tx
-      .select({
-        position: schema.sessionHistoryItems.position,
-        item: schema.sessionHistoryItems.item,
-        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, scope.workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, scope.sessionId),
-          eq(schema.sessionHistoryItems.turnId, scope.turnId),
-          before === null ? undefined : lt(schema.sessionHistoryItems.position, before),
-        ),
-      )
-      .orderBy(desc(schema.sessionHistoryItems.position))
-      .limit(DURABLE_TOOL_CALL_SCAN_PAGE);
+    const page = await readSessionHistoryToolIdentityPage(
+      tx,
+      scope,
+      before,
+      DURABLE_TOOL_CALL_SCAN_PAGE,
+    );
     // Positions are unique per session, so each row is strictly older than
     // every row already seen.
     for (const row of page) {
-      const item = fromPostgresLosslessJson(row.item, row.itemCodecVersion) as Record<
-        string,
-        unknown
-      >;
-      const callId = historyCallId(item);
-      const type = historyItemType(item);
+      const { callId, type } = row;
       if (callId === null || type === null) continue;
       const call = unproven.get(callId);
       if (!call) continue;
