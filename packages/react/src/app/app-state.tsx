@@ -15,7 +15,7 @@ import {
 import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
-import { hasWorkspacePermission } from "./lib/permissions";
+import { hasWorkspacePermission, isWorkspacePermissionDenied } from "./lib/permissions";
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
@@ -1385,6 +1385,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         // first-load failure must not look like an empty catalog, or draft
         // hydration would drop GitHub-identity repos and autosave that loss.
         setGithubStatusFailed(true);
+        // Someone without GitHub access in this workspace has nothing to fix.
+        if (isWorkspacePermissionDenied(error)) return;
         toast.error("GitHub status unavailable", {
           description: userErrorText(error),
         });
