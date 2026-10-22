@@ -1,5 +1,21 @@
 # @opengeni/browserd
 
+## 0.4.0
+
+### Minor Changes
+
+- 6c7b552: Downloads now work in attached Chrome. A file that a tab Opengeni controls downloads appears in `browser_downloads` like a managed browser's download, and `browser_download_save` saves it into the session's workspace. Chrome still saves it in the person's own downloads folder, where it stays untouched; the session keeps a verified copy. The extension asks for Chrome's `downloads` permission so it can tell where Chrome saved a controlled tab's download (it looks up only completed downloads of that address since the download began). With an older extension, such a download is listed as failed with `download_location_unavailable`.
+
+### Patch Changes
+
+- e142b9e: The browser extension now reconnects to the local agent after Chrome stops and later restarts its service worker. A periodic wake-up alarm (new `alarms` permission) reopens the native connection when it is down, so an attached Chrome no longer stays disconnected until a tab event happens. Browser and computer controllers also log the class, frame and redacted message of any dispatch error the driver did not classify, so `controller_lost` failures leave a cause in the agent log.
+- 92e227c: An agent update no longer interrupts a browser or computer task between steps. The update used to wait only for the request in flight, so an update that arrived while the agent was thinking about its next step restarted the controller under it, and the agent's next calls failed (draining, upstream unavailable, outcome unknown) until the restart finished. A browser or computer session used in the last three minutes now holds the update back (`browser_recent_use`, `computer_recent_use`); it proceeds once the session has been idle that long or has ended.
+- Updated dependencies [e142b9e]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/interaction@4.5.0
+  - @opengeni/contracts@4.5.0
+
 ## 0.3.1
 
 ### Patch Changes
