@@ -2,6 +2,7 @@
 // Electron.
 
 import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
+import { OPENGENI_WEB_PATHS, type AppWebPaths } from "@opengeni/sdk/app-links";
 
 export type InboxAction =
   | { kind: "approve" }
@@ -106,8 +107,7 @@ export function diffInbox(
 }
 
 /** The in-app path that shows an item: its session at the moment it came from. */
-export function inboxItemPath(item: InboxItem): string {
-  if (!item.sessionAvailable) return `/workspaces/${item.workspaceId}/inbox`;
-  const at = item.eventSequence ? `?at=${item.eventSequence}` : "";
-  return `/workspaces/${item.workspaceId}/sessions/${item.sessionId}${at}`;
+export function inboxItemPath(item: InboxItem, paths: AppWebPaths = OPENGENI_WEB_PATHS): string {
+  if (!item.sessionAvailable) return paths.inbox(item.workspaceId);
+  return paths.session(item.workspaceId, item.sessionId, item.eventSequence || null);
 }
