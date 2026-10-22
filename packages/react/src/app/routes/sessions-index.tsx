@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
@@ -259,6 +260,7 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const starters = useSessionUiFeature("starters");
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -2020,15 +2022,17 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
-        <NewSessionStarters
-          workspaceId={workspaceId}
-          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
-          disabled={busy || newSessionDraft.loading}
-          onSelect={(prompt) => {
-            setMessage(prompt);
-            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
-          }}
-        />
+        {starters ? (
+          <NewSessionStarters
+            workspaceId={workspaceId}
+            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            disabled={busy || newSessionDraft.loading}
+            onSelect={(prompt) => {
+              setMessage(prompt);
+              composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}

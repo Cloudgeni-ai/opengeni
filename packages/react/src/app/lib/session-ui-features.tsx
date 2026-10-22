@@ -19,15 +19,27 @@ export type SessionUiFeatures = Readonly<{
    * chat, ⌘/Ctrl+K, next and previous chat, the shortcut sheet).
    */
   keyboardShortcuts: boolean;
-  /** The Opengeni logo and wordmark at the top of the chat list. */
+  /** The Opengeni logo and wordmark at the top of the chat list and the mobile header. */
   brand: boolean;
+  /**
+   * Opengeni's suggested first tasks under the new-chat composer (connect
+   * Slack, GitHub or Linear, schedule a brief, and so on).
+   */
+  starters: boolean;
 }>;
 
 export type SessionUiPreset = "app" | "companion" | "embed";
 
 export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatures>> = {
   /** The web app and the desktop app. */
-  app: { chatList: true, dock: true, adminAccess: true, keyboardShortcuts: true, brand: true },
+  app: {
+    chatList: true,
+    dock: true,
+    adminAccess: true,
+    keyboardShortcuts: true,
+    brand: true,
+    starters: true,
+  },
   /**
    * First-party side panes (the Excel add-in): everything but admin access and
    * page-wide keyboard shortcuts.
@@ -38,11 +50,12 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     adminAccess: false,
     keyboardShortcuts: false,
     brand: true,
+    starters: true,
   },
   /**
    * A customer product page (the default): the chat list, chats and composer,
-   * without Opengeni's brand, the session panel, admin access or page-wide
-   * shortcuts until the host turns them on.
+   * without Opengeni's brand and suggested tasks, the session panel, admin
+   * access or page-wide shortcuts until the host turns them on.
    */
   embed: {
     chatList: true,
@@ -50,6 +63,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     adminAccess: false,
     keyboardShortcuts: false,
     brand: false,
+    starters: false,
   },
 };
 
