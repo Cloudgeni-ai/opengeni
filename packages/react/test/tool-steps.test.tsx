@@ -8,7 +8,8 @@ import { englishMessages } from "../src/messages/en";
 import { createOpenGeniText } from "../src/messages/runtime";
 import type { ToolCallItem } from "../src/timeline";
 import { toolDisplayName } from "../src/timeline/tool-display-name";
-import { toolRowPresentation } from "../src/timeline/tool-presentation";
+import { genericToolIconKind, toolRowPresentation } from "../src/timeline/tool-presentation";
+import { toolIcon } from "../src/timeline/tool-icon";
 import {
   BUILT_IN_TOOL_STEP_NAMES,
   builtInToolStep,
@@ -41,6 +42,25 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("built-in tool steps", () => {
+  test("every built-in tool draws its own icon instead of the generic wrench", () => {
+    const wrench = toolIcon("wrench");
+    for (const name of BUILT_IN_TOOL_STEP_NAMES) {
+      const kind = genericToolIconKind(name);
+      expect({ name, kind }).not.toEqual({ name, kind: "wrench" });
+      expect(toolIcon(kind)).not.toBe(wrench);
+    }
+  });
+
+  test("a row's icon matches its words, with or without the server prefix", () => {
+    const icon = (name: string) => toolRowPresentation(t, toolItem({ name })).icon;
+    expect(icon("interaction__browser_open")).toBe("browser");
+    expect(icon("browser_act")).toBe("browser");
+    expect(icon("interaction__computer_act")).toBe("screen");
+    expect(icon("opengeni__excel_run")).toBe("spreadsheet");
+    expect(icon("web_search_call")).toBe("search");
+    expect(icon("some_custom_tool")).toBe("wrench");
+  });
+
   test("every built-in tool reads as a plain step", () => {
     const builtIn = [
       ...FIRST_PARTY_MCP_TOOL_NAMES,
