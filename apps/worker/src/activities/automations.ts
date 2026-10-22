@@ -216,6 +216,7 @@ export function createAutomationActivities(
               written.tools,
               resolution.config,
               written.firstPartyMcpTools,
+              catalogSettings.mcpServers,
             ),
           };
         } catch (error) {
