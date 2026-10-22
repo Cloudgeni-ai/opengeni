@@ -516,6 +516,31 @@ describe.skipIf(!helm)("web asset ingress", () => {
     expect(assets?.spec.rules).toHaveLength(2);
   });
 
+  test("keeps a host-less catch-all rule host-less", async () => {
+    const assets = ingress(
+      await render(
+        ingressValues({
+          hosts: [
+            { paths: [{ path: "/", pathType: "Prefix", service: "web" }] },
+            {
+              host: "app.example.test",
+              paths: [{ path: "/", pathType: "Prefix", service: "web" }],
+            },
+          ],
+        }),
+      ),
+      "skew-opengeni-web-assets",
+    );
+    expect(assets?.spec.rules).toHaveLength(2);
+    expect(Object.hasOwn(assets?.spec.rules[0], "host")).toBe(false);
+    expect(assets?.spec.rules[0].http.paths.map((path: any) => path.path)).toEqual([
+      "/assets",
+      "/office/assets",
+      "/react-demo/assets",
+    ]);
+    expect(assets?.spec.rules[1].host).toBe("app.example.test");
+  });
+
   test("keeps rewrites, canaries, server-level settings and DNS ownership off the asset Ingress", async () => {
     const assets = ingress(
       await render(

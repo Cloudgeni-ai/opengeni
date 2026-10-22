@@ -213,7 +213,8 @@ spec:
 {{- $webAssetHosts := list }}
 {{- $webAssetHostPaths := dict }}
 {{- range .Values.ingress.hosts }}
-  {{- $hostName := toString .host }}
+  {{- /* A host-less entry is a catch-all rule; key it as "" and render no host. */}}
+  {{- $hostName := .host | default "" | toString }}
   {{- if not (hasKey $webAssetHostPaths $hostName) }}
     {{- $webAssetHosts = append $webAssetHosts $hostName }}
     {{- $_ := set $webAssetHostPaths $hostName list }}
@@ -285,7 +286,9 @@ spec:
   {{- end }}
   rules:
     {{- range $webAssetRules }}
-    - host: {{ .host | quote }}
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
       http:
         paths:
           {{- range .paths }}
