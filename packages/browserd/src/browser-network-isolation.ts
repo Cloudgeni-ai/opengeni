@@ -375,6 +375,8 @@ export function isolatedChromeLaunch(input: {
   trailingArguments: readonly string[];
   stderrFifo: string;
   stderrLog: string;
+  /** Created once stderrLog is complete. */
+  stderrDone: string;
   tail: string;
   stderrBytes: number;
 }): string {
@@ -405,7 +407,7 @@ export function isolatedChromeLaunch(input: {
     "  esac",
     "done",
     `[ -n "$profile" ] && ${q(input.tools.rm)} -f "$profile/DevToolsActivePort"`,
-    `${q(input.tools.shell)} -c ${q(reader)} opengeni-browser-devtools ${port} "$profile" ${q(input.tools.mv)} ${q(input.tools.cat)} <${q(input.stderrFifo)} | ${q(input.tail)} -c ${input.stderrBytes} >${q(input.stderrLog)} 2>/dev/null &`,
+    `{ ${q(input.tools.shell)} -c ${q(reader)} opengeni-browser-devtools ${port} "$profile" ${q(input.tools.mv)} ${q(input.tools.cat)} <${q(input.stderrFifo)} | ${q(input.tail)} -c ${input.stderrBytes} >${q(input.stderrLog)} 2>/dev/null; : >${q(input.stderrDone)}; } &`,
     `exec ${q(input.executable)}${fixed} "$@"${trailing} 2>${q(input.stderrFifo)}`,
     "",
   ].join("\n");

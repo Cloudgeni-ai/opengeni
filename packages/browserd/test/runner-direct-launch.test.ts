@@ -149,6 +149,48 @@ test.skipIf(!native)(
 );
 
 test.skipIf(!native)(
+  "a browser that dies during launch reports its stderr even when the drain writes it late",
+  async () => {
+    const { directory, options } = await session("slow-drain");
+    await writeFile(join(directory, "crash"), "");
+    // A loaded machine can run the stderr drain only after the controller
+    // has seen the browser exit: this tail writes its output half a second
+    // after reading the browser's closed stderr.
+    const realTail = Bun.which("tail");
+    expect(realTail).toBeTruthy();
+    const slowBin = join(directory, "slow-bin");
+    await mkdir(slowBin, { mode: 0o700 });
+    await writeFile(
+      join(slowBin, "tail"),
+      `#!/bin/sh\nout=$('${realTail}' "$@")\nsleep 0.5\nprintf '%s\\n' "$out"\n`,
+      { mode: 0o700 },
+    );
+    const path = process.env.PATH;
+    process.env.PATH = `${slowBin}:${path ?? ""}`;
+    let runner: ManagedBrowserRunner;
+    try {
+      runner = await ManagedBrowserRunner.create(options);
+    } finally {
+      process.env.PATH = path;
+    }
+    try {
+      const failure = await runner.run(["get", "cdp-url"]).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(AgentBrowserCommandError);
+      expect((failure as AgentBrowserCommandError).code).toBe("driver_rejected");
+      expect((failure as AgentBrowserCommandError).driverMessage).toContain(
+        "Missing X server or $DISPLAY",
+      );
+    } finally {
+      await runner.terminate().catch(() => undefined);
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!native)(
   "a replacement controller reattaches a live browser from its receipt and retires it, repeatably",
   async () => {
     const { options } = await session("reattach");
