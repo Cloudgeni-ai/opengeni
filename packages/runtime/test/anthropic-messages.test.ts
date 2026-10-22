@@ -337,7 +337,7 @@ for (const fixture of syntheticCompactedHistories) {
   });
 }
 
-test("portable compaction's retained inputs, finished reply and user summary remain valid on Claude", () => {
+test("portable compaction's retained user/system inputs and user summary remain valid on Claude", () => {
   const history = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "Task" }] },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working" }] },
@@ -347,33 +347,19 @@ test("portable compaction's retained inputs, finished reply and user summary rem
     { type: "message", role: "system", content: [{ type: "input_text", text: "Goal context" }] },
   ];
   const compacted = buildCompactionReplacementHistory(history, "Work already completed");
-  // The canonical replacement deliberately preserves system-role machine input,
-  // and the finished "Task" turn keeps its last reply.
-  expect(compacted.map((item) => item.role)).toEqual([
-    "user",
-    "assistant",
-    "system",
-    "user",
-    "system",
-    "user",
-  ]);
+  // The canonical replacement deliberately preserves system-role machine input.
+  expect(compacted.map((item) => item.role)).toEqual(["user", "system", "user", "system", "user"]);
   const input = compacted as ModelRequest["input"];
   const before = JSON.stringify(input);
   for (const streamed of [false, true]) {
     const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, streamed);
-    expect(body.messages.map((message: any) => message.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "system",
-    ]);
-    expect(body.messages[3].content.map((block: any) => block.text)).toEqual([
+    expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+    expect(body.messages[1].content.map((block: any) => block.text)).toEqual([
       "Child result",
       "Goal context",
     ]);
-    expect(body.messages[0].content.map((block: any) => block.text)).toEqual(["Task"]);
-    expect(body.messages[1].content.map((block: any) => block.text)).toEqual(["Working"]);
-    expect(body.messages[2].content.map((block: any) => block.text)).toEqual([
+    expect(body.messages[0].content.map((block: any) => block.text)).toEqual([
+      "Task",
       "Follow up",
       compacted.at(-1)!.content,
     ]);
