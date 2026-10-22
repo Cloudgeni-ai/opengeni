@@ -77,7 +77,9 @@ for (const theme of ["dark", "light"] as const) {
         try {
           await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
           await page.getByRole("heading", { name: "Connect Claude subscription" }).waitFor();
-          await page.getByRole("button", { name: "Use a setup token", exact: false }).click();
+          const tokenMethod = page.getByRole("radio", { name: "Setup token", exact: true });
+          await tokenMethod.click();
+          expect(await tokenMethod.getAttribute("aria-checked")).toBe("true");
           expect(await page.locator('input[type="file"]').count()).toBe(0);
           expect(await page.getByLabel("Claude account UUID").count()).toBe(0);
           expect(await page.getByLabel("Claude device ID").count()).toBe(0);
@@ -85,7 +87,7 @@ for (const theme of ["dark", "light"] as const) {
             await page.getByLabel("Create a Claude setup token", { exact: true }).inputValue(),
           ).toBe("claude setup-token");
           const connect = page.getByRole("button", {
-            name: "Connect Claude subscription",
+            name: "Connect Claude",
             exact: true,
           });
           expect(await connect.isDisabled()).toBe(true);

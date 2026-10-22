@@ -1151,12 +1151,14 @@ Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
 
-Startup metadata reads overlap only within independent pairs: video policy and
-Skill descriptors after native-link authorization, then per-attempt recovery
-instructions and a second live video-policy read before agent construction.
-Both pairs finish before downstream catalog writes; each reader retains its
-own RLS scope. Recovery reads remain unconditional, policy reads remain fresh,
-and failures prevent downstream preparation without bypassing execution fences.
+Startup metadata reads overlap only within independent pairs. When Skills are
+enabled, video policy and Skill descriptors load after native-link authorization;
+disabled Skills skip those reads and bundled Skill files. An empty bundled Skill
+selection reads no packaged files. Before agent construction, per-attempt recovery
+instructions and the live video-policy read still run unconditionally. Each
+required pair finishes before downstream catalog writes and each reader retains
+its own RLS scope. Required-read failures prevent downstream preparation without
+bypassing execution fences.
 
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
@@ -3039,13 +3041,16 @@ No cancellation/reaper protocol changes are included.
 
 This is separate from human consent. Before agent construction (including
 on-demand sandbox turns), an exact live attempt may decide how a definitively
-lost managed Modal sandbox continues. A lost box never dead-ends its sessions:
+lost managed sandbox continues, on every backend Opengeni manages (Modal,
+Docker, compute and the other hosted providers; not self-hosted or none). A
+lost box never dead-ends its sessions:
 the decision covers the complete sandbox group at once, including parents,
 shared children and members private to another human.
 
 **Loss evidence.** Both lanes need durable proof that this lease lineage's
 provider object was definitively lost: the reaper's missing-before-capture
-cold commit or an exact warm-instance `NOT_FOUND`. Each records
+cold commit, an exact warm-instance `NOT_FOUND`, or a failed same-lease
+continuity restore (source `continuity_restore`). Each records
 `opengeniProviderLoss` on the lease (source, lost epoch and instance, workspace
 generation, observation time, stamped provider deadline); cold and warming
 rebuilds carry it and a verified warm publication ends it. A failed or reset
@@ -3058,7 +3063,9 @@ shape) or, when a replacement attempt overwrote that record (older code wrote
 `sandbox.provider_missing_before_capture` audit for the same lease and unchanged
 workspace generation, so stuck sessions recover on their next turn or Retry. A
 plain `not_created` (an ordinary drain, operator restore or capture failure)
-never revives an older loss. Turn start takes the workspace-control fence only
+never revives an older loss. A warming rebuild that fails while it carries a
+loss record keeps the loss on the cold lease rather than clearing it into a
+clean lease, which used to restart the session on a silent empty workspace. Turn start takes the workspace-control fence only
 for a lease with an incomplete archive and a loss-shaped provider record (or a
 pending decision), so the ordinary resume of a complete archive stays unlocked. A decision pins the evidence it used. Provider
 `unknown`, `creating` or `exists`, an unresolved provider create, an explicit
@@ -3077,8 +3084,10 @@ call is live while its attempt is open or awaits quiescence, or while its turn i
 not terminal; a row stranded by a terminal turn whose attempt settled is not a
 writer.
 
-The decision prefers the latest registered CURRENT native Modal checkpoint
-older than the lost workspace (lane `checkpoint`; singleton or shared). It
+The decision prefers the latest registered CURRENT checkpoint older than the
+lost workspace (lane `checkpoint`; singleton or shared): a native Modal
+checkpoint on Modal, a verified portable tar checkpoint (which has no native
+artifact, so its selection's `artifactId` is `null`) on the other backends. It
 records a system-attributed audit, one immutable `sandbox.recovery.automatic`
 receipt per member (the deciding attempt is the actor for its own session, the
 system recovery subject for the others) and a lease marker. Restore then uses
@@ -3101,15 +3110,33 @@ When the loss leaves no checkpoint Opengeni can restore automatically (no
 archive, an unverified archive, a legacy or unregistered descriptor, an invalid
 artifact, or a definitive integrity failure of the selected checkpoint), the
 decision is lane `fresh_workspace`: continue on a new EMPTY workspace. Because
-that is irreversible for the running sandbox, it also waits until the lost
-object is past its hard provider lifetime: its stamped provider deadline plus a
-one-hour create grace, or, for rows without one, the loss observation plus 24
-hours. Opengeni validates the Modal timeout to at most 24 hours (Modal's own
-cap) and never renews it, so no Modal sandbox can outlive that bound in any
-workspace. A misconfigured credential or namespace that turned a live box into
-a false `NOT_FOUND` therefore cannot cause an empty reset; this deadline proof
-subsumes a provider-binding check and needs no provider call on the turn path.
-Staging's 24-hour deadline kills satisfy it at loss time. The decision writes
+that is irreversible for the running sandbox, it also needs per-backend proof
+that the lost object is really gone:
+
+- Modal: the lost object is past its hard provider lifetime: its stamped
+  provider deadline plus a one-hour create grace, or, for rows without one, the
+  loss observation plus 24 hours. Opengeni validates the Modal timeout to at
+  most 24 hours (Modal's own cap) and never renews it, so no Modal sandbox can
+  outlive that bound in any workspace. Staging's 24-hour deadline kills satisfy
+  it at loss time.
+- Compute: the loss observation itself, because the compute control plane is
+  authoritative for its own sandboxes and its deletion is final.
+- Docker: a `workspace_absent` proof written when the continuity restore finds
+  the workspace gone on the same daemon: the durable ownership receipt names
+  that daemon, the daemon reports the exact container missing, and both owned
+  host roots are absent (`ENOENT`) while the directory that held them exists,
+  so an unmounted volume or another host's filesystem never passes.
+- Other hosted providers with a configured hard or renewable lifetime: a
+  `provider_lifetime` proof stamped at loss as the observation plus that
+  lifetime plus the one-hour create grace.
+
+Without such proof the lane is unavailable (`provider_death_unproven`): a
+transient or false `NOT_FOUND` (a misconfigured credential or namespace, or a
+host under memory pressure) can at most restore a checkpoint, never empty the
+workspace by itself. The session is still not stranded: the lease keeps its
+loss, so the public projection offers a person who controls the complete group
+Retry or an explicit fresh-workspace consent. This proof needs no provider call
+on the turn path. The decision writes
 its own audit (`sandbox.fresh_workspace_recovery.authorized`), one immutable
 `sandbox.recovery.fresh_workspace` receipt per member naming the loss time and
 reason, and a pending lease marker, and retires any late-capture receipt in the
@@ -4256,9 +4283,12 @@ writers first. A live `opengeni_app` session rejects activation with SQLSTATE
 old writer is permitted only before activation; after activation no old writer
 may restart, because there is no mixed-version or down-migration path.
 
-**Worker restarts are survivable.** A graceful worker shutdown (a deploy or
-rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
-reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
+**Worker restarts are survivable.** A draining turn worker (a deploy or
+rollout restart delivers SIGTERM) stops polling at once and lets in-flight
+turns finish naturally for its shutdown grace (default 90 seconds,
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS`); those turns complete normally. For a
+turn that outlasts the grace, Temporal cancels the activity with reason
+`WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
@@ -4763,7 +4793,13 @@ response to 64 KiB; the REST session detail contract remains unchanged.
 stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
-`activity_xid`. A semantic event or explicit session mutation advances
+`activity_xid`. The same holds for infrastructure diagnostics
+(`SESSION_ACTIVITY_NEUTRAL_EVENT_TYPES`, migration 0904): sandbox box
+created/terminated/snapshot, env drift, route reconciliation, workspace
+capture announcements, and machine recovery/restore/restart notices. The idle
+reaper's `sandbox.box.terminated` fan-out therefore no longer makes every chat
+sharing a drained box look recently active. Attention events such as
+`sandbox.box.lost` remain activity. A semantic event or explicit session mutation advances
 the timestamp and stamps the same top-level xid on every session changed by
 that transaction. This keeps
 updated-order discovery useful even while a productive session emits a large
@@ -4920,6 +4956,17 @@ the runtime and ends at the provider transport boundary, so it may include the
 sandbox, sandbox environment, repository, and other setup rows whose starts appear below it.
 The timeline labels that overlap explicitly instead of presenting the parent as
 an additional sequential wait.
+
+Eager owned-box platform setup (rig setup, credential hooks and repository
+clones) needs nothing from file delivery or the model input, so the worker
+starts it once agent preparation finishes and runs it alongside worker file
+delivery and model-input preparation; the first model stream joins it before the
+provider request. When the runtime delivers files itself, setup still waits for
+the prepared input it annotates with unavailable-file notes. Later streams of
+the same attempt run the idempotent setup again, and a box rebound while the
+early setup ran gets its own setup. The attempt settles a started setup before
+it returns, so no setup admission outlives it. Model-visible input and its
+order are unchanged.
 
 The periodic warm-workspace snapshot is mid-session durability. The lease
 heartbeat must not start it until the first provider request has reached its

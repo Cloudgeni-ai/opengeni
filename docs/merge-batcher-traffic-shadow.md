@@ -19,7 +19,7 @@ bun scripts/ci/batch-traffic-shadow.ts --once --lookback-hours 24 --max-prs 128 
   --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
 ```
 
-Use Bun 1.4.3 and Git 2.38+. Runtime dependencies are built-ins and Git only. The
+Use Bun 1.4.4 and Git 2.38+. Runtime dependencies are built-ins and Git only. The
 existing `GH_TOKEN`/`GITHUB_TOKEN` or GitHub App authentication works through
 `GitHubReader`/`GitHubAuth`; never put credentials in output, Git URLs or images.
 Default execution is read-only even when `BATCHER_MODE=active` is inherited. The
@@ -62,7 +62,15 @@ occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
   position, then PR number. Deduplicate identical records, reject inconsistent
   projections. A reused/changed historical head can cause a disagreement; it is
   not silently replaced with the squash commit.
-- Cohorts have at most 16 members. Version PRs are singleton barriers. Reconstruct
+- Cohorts have at most 16 members. Version PRs are singleton barriers. Actual
+  main commits changing any `ADAPTER_PATHS` entry (including the entire `scripts`
+  tree) are also singleton barriers: preserve the changing PR in the report,
+  but do not let it poison otherwise eligible adjacent FIFO segments. A change
+  in an unselected intervening main commit starts a new segment and remains
+  visible in collection coverage. Missing/unretained projections are isolated,
+  never dropped. This is selection only: every synthetic candidate still passes
+  the same unchanged-adapter guard; actual landing bytes are not substituted for
+  its observed PR head. Reconstruct
   the base from the first actual merge's first parent, not today's main. Compare
   every synthetic member tree with its actual merge tree and the whole tip with
   the last actual merge. Single-parent landings are labelled squash-or-rebase:
@@ -97,6 +105,27 @@ input/proxy metadata, candidates/manifests, per-member/tree comparisons, main CI
 runs, actual build/collection durations, stage counts, disagreements and optional
 publication comparisons. No readiness-to-CI latency is claimed from `mergedAt`.
 
+Each built cohort includes `adapterCheck`: exact base/tip SHAs and the first
+failed path, object IDs and reason (changed/invalid, non-tree or unavailable).
+The whole-scripts guard deliberately also rejects changed tests/operator helpers.
+Segmentation preserves this conservative coverage; it does not promise that every
+window has an eligible cohort or that historical composition represents a live queue.
+
+For continuous service retention, the separately reviewed supervisor integration
+emits `trafficEvidenceRecords` through its existing structured stdout log sink.
+The child output alone is insufficient: that supervisor discards subprocess stdout.
+Each successful cycle emits canonical full report JSON as indexed base64 chunks
+of at most 64 KiB raw bytes, with a common SHA-256 `reportDigest`, total count and
+byte length. Decode chunks individually, concatenate in index order, then verify
+SHA-256 of the canonical decoded JSON. Missing chunks mean incomplete evidence,
+not a complete retained report. Limit: 2 MiB raw report per cycle (at most 32 chunks);
+larger reports emit one explicit `traffic_report_overflow` record and are not
+claimed durably retained. No credentials/environment or raw provider responses
+are added. Existing provider log retention applies; there is no new cloud store
+or API writer. Local JSON remains the full report, with the supervisor's existing
+64-file retention. This requires the reviewed wrapper patch in the same-source
+image; adding the helper alone does not change a previously deployed supervisor.
+
 `traffic-cache` retains checksummed local GET snapshots (five-minute TTL), completed
 attempt job pages only after the exact attempt is terminal, and exact verified
 result receipts by batch/tip/run/attempt. These observations can lag; current
@@ -121,6 +150,8 @@ not feed these manifests into live admission or represent them as ready labels.
 # This command WRITES queue/state refs. It was not run against GitHub in this task.
 # Set TRAFFIC_SHADOW_RUNNER_BUDGET and TRAFFIC_SHADOW_MAIN_RESERVE to measured,
 # operator-allocated repository capacity and full-main demand, respectively.
+# Optional: TRAFFIC_SHADOW_PROVIDER_JOB_LIMIT (default 60) and
+# TRAFFIC_SHADOW_OTHER_REPOSITORY_ALLOWANCE (default 28); invalid values hold.
 bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --once --lookback-hours 24 \
   --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
 ```
@@ -168,10 +199,32 @@ Fresh bounded run/job queries must show room for the full-main reserve plus curr
 other workflow demand and 18 conservative candidate slots. Demand is the count of
 `queued`, `in_progress` and `requested` jobs; approval-waiting, concurrency-pending
 and completed jobs and runs without jobs reserve nothing, and an unrecognized job
-status holds. Any active Batch CI or incomplete capacity scan blocks publication,
+status holds. The scan is shared with the batcher (see the headroom section of
+[merge-batcher.md](merge-batcher.md)): every active status is listed twice,
+runs listed as `completed` are skipped (a `completed` Batch CI listing no longer
+blocks publication), runs proven approval-only (`waiting` in every listing, at
+least one `waiting` job, all other jobs `pending` or `completed`) are excluded
+from the 32-run cap, which still applies to every other active run, and at most
+64 active runs are scanned per observation within a 120-second deadline; larger
+backlogs hold. One observation costs up to 74 uncached requests (10 run-list plus
+64 job pages) against the 200-per-cycle and 600-per-hour read budgets above;
+exhausting them backs off and holds. Any active Batch CI or incomplete capacity
+scan blocks publication,
 and unpublished or no-run traffic candidates keep their own occupancy hold. The
 budget is an operator allocation, not a discovered GitHub/custom quota; reserve for
-other organization consumers outside this repository separately. Actions
+other organization consumers outside this repository separately.
+
+The traffic reader applies the same pool checks as the batcher (see the
+headroom section of [merge-batcher.md](merge-batcher.md)). It holds while any active
+full-main run is before its fan-out (at most the 3 pre-plan jobs and not proven
+approval-only) or has jobs `queued` or `requested`. It also requires observed
+repository demand plus the other-repository allowance (default 28, a measured
+maximum, not an observation of other repositories) plus 18 to fit the hosted job
+limit (default 60). The report's `publication.headroom.capacity` records the
+limit, allowance, required total, hold reason, `mainQueuedJobs`,
+`preFanoutMainRuns` and newest-main queue waits.
+
+Actions
 scheduling is not transactionally fenced by the Git CAS, so this observation is
 not a provider capacity reservation. Waiting, pending and job-less runs can start
 requesting runners after observation; that race is bounded by the same caveat.

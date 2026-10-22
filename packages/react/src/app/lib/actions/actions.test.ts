@@ -9,9 +9,15 @@ import {
   type Chord,
 } from "./chords";
 import type { ChatRecord } from "./chat-directory";
-import { isSwitcherKey, openChatSwitcher, stepChatSwitcher, SWITCHER_LIMIT } from "./chat-switcher";
+import {
+  extendChatSwitcher,
+  isSwitcherKey,
+  openChatSwitcher,
+  stepChatSwitcher,
+  SWITCHER_LIMIT,
+} from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
-import { APP_ACTIONS } from "./registry";
+import { appActions, stepWorkspace } from "./registry";
 
 function key(
   code: string,
@@ -85,6 +91,38 @@ describe("chords", () => {
     ).toBe(false);
   });
 
+  test("AltGr typing on Windows never fires a Ctrl+Alt chord", () => {
+    // What Windows browsers report for AltGr+key: Ctrl and Alt, plus AltGraph.
+    const altGr = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    });
+    const chordFor = (id: string) =>
+      applicableChords(appActions().find((action) => action.id === id)!.chords, "web", "other")[0]!;
+    // "ą" on Polish keyboards and "{" on Czech and Hungarian ones; Pin uses the same shape.
+    expect(matchesChord(altGr("KeyA", "ą"), chordFor("chat.archive"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyB", "{"), chordFor("view.workspacePanel"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyP", "π"), chordFor("chat.pin"), "other")).toBe(false);
+    // A deliberate Ctrl+Alt on a layout without AltGr still works.
+    const plain = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: () => false,
+    });
+    expect(matchesChord(plain("KeyA", "a"), chordFor("chat.archive"), "other")).toBe(true);
+    expect(matchesChord(plain("KeyB", "b"), chordFor("view.workspacePanel"), "other")).toBe(true);
+    // Mac has no AltGr: ⌥⌘B with Option reported as AltGraph is still the chord.
+    expect(
+      matchesChord(
+        {
+          ...key("KeyB", { meta: true, alt: true, key: "∫" }),
+          getModifierState: (modifier: string) => modifier === "AltGraph",
+        },
+        chordFor("view.workspacePanel"),
+        "mac",
+      ),
+    ).toBe(true);
+  });
+
   test("shows each platform's notation", () => {
     const toggle: Chord = { code: "KeyS", mod: true, control: true };
     expect(chordKeys(toggle, "mac")).toEqual(["⌃", "⌘", "S"]);
@@ -97,7 +135,7 @@ describe("chords", () => {
   });
 
   test("browser-reserved keys stay on desktop", () => {
-    const action = APP_ACTIONS.find((candidate) => candidate.id === "chat.new")!;
+    const action = appActions().find((candidate) => candidate.id === "chat.new")!;
     expect(applicableChords(action.chords, "web", "mac").map((chord) => chord.code)).toEqual([
       "KeyO",
     ]);
@@ -105,7 +143,7 @@ describe("chords", () => {
       "KeyN",
       "KeyO",
     ]);
-    const inbox = APP_ACTIONS.find((candidate) => candidate.id === "go.inbox")!;
+    const inbox = appActions().find((candidate) => candidate.id === "go.inbox")!;
     // Ctrl+Shift+I opens developer tools in browsers on Windows and Linux.
     expect(applicableChords(inbox.chords, "web", "other")).toEqual([]);
     expect(applicableChords(inbox.chords, "desktop", "other")).toHaveLength(1);
@@ -115,7 +153,7 @@ describe("chords", () => {
     for (const surface of ["web", "desktop"] as const) {
       for (const platform of ["mac", "other"] as const) {
         const seen = new Map<string, string>();
-        for (const action of APP_ACTIONS) {
+        for (const action of appActions()) {
           for (const chord of applicableChords(action.chords, surface, platform)) {
             const label = chordLabel(chord, platform);
             expect(seen.get(label) ?? action.id).toBe(action.id);
@@ -123,6 +161,20 @@ describe("chords", () => {
           }
         }
       }
+    }
+  });
+
+  test("⌘B toggles the sidebar, as a formatting key with a standard key beside it", () => {
+    const sidebar = appActions().find((candidate) => candidate.id === "view.sidebar")!;
+    for (const platform of ["mac", "other"] as const) {
+      const chords = applicableChords(sidebar.chords, "desktop", platform);
+      expect(chordLabel(chords[0]!, platform)).toBe(platform === "mac" ? "⌘B" : "Ctrl+B");
+      expect(chords[0]!.formatting).toBe(true);
+      // The menu bar takes the first key that is not a formatting key.
+      const menuKey = chords.find((chord) => !chord.formatting)!;
+      expect(chordAccelerator(menuKey)).toBe(
+        platform === "mac" ? "Ctrl+CmdOrCtrl+S" : "CmdOrCtrl+Shift+S",
+      );
     }
   });
 });
@@ -180,6 +232,7 @@ describe("chat switcher", () => {
     pinned: false,
     archived: false,
     row: null,
+    readAt: 0,
     ...extra,
   });
   const directory = (recent: string[], records: ChatRecord[] = recent.map((id) => record(id))) => ({
@@ -233,9 +286,74 @@ describe("chat switcher", () => {
     expect(openChatSwitcher(directory([]), null, false)).toBeNull();
   });
 
-  test("the list stops at ten chats", () => {
-    const ids = Array.from({ length: 15 }, (_, index) => `c${index}`);
-    expect(openChatSwitcher(directory(ids), "c0", false)!.ids).toHaveLength(SWITCHER_LIMIT);
+  test("chats in other workspaces join the list, unless that workspace is gone", () => {
+    const rows = [
+      record("a"),
+      record("b", { workspaceId: "other" }),
+      record("c", { workspaceId: "gone" }),
+    ];
+    const state = openChatSwitcher(
+      directory(["a", "b", "c"], rows),
+      "a",
+      false,
+      (workspaceId) => workspaceId !== "gone",
+    )!;
+    expect(state.ids).toEqual(["a", "b"]);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
+  test("past the opened chats it carries on through other chats by latest activity", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("older", { updatedAt: 5 }),
+      record("newer", { updatedAt: 9, workspaceId: "other" }),
+      record("gone", { updatedAt: 8, archived: true }),
+      record("child", { updatedAt: 7, row: { parentSessionId: "a" } as ChatRecord["row"] }),
+    ];
+    const state = openChatSwitcher(directory(["a", "b"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "b", "newer", "older"]);
+    expect(state.viewed).toBe(2);
+    // Tab keeps going into the older chats before it wraps.
+    let stepped = stepChatSwitcher(state, 1);
+    stepped = stepChatSwitcher(stepped, 1);
+    expect(stepped.ids[stepped.index]).toBe("older");
+  });
+
+  test("with no opened chats yet, the most recently active chat is the target", () => {
+    const rows = [record("a", { updatedAt: 1 }), record("b", { updatedAt: 2 })];
+    const state = openChatSwitcher(directory([], rows), null, false)!;
+    expect(state.ids).toEqual(["b", "a"]);
+    expect(state.viewed).toBe(0);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
+  test("chats that load while it is open join at the end, and nothing else moves", () => {
+    const start = directory(["a", "b"], [record("a"), record("b"), record("c", { updatedAt: 3 })]);
+    const state = stepChatSwitcher(openChatSwitcher(start, "a", false)!, 1);
+    expect(extendChatSwitcher(state, start)).toBe(state);
+    const later = directory(
+      ["a", "b"],
+      [record("a"), record("b"), record("c", { updatedAt: 3 }), record("d", { updatedAt: 9 })],
+    );
+    const grown = extendChatSwitcher(state, later);
+    expect(grown.ids).toEqual(["a", "b", "c", "d"]);
+    expect(grown.index).toBe(state.index);
+    expect(grown.viewed).toBe(2);
+  });
+
+  test("the list stops at its limit", () => {
+    const ids = Array.from({ length: SWITCHER_LIMIT + 20 }, (_, index) => `c${index}`);
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      record(`x${index}`, { updatedAt: index }),
+    );
+    const state = openChatSwitcher(
+      directory(ids, [...ids.map((id) => record(id)), ...rows]),
+      "c0",
+      false,
+    )!;
+    expect(state.ids).toHaveLength(SWITCHER_LIMIT);
+    expect(extendChatSwitcher(state, directory(ids, rows))).toBe(state);
   });
 
   test("only Control+Tab opens it", () => {
@@ -245,5 +363,38 @@ describe("chat switcher", () => {
     expect(isSwitcherKey({ ...tab, altKey: true })).toBe(false);
     expect(isSwitcherKey({ ...tab, ctrlKey: false })).toBe(false);
     expect(isSwitcherKey({ ...tab, code: "KeyQ" })).toBe(false);
+  });
+});
+
+describe("workspace keys", () => {
+  const workspaces = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  test("previous and next walk the picker's order and wrap around", () => {
+    expect(stepWorkspace(workspaces, "a", 1)).toBe("b");
+    expect(stepWorkspace(workspaces, "c", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "a", -1)).toBe("c");
+    expect(stepWorkspace(workspaces, "b", -1)).toBe("a");
+  });
+
+  test("one workspace has nowhere to go, and an unknown one starts at an end", () => {
+    expect(stepWorkspace([{ id: "a" }], "a", 1)).toBeNull();
+    expect(stepWorkspace(workspaces, "x", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "x", -1)).toBe("c");
+  });
+
+  test("⌥⌘↑ and ⌥⌘↓ on Mac, Ctrl+Alt elsewhere, plus Ctrl+Shift+PgUp/PgDn in the desktop app", () => {
+    const next = appActions().find((action) => action.id === "go.nextWorkspace")!;
+    const mac = applicableChords(next.chords, "web", "mac");
+    expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌥⌘↓"]);
+    expect(matchesChord(key("ArrowDown", { meta: true, alt: true }), mac[0]!, "mac")).toBe(true);
+    // ⌥↓ alone is the next chat.
+    expect(matchesChord(key("ArrowDown", { alt: true }), mac[0]!, "mac")).toBe(false);
+    expect(
+      applicableChords(next.chords, "web", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓"]);
+    expect(
+      applicableChords(next.chords, "desktop", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓", "Ctrl+Shift+PgDn"]);
+    expect(chordAccelerator(mac[0]!)).toBe("CmdOrCtrl+Alt+Down");
   });
 });

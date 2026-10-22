@@ -1,5 +1,21 @@
 # Modular prompt changelog
 
+When something the user can fix blocks a tool, such as a missing connection,
+extension, machine, integration, permission or secret, the agent now offers the
+fix in the same reply: it shows the setup card, or gives the exact next step
+when there is no card, and continues once it is fixed. It never only reports
+that something is unavailable. This one rule in Autonomy and persistence
+replaces case-by-case wording: the Integration setup ending "If blocked or a
+setup tool is unavailable, explain the specific gap" now says to give the exact
+next step, or, when the user can't fix it, to explain the gap and who can, and
+`browser_open` and `interaction_discover` no longer tell the agent to explain
+that the Chrome extension must be connected. Before, an agent
+asked to use LinkedIn in the person's browser answered "Browser isn't
+connected" and showed the setup card only after the person asked how. Tools
+that hit a registered user-fixable refusal also post the card themselves (see
+`USER_SETUP_BLOCKERS`). Both compositions change identically; legacy prompt
+digests are refreshed for this reviewed change.
+
 A Word, Excel, PDF or PowerPoint file the user sends to be changed is now
 edited in the sandbox with ordinary tools (python-docx, openpyxl, pandoc,
 LibreOffice), checked and published, and so is a new file the user asks for in

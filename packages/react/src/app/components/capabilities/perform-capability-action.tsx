@@ -15,6 +15,7 @@ import {
   type IntegrationClass,
   type IntegrationConnectMethod,
 } from "../../lib/integration-connect-analytics";
+import { beginDriveConnect, DRIVE_MCP_URL } from "../../lib/drive-connect-return";
 import { startMcpOAuthWithTimeout } from "../../lib/mcp-oauth";
 import { toast } from "../../lib/toast";
 
@@ -130,6 +131,33 @@ async function performCapabilityActionUntracked(
     throw new Error(
       "Existing connections could not be checked. Refresh and retry before saving credentials.",
     );
+  }
+
+  // The built-in Drive action uses a server-owned Connect provider identity.
+  // Custom MCP requests continue through the generic OAuth route below.
+  if (
+    ["oauth", "add_oauth_account", "reconnect_oauth"].includes(action.type) &&
+    (item.mcpUrl ?? item.endpointUrl) === DRIVE_MCP_URL
+  ) {
+    if (!("ownership" in action) || action.ownership !== "personal")
+      throw new Error("Google Drive connections must be personal-owned.");
+    const persisted = await persistIfRegistry(item, registry);
+    const target = new URL(returnPathFor(persisted.id), connectReturnUrl ?? window.location.href);
+    const authorizationUrl = await beginDriveConnect({
+      client,
+      workspaceId,
+      itemId: persisted.id,
+      returnUrl: target.toString(),
+      ...(action.type === "reconnect_oauth" && action.connectionId
+        ? { reconnectAccountId: action.connectionId }
+        : {}),
+      ...(action.type === "reconnect_oauth" && action.connectionWorkspaceId
+        ? { connectionWorkspaceId: action.connectionWorkspaceId }
+        : {}),
+      storage: window.sessionStorage,
+    });
+    redirect(authorizationUrl);
+    return;
   }
 
   if (action.type === "install_skill") {

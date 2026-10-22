@@ -40,7 +40,7 @@ import {
   listInteractionInterventions,
   listNetworkRoutes,
   listSiteAuthConnections,
-  listVisibleSessionInvalidationIds,
+  listVisibleSessionInvalidationHints,
   sessionListChangesFor,
   resolveInteractionIntervention,
   updateNetworkRoute,
@@ -113,7 +113,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
                   freshGrant,
                   "http",
                 );
-                return await listVisibleSessionInvalidationIds(deps.db, workspaceId, ids, {
+                return await listVisibleSessionInvalidationHints(deps.db, workspaceId, ids, {
                   subjectId: freshGrant.subjectId,
                   ...(authorizationScope ? { authorizationScope } : {}),
                   personalWorkspaceOwnerException:

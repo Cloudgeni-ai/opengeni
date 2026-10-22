@@ -452,9 +452,10 @@ export async function coreOrganizationAccounts(
     subjectId: actor.actorSubjectId,
   });
   return c.json({
-    accounts: projection.accounts.map((account) =>
-      ctx.listedAccountJson(account, projection.activeCredentialId),
-    ),
+    accounts: projection.accounts.map((account) => ({
+      ...ctx.listedAccountJson(account, projection.activeCredentialId),
+      ...(account.reach ? { reach: account.reach } : {}),
+    })),
     activeAccountId: projection.activeCredentialId,
     source: "organization",
     organizationId: actor.organizationId,

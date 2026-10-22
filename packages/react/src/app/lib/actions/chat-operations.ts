@@ -76,6 +76,7 @@ export function useChatOperations(): ChatOperations {
     },
     [context],
   );
+  const setArchivedRef = useRef<ChatOperations["setArchived"] | null>(null);
   const setArchived = useCallback(
     async (chat: SessionListRow, archived: boolean) => {
       if (archiving.current.has(chat.id)) return;
@@ -98,7 +99,19 @@ export function useChatOperations(): ChatOperations {
           sessionId: chat.id,
           archived: updated.archived,
         });
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
+        const after: SessionListRow = {
+          ...chat,
+          archived: updated.archived === true,
+          ...(updated.archiveVersion !== undefined
+            ? { archiveVersion: updated.archiveVersion }
+            : {}),
+        };
+        toast.success(updated.archived ? "Chat archived." : "Chat restored.", {
+          // Archiving is one key away, so taking it back is one click away.
+          action: updated.archived
+            ? { label: "Undo", onClick: () => void setArchivedRef.current?.(after, false) }
+            : undefined,
+        });
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
@@ -110,6 +123,7 @@ export function useChatOperations(): ChatOperations {
     },
     [context],
   );
+  setArchivedRef.current = setArchived;
   const setUnread = useCallback(
     async (chat: SessionListRow, unread: boolean) => {
       try {

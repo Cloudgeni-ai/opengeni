@@ -177,7 +177,10 @@ impl MemoryStore {
         };
         row.renewals += 1;
         row.seq = row.seq.max(renew.seq);
-        row.capacity = renew.capacity.clone();
+        // A renewal without a capacity keeps the one last heard.
+        if let Some(capacity) = &renew.capacity {
+            row.capacity = capacity.clone();
+        }
         row.changed = changed;
         inner.changes = changed;
         true

@@ -1,5 +1,78 @@
 # @opengeni/example-northstar-support
 
+## 0.0.190
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+- Updated dependencies [d0eb91c]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/react@4.6.0
+
+## 0.0.189
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [6f9b6f5]
+- Updated dependencies [7e5e08f]
+- Updated dependencies [1d65f48]
+- Updated dependencies [debd64e]
+- Updated dependencies [0910456]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [0b3b079]
+- Updated dependencies [d8179be]
+  - @opengeni/sdk@4.5.0
+  - @opengeni/react@4.5.0
+
+## 0.0.188
+
+### Patch Changes
+
+- Updated dependencies [dd61c8d]
+- Updated dependencies [efd4df0]
+- Updated dependencies [4ff99bd]
+- Updated dependencies [23dfcb2]
+- Updated dependencies [b800b7f]
+- Updated dependencies [a506901]
+- Updated dependencies [dfa5df0]
+- Updated dependencies [565253c]
+- Updated dependencies [2a2acb2]
+- Updated dependencies [343c1aa]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [e3c07bc]
+- Updated dependencies [182eff6]
+- Updated dependencies [926e0b8]
+- Updated dependencies [73132c4]
+- Updated dependencies [85c0948]
+- Updated dependencies [67ce6ff]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [b81d318]
+- Updated dependencies [7157f58]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [201c380]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [486abe4]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [67882a3]
+- Updated dependencies [84c8b32]
+- Updated dependencies [b7943f4]
+- Updated dependencies [886dc39]
+- Updated dependencies [f7f7987]
+- Updated dependencies [84b1a18]
+  - @opengeni/react@4.4.0
+  - @opengeni/sdk@4.4.0
+
 ## 0.0.187
 
 ### Patch Changes

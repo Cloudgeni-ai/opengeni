@@ -71,7 +71,7 @@ function task(): ScheduledTask {
 afterEach(() => mock.restore());
 
 describe("scheduled existing-session authorization", () => {
-  test("empty first-party permissions disable publication while legacy null inherits defaults", () => {
+  test("native publication stays retired with empty or legacy null permissions", () => {
     const target = {
       firstPartyMcpTools: ["editable_artifact_export", "editable_artifact_export_status"],
       firstPartyMcpPermissions: [],
@@ -84,7 +84,7 @@ describe("scheduled existing-session authorization", () => {
         ...target,
         firstPartyMcpPermissions: null,
       }).googleDrivePublicationEnabled,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("redacts target and run session IDs without sessions:control", () => {

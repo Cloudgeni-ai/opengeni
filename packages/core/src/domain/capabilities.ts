@@ -25,6 +25,8 @@ import {
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
   type SocialConnection,
+  ToolAuthNeededPayload,
+  type UserSetupBlocker,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -162,6 +164,7 @@ export async function buildCapabilityCatalog(input: {
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -210,7 +213,10 @@ export async function buildCapabilityCatalog(input: {
             }
           : projected;
       return applyCapabilityLifecycle(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+        applyGoogleConnectorSetupAvailability(
+          applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+          input.settings,
+        ),
       );
     })
     .sort(compareCatalogItems);
@@ -234,7 +240,33 @@ function operatorOAuthClientResolver(settings: Settings): (issuer: string) => bo
   } catch {
     // Startup validates this setting; a malformed value can configure nothing.
   }
-  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+  return (issuer) =>
+    (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
+    findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyGoogleConnectorSetupAvailability(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+): CapabilityCatalogItem {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
+  const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  if (
+    item.kind !== "mcp" ||
+    (!drive && !gmail) ||
+    (settings.googleConnectorSetupEnabled && (!drive || settings.googleDriveMcpEnabled))
+  )
+    return item;
+  return {
+    ...item,
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until Google data-access verification and provider setup are complete.",
+    },
+  };
 }
 
 export function applyOperatorOAuthClientRequirement(
@@ -392,12 +424,14 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
     if (
-      item.endpointUrl?.replace(/\/+$/u, "") === "https://gmailmcp.googleapis.com/mcp/v1" &&
+      ["https://gmailmcp.googleapis.com/mcp/v1", "https://drivemcp.googleapis.com/mcp/v1"].includes(
+        item.endpointUrl?.replace(/\/+$/u, "") ?? "",
+      ) &&
       (input.payload.connectionRef?.subjectScope !== "subject" ||
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {
       throw new HTTPException(422, {
-        message: "Gmail requires a personal-owned connection reference",
+        message: "Google connector requires a personal-owned connection reference",
       });
     }
     // This generic, potentially workspace-authored catalog is not proof of a
@@ -1020,6 +1054,7 @@ export async function settingsWithEnabledCapabilityMcpServers(
       readCodexAppsDesignation(),
     ]);
   }
+  apiIntegrations = apiIntegrations.filter(apiIntegrationIsExecutable);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(
@@ -1063,9 +1098,9 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     })
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
-  const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
-    ...serverIds,
-  ]);
+  const apiIntegrations = (
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter(apiIntegrationIsExecutable);
   options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
@@ -1131,6 +1166,12 @@ async function listInstalledApiIntegrationsForDelegations(
   return [...byServerId.values()];
 }
 
+function apiIntegrationIsExecutable(integration: ApiIntegrationRuntime): boolean {
+  return !(
+    integration.definitionProvenance === "curated" && integration.definitionId === "google-drive"
+  );
+}
+
 export function settingsWithApiIntegrationServers(
   settings: Settings,
   integrations: readonly ApiIntegrationRuntime[],
@@ -1138,7 +1179,10 @@ export function settingsWithApiIntegrationServers(
   if (integrations.length === 0) return settings;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = integrations
-    .filter((integration) => !existingIds.has(integration.serverId))
+    .filter(
+      (integration) =>
+        apiIntegrationIsExecutable(integration) && !existingIds.has(integration.serverId),
+    )
     .map((integration) => ({
       id: integration.serverId,
       name: integration.name,
@@ -1665,6 +1709,93 @@ function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCa
   });
 }
 
+/** How people and agents name the deployment's Chrome extension, and where it is installed. */
+export type BrowserExtension = { name: string; installUrl: string };
+
+/** The deployment's configured Chrome extension, else Opengeni Browser. */
+export function browserExtension(settings: {
+  browserExtensionName?: string | undefined;
+  browserExtensionInstallUrl?: string | undefined;
+}): BrowserExtension {
+  return {
+    name: settings.browserExtensionName ?? "Opengeni Browser",
+    installUrl: settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+  };
+}
+
+/** The catalog id of the Excel add-in tile and its in-chat install card. */
+export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
+
+/** How people and agents name the deployment's Excel add-in, and where it is installed. */
+export type ExcelAddin = { name: string; installUrl: string | null };
+
+/** The deployment's configured add-in, else this web app's own /excel install page. */
+export function excelAddin(settings: {
+  officeAddinName?: string | undefined;
+  officeAddinInstallUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  publicBaseUrl?: string | undefined;
+}): ExcelAddin {
+  const web = settings.webBaseUrl ?? settings.publicBaseUrl;
+  return {
+    name: settings.officeAddinName ?? "Opengeni",
+    installUrl:
+      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
+  };
+}
+
+/**
+ * The Excel add-in tile. The add-in is installed in each person's own Excel
+ * and connects whichever workbook they open its pane in, so there is nothing
+ * to enable for the workspace: the tile explains it and links to the install
+ * page, and `excel_run` reaches the person's connected workbooks.
+ */
+export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: EXCEL_ADDIN_CAPABILITY_ID,
+    kind: "api",
+    source: "built_in",
+    name: "Microsoft Excel",
+    description: `Add the ${addin.name} add-in to Excel (web, Windows or Mac) and open it in a workbook: you can chat there, and agents in any chat can read and change that workbook live.`,
+    category: "productivity",
+    tags: [
+      "excel",
+      "microsoft",
+      "office",
+      "microsoft-365",
+      "spreadsheet",
+      "spreadsheets",
+      "workbook",
+      "xlsx",
+      "add-in",
+      "finance",
+      "budget",
+      "model",
+    ],
+    homepageUrl: addin.installUrl,
+    providerDomain: "microsoft.com",
+    authModel: "office_addin",
+    authKind: "none",
+    surfaceType: "first_party_excel_addin",
+    tools: [],
+    runtime: {
+      available: addin.installUrl !== null,
+      notes:
+        addin.installUrl !== null
+          ? `Agents use excel_run in workbooks people have open with the ${addin.name} add-in.`
+          : "This deployment has no Excel add-in install page configured.",
+    },
+    enabled: false,
+    enabledReason: null,
+    metadata: {
+      connectorMode: "first_party_excel_addin",
+      addinName: addin.name,
+      installUrl: addin.installUrl,
+      firstPartyMcpTools: ["excel_run"],
+    },
+  });
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
 ): CapabilityCatalogItem[] {
@@ -1717,8 +1848,9 @@ export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 export { OPENGENI_BROWSER_EXTENSION_URL };
 
 export function nativeConnectionCapabilityRecommendations(
-  options: { connectedMachines?: boolean } = {},
+  options: { connectedMachines?: boolean; browserExtension?: BrowserExtension } = {},
 ): CapabilityCatalogItem[] {
+  const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
@@ -1789,7 +1921,7 @@ export function nativeConnectionCapabilityRecommendations(
         tools: [{ kind: "mcp", id: "opengeni" }],
         runtime: {
           available: true,
-          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${extensionUrl}) works only after the machine is connected.`,
         },
         lifecycle: {
           status: "available",
@@ -1806,13 +1938,48 @@ export function nativeConnectionCapabilityRecommendations(
             "connected_machine_enroll_token",
             "connected_machine_enable_screen_control",
           ],
-          browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
+          browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
       }),
     );
   }
   return items;
+}
+
+/**
+ * The `tool.auth_needed` payload of the setup card that fixes a person-fixable
+ * tool refusal (see USER_SETUP_BLOCKERS). Every tool and route that hits such a
+ * refusal posts this same card in the calling turn, so the person sees the fix
+ * on the first attempt. Null when the blocker's capability is not a native
+ * card this deployment can show.
+ */
+export function userSetupCardPayload(
+  blocker: UserSetupBlocker,
+  options: { toolName: string; requestedSandboxId?: string | null },
+): ToolAuthNeededPayload | null {
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
+  if (!item) return null;
+  return ToolAuthNeededPayload.parse({
+    serverId: "opengeni",
+    toolName: options.toolName,
+    // Built-in capabilities are Opengeni's own; a blank domain must not fail the card.
+    providerDomain: item.providerDomain?.trim() || "opengeni.local",
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: "connect",
+      rationale: blocker.rationale,
+      requiredVariables: [],
+    },
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
+    ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
+  });
 }
 
 function socialConnectionCounts(

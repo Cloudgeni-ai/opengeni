@@ -476,6 +476,28 @@ describe("BrowserInteractionController", () => {
     expect(sideEffects).toBe(1);
   });
 
+  test("hands an unclassified dispatch error to the diagnostics hook without changing the outcome", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const failure = new TypeError("Cannot read properties of undefined");
+    const reported: Array<{ error: unknown; operationId: string }> = [];
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(targets, async () => {
+        throw failure;
+      }),
+      onUnexpectedDispatchError: (error, current) => {
+        reported.push({ error, operationId: current.operationId });
+        throw new Error("diagnostics must not leak into the outcome");
+      },
+    });
+
+    const receipt = await controller.run(command(1));
+    expect(receipt.state).toBe("outcome_unknown");
+    expect(receipt.error?.code).toBe("controller_lost");
+    expect(reported).toEqual([{ error: failure, operationId: operationId(1) }]);
+  });
+
   test("durably journals preparation and dispatch before invoking the driver", async () => {
     const targets = new Map([["target-1", target()]]);
     const preparedRelease = deferred();

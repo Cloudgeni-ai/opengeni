@@ -15,6 +15,7 @@ import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -46,6 +47,7 @@ import {
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
+  TurnSandboxCommandCancelledError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceArchiveIntegrityError,
@@ -3794,6 +3796,19 @@ describe("lazy sandbox provisioner single-flight", () => {
         new SandboxExecReadinessError("modal", "exec_probe_failed", 60_000, 1, "sb-1"),
       ),
     ).toMatchObject({ category: "exec_readiness", code: "exec_probe_failed" });
+    // Provider exec-state loss on the probe is a typed readiness failure (not
+    // "create_failed"), with unchanged retry semantics.
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toMatchObject({ category: "exec_readiness", code: "exec_probe_lost", retryable: false });
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toBe(false);
     expect(
       classifySandboxLogicalProvisionFailure(
         "modal",
@@ -4091,6 +4106,26 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(cancellation).toBeInstanceOf(CancelledFailure);
     expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
     expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a sandbox command cancelled by a worker shutdown recovers like the shutdown itself", () => {
+    // A shutdown during startup file downloads reaches settlement through the
+    // turn tool fence's command error. Its cause is the activity's own
+    // cancellation, so the turn recovers instead of failing as "WORKER_SHUTDOWN".
+    const shutdown = new CancelledFailure("WORKER_SHUTDOWN");
+    const commandCancelled = new TurnSandboxCommandCancelledError(shutdown);
+    expect(commandCancelled.message).toBe("WORKER_SHUTDOWN");
+    expect(turnOperationCancellationFailure(commandCancelled)).toBe(shutdown);
+    expect(isWorkerShutdownCancellation(turnOperationCancellationFailure(commandCancelled))).toBe(
+      true,
+    );
+    // Any other command cancellation keeps its existing settlement.
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError(new Error("STEER"))),
+    ).toBeNull();
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError("deadline")),
+    ).toBeNull();
   });
 
   test("a committed control outranks a same-checkpoint provider failure", async () => {
@@ -5305,7 +5340,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+  test("a null accepted Codex stream settles terminally; only a checkpoint retries it", async () => {
     const observed = await actualCodexNullBodyFailure();
     expect(observed.calls).toBe(1);
     expect(agentRunFailurePayload(observed.error)).toEqual({
@@ -5314,16 +5349,20 @@ describe("transient provider error classifier", () => {
       retryable: false,
     });
 
+    // A checkpoint request has no tool or output effects to repeat.
     const wrapped = new CompactionProviderResponseError(
       { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
       observed.error,
     );
     expect(agentRunFailurePayload(wrapped)).toEqual({
-      error: "The Codex response stream ended without a terminal response",
-      code: "invalid_sse_terminal",
-      retryable: false,
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: wrapped.message,
+      providerCondition: "unavailable",
     });
-    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+    expect(wrapped.message).toContain('"code":"invalid_sse_terminal"');
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
   });
 
   test("an actual streamed Codex server failure preserves exact detail during same-turn recovery", async () => {
@@ -6104,6 +6143,74 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a checkpoint stream that ends early or times out retries the same turn", () => {
+    // Ordinary requests keep these terminal because replay could repeat model
+    // or tool effects. A checkpoint request only summarizes, so it is safe to
+    // send again on the same logical turn.
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    for (const cause of [truncated, timedOut]) {
+      const wrapped = new CompactionProviderResponseError(
+        compactionProviderFailureDiagnostics(cause),
+        cause,
+      );
+      expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+      expect(agentRunFailurePayload(wrapped)).toMatchObject({
+        code: "provider_unavailable",
+        retryable: true,
+      });
+      // The same failures on an ordinary model request stay terminal.
+      expect(agentRunFailurePayload(cause, { isCodexTurn: true }).retryable).toBe(false);
+    }
+  });
+
+  test("a retried checkpoint keeps its transport cause, timeout class and request", () => {
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      request_id: "req_checkpoint_sse",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const sse = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(truncated),
+      truncated,
+    );
+    expect(sse.message).toContain('"code":"invalid_sse_terminal"');
+    expect(sse.message).toContain("req_checkpoint_sse");
+    expect(agentRunFailurePayload(sse)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: sse.message,
+      providerCondition: "unavailable",
+    });
+
+    // The cause's own timeout class, not the wrapper's default.
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    const timeout = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(timedOut),
+      timedOut,
+    );
+    expect(agentRunFailurePayload(timeout)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+      requestId: "attempt:2:1:4",
+      detail: timeout.message,
+      providerCondition: "unresponsive",
+    });
   });
 
   test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {

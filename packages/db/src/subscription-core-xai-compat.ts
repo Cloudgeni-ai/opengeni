@@ -118,11 +118,7 @@ export async function getSubscriptionCoreXaiWorkspaceProjection(
           : "workspace",
     accounts: [
       ...view.pool.connections.map((entry) =>
-        projectSubscriptionCoreXaiAccount(
-          entry.row,
-          entry.source,
-          entry.row.allocator_enabled && entry.poolAllocatorEnabled,
-        ),
+        projectSubscriptionCoreXaiAccount(entry.row, entry.source, entry.row.allocator_enabled),
       ),
       ...view.personal.map((row) => projectSubscriptionCoreXaiAccount(row, "user")),
     ],
@@ -139,9 +135,13 @@ export async function getSubscriptionCoreXaiOrganizationProjection(
   const pool = await readSubscriptionCoreOrganizationPool(db, SUBSCRIPTION_CORE_XAI, input);
   return {
     source: "organization",
-    accounts: (pool?.rows ?? []).map((row) =>
-      projectSubscriptionCoreXaiAccount(row, "organization"),
-    ),
+    accounts: (pool?.rows ?? []).map((row) => {
+      const reach = pool?.reach.get(row.id);
+      return {
+        ...projectSubscriptionCoreXaiAccount(row, "organization"),
+        ...(reach ? { reach } : {}),
+      };
+    }),
     activeCredentialId: pool?.primaryConnectionId ?? null,
     rotationEnabled: pool ? pool.rotationMode === "spread" : false,
   };

@@ -14,7 +14,6 @@ import {
   createSession,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
-  listSubscriptionConnectionAssignmentPolicies,
   listSubscriptionConnectionsForPlacement,
   isSubscriptionProviderCutoverEnabled,
   readSubscriptionProviderCutoverState,
@@ -1801,36 +1800,15 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "assignment pool policy remains independent and session binding writes are compare-and-swap fenced",
+    "a placement connection carries no per-workspace policy and session binding writes are compare-and-swap fenced",
     async () => {
       const state = await fixture();
-      await shared!.admin`
-        insert into subscription_connection_assignment_policies (
-          account_id, connection_id, workspace_id, inference_pool, allocator_enabled,
-          allowed_model_ids, excluded_models
-        ) values
-          (${state.accountId}::uuid, ${state.connectionId}::uuid, ${state.workspaceId}::uuid,
-           'workspace', true, array['codex/a'], array['codex/b']),
-          (${state.accountId}::uuid, ${state.connectionId}::uuid, ${state.workspaceId}::uuid,
-           'organization', false, array['codex/b'], array['codex/a'])`;
       const actor = { subjectId: state.subjectId, initiatingHumanSubjectId: state.subjectId };
       await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,
           { accountId: state.accountId, workspaceId: state.workspaceId },
           async (db) => {
-            const policies = await listSubscriptionConnectionAssignmentPolicies(db, {
-              accountId: state.accountId,
-              workspaceId: state.workspaceId,
-              provider: "codex",
-            });
-            expect(policies).toHaveLength(2);
-            expect(
-              policies.map((policy) => [policy.inferencePool, policy.allocatorEnabled]),
-            ).toEqual([
-              ["organization", false],
-              ["workspace", true],
-            ]);
             const placementConnections = await listSubscriptionConnectionsForPlacement(db, {
               accountId: state.accountId,
               workspaceId: state.workspaceId,
@@ -1838,24 +1816,11 @@ describe("provider-neutral subscription runtime persistence", () => {
               health: "stored",
             });
             expect(placementConnections).toHaveLength(1);
+            expect(placementConnections[0]).not.toHaveProperty("assignmentPolicies");
             expect(placementConnections[0]).toMatchObject({
               id: state.connectionId,
               provider: "codex",
               ownership: { kind: "shared", scope: { kind: "organization" } },
-              assignmentPolicies: [
-                {
-                  inferencePool: "organization",
-                  allocatorEnabled: false,
-                  allowedModelIds: ["codex/b"],
-                  excludedModelIds: ["codex/a"],
-                },
-                {
-                  inferencePool: "workspace",
-                  allocatorEnabled: true,
-                  allowedModelIds: ["codex/a"],
-                  excludedModelIds: ["codex/b"],
-                },
-              ],
               quota: null,
             });
 
@@ -1889,115 +1854,6 @@ describe("provider-neutral subscription runtime persistence", () => {
                 provider: "codex",
               }),
             ).toMatchObject({ modelId: "codex/b", version: 2 });
-          },
-        ),
-      );
-      await shared!.admin`
-        delete from subscription_connection_assignment_policies
-        where account_id = ${state.accountId}::uuid and connection_id = ${state.connectionId}::uuid`;
-      const unassigned = await withSessionRlsActorContext(actor, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          (db) =>
-            listSubscriptionConnectionsForPlacement(db, {
-              accountId: state.accountId,
-              workspaceId: state.workspaceId,
-              provider: "codex",
-              health: "stored",
-            }),
-        ),
-      );
-      // No assignment row in this workspace: the management classification
-      // applies (M3 PR 3b), exactly as the compatibility projection reads it.
-      expect(unassigned[0]?.assignmentPolicies).toBeUndefined();
-    },
-    180_000,
-  );
-
-  test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "workspace administrators can manage only organization-delegated connection policies",
-    async () => {
-      const state = await fixture();
-      const managerSubject = `user:subscription-policy-manager-${crypto.randomUUID()}`;
-      const [personalWorkspace] = await shared!.admin<{ id: string }[]>`
-        insert into workspaces (account_id, name)
-        values (${state.accountId}::uuid, 'Subscription policy manager Personal')
-        returning id::text as id`;
-      await shared!.admin`
-        insert into organization_memberships (
-          account_id, subject_id, role, status, personal_workspace_id
-        ) values (
-          ${state.accountId}::uuid, ${managerSubject}, 'member', 'active', ${personalWorkspace!.id}::uuid
-        )`;
-      await shared!.admin`
-        insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-        values (${state.accountId}::uuid, ${state.workspaceId}::uuid, ${managerSubject}, 'admin')`;
-
-      const [delegated] = await shared!.admin<{ id: string }[]>`
-        insert into subscription_connections (
-          account_id, provider, credential_encrypted, ownership, scope_kind, managed_by_workspace_id
-        ) values (
-          ${state.accountId}::uuid, 'codex', 'v1:delegated-policy', 'shared', 'people',
-          ${state.workspaceId}::uuid
-        ) returning id::text as id`;
-      await shared!.admin`
-        insert into subscription_connection_people (account_id, connection_id, organization_membership_id)
-        select ${state.accountId}::uuid, ${delegated!.id}::uuid, membership.id
-        from organization_memberships membership
-        where membership.account_id = ${state.accountId}::uuid
-          and membership.subject_id = ${managerSubject}`;
-      await shared!.admin`
-        insert into subscription_connection_assignment_policies (
-          account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
-        ) values (
-          ${state.accountId}::uuid, ${delegated!.id}::uuid, ${state.workspaceId}::uuid,
-          'organization', ${state.workspaceId}::uuid
-        )`;
-
-      await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
-        withRlsContext(
-          client!.db,
-          { accountId: state.accountId, workspaceId: state.workspaceId },
-          async (db) => {
-            const [changed] = await db.execute<{ allocator_enabled: boolean }>(sql`
-              update subscription_connection_assignment_policies
-              set allocator_enabled = false, allowed_model_ids = array['codex/a']::text[]
-              where connection_id = ${delegated!.id}::uuid and inference_pool = 'organization'
-              returning allocator_enabled
-            `);
-            expect(changed?.allocator_enabled).toBe(false);
-
-            let markerMutationError: unknown;
-            try {
-              await db.transaction((nested) =>
-                nested.execute(sql`
-                  update subscription_connection_assignment_policies
-                  set managed_by_workspace_id = null
-                  where connection_id = ${delegated!.id}::uuid and inference_pool = 'organization'
-                `),
-              );
-            } catch (error) {
-              markerMutationError = error;
-            }
-            expect(markerMutationError).toBeDefined();
-
-            let selfDelegationError: unknown;
-            try {
-              await db.transaction((nested) =>
-                nested.execute(sql`
-                  insert into subscription_connection_assignment_policies (
-                    account_id, connection_id, workspace_id, inference_pool, managed_by_workspace_id
-                  ) values (
-                    ${state.accountId}::uuid, ${state.connectionId}::uuid, ${state.workspaceId}::uuid,
-                    'organization', ${state.workspaceId}::uuid
-                  )
-                `),
-              );
-            } catch (error) {
-              selfDelegationError = error;
-            }
-            expect(selfDelegationError).toBeDefined();
           },
         ),
       );

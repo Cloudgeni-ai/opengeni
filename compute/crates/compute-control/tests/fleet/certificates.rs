@@ -71,7 +71,7 @@ async fn a_caller_without_a_certificate_is_refused_by_every_route_but_the_certif
                 host: 1,
                 epoch: 1,
                 seq: 1,
-                capacity: roomy(),
+                capacity: Some(roomy()),
             })
             .unwrap(),
         ),

@@ -1,13 +1,15 @@
 //! Hosts' leases: when the service gives up on a host, what becomes of its
 //! sandboxes, and how a host that comes back is told what is still its.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use compute_protocol::fleet::{Envelope, Registered};
+use compute_control::view::View;
+use compute_protocol::fleet::{Capacity, Envelope, Registered};
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::json;
 
-use super::support::{Act, Fleet, counted, given_up, id, until};
+use super::support::{Act, FakeHost, Fleet, counted, given_up, id, roomy, until};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopped() {
@@ -167,4 +169,55 @@ async fn a_host_renewing_a_lost_registration_registers_again() {
         host.epoch() > old && counted(&fleet, &host).await
     })
     .await;
+}
+
+/// What `view` last heard `host` can take on.
+fn heard(view: &View, host: &FakeHost) -> Option<Capacity> {
+    view.hosts()
+        .into_iter()
+        .find(|known| known.target.host.0 == host.id())
+        .map(|known| known.capacity)
+}
+
+/// A restarted agent renews the lease it holds while it takes back its
+/// sandboxes, which can outlast the term, before it can say what it can
+/// take on, and refuses requests until then. The service keeps the host
+/// and what it last reported, so neither placement nor scaling sees a
+/// host gone empty, and a create it refuses meanwhile goes elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_renewing_while_its_agent_starts_keeps_its_lease_and_last_capacity() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let reported = Capacity {
+        sandboxes: 7,
+        awake: 3,
+        ..roomy()
+    };
+    a.set_capacity(reported.clone());
+    let view = Arc::clone(fleet.running.service.view());
+    until(
+        Duration::from_secs(5),
+        "the service hears its capacity",
+        async || heard(&view, &a).as_ref() == Some(&reported),
+    )
+    .await;
+    a.starting(true);
+    a.behave(|_| {
+        Act::Reply(Reply::Error {
+            message: "this host's agent is starting".into(),
+            code: ErrorCode::Unavailable,
+        })
+    });
+    let b = fleet.host("host-b.example").await;
+    let terms = fleet.terms;
+    tokio::time::sleep(terms.term + terms.margin + terms.renew_every).await;
+    assert!(counted(&fleet, &a).await, "not given up on while it renews");
+    assert_eq!(heard(&view, &a), Some(reported));
+
+    for _ in 0..8 {
+        let sandbox = fleet.create(json!({})).await;
+        let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+        assert_eq!(row["host"], json!("host-b.example"), "{row}");
+        assert!(b.holds(id(&sandbox)).is_some());
+    }
 }

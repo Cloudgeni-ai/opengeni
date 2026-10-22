@@ -195,3 +195,66 @@ test("web pages on macOS read without context-menu actions or repeated link text
     ["s:5", "text", "Computer accessibility refers to", []],
   ]);
 });
+
+test("file dialog places, folders and files open on invoke and are not edited", () => {
+  const nodes = projectElements(
+    [
+      { element_index: 0, element_token: "s:0", role: "AXSheet", label: "Open", actions: [] },
+      {
+        element_index: 1,
+        element_token: "s:1",
+        parent_index: 0,
+        role: "AXCell",
+        label: "Downloads",
+        actions: ["AXOpen"],
+      },
+      {
+        element_index: 2,
+        element_token: "s:2",
+        parent_index: 0,
+        role: "AXTextField",
+        value: "report.pdf",
+        actions: ["AXOpen", "AXConfirm"],
+      },
+      {
+        element_index: 3,
+        element_token: "s:3",
+        parent_index: 0,
+        role: "AXButton",
+        label: "Open",
+        actions: ["AXPress"],
+      },
+    ],
+    "macos",
+  );
+  const actions = new Map(nodes.map((node) => [node.ref, node.actions]));
+  expect(actions.get("s:1")).toContain("invoke");
+  expect(actions.get("s:2")).toContain("invoke");
+  expect(actions.get("s:2")).not.toContain("set_value");
+  expect(actions.get("s:3")).toContain("invoke");
+});
+
+test("Chrome tabs are named without their live memory usage", () => {
+  const tab = (index: number, label: string) => ({
+    element_index: index,
+    element_token: `s:${index}`,
+    role: "AXRadioButton",
+    label,
+    actions: ["AXPress"],
+  });
+  const nodes = projectElements(
+    [
+      tab(0, "Inbox (3) - Memory usage - 85.2 MB"),
+      tab(1, "Docs - High memory usage - 1.2 GB"),
+      tab(2, "Player - Audio playing - Memory usage - 312 MB"),
+      tab(3, "Memory usage - 10 MB notes"),
+    ],
+    "macos",
+  );
+  expect(nodes.map((node) => node.name)).toEqual([
+    "Inbox (3)",
+    "Docs",
+    "Player - Audio playing",
+    "Memory usage - 10 MB notes",
+  ]);
+});

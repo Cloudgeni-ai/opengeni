@@ -451,7 +451,12 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     // membership until publication, and the next turn must not dead-end.
     let automaticRecoveryPending = false;
     try {
-      if (!machinePrimary && groupBoxBackend === "modal" && activeSandboxBackend !== "selfhosted") {
+      if (
+        !machinePrimary &&
+        groupBoxBackend !== "none" &&
+        groupBoxBackend !== "selfhosted" &&
+        activeSandboxBackend !== "selfhosted"
+      ) {
         // This happens before buildTurnAgent reads the durable instruction
         // tail, even for an on-demand sandbox. The DB admits only a provider-
         // lost group with no unresolved workspace writers in ANY member: the
@@ -468,7 +473,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
           try {
             recordSandboxAutomaticRecoverySelected(
               observability,
-              "modal",
+              groupBoxBackend,
               sandboxAutomaticRecoveryOutcome(fallback),
             );
           } catch {
@@ -476,7 +481,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
           }
           if (fallback.lane === "checkpoint") {
             observability.warn("managed sandbox selected an older verified checkpoint", {
-              backend: "modal",
+              backend: groupBoxBackend,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               archiveGeneration: fallback.selection.archiveGeneration,
@@ -485,7 +490,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             });
           } else {
             observability.warn("managed sandbox continues on an empty workspace after loss", {
-              backend: "modal",
+              backend: groupBoxBackend,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               reason: fallback.reason,

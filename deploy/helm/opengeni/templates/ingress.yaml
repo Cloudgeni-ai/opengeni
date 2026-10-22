@@ -208,3 +208,97 @@ spec:
           {{- end }}
     {{- end }}
 {{- end }}
+{{- $webAssets := .Values.ingress.webAssetsIngress | default dict }}
+{{- /* ingress-nginx merges every entry for one host, so judge each host as a whole. */}}
+{{- $webAssetHosts := list }}
+{{- $webAssetHostPaths := dict }}
+{{- range .Values.ingress.hosts }}
+  {{- /* A host-less entry is a catch-all rule; key it as "" and render no host. */}}
+  {{- $hostName := .host | default "" | toString }}
+  {{- if not (hasKey $webAssetHostPaths $hostName) }}
+    {{- $webAssetHosts = append $webAssetHosts $hostName }}
+    {{- $_ := set $webAssetHostPaths $hostName list }}
+  {{- end }}
+  {{- $_ := set $webAssetHostPaths $hostName (concat (get $webAssetHostPaths $hostName) (.paths | default list)) }}
+{{- end }}
+{{- $webAssetRules := list }}
+{{- range $hostName := $webAssetHosts }}
+  {{- $assetPaths := list }}
+  {{- range $assetPath := list "/assets" "/office/assets" "/react-demo/assets" }}
+    {{- /* The longest prefix route that matches this asset path today. */}}
+    {{- $winner := dict }}
+    {{- $winnerLength := -1 }}
+    {{- range (get $webAssetHostPaths $hostName) }}
+      {{- $prefix := trimSuffix "/" (toString .path) }}
+      {{- if and (has (toString .pathType) (list "Prefix" "ImplementationSpecific")) (hasPrefix (printf "%s/" $prefix) (printf "%s/" $assetPath)) (gt (len $prefix) $winnerLength) }}
+        {{- $winner = . }}
+        {{- $winnerLength = len $prefix }}
+      {{- end }}
+    {{- end }}
+    {{- /* Only a shorter web route is refined; an explicit asset route is left as is. */}}
+    {{- if and (eq (toString $winner.service) "web") (lt $winnerLength (len $assetPath)) }}
+      {{- $assetPaths = append $assetPaths (dict "path" $assetPath "portName" ($winner.portName | default "http")) }}
+    {{- end }}
+  {{- end }}
+  {{- if $assetPaths }}
+    {{- $webAssetRules = append $webAssetRules (dict "host" $hostName "paths" $assetPaths) }}
+  {{- end }}
+{{- end }}
+{{- $primaryIngressAnnotations := .Values.ingress.annotations | default dict }}
+{{- /* The class may also come from the legacy kubernetes.io/ingress.class annotation, which is copied below. */}}
+{{- $webAssetsClass := .Values.ingress.className | default (get $primaryIngressAnnotations "kubernetes.io/ingress.class") | toString }}
+{{- if and .Values.ingress.enabled .Values.web.enabled $webAssets.enabled (or (not $webAssets.requireNginxClassName) (contains "nginx" $webAssetsClass)) (gt (len $webAssetRules) 0) }}
+{{- $webAssetAnnotations := dict }}
+{{- range $key, $value := $primaryIngressAnnotations }}
+  {{- /* Certificates and DNS stay owned by the primary Ingress; rewrites, canaries and server-level settings would change or duplicate what the asset paths do today. */}}
+  {{- $skip := or (hasPrefix "cert-manager.io/" $key) (hasPrefix "acme.cert-manager.io/" $key) (eq $key "kubernetes.io/tls-acme") (hasPrefix "external-dns.alpha.kubernetes.io/" $key) (hasPrefix "nginx.ingress.kubernetes.io/canary" $key) (has $key (list "nginx.ingress.kubernetes.io/rewrite-target" "nginx.ingress.kubernetes.io/app-root" "nginx.ingress.kubernetes.io/server-snippet" "nginx.ingress.kubernetes.io/server-alias")) }}
+  {{- if not $skip }}
+    {{- $_ := set $webAssetAnnotations $key $value }}
+  {{- end }}
+{{- end }}
+{{- $_ := set $webAssetAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream" "error timeout http_404" }}
+{{- $_ := set $webAssetAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" (toString (int ($webAssets.nextUpstreamTries | default 3))) }}
+{{- range $key, $value := $webAssets.annotations | default dict }}
+  {{- $_ := set $webAssetAnnotations $key $value }}
+{{- end }}
+---
+# During a web rollout, pods of the old and the new build serve side by side and
+# ingress-nginx balances every request separately, so a page from one build can
+# ask a pod of the other build for a content-hashed asset it does not have. This
+# Ingress takes over only the hashed asset paths that the primary Ingress already
+# sends to the web service, with the same class, TLS and most annotations, and retries
+# a 404 on another web pod. Non-asset paths keep their primary routing.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-web-assets
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $webAssetAnnotations | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $webAssetRules }}
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-web
+                port:
+                  name: {{ .portName }}
+          {{- end }}
+    {{- end }}
+{{- end }}

@@ -23,6 +23,7 @@ export function partitionConnectionServices(
                 capabilityCuration(item).curated ||
                 item.id === "api:fiken" ||
                 item.id === "api:1password" ||
+                item.id === "api:excel-addin" ||
                 ["dropbox.com", "front.com"].includes(item.providerDomain ?? ""),
             )
             .map((item) => catalogServiceIdentity(item.id, item.name, item.providerDomain).id),

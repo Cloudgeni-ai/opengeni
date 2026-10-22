@@ -284,7 +284,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
               {pool.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description="Used for new work when sharing is off."
+                  description="New chats start here when work isn’t spread across accounts."
                   control={
                     account.id === pool.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">

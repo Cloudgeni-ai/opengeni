@@ -316,6 +316,30 @@ export const siteSessionAccess = pgTable(
   ],
 );
 
+/** When each person last opened a Site (migration 0908); personal ordering only. */
+export const siteOpens = pgTable(
+  "site_opens",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_opens_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {
@@ -4779,6 +4803,8 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .default({}),
   // Voice settings by realtime model id (0895); a workspace's own win.
   realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
+  // Realtime voice model new voice conversations start with (0903); null is automatic.
+  realtimeDefaultModel: text("realtime_default_model"),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -9847,6 +9873,40 @@ export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
     pending: index("automatic_title_fanout_pending_idx")
       .on(table.createdAt, table.id)
       .where(sql`${table.deliveredAt} is null`),
+  }),
+);
+
+/**
+ * Searchable text of each user and completed assistant message, written only
+ * by the schema owner's AFTER INSERT trigger on session_events. Its
+ * row-security policies are the search: rows are visible only while the
+ * transaction's `opengeni.session_message_search_pattern` matches them (or the
+ * text is losslessly encoded), so the trigram index can serve the pattern
+ * under FORCE RLS. See docs/session-message-search.md.
+ */
+export const sessionMessageSearchTexts = pgTable(
+  "session_message_search_texts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    encoded: boolean("encoded").notNull(),
+    text: text("text").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_message_search_texts_pkey",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+    }),
+    workspaceEvent: foreignKey({
+      name: "session_message_search_texts_event_fk",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+      foreignColumns: [sessionEvents.workspaceId, sessionEvents.sessionId, sessionEvents.sequence],
+    }).onDelete("cascade"),
+    encodedText: index("session_message_search_texts_encoded_idx")
+      .on(table.workspaceId)
+      .where(sql`${table.encoded}`),
   }),
 );
 

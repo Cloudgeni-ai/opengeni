@@ -91,6 +91,177 @@ e2e(
 );
 
 e2e(
+  "runs one batch across a page load, a late element and a form that enables late",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/account"
+            ? `<!doctype html><title>Account</title><main></main>
+              <script>
+                setTimeout(() => {
+                  const edit = document.createElement("button");
+                  edit.textContent = "Edit billing";
+                  edit.onclick = () => {
+                    document.querySelector("main").innerHTML =
+                      '<label>Seats <input disabled></label><button disabled>Save changes</button><output></output>';
+                    const [input, save] = [document.querySelector("input"), document.querySelector("button")];
+                    save.onclick = () => { document.querySelector("output").textContent = "Saved " + input.value; };
+                    setTimeout(() => { input.disabled = false; save.disabled = false; }, 400);
+                  };
+                  document.querySelector("main").append(edit);
+                }, 300);
+              </script>`
+            : `<!doctype html><title>Accounts</title><a href="/account">Birch Holdings</a>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      const initial = await driver.start(String(server.url));
+      const observation = await driver.dispatch(
+        command(initial, {
+          type: "batch",
+          actions: [
+            { type: "click", locator: { kind: "role", role: "link", name: "Birch Holdings" } },
+            { type: "click", locator: { kind: "role", role: "button", name: "Edit billing" } },
+            { type: "fill", locator: { kind: "label", text: "Seats" }, value: "21" },
+            { type: "click", locator: { kind: "role", role: "button", name: "Save changes" } },
+          ],
+        }),
+      );
+      expect(names(observation)).toContain("Saved 21");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a fenced action's locator wait stops at a navigation instead of acting on the next document",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-fence-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/next"
+            ? `<!doctype html><title>Next</title>
+              <input id="next" aria-label="Next field" oninput="document.querySelector('output').textContent = 'Got ' + this.value"><output></output>`
+            : `<!doctype html><title>Start</title>
+              <button onclick="setTimeout(() => { location.href = '/next'; }, 1000)">Go later</button>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    const goLater = { kind: "role", role: "button", name: "Go later" } as const;
+    const restart = async () => {
+      const observation = await driver.dispatch(
+        command(await driver.observe(initial.target.id), {
+          type: "navigate",
+          url: String(server.url),
+        }),
+      );
+      return observation!;
+    };
+    const afterNavigation = async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const observation = await driver.observe(initial.target.id);
+        if (new URL(observation.target.url).pathname === "/next") return observation;
+        await Bun.sleep(50);
+      }
+      throw new Error("the page did not navigate");
+    };
+    let initial!: BrowserObservation;
+    try {
+      initial = await driver.start(String(server.url));
+      for (const locator of [
+        { kind: "css", selector: "#next" },
+        { kind: "label", text: "Next field" },
+      ] as const) {
+        const start = await restart();
+        await expect(
+          driver.dispatch(
+            command(start, {
+              type: "batch",
+              fenceEachAction: true,
+              actions: [
+                { type: "click", locator: goLater },
+                { type: "fill", locator, value: "crossed" },
+              ],
+            }),
+          ),
+        ).rejects.toMatchObject({
+          code: "outcome_unknown",
+          message: expect.stringContaining("document_stale"),
+        });
+        expect(names(await afterNavigation())).not.toContain("Got crossed");
+      }
+
+      const clicked = await driver.dispatch(
+        command(await restart(), { type: "click", locator: goLater }),
+      );
+      await expect(
+        driver.dispatch(
+          command(clicked!, {
+            type: "fill",
+            locator: { kind: "css", selector: "#next" },
+            value: "crossed",
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "document_stale" });
+      expect(names(await afterNavigation())).not.toContain("Got crossed");
+
+      // Without fenceEachAction, a later action still follows the page.
+      const followed = await driver.dispatch(
+        command(await restart(), {
+          type: "batch",
+          actions: [
+            { type: "click", locator: goLater },
+            { type: "fill", locator: { kind: "css", selector: "#next" }, value: "crossed" },
+          ],
+        }),
+      );
+      expect(names(followed!)).toContain("Got crossed");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+e2e(
   "counts a page's own failed request but not the browser's missing-icon fetch",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-icon-failure-");
@@ -1209,16 +1380,19 @@ e2e(
           locator: { kind: "role", role: "button", name: "Log failure" },
         }),
       );
-      expect(logged.diagnostics.consoleErrorCount).toBe(1);
+      // Runtime stays disabled, so console messages are read only on request.
+      expect(logged.diagnostics.consoleErrorCount).toBe(0);
       const debug = await driver.debug(logged.target.id, { kinds: ["console"] });
       expect(debug.entries.at(-1)).toMatchObject({
         kind: "console",
         level: "error",
         message: "Fixture console failure",
       });
+      // Chrome replays its whole buffer on every read; nothing is reported twice.
       expect(
         (await driver.debug(logged.target.id, { afterSequence: debug.cursor })).entries,
       ).toEqual([]);
+      expect((await driver.observe(logged.target.id)).diagnostics.consoleErrorCount).toBe(1);
 
       const asking = await driver.dispatch(
         command(logged, {

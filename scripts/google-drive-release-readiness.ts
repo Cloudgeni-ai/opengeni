@@ -1,117 +1,44 @@
 #!/usr/bin/env bun
-import {
-  configuredGoogleDriveSyncLimits,
-  getSettings,
-  googleDriveOAuthCallbackUrl,
-  googleDriveProviderRetryOptions,
-  type Settings,
-} from "@opengeni/config";
-
-type ReadinessCheck = {
-  id: string;
-  status: "pass" | "block";
-  message: string;
-};
 
 export type GoogleDriveReleaseReadiness = {
-  schema: "opengeni.google-drive-release-readiness.v1";
-  status: "ready" | "blocked";
+  schema: "opengeni.google-drive-release-readiness.v2";
+  status: "blocked";
+  nativeConnectorStatus: "retired";
   providerCallsPerformed: false;
-  checks: ReadinessCheck[];
-  runtime: {
-    callbackUrl: string | null;
-    syncLimits: ReturnType<typeof configuredGoogleDriveSyncLimits>;
-    providerRetry: ReturnType<typeof googleDriveProviderRetryOptions>;
-  };
-  pendingApprovalGates: string[];
+  oauthVerificationStatus: "not_checked";
+  checks: {
+    id: "native_drive_retired";
+    status: "block";
+    message: string;
+  }[];
+  operatorGuide: "docs/google-drive.md";
 };
 
-export function buildGoogleDriveReleaseReadiness(settings: Settings): GoogleDriveReleaseReadiness {
-  const callbackUrl = googleDriveOAuthCallbackUrl(settings.publicBaseUrl);
-  const checks: ReadinessCheck[] = [
-    check(
-      "integrations_enabled",
-      settings.integrationsEnabled,
-      "OPENGENI_INTEGRATIONS_ENABLED must be true.",
-    ),
-    check(
-      "oauth_client_present",
-      Boolean(settings.googleDriveClientId && settings.googleDriveClientSecret),
-      "Both Google Drive OAuth client settings must be present in the runtime Secret.",
-    ),
-    check(
-      "oauth_state_secret_present",
-      Boolean(settings.integrationsStateSecret),
-      "OPENGENI_INTEGRATIONS_STATE_SECRET must be present in the runtime Secret.",
-    ),
-    check(
-      "credential_encryption_present",
-      Boolean(settings.environmentsEncryptionKey),
-      "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be present in the runtime Secret.",
-    ),
-    check(
-      "public_callback_origin",
-      Boolean(callbackUrl),
-      "OPENGENI_PUBLIC_BASE_URL must define a credential-free OAuth callback origin without a path, query, or fragment.",
-    ),
-    check(
-      "structured_logs_enabled",
-      settings.observabilityStructuredLogs,
-      "OPENGENI_OBSERVABILITY_STRUCTURED_LOGS must be true for release acceptance.",
-    ),
-    check(
-      "metrics_enabled",
-      settings.observabilityMetricsEnabled,
-      "OPENGENI_OBSERVABILITY_METRICS_ENABLED must be true for release acceptance.",
-    ),
-  ];
+/**
+ * Keep the previous release command as an explicit retirement notice. Local
+ * credential presence cannot prove Google's preview access or OAuth approval.
+ * Do not load configuration: old secrets must never enter this report.
+ */
+export function buildGoogleDriveReleaseReadiness(): GoogleDriveReleaseReadiness {
   return {
-    schema: "opengeni.google-drive-release-readiness.v1",
-    status: checks.some((candidate) => candidate.status === "block") ? "blocked" : "ready",
+    schema: "opengeni.google-drive-release-readiness.v2",
+    status: "blocked",
+    nativeConnectorStatus: "retired",
     providerCallsPerformed: false,
-    checks,
-    runtime: {
-      callbackUrl,
-      syncLimits: configuredGoogleDriveSyncLimits(settings),
-      providerRetry: googleDriveProviderRetryOptions(settings),
-    },
-    pendingApprovalGates: [
-      "merged declared Drive source-security dependency",
-      "explicit human approval for non-production real-provider acceptance",
-      "separate explicit human approval for deployment or production live-provider acceptance",
+    oauthVerificationStatus: "not_checked",
+    checks: [
+      {
+        id: "native_drive_retired",
+        status: "block",
+        message:
+          "Native Google Drive source sync and publishing are retired. Use the personal Drive MCP connection and ordinary agent schedules. This command does not verify Google OAuth approval or MCP readiness; follow docs/google-drive.md before enabling setup.",
+      },
     ],
+    operatorGuide: "docs/google-drive.md",
   };
-}
-
-function check(id: string, passes: boolean, message: string): ReadinessCheck {
-  return { id, status: passes ? "pass" : "block", message };
 }
 
 if (import.meta.main) {
-  try {
-    const result = buildGoogleDriveReleaseReadiness(getSettings());
-    console.log(JSON.stringify(result, null, 2));
-    process.exitCode = result.status === "ready" ? 0 : 2;
-  } catch {
-    console.log(
-      JSON.stringify(
-        {
-          schema: "opengeni.google-drive-release-readiness.v1",
-          status: "blocked",
-          providerCallsPerformed: false,
-          checks: [
-            {
-              id: "configuration_parse",
-              status: "block",
-              message:
-                "Opengeni runtime configuration is invalid; inspect the secret-safe boot error.",
-            },
-          ],
-        },
-        null,
-        2,
-      ),
-    );
-    process.exitCode = 3;
-  }
+  console.log(JSON.stringify(buildGoogleDriveReleaseReadiness(), null, 2));
+  process.exitCode = 2;
 }

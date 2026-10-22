@@ -4,7 +4,7 @@
 // (breadcrumb → title) on the left and the action cluster on the right
 // (provider+model·effort·speed, sandbox, pin, connection, status, panel).
 // The live children that need their own hooks — the sandbox switcher and the
-// codex account indicator — arrive as slots so the whole bar can be rendered
+// subscription account control — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in session-shell owns the
 // data wiring and passes the real slots.
 import { t } from "../../lib/console-text";
@@ -26,6 +26,7 @@ import {
   BellIcon,
   BellOffIcon,
   CalendarClockIcon,
+  CalendarOffIcon,
   GaugeIcon,
   LinkIcon,
   LockIcon,
@@ -66,8 +67,12 @@ import { RENAME_CURRENT_CHAT_EVENT } from "../../lib/actions/events";
 import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
-import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { useSessionStartup } from "../../lib/session-startup";
+import {
+  sessionControlPaused,
+  sessionHasUpcomingSchedule,
+  sessionInputWait,
+} from "../../lib/session-rail";
+import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -81,6 +86,12 @@ import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
 import { useUiEventTarget } from "../../lib/ui-events";
+
+const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
+  "codex_subscription",
+  "claude_subscription",
+  "supergrok_subscription",
+]);
 
 export function SessionHeader({
   session,
@@ -101,7 +112,7 @@ export function SessionHeader({
   adminAccess,
   onOpenUsageLimit,
   sandboxSlot,
-  codexSlot,
+  accountSlot,
   accessSlot,
   leading,
   lastStartedModel,
@@ -151,10 +162,11 @@ export function SessionHeader({
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode | undefined;
   /**
-   * Replaces the static provider mark when the session is on Codex — same icon,
-   * clickable for account status/switch. Absent for host-credit sessions.
+   * Replaces the static provider mark when the session runs on a subscription
+   * (Codex, Claude, SuperGrok): the same mark, clickable for the account and
+   * its usage. Absent for other payment rails.
    */
-  codexSlot?: ReactNode | undefined;
+  accountSlot?: ReactNode | undefined;
   /** Compact session access state/menu, lazy-mounted by the route shell. */
   accessSlot?: ReactNode | undefined;
   /** Leading control (the mobile hamburger); absent on desktop. */
@@ -167,7 +179,7 @@ export function SessionHeader({
   lastStartedModel?: string | undefined;
   lastStartedReasoningEffort?: IntelligenceEffort | undefined;
   lastStartedLatencyMode?: LatencyMode | undefined;
-  /** Billing rail: Codex account chip, or the mark for makers without a logo. */
+  /** Billing rail: subscription account chip, or the mark for makers without a logo. */
   billingClass?: BillingClass | undefined;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string | undefined;
@@ -181,6 +193,8 @@ export function SessionHeader({
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
+  // A paused or finished schedule still links to its settings, marked inactive.
+  const upcomingSchedule = sessionHasUpcomingSchedule(session);
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -199,9 +213,10 @@ export function SessionHeader({
   const resolvedModel = modelLabel?.trim() || modelDisplayName(modelId);
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
-  // Codex → clickable account chip. Other rails → static provider icon only
-  // (never invent a text "Opengeni"/"BYOK" word). Don't key off `codexSlot != null`.
-  const isCodexRail = resolvedBilling === "codex_subscription";
+  // Subscription rails → clickable account chip, the same for every provider.
+  // Other rails → static provider icon only (never invent a text
+  // "Opengeni"/"BYOK" word). Don't key off `accountSlot != null`.
+  const isSubscriptionRail = SUBSCRIPTION_RAILS.has(resolvedBilling);
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
@@ -224,6 +239,8 @@ export function SessionHeader({
   const findKeys = useActionShortcut("chat.find");
   const copyLinkKeys = useActionShortcut("chat.copyLink");
   const pinKeys = useActionShortcut("chat.pin");
+  const archiveKeys = useActionShortcut("chat.archive");
+  const panelKeys = useActionShortcut("view.workspacePanel");
   // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
   const startRenaming = rename.startEditing;
   useEffect(() => {
@@ -231,10 +248,10 @@ export function SessionHeader({
     uiEvents.addEventListener(RENAME_CURRENT_CHAT_EVENT, start);
     return () => uiEvents.removeEventListener(RENAME_CURRENT_CHAT_EVENT, start);
   }, [uiEvents, startRenaming]);
-  const providerControl = isCodexRail ? (
-    (codexSlot ?? (
+  const providerControl = isSubscriptionRail ? (
+    (accountSlot ?? (
       <BillingClassMark
-        billingClass="codex_subscription"
+        billingClass={resolvedBilling}
         className="size-3.5 shrink-0 text-fg-muted"
         aria-label=""
       />
@@ -276,9 +293,17 @@ export function SessionHeader({
               type="button"
               onClick={onOpenSchedule}
               className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title="Open schedules for this session"
+              title={
+                upcomingSchedule
+                  ? "Open schedules for this session"
+                  : "No upcoming runs. Open schedules for this session"
+              }
             >
-              <CalendarClockIcon aria-hidden className="size-3" />
+              {upcomingSchedule ? (
+                <CalendarClockIcon aria-hidden className="size-3" />
+              ) : (
+                <CalendarOffIcon aria-hidden className="size-3" />
+              )}
               Schedule
             </button>
           ) : null}
@@ -400,7 +425,11 @@ export function SessionHeader({
             size="icon-sm"
             onClick={onToggleInspector}
             aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
-            title={inspectorOpen ? "Hide workspace" : "Open workspace"}
+            aria-keyshortcuts={panelKeys?.ariaKeys}
+            title={
+              (inspectorOpen ? "Hide workspace" : "Open workspace") +
+              (panelKeys ? ` (${panelKeys.label})` : "")
+            }
             className="pointer-coarse:size-11"
           >
             {inspectorOpen ? (
@@ -523,10 +552,17 @@ export function SessionHeader({
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void onArchive?.(session, !session.archived)}>
+                <DropdownMenuItem
+                  aria-keyshortcuts={archiveKeys?.ariaKeys}
+                  onSelect={() => void onArchive?.(session, !session.archived)}
+                >
                   {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
                   {session.archived ? "Restore" : "Archive"}
-                  {session.archived ? <DropdownMenuMeta>Archived</DropdownMenuMeta> : null}
+                  {session.archived ? (
+                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
+                  ) : archiveKeys ? (
+                    <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
+                  ) : null}
                 </DropdownMenuItem>
               </>
             ) : null}

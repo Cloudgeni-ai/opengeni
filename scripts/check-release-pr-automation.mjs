@@ -2097,8 +2097,21 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     "release source tree differs from the exact reviewed head and is not a moving-main squash or exact-head merge",
   );
   const integrationBaseSha = source.parents[0];
+  // A merged PR's provider base may already be its landing parent. Its patch
+  // still starts at the head/base merge base, not at that later target tree.
+  const comparison = await api.get(
+    repositoryPath(`/compare/${pullIdentity.baseSha}...${pullIdentity.headSha}`),
+  );
   invariant(
-    integrationBaseSha !== pullIdentity.baseSha,
+    comparison?.base_commit?.sha === pullIdentity.baseSha &&
+      comparison?.commits?.at(-1)?.sha === pullIdentity.headSha &&
+      Number.isSafeInteger(comparison?.ahead_by) &&
+      comparison.ahead_by > 0,
+    "reviewed release patch comparison identity changed",
+  );
+  const patchBaseSha = assertSha(comparison?.merge_base_commit?.sha, "reviewed patch-base SHA");
+  invariant(
+    integrationBaseSha !== patchBaseSha,
     "release source tree differs from the exact reviewed head on its exact PR base",
   );
   await assertSourceAncestorOfCurrentMain(
@@ -2113,14 +2126,22 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     integrationBaseSha,
     "moving-main integration-base commit",
   );
+  const patchBase =
+    patchBaseSha === base.sha
+      ? base
+      : assertCommit(
+          await api.get(repositoryPath(`/git/commits/${patchBaseSha}`)),
+          patchBaseSha,
+          "reviewed patch-base commit",
+        );
   const [baseTree, headTree, integrationBaseTree, sourceTree] = await Promise.all([
-    api.get(repositoryPath(`/git/trees/${base.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${patchBase.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${integrationBase.treeSha}?recursive=1`)),
     api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
   ]);
   const reviewedManifest = directTreeManifest(
-    canonicalReleaseLeafMap(baseTree, base.treeSha, "reviewed base tree"),
+    canonicalReleaseLeafMap(baseTree, patchBase.treeSha, "reviewed patch-base tree"),
     canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
   );
   const landedManifest = directTreeManifest(
@@ -2142,6 +2163,7 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
       : "provider-verified-moving-main-squash",
     sourceComposition: {
       type: "exact-reviewed-delta-on-moving-main",
+      patchBaseSha,
       integrationBaseSha,
       integrationBaseTreeSha: integrationBase.treeSha,
       manifestSha256: treeManifestSha256(reviewedManifest),
@@ -3161,6 +3183,22 @@ export async function verifyApprovedMerge(options = {}) {
     head,
     pullIdentity,
   );
+  // When GitHub's merge-time `pull.base.sha` has advanced past the reviewed
+  // patch base, no exact-head Version CI ran against the landed integration
+  // base. Admit that shape only for one generated Version commit on its patch
+  // base, and only with the landed commit's own fully green push run (below).
+  const advancedProviderBase =
+    sourceComposition.type === "exact-reviewed-delta-on-moving-main" &&
+    sourceComposition.patchBaseSha !== pullIdentity.baseSha;
+  if (advancedProviderBase) {
+    assertVersionProvenancePull(pull);
+    invariant(
+      pullIdentity.commitCount === 1 &&
+        head.parents.length === 1 &&
+        head.parents[0] === sourceComposition.patchBaseSha,
+      "advanced-provider-base release head is not one generated commit on its patch base",
+    );
+  }
   const review = mergedSourceReview(pullNumber, context.sourceSha, pullIdentity);
 
   const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
@@ -3189,9 +3227,34 @@ export async function verifyApprovedMerge(options = {}) {
   const requiredSourceChecks = await verifySuccessfulSourceChecks(
     api,
     sourceChecks,
-    RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    advancedProviderBase
+      ? [
+          ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+          ...RELEASE_AUTOMATION_CONTRACT.checks.fullGreenJobs,
+        ]
+      : RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
     context.sourceSha,
   );
+  let fullGreen;
+  if (advancedProviderBase) {
+    const { workflowRunId, workflowRunAttempt } = requiredSourceChecks[0];
+    fullGreen = {
+      workflowRunId,
+      workflowRunAttempt,
+      status: await verifyFullGreenStatus(
+        api,
+        context.sourceSha,
+        workflowRunId,
+        workflowRunAttempt,
+      ),
+      artifacts: await verifyFullGreenArtifacts(
+        api,
+        context.sourceSha,
+        workflowRunId,
+        workflowRunAttempt,
+      ),
+    };
+  }
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
   const terminalMainSha = await assertReleaseMainRef(
     api,
@@ -3238,6 +3301,7 @@ export async function verifyApprovedMerge(options = {}) {
     review,
     sourceAdmission,
     requiredSourceChecks,
+    ...(fullGreen ? { fullGreen } : {}),
   };
   logger.log(
     `Verified PR #${pullNumber} ${mergeMethod} provenance and exact checks for ${context.sourceSha}.`,

@@ -28,8 +28,8 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
 
 /**
  * Readable label for a tool call. Opengeni's own tools read as plain steps in
- * the given phase ("opengeni__session_create" → "Getting help from another
- * assistant" while running, "Got help from another assistant" once done; see
+ * the given phase ("opengeni__session_create" → "Starting a worker" while
+ * running, "Started a worker" once done; see
  * `tool-steps`). Any other tool title-cases its leaf ("list_issues" → "List
  * issues"). A connector account is named only when the connector has several
  * ("List issues · alice@example.com"); the connector itself shows as its logo.

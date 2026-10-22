@@ -1384,6 +1384,146 @@ describe("Codex realtime browser controller", () => {
     await recovered.stop();
   });
 
+  test("a reload keeps what was said since the last delegation for the next one", async () => {
+    const browser = rotatingBrowserFixture();
+    const storage = storageFixture();
+    const syncRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    let context = "first route context";
+    let contextReads = 0;
+    let uuid = 300;
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "reload-unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate across reload" }],
+        },
+      });
+    const providerStarted = (providerEventId: string) =>
+      JSON.stringify({
+        type: "session.started",
+        event_id: providerEventId,
+        session: { id: `provider-${providerEventId}` },
+      });
+    const client = {
+      beginSessionRealtime: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: { operationId: string; browserInstanceId: string },
+      ) => {
+        const replay = current.operationId === request.operationId;
+        if (!replay) {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+        }
+        return { mode: current, replay };
+      },
+      negotiateCodexRealtimeWebrtc: async (
+        _workspaceId: string,
+        _sessionId: string,
+        request: CodexRealtimeWebrtcRequest,
+      ) => {
+        const connectionEpoch = request.rotate
+          ? current.connectionEpoch + 1
+          : current.connectionEpoch;
+        return {
+          sdp: ANSWER,
+          version: "v3" as const,
+          model: "gpt-live-1-boulder-alpha" as const,
+          connectionId: `32000000-0000-4000-8000-${String(connectionEpoch).padStart(12, "0")}`,
+          connectionEpoch,
+          startupFenceSequence: 0,
+          modeVersion: current.version,
+          replay: false,
+        };
+      },
+      activateCodexRealtimeConnection: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        _connectionId: string,
+        request: { connectionEpoch: number },
+      ) => {
+        const rotated = request.connectionEpoch !== current.connectionEpoch;
+        current = mode({
+          ...current,
+          version: current.version + (rotated ? 1 : 0),
+          connectionEpoch: request.connectionEpoch,
+        });
+        return { mode: current, replay: false };
+      },
+      heartbeatSessionRealtime: async () => {
+        current = mode({ ...current, version: current.version + 1 });
+        return { mode: current, replay: false };
+      },
+      syncSessionRealtimeLedger: async (
+        _workspaceId: string,
+        _sessionId: string,
+        _realtimeId: string,
+        request: SyncSessionRealtimeLedgerRequest,
+      ) => {
+        if (request.entries?.some((entry) => entry.kind === "delegation_call")) {
+          syncRequests.push(request);
+        }
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: mode({
+          ...current,
+          state: "ended",
+          version: current.version + 1,
+          endedAt: "2026-07-29T07:01:00.000Z",
+          endReason: "user_stop",
+        }),
+        replay: false,
+      }),
+    };
+    const createController = () =>
+      createCodexRealtimeController({
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        storage,
+        remoteAudio: browser.remoteAudio,
+        randomUUID: () => `31000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+        createPeerConnection: browser.createPeerConnection,
+        getUserMedia: browser.getUserMedia,
+        getModelContext: () => {
+          contextReads += 1;
+          return context;
+        },
+        ...noIntervals(),
+        client,
+      });
+
+    const first = createController();
+    await first.start();
+    await first.ingestProviderEvent(providerStarted("startup-first"));
+    await first.ingestProviderEvent(
+      JSON.stringify({
+        type: "turn.done",
+        event_id: "said-before-reload",
+        turn: { id: "turn-before-reload", role: "user", transcript: "Do it yourself" },
+      }),
+    );
+    first.close();
+
+    const recovered = createController();
+    await recovered.observeLifecycle(null);
+    await recovered.ingestProviderEvent(providerStarted("startup-recovered"));
+    await recovered.ingestProviderEvent(delegation("delegation-after-reload"));
+
+    const call = syncRequests.at(-1)?.entries?.find((entry) => entry.kind === "delegation_call");
+    expect(call?.text).toContain("user: Do it yourself");
+    expect(contextReads).toBeGreaterThan(0);
+    await recovered.stop();
+  });
+
   test("coalesces duplicate peer failures and retries with capped backoff until one replacement succeeds", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();

@@ -84,19 +84,10 @@ describe("web bundle budget policy", () => {
     const envelope = wholeKibEnvelope(656_741, 1.5 * KIB);
     expect(envelope).toBe(643 * KIB);
     expect(envelope - 656_774).toBeGreaterThanOrEqual(1.5 * KIB);
-    // Keep the unrelated hard limits pinned while adding the measured gzip cost.
+    // Shared hard limits are pinned once above; retain the unique direct-session caps here.
     for (const limit of [
-      "initialRaw: 1485 * kib",
-      "initialGzip: 405 * kib",
-      "initialFileGzip: wholeKibEnvelope(82_325)",
-      // Usage allowances split one shared members chunk (807 gzip bytes).
-      "initialFiles: 20",
       "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
       "directSessionFiles: 31",
-      "lazyChunkRaw: 800 * kib",
-      "lazyChunkGzip: 240 * kib",
-      // The command menu's documented stylesheet growth (#5368).
-      "cssGzip: wholeKibEnvelope(48_180)",
     ])
       expect(source).toContain(limit);
   });

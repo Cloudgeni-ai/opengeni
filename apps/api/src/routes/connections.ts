@@ -141,6 +141,10 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
+import {
+  MICROSOFT_ADMIN_CONSENT_STATE,
+  microsoftAdminConsentResultPage,
+} from "../integrations/microsoft-admin-consent";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
@@ -1590,10 +1594,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
+    // An administrator returning from the Microsoft approval link, not a connect attempt.
+    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+      return microsoftAdminConsentResultPage({
+        adminConsent: c.req.query("admin_consent"),
+        error: c.req.query("error"),
+      });
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      ...(c.req.query("error_description")
+        ? { errorDescription: c.req.query("error_description") }
+        : {}),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)

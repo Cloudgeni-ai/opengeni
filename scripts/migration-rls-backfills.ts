@@ -54,6 +54,8 @@ const REVIEWED_ROUTINE_SOURCE_PATCH_SHA256 = new Set([
   // 0855 statements 3 and 4: patch both fork routines, then check the patch.
   "0b02e5d3e8647e158836970622896e15d0ecc8c0bbd9c1a06583594e648639a3",
   "2ec24b44e91326ab518e13ea90d1b65bbebafb24ec1361ce589032ebe9c7904b",
+  // 0904: one patch of the event cursor trigger's session projection.
+  "9943693884ffedecf77e8b3a535cb03202d793f91bd1a241e9ff4aec1a54d44e",
 ]);
 
 /**

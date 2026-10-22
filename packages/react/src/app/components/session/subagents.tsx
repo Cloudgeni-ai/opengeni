@@ -16,18 +16,14 @@
 // active, …) never leak into a rendered string.
 import { t } from "../../lib/console-text";
 import { formatRelativeTime } from "../../../lib/format";
-import {
-  sessionAdmissionBlocked,
-  sessionDisplayStatus,
-  type SessionDisplayStatus,
-} from "../../../timeline-model";
+import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../timeline-model";
+import { sessionAgentAttention } from "../../../session-agents-model";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "../../lib/navigation";
 import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { STATUS_META, StatusDot, type StatusTone } from "../../../ui/status-dot";
-import { formatWaitingSince } from "../../lib/format";
 import { sessionDisplayTitle } from "../../lib/session-rename";
 import {
   DropdownMenu,
@@ -53,28 +49,10 @@ export function subagentAttentionHint(
   paused: boolean,
   now: Date = new Date(),
 ): { word: string; waitingFor: string; title?: string | undefined } | null {
-  if (session.status === "failed") return { word: "Failed", waitingFor: "" };
-  // The runtime could not start its next step: loud, but not a request of you.
-  if (sessionAdmissionBlocked(session)) {
-    return {
-      word: "Stuck",
-      waitingFor: "",
-      title: "Could not start its next step",
-    };
-  }
-  if (session.status === "requires_action") {
-    const since = session.requiresActionSince ?? null;
-    const waitingFor = since ? formatWaitingSince(since, now) : "";
-    return {
-      word: `Needs you${waitingFor ? ` · ${waitingFor}` : ""}`,
-      waitingFor,
-      ...(since
-        ? { title: `Waiting for your input since ${new Date(since).toLocaleString()}` }
-        : {}),
-    };
-  }
-  if (paused) return { word: "Paused", waitingFor: "" };
-  return null;
+  const attention = sessionAgentAttention(t, session, paused, now);
+  if (!attention) return null;
+  const { tone: _tone, ...hint } = attention;
+  return hint;
 }
 
 /** Map a session lifecycle status onto the six-tone status language. */

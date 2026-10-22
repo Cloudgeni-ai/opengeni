@@ -806,6 +806,10 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
       const scroller = page.locator("[data-og-timeline-scroller]");
       await scroller.getByText(/third-ember/).waitFor({ timeout: 30_000 });
+      // Loading a chat with nothing focused puts the cursor in its composer,
+      // so the composer is what opens Find below.
+      const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+      await expectFocused(composer);
 
       // Keyboard entry point: Ctrl+F (Cmd+F on macOS) opens the strip.
       await page.keyboard.press("Control+f");
@@ -869,13 +873,13 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await waitFor(async () => (await readOrdinal()) === 2, { timeoutMs: 10_000 });
 
       // Closing the strip must not move the conversation: no scroll, and
-      // focus returns to the chat Find button.
+      // focus returns to the composer that opened it.
       const scrollBefore = await scroller.evaluate((node) => node.scrollTop);
       await find.getByRole("button", { name: "Close conversation search", exact: true }).click();
       await find.waitFor({ state: "detached" });
       const scrollAfter = await scroller.evaluate((node) => node.scrollTop);
       expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThanOrEqual(2);
-      await expectFocused(page.getByRole("button", { name: "Find in conversation", exact: true }));
+      await expectFocused(composer);
 
       // A closed strip leaves no stale target: reopening starts clean.
       await page.keyboard.press("Control+f");

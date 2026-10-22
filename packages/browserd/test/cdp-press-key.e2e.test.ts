@@ -140,3 +140,79 @@ e2e(
   },
   60_000,
 );
+
+e2e(
+  "typed keys follow a code field that moves focus a frame later",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-code-boxes-");
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    // Nine one-character boxes. Like a React effect, the page moves focus to
+    // the next box in a task after the next frame, not inside the key event.
+    const boxes = Array.from(
+      { length: 9 },
+      (_, i) => `<input maxlength="1" aria-label="Code character ${i + 1} of 9">`,
+    ).join("");
+    const fixture = `data:text/html,${encodeURIComponent(
+      `<!doctype html><title>Code boxes</title>${boxes}<script>const all=[...document.querySelectorAll("input")];all.forEach((box,i)=>box.addEventListener("input",()=>{box.value=box.value.slice(-1);if(box.value&&all[i+1])requestAnimationFrame(()=>setTimeout(()=>all[i+1].focus(),0));}));</script>`,
+    )}`;
+    try {
+      const initial = await driver.start(fixture);
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const typed = await controller.run({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: initial.target.id,
+        expectedTargetGeneration: initial.target.targetGeneration,
+        expectedDocumentGeneration: initial.target.documentGeneration!,
+        expectedFrameId: initial.frameId!,
+        actor: { kind: "human", subjectId: "code-boxes-fixture" },
+        observationMode: "none",
+        action: {
+          type: "type",
+          locator: { kind: "label", text: "Code character 1 of 9" },
+          text: "BIJJL4Q4J",
+          mode: "keys",
+        },
+      });
+      expect(typed.state).toBe("completed");
+      const value = (
+        await cdp.send<{ result: { value: unknown } }>(
+          "Runtime.evaluate",
+          {
+            expression: '[...document.querySelectorAll("input")].map((box) => box.value).join("")',
+            returnByValue: true,
+          },
+          { sessionId: attached.sessionId },
+        )
+      ).result.value;
+      expect(value).toBe("BIJJL4Q4J");
+    } finally {
+      await cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);

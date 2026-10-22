@@ -1,4 +1,4 @@
-import { observedSessionSequence, type SessionEvent } from "@opengeni/sdk";
+import { isTransientRequestError, observedSessionSequence, type SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EmbeddedSessionEventClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
@@ -56,15 +56,87 @@ export type AsyncListState<T> = {
 };
 
 /**
+ * How a read hook rides out transient failures (a transport error or a
+ * 502/503/504, as during an API rolling deploy). While the failures last less
+ * than `quietWindowMs`, the hook keeps its loading state or its last data and
+ * retries with backoff; after that it surfaces the error but keeps retrying
+ * every `backgroundDelayMs`, and clears the error when a read succeeds.
+ * Definitive errors (401, 403, 404, other statuses) surface immediately.
+ */
+export type TransientReadRetryOptions = {
+  quietWindowMs?: number | undefined;
+  initialDelayMs?: number | undefined;
+  maxDelayMs?: number | undefined;
+  backgroundDelayMs?: number | undefined;
+};
+
+export type TransientReadRetryPolicy = {
+  quietWindowMs: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backgroundDelayMs: number;
+};
+
+export const DEFAULT_TRANSIENT_READ_RETRY: Readonly<TransientReadRetryPolicy> = Object.freeze({
+  quietWindowMs: 20_000,
+  initialDelayMs: 1_000,
+  maxDelayMs: 4_000,
+  backgroundDelayMs: 15_000,
+});
+
+type TransientReadStreak = { since: number; attempts: number; surfaced: boolean };
+
+function jittered(delayMs: number): number {
+  return Math.round(delayMs * (0.8 + Math.random() * 0.4));
+}
+
+/**
+ * The decision for one transient read failure: stay quiet and retry soon, or
+ * surface the error (once per streak) and keep retrying in the background.
+ */
+export function transientReadRetryStep(
+  streak: TransientReadStreak,
+  now: number,
+  policy: TransientReadRetryPolicy,
+): { quiet: boolean; delayMs: number } {
+  streak.attempts += 1;
+  const quiet = now - streak.since < policy.quietWindowMs;
+  const delayMs = quiet
+    ? Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (streak.attempts - 1))
+    : policy.backgroundDelayMs;
+  return { quiet, delayMs: Math.max(0, jittered(delayMs)) };
+}
+
+/**
  * Shared fetch + optional polling loop for the list/read hooks. Stale
  * responses (superseded by a newer load or an unmount) are dropped.
+ * Transient failures are retried quietly (see {@link TransientReadRetryOptions}).
  */
 export function usePolledValue<T>(
   load: (signal?: AbortSignal) => Promise<T>,
-  options: { pollIntervalMs?: number | undefined; enabled?: boolean | undefined } = {},
+  options: {
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Quiet retry of transient failures; on by default, `false` surfaces them at once. */
+    transientRetry?: TransientReadRetryOptions | false | undefined;
+  } = {},
 ): AsyncListState<T> {
   const enabled = options.enabled ?? true;
   const pollIntervalMs = options.pollIntervalMs;
+  const transientRetryRef = useRef<TransientReadRetryPolicy | null>(null);
+  transientRetryRef.current =
+    options.transientRetry === false
+      ? null
+      : {
+          quietWindowMs:
+            options.transientRetry?.quietWindowMs ?? DEFAULT_TRANSIENT_READ_RETRY.quietWindowMs,
+          initialDelayMs:
+            options.transientRetry?.initialDelayMs ?? DEFAULT_TRANSIENT_READ_RETRY.initialDelayMs,
+          maxDelayMs: options.transientRetry?.maxDelayMs ?? DEFAULT_TRANSIENT_READ_RETRY.maxDelayMs,
+          backgroundDelayMs:
+            options.transientRetry?.backgroundDelayMs ??
+            DEFAULT_TRANSIENT_READ_RETRY.backgroundDelayMs,
+        };
   const pageLive = usePageLiveActivity();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(enabled);
@@ -77,6 +149,17 @@ export function usePolledValue<T>(
   const requestAbortRef = useRef<AbortController | null>(null);
   const inFlightRef = useRef<{ load: typeof load; promise: Promise<void> } | null>(null);
   const trailingRefreshRef = useRef<{ load: typeof load; promise: Promise<void> } | null>(null);
+  // The current run of consecutive transient failures, and its pending retry.
+  const transientStreakRef = useRef<TransientReadStreak | null>(null);
+  const transientRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Retries run only while the query is enabled and the page is live.
+  const retryLiveRef = useRef(false);
+  const cancelTransientRetry = useCallback(() => {
+    if (transientRetryTimerRef.current !== null) {
+      clearTimeout(transientRetryTimerRef.current);
+      transientRetryTimerRef.current = null;
+    }
+  }, []);
   const [stateIdentity, setStateIdentity] = useState<{ load: typeof load }>(() => ({ load }));
 
   // A new loader identity means a new query (different session/workspace/...):
@@ -107,6 +190,8 @@ export function usePolledValue<T>(
           activeLoadRef.current === load &&
           !requestAbort.signal.aborted
         ) {
+          transientStreakRef.current = null;
+          cancelTransientRetry();
           setData(result);
           setError(null);
           setLoading(false);
@@ -117,8 +202,36 @@ export function usePolledValue<T>(
           activeLoadRef.current === load &&
           !requestAbort.signal.aborted
         ) {
-          setError(normalizeError(cause));
-          setLoading(false);
+          const policy = transientRetryRef.current;
+          if (policy && retryLiveRef.current && isTransientRequestError(cause)) {
+            // Keep the loading state or the last data on screen while a
+            // deploy or network blip passes; retry, and surface the error
+            // only once it outlasts the quiet window.
+            const now = Date.now();
+            const streak = (transientStreakRef.current ??= {
+              since: now,
+              attempts: 0,
+              surfaced: false,
+            });
+            const step = transientReadRetryStep(streak, now, policy);
+            if (!step.quiet) {
+              // One stable error per streak: background retries that fail
+              // the same way must not re-announce it.
+              if (!streak.surfaced) setError(normalizeError(cause));
+              streak.surfaced = true;
+              setLoading(false);
+            }
+            cancelTransientRetry();
+            transientRetryTimerRef.current = setTimeout(() => {
+              transientRetryTimerRef.current = null;
+              if (retryLiveRef.current) void run();
+            }, step.delayMs);
+          } else {
+            transientStreakRef.current = null;
+            cancelTransientRetry();
+            setError(normalizeError(cause));
+            setLoading(false);
+          }
         }
       } finally {
         if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
@@ -127,7 +240,7 @@ export function usePolledValue<T>(
     })();
     inFlightRef.current = { load, promise };
     return promise;
-  }, [load]);
+  }, [cancelTransientRetry, load]);
 
   const refresh = useCallback((): Promise<void> => {
     const existing = inFlightRef.current;
@@ -146,7 +259,12 @@ export function usePolledValue<T>(
   }, [load, run]);
 
   useEffect(() => {
+    // Every (re)start begins a fresh streak; a pending retry belongs to the
+    // previous query or visibility period.
+    transientStreakRef.current = null;
+    cancelTransientRetry();
     if (!enabled || !pageLive) {
+      retryLiveRef.current = false;
       setLoading(false);
       generation.current += 1;
       requestAbortRef.current?.abort();
@@ -154,6 +272,7 @@ export function usePolledValue<T>(
       trailingRefreshRef.current = null;
       return;
     }
+    retryLiveRef.current = true;
     setLoading(true);
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -168,6 +287,8 @@ export function usePolledValue<T>(
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
       return () => {
         cancelled = true;
+        retryLiveRef.current = false;
+        cancelTransientRetry();
         generation.current += 1;
         requestAbortRef.current?.abort();
         inFlightRef.current = null;
@@ -177,12 +298,14 @@ export function usePolledValue<T>(
     return () => {
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
+      retryLiveRef.current = false;
+      cancelTransientRetry();
       generation.current += 1;
       requestAbortRef.current?.abort();
       inFlightRef.current = null;
       trailingRefreshRef.current = null;
     };
-  }, [run, enabled, pageLive, pollIntervalMs]);
+  }, [run, enabled, pageLive, pollIntervalMs, cancelTransientRetry]);
 
   const identityMatches = stateIdentity.load === load;
   return {

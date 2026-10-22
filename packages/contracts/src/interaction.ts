@@ -3434,7 +3434,9 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       bounds: InteractionRect.nullable(),
       focused: z.boolean(),
       /** Present on a window the platform cannot capture or read while it is
-       * off screen (macOS: minimized, hidden, or on another Space or display). */
+       * off screen (macOS: on another Space, such as a full-screen app). A
+       * minimized window or a hidden app's window is not marked: reading it
+       * brings it back on screen behind the person's front window. */
       offScreen: z.literal(true).optional(),
     })
     .strict(),

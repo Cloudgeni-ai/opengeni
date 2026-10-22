@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -19,7 +20,11 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
 } from "@opengeni/core";
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  configuredModels,
+  environmentsEncryptionKeyBytes,
+  withCodexCatalogProvider,
+} from "@opengeni/config";
 import {
   appendSessionEvents,
   claimSessionWorkForAttempt,
@@ -3522,6 +3527,111 @@ test("a member's conversation from before members were uncapped keeps working, u
       .map((window) => Number(window.agent_micros)),
   ).toEqual([50_000, 50_000]);
 });
+
+test("published Site models follow the database catalog for members and guests without a restart", async () => {
+  const [previous] = await shared.admin`select document, version from deployment_model_catalog`;
+  const model = "codex/gpt-6.1-sol";
+  const creditModel = "gpt-6.1-sol";
+  const key = Buffer.alloc(32, 71);
+  const liveModels = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: true,
+    status: 200,
+    slugs: ["gpt-6.1-sol"],
+  });
+  try {
+    const f = await fixture({
+      modelCatalogSource: "database",
+      codexSubscriptionEnabled: true,
+      environmentsEncryptionKey: key.toString("base64"),
+    });
+    const capabilities = configuredModels(withCodexCatalogProvider(f.settings)).find(
+      (entry) => entry.id === "codex/gpt-6-sol",
+    )!.capabilities;
+    const document = {
+      schemaVersion: 1,
+      builtInModels: [creditModel],
+      codexModels: [{ id: model, upstreamModelId: "gpt-6.1-sol", capabilities }],
+    };
+    const install = async (catalog: typeof document, version: number) => {
+      await shared.admin`insert into deployment_model_catalog (singleton, document, version)
+        values (true, ${shared.admin.json(catalog)}, ${version})
+        on conflict (singleton) do update set document=excluded.document, version=excluded.version`;
+    };
+    await install(document, 1);
+    // Metadata-only subscription fixture. No provider inference or real credential is used.
+    const credential = encryptEnvironmentValue(
+      key,
+      JSON.stringify({ access_token: "fixture-access", refresh_token: "fixture-refresh" }),
+    );
+    await shared.admin`insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type, provider_state, expires_at, last_refresh_at, label
+    ) values (
+      ${f.accountId}, 'codex', 'subscription', ${credential}, 'shared', 'organization',
+      'catalog-fixture', 'pro', ${shared.admin.json({ isFedramp: false })},
+      ${new Date(Date.now() + 86_400_000).toISOString()}, now(), 'Catalog fixture'
+    )`;
+    const site = await f.live("Database models", {
+      access: "public",
+      agent: { enabled: true, model },
+    });
+    const session = await f.signIn(f.member, site.host);
+    const consoleCatalog = await f.api(
+      f.member,
+      "GET",
+      `/v1/config/client?workspaceId=${f.workspace.id}`,
+    );
+    expect(consoleCatalog.status, JSON.stringify(consoleCatalog.json)).toBe(200);
+    expect(consoleCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    const memberCatalog = await f.gateway(site.host, "GET", "/model-catalog", { session });
+    expect(memberCatalog.status, JSON.stringify(memberCatalog.json)).toBe(200);
+    expect(memberCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    const member = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(member.status, JSON.stringify(member.json)).toBe(202);
+
+    const visitor = visitorId();
+    const guestCatalog = await f.gateway(site.host, "GET", "/model-catalog", { visitor });
+    expect(guestCatalog.status, JSON.stringify(guestCatalog.json)).toBe(200);
+    expect(guestCatalog.json.defaultModel).toBe(creditModel);
+    expect(guestCatalog.json.models.map((entry: { id: string }) => entry.id)).toEqual([
+      creditModel,
+    ]);
+    const guest = await f.gateway(site.host, "POST", "/sessions", {
+      visitor,
+      body: { initialMessage: "Hello" },
+    });
+    expect(guest.status, JSON.stringify(guest.json)).toBe(202);
+    const rows = await shared.admin`select id, model from sessions
+      where id in (${member.json.id}, ${guest.json.id})`;
+    expect(rows.find((row) => row.id === member.json.id)?.model).toBe(model);
+    expect(rows.find((row) => row.id === guest.json.id)?.model).toBe(creditModel);
+    const forbidden = await f.gateway(site.host, "POST", "/sessions", {
+      visitor,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(forbidden.status).toBe(403);
+
+    // Hot removal is observed by the same app instance; old fallback models stay absent.
+    await install({ ...document, codexModels: [] }, 2);
+    const changed = await f.gateway(site.host, "GET", "/model-catalog", { session });
+    expect(changed.json.models.map((entry: { id: string }) => entry.id)).toEqual([creditModel]);
+    const removed = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(removed.status).toBe(403);
+  } finally {
+    liveModels.mockRestore();
+    await shared.admin`delete from deployment_model_catalog`;
+    if (previous) {
+      await shared.admin`insert into deployment_model_catalog (singleton, document, version)
+        values (true, ${shared.admin.json(previous.document)}, ${previous.version})`;
+    }
+  }
+}, 60_000);
 
 test("the model follows the viewer: people outside the workspace never use a subscription", async () => {
   const f = await fixture();

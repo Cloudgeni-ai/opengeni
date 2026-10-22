@@ -28,7 +28,7 @@ import type {
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
-import type { UpdateBlocker } from "./update-admission";
+import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserDownloadExportRequest,
@@ -122,6 +122,7 @@ import {
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
 import { markProfileExitedCleanly } from "./profile-exit-state";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -1236,6 +1237,21 @@ export class BrowserSupervisor {
     if (this.stateTransferTails.size)
       blockers.push({ kind: "browser_state_transfer", count: this.stateTransferTails.size });
     for (const runtime of this.sessions.values()) {
+      // A restart in the middle of a task fails the agent's next calls while
+      // it lasts, even for a session that survives it. A session used within
+      // the hold is mid-task, so the update waits for a pause.
+      if (
+        runtime.lifecycle === "active" &&
+        runtime.controller.isIdle() &&
+        this.now() - runtime.lastUsedAt < RECENT_USE_UPDATE_HOLD_MS
+      ) {
+        blockers.push({
+          kind: "browser_recent_use",
+          resourceId: runtime.options.browserSessionId,
+          count: 1,
+        });
+        continue;
+      }
       if (restartPreservesRuntime(runtime)) continue;
       const kind =
         runtime.recovery !== null
@@ -1497,7 +1513,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.list();
@@ -1511,7 +1527,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.get(downloadId);
@@ -2101,7 +2117,10 @@ export class BrowserSupervisor {
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
-    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
+    if (
+      options.transport.kind === "attached_chrome" ||
+      (options.transport.kind === "managed" && options.transport.engine !== "lightpanda")
+    ) {
       try {
         downloadStore = await BrowserDownloadStore.open({
           rootDirectory: downloadDirectory,
@@ -2793,6 +2812,8 @@ export class BrowserSupervisor {
           initialJournal,
           onJournalRecord: (record) => runtime.journal.write(record),
           loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          onUnexpectedDispatchError: (error, command) =>
+            reportUnexpectedDispatchError("browser", error, command),
           authority: {
             authorizeDispatch: async (command) => {
               if (runtime.lifecycle !== "active") {
@@ -3136,7 +3157,9 @@ export class BrowserSupervisor {
         await writeDetachedBrowserRecord(runtime.sessionDirectory, {
           version: 1,
           browserSessionId: runtime.options.browserSessionId,
-          lastUsedAt: runtime.lastUsedAt,
+          // A live view, recording or request still open at shutdown is a use
+          // that has not ended yet, so the successor's idle time starts now.
+          lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
           process: runtime.workingReceipt.process,
         });
       } catch (error) {
@@ -3320,7 +3343,12 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return createAttachedChromeDriver(context, attached, context.resolveWorkspaceFiles);
+    return createAttachedChromeDriver(
+      context,
+      attached,
+      context.resolveWorkspaceFiles,
+      context.downloadEvents,
+    );
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {

@@ -6,6 +6,7 @@ import {
 } from "@opengeni/config";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   resolveSessionAgentConfigForCreate,
@@ -211,7 +212,12 @@ export function createAutomationActivities(
             config: resolution.config,
             instructions: resolution.instructions,
             firstPartyMcpTools: written.firstPartyMcpTools,
-            tools: written.tools,
+            tools: newSessionKnowledgeSearchTools(
+              written.tools,
+              resolution.config,
+              written.firstPartyMcpTools,
+              catalogSettings.mcpServers,
+            ),
           };
         } catch (error) {
           if (!isUnprocessableEntity(error)) throw error;

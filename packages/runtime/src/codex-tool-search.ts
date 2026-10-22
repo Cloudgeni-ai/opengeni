@@ -69,9 +69,11 @@ export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
 /**
  * First-party tools the harness itself relies on: goal lifecycle, background
  * command polling, and the session-level wait, plus excel_run, the only way to
- * reach a workbook the person has open in Excel. Hiding any of them behind
- * search spends a model round trip to rediscover the same schema (for Excel,
- * one of every four requests in a typical add-in chat). This is an exact
+ * reach a workbook the person has open in Excel, and sandbox_file_publish, the
+ * last step of every task that hands the person a file. Hiding any of them
+ * behind search spends a model round trip to rediscover the same schema (for
+ * Excel, one of every four requests in a typical add-in chat; for a document
+ * or spreadsheet the person asked for, one of every six). This is an exact
  * per-tool exception, never the whole `opengeni` catalog, and it never widens
  * authority: only a tool the attempt's prepared server actually listed
  * (selection and permissions already applied) can be visible.
@@ -86,6 +88,7 @@ export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
   "command_wait",
   "wait_for_input",
   "excel_run",
+  "sandbox_file_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const HARNESS_CONTROL_MODEL_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -121,14 +124,27 @@ function interactionToolName(name: string): string | null {
   return name.startsWith(prefix) ? name.slice(prefix.length) : null;
 }
 
+/**
+ * Native CUA tools (`cua_<name>`) come with the two an agent needs to use any
+ * of them well: the window read and the batch tool. Without the batch tool in
+ * hand, an agent that found `cua_click` sends every field as its own call.
+ */
+const CUA_TOOL_PREFIX = "cua_";
+const CUA_WORKING_SET: readonly string[] = ["cua_get_window_state", "cua_run_steps"];
+
 /** The other members of every family a disclosed tool belongs to, in family order. */
 function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
   const disclosedShort = new Set(
     disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
   );
-  const wanted = INTERACTION_TOOL_FAMILIES.filter((family) =>
-    family.some((member) => disclosedShort.has(member)),
-  ).flat();
+  const wanted = [
+    ...INTERACTION_TOOL_FAMILIES.filter((family) =>
+      family.some((member) => disclosedShort.has(member)),
+    ).flat(),
+    ...([...disclosedShort].some((name) => name.startsWith(CUA_TOOL_PREFIX))
+      ? CUA_WORKING_SET
+      : []),
+  ];
   const companions: T[] = [];
   for (const member of wanted) {
     if (disclosedShort.has(member)) continue;

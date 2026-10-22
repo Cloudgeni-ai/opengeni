@@ -1,3 +1,4 @@
+import { GOOGLE_CONNECTOR_SETUP_UNAVAILABLE } from "../integrations/google-connector-availability";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -84,8 +85,9 @@ import {
   startMcpOAuth,
   requireIntegrationsStateSecret,
   gmailOAuthClientConfigured,
+  googleDriveOAuthClientConfigured,
 } from "../integrations/oauth-client";
-import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
+import { OFFICIAL_GMAIL_MCP_URL, OFFICIAL_DRIVE_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -228,12 +230,36 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       ConnectProvider.parse({
         id: "gmail",
+        ...(!deps.settings.googleConnectorSetupEnabled
+          ? { reason: GOOGLE_CONNECTOR_SETUP_UNAVAILABLE }
+          : {}),
         label: "Gmail",
         family: "google",
         readiness:
           !external || !canWrite || !personal
             ? "unsupported"
             : mcpConfigured && gmailOAuthClientConfigured(deps.settings)
+              ? "available"
+              : "needs_configuration",
+        ownership: personal ? ["personal"] : [],
+        setup: ["oauth"],
+      }),
+      ConnectProvider.parse({
+        id: "google-drive",
+        label: "Google Drive",
+        family: "google",
+        ...(!deps.settings.googleConnectorSetupEnabled
+          ? { reason: GOOGLE_CONNECTOR_SETUP_UNAVAILABLE }
+          : !deps.settings.googleDriveMcpEnabled
+            ? {
+                reason:
+                  "Google Drive setup is unavailable until this deployment completes Google's preview and OAuth requirements.",
+              }
+            : {}),
+        readiness:
+          !external || !canWrite || !personal
+            ? "unsupported"
+            : mcpConfigured && googleDriveOAuthClientConfigured(deps.settings)
               ? "available"
               : "needs_configuration",
         ownership: personal ? ["personal"] : [],
@@ -301,26 +327,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: ["workspace"],
         setup: ["oauth", "installation"],
       }),
-      ...(["google-drive-knowledge", "google-drive-publish"] as const).map((id) =>
-        ConnectProvider.parse({
-          id,
-          label:
-            id === "google-drive-publish"
-              ? "Google Drive publishing"
-              : "Google Drive knowledge sources",
-          family: "google-drive",
-          readiness:
-            !external || !canWrite || !personal
-              ? "unsupported"
-              : mcpConfigured &&
-                  deps.settings.googleDriveClientId?.trim() &&
-                  deps.settings.googleDriveClientSecret?.trim()
-                ? "available"
-                : "needs_configuration",
-          ownership: personal ? ["personal"] : [],
-          setup: ["oauth"],
-        }),
-      ),
       ConnectProvider.parse({
         id: "fiken-token",
         label: "Fiken",
@@ -563,14 +569,17 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ? "slack-personal"
                   : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL
                     ? "gmail"
-                    : "mcp-oauth",
+                    : connection.metadata.mcpUrl === OFFICIAL_DRIVE_MCP_URL
+                      ? "google-drive"
+                      : "mcp-oauth",
               label: connection.providerDomain,
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
                 connection.status === "revoked"
                   ? "disabled"
-                  : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
-                      connection.subjectId === null
+                  : [OFFICIAL_GMAIL_MCP_URL, OFFICIAL_DRIVE_MCP_URL].includes(
+                        connection.metadata.mcpUrl,
+                      ) && connection.subjectId === null
                     ? "auth_needed"
                     : connection.status === "active"
                       ? "connected"
@@ -1070,7 +1079,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    if (["mcp-oauth", "slack-personal", "gmail"].includes(before.providerId)) {
+    if (["mcp-oauth", "slack-personal", "gmail", "google-drive"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP OAuth requires a server URL" });
       const values =
@@ -1078,10 +1087,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? { mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL }
           : before.providerId === "gmail"
             ? { mcpUrl: OFFICIAL_GMAIL_MCP_URL }
-            : z
-                .object({ mcpUrl: z.string().url().max(4096) })
-                .strict()
-                .parse(action.values);
+            : before.providerId === "google-drive"
+              ? { mcpUrl: OFFICIAL_DRIVE_MCP_URL }
+              : z
+                  .object({ mcpUrl: z.string().url().max(4096) })
+                  .strict()
+                  .parse(action.values);
       return c.json(
         await executeConnectOperation({
           db: deps.db,
@@ -1099,7 +1110,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               throw new HTTPException(409, { message: "Reload the current connection setup" });
             const started = await startMcpOAuth(deps, {
               ...scope,
-              ...(before.providerId === "gmail" || before.providerId === "slack-personal"
+              ...(before.providerId === "gmail" ||
+              before.providerId === "google-drive" ||
+              before.providerId === "slack-personal"
                 ? { integrationKey: before.providerId }
                 : {}),
               ...(continuation ? { externalContinuation: continuation } : {}),
@@ -1366,8 +1379,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, { message: "capabilities:manage required" });
     if (input.providerId === "atlassian")
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
-    if (input.providerId === "gmail" && input.ownership !== "personal")
-      throw new HTTPException(422, { message: "Gmail connections must be personal-owned" });
+    if (["gmail", "google-drive"].includes(input.providerId) && input.ownership !== "personal")
+      throw new HTTPException(422, { message: "Google connections must be personal-owned" });
     let target: URL;
     try {
       target = new URL(input.returnUrl);
@@ -1693,6 +1706,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "mcp-oauth",
             "slack-personal",
             "gmail",
+            "google-drive",
             "mcp-bearer",
             "mcp-headers",
             "fiken-token",
@@ -1712,6 +1726,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "mcp-oauth",
             "slack-personal",
             "gmail",
+            "google-drive",
             "mcp-bearer",
             "mcp-headers",
             "fiken-token",
@@ -1720,7 +1735,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);
-          if (["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId))
+          if (["mcp-oauth", "slack-personal", "gmail", "google-drive"].includes(input.providerId))
             requireIntegrationsStateSecret(deps.settings);
           const existing = input.reconnectAccountId
             ? await getConnectionMetadata(
@@ -1735,13 +1750,17 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             (!existing ||
               (input.providerId === "fiken-token"
                 ? !isFikenConnection(existing)
-                : ["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId)
+                : ["mcp-oauth", "slack-personal", "gmail", "google-drive"].includes(
+                      input.providerId,
+                    )
                   ? existing.kind !== "oauth2" ||
                     !existing.metadata.oauthDiscovery ||
                     (input.providerId === "slack-personal" &&
                       existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
                     (input.providerId === "gmail" &&
-                      existing.metadata.mcpUrl !== OFFICIAL_GMAIL_MCP_URL)
+                      existing.metadata.mcpUrl !== OFFICIAL_GMAIL_MCP_URL) ||
+                    (input.providerId === "google-drive" &&
+                      existing.metadata.mcpUrl !== OFFICIAL_DRIVE_MCP_URL)
                   : existing.kind !== "api_key" ||
                     existing.metadata.connectAdapter !== input.providerId) ||
               (existing.subjectId === null ? "workspace" : "personal") !== input.ownership)
@@ -1786,7 +1805,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       required: true,
                       secret: true,
                     }))
-                  : ["slack-personal", "gmail"].includes(input.providerId)
+                  : ["slack-personal", "gmail", "google-drive"].includes(input.providerId)
                     ? []
                     : input.providerId === "fiken-token"
                       ? [

@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
 import { githubChip } from "@/components/capabilities/use-github-integration";
-import { googleDriveChip } from "@/components/capabilities/use-google-drive-integration";
 import {
   canInstallOpenGeniSlackBot,
   canManageSlackReactionSummon,
@@ -122,17 +121,6 @@ describe("integration state chips", () => {
       "Connected",
     );
     expect(connectionAccessChip(integration.chip, false).label).toBe("Loading");
-  });
-
-  test("normalizes Google Drive states onto the shared chip vocabulary", () => {
-    expect(googleDriveChip("connected", true, true).label).toBe("Connected");
-    expect(googleDriveChip("connected", true, false).label).toBe("Set up by an admin");
-    expect(googleDriveChip("paused", true, true).label).toBe("Needs attention");
-    expect(googleDriveChip("not_connected", true, true).label).toBe("Not connected");
-    expect(googleDriveChip("disconnected", true, true).label).toBe("Not connected");
-    expect(googleDriveChip("reconsent_required", true, true).label).toBe("Needs attention");
-    expect(googleDriveChip("unverified", true, true).label).toBe("Loading");
-    expect(googleDriveChip("connected", false, false).label).toBe("Set up by an admin");
   });
 
   test("marks historical native Atlassian accounts retired without changing GitHub states", () => {

@@ -7,6 +7,8 @@ import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces"
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type {
+  AccessGrant,
+  AccessContext,
   CreateSessionRequest,
   FileResourceRef,
   LatencyMode,
@@ -93,7 +95,9 @@ export type SessionProxyContext = {
 };
 
 /**
- * The only fields a browser may send when creating a session through the proxy.
+ * The only fields a browser may send when creating a session through the proxy,
+ * besides `modelContext`, which the proxy appends after any context the hook
+ * and `messageExtras` return, as it does for follow-up messages.
  * After the `createSession` hook returns, the proxy adds the attached files to
  * the created request (deduplicated by file id) and, when `modelSelection` is
  * not `false`, applies the browser's explicit model choices over the hook's,
@@ -328,6 +332,40 @@ export type SessionProxyHandlerOptions = {
    */
   sites?: boolean | undefined;
   /**
+   * Let the product's Excel add-in connect the open workbook for the signed-in
+   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
+   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
+   * user in the resolved workspace; agents working for them there reach it with
+   * `excel_run`. The ticket authenticates the add-in's WebSocket to
+   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
+   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
+   * Explicit opt-in, default false.
+   */
+  office?: boolean | undefined;
+  /**
+   * Serve the packaged session app (`SessionApp` from
+   * `@opengeni/react/session-app`, with `apiBaseUrl` set to this proxy) besides
+   * the conversation components. Explicit opt-in, default false.
+   *
+   * Every route above keeps its rules (this proxy's `createSession` hook, the
+   * message hooks, the model, upload, voice, artifact and file switches). On
+   * top of them:
+   *
+   * - `GET /v1/access/me` and `GET /v1/workspaces` answer with the resolved
+   *   user's access to the resolved workspace only.
+   * - Other `GET` routes in the resolved workspace, and in a chat the user may
+   *   open (`authorizeSession`), are read as the resolved user, so Opengeni's
+   *   permissions for that user decide what they see.
+   * - A short list of the app's own writes passes as the resolved user:
+   *   pinning a chat, moving it to a project, managing projects and a chat's
+   *   tool approval settings. Every other write is refused.
+   * - Catalog logos are served from the Opengeni API.
+   * - Creating a chat also takes the app's own create fields: the id of its
+   *   first message and the new-chat draft revision it sent. It sends
+   *   `visibility` and `connectionAccounts` too; the server chooses both.
+   */
+  sessionApp?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session Opengeni lets that user read in the workspace (shared
@@ -373,6 +411,14 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "idempotencyKey",
   "resources",
   "startMode",
+  "modelContext",
+]);
+/** Extra fields the packaged session app sends on create (see `browserCreateFields`). */
+const SESSION_APP_CREATE_FIELDS: ReadonlySet<string> = new Set([
+  "visibility",
+  "clientEventId",
+  "connectionAccounts",
+  "expectedNewSessionDraftRevision",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 /** The API's single-recording ceiling (25 MiB) plus multipart framing. */
@@ -431,6 +477,8 @@ export function createSessionProxyHandler(
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const sitesEnabled = options.sites === true;
+  const officeEnabled = options.office === true;
+  const sessionAppEnabled = options.sessionApp === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -475,6 +523,21 @@ export function createSessionProxyHandler(
         return errorJson(401, "user_required", "Authentication required.");
       }
       const url = new URL(request.url);
+      if (sessionAppEnabled && method === "GET") {
+        // Catalog logos the session app shows beside connectors and tools.
+        const asset = catalogAssetPath(url.pathname, options.basePath);
+        if (asset) {
+          try {
+            const blob = await service.downloadCatalogAsset(asset, { signal: request.signal });
+            return new Response(blob, {
+              headers: { "Content-Type": blob.type, "Cache-Control": "public, max-age=3600" },
+            });
+          } catch {
+            // Missing, malformed or not an image: the app shows its fallback mark.
+            return errorJson(404, "route_not_allowed", "Not found.");
+          }
+        }
+      }
       const segments = routeSegments(url.pathname, options.basePath);
       if (!segments) return errorJson(404, "route_not_allowed", "Not found.");
 
@@ -683,6 +746,51 @@ export function createSessionProxyHandler(
         );
       };
       const [root, ...rest] = segments;
+      // Session app reads and its listed writes, as the resolved user. The
+      // response passes through unread: JSON, an event stream or a file.
+      const passThrough = async (path: string, body?: Record<string, unknown>) => {
+        const search = new URLSearchParams(query).toString();
+        const upstream = await client.fetchApi(client.apiUrl(search ? `${path}?${search}` : path), {
+          method,
+          headers: {
+            Accept: request.headers.get("accept") ?? "application/json",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          signal: request.signal,
+        });
+        // Opengeni's own answer, errors included, with only neutral headers.
+        const headers = new Headers({ "Cache-Control": "no-store" });
+        for (const name of PASS_THROUGH_HEADERS) {
+          const value = upstream.headers.get(name);
+          if (value !== null) headers.set(name, value);
+        }
+        return new Response(upstream.body as BodyInit | null, {
+          status: upstream.status,
+          headers,
+        });
+      };
+      // The app's bootstrap: only the resolved workspace, never the user's
+      // other workspaces or the key's own authority.
+      if (sessionAppEnabled && method === "GET" && root === "workspaces" && rest.length === 0) {
+        const workspaces = await client.listWorkspaces();
+        return json(workspaces.filter((workspace) => workspace.id === workspaceId));
+      }
+      if (
+        sessionAppEnabled &&
+        method === "GET" &&
+        root === "access" &&
+        rest.length === 1 &&
+        rest[0] === "me"
+      ) {
+        // An external actor's access inventory is empty: its authority for this
+        // workspace is the effective grant, so the app gets exactly that grant.
+        const [access, grant] = await Promise.all([
+          client.getAccessContext(),
+          getSessionProxyWorkspaceGrant(client, workspaceId, call),
+        ]);
+        return json(scopedAccessContext(access, grant));
+      }
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
           // The browser speaks this proxy's contract, not the upstream deployment's:
@@ -806,6 +914,16 @@ export function createSessionProxyHandler(
           reject(403, "control_not_allowed", "Only workspace resume is available.");
         }
         return json(await client.requestJson("POST", `${base}/inference-control`, body));
+      }
+
+      if (area === "office" && officeEnabled && tail.length === 1) {
+        if (tail[0] === "workbook-tickets" && method === "POST") {
+          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
+        }
+        if (tail[0] === "workbooks" && method === "GET") {
+          return await read(`${base}/office/workbooks`);
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
@@ -1006,7 +1124,17 @@ export function createSessionProxyHandler(
         });
       }
 
-      if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
+      if (area !== "sessions") {
+        if (sessionAppEnabled && area !== undefined && !PROXY_WORKSPACE_AREAS.has(area)) {
+          const route = `${method} ${[area, ...tail].join("/")}`;
+          const path = `${base}/${[area, ...tail].join("/")}`;
+          if (method === "GET") return await passThrough(path);
+          if (SESSION_APP_WORKSPACE_WRITES.some((pattern) => pattern.test(route))) {
+            return await passThrough(path, await readJsonBody(request, maxBodyBytes, true));
+          }
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
+      }
 
       if (tail.length === 0 && method === "GET") {
         if (!sessionList) return errorJson(404, "route_not_allowed", "Not found.");
@@ -1033,7 +1161,9 @@ export function createSessionProxyHandler(
         if (method !== "POST" || !options.createSession) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
-        const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
+        const body = await readJsonBody(request, maxBodyBytes);
+        const input = createInput(body, modelSelection, sessionAppEnabled);
+        const browser = browserCreateFields(body, sessionAppEnabled);
         if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
@@ -1042,22 +1172,36 @@ export function createSessionProxyHandler(
         const created = withBrowserCreateChoices(
           toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
           input,
+          browser,
         );
         const extras = await messageExtras({
           delivery: "create",
           ...(input.startMode ? { startMode: input.startMode } : {}),
         });
         if (extras instanceof Response) return extras;
-        const modelContext = joinContext(extras?.modelContext, created.modelContext);
-        return json(
-          await client.createSession(workspaceId, {
-            ...created,
-            visibility: created.visibility ?? defaults.visibility,
-            agentAccess: created.agentAccess ?? defaults.agentAccess,
-            memoryScope: created.memoryScope ?? defaults.memoryScope,
-            ...(modelContext ? { modelContext } : {}),
-          }),
+        const modelContext = joinContext(
+          extras?.modelContext,
+          created.modelContext,
+          browser.modelContext,
         );
+        const session = await client.createSession(workspaceId, {
+          ...created,
+          visibility: created.visibility ?? defaults.visibility,
+          agentAccess: created.agentAccess ?? defaults.agentAccess,
+          memoryScope: created.memoryScope ?? defaults.memoryScope,
+          ...(modelContext ? { modelContext } : {}),
+        });
+        if (
+          browser.expectedNewSessionDraftRevision !== undefined &&
+          input.startMode !== "realtime"
+        ) {
+          await clearSentNewSessionDraft(
+            client,
+            workspaceId,
+            browser.expectedNewSessionDraftRevision,
+          );
+        }
+        return json(session);
       }
 
       const [sessionId, ...op] = tail as [string, ...string[]];
@@ -1276,6 +1420,14 @@ export function createSessionProxyHandler(
       ) {
         return json(await client.requestJson("POST", `${session}/queue/${op[1]}/${op[2]}`, body));
       }
+      if (sessionAppEnabled && !PROXY_SESSION_OPERATIONS.has(op[0] ?? "")) {
+        // authorizeSession above already admitted this chat.
+        const path = `${session}/${op.join("/")}`;
+        if (method === "GET") return await passThrough(path);
+        if (SESSION_APP_SESSION_WRITES.some((pattern) => pattern.test(route))) {
+          return await passThrough(path, body);
+        }
+      }
       return errorJson(404, "route_not_allowed", "Not found.");
     } catch (error) {
       return errorResponse(error, rejectedKeyNotice);
@@ -1288,6 +1440,112 @@ export function createSessionProxyHandler(
  * attributes a verb only to the routes that actually forward it.
  */
 const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/** Workspace areas this proxy serves itself; `sessionApp` never widens them. */
+const PROXY_WORKSPACE_AREAS: ReadonlySet<string> = new Set([
+  "sessions",
+  "usage",
+  "model-catalog",
+  "realtime-model-catalog",
+  "live-events",
+  "inference-control",
+  "office",
+  "files",
+  "artifacts",
+  "transcriptions",
+  "editable-artifacts",
+  "published-artifacts",
+  // Rosters, credentials, budgets and administration stay out of the browser
+  // even when Opengeni would let the user read them.
+  "access",
+  "allowance",
+  "api-keys",
+  "auth-runs",
+  "credential-provider",
+  "enrollments",
+  "external-members",
+  "identity-links",
+  "insights",
+  "member-candidates",
+  "members",
+  "session-tenancy",
+  "subscription-usage-pools",
+  "user-resource-authorities",
+  "vault-providers",
+  "vaults",
+  "webhooks",
+]);
+
+/** Chat routes this proxy serves itself; `sessionApp` never widens them. */
+const PROXY_SESSION_OPERATIONS: ReadonlySet<string> = new Set([
+  "",
+  "archive",
+  "attention",
+  "events",
+  "steer",
+  "queue",
+  "composer-draft",
+  "control",
+  "human-input-requests",
+  "goal",
+  "realtime",
+  "fs",
+  "artifacts",
+]);
+
+/** The session app's own writes in the workspace, as the resolved user. */
+const SESSION_APP_WORKSPACE_WRITES: readonly RegExp[] = [
+  /^PUT new-session-draft$/,
+  /^POST channels$/,
+  /^(PATCH|DELETE) channels\/[^/]+$/,
+];
+
+/** The session app's own writes in a chat, as the resolved user. */
+const SESSION_APP_SESSION_WRITES: readonly RegExp[] = [
+  /^PUT pin$/,
+  /^PUT channel$/,
+  /^PUT tool-policy$/,
+  /^PATCH mcp-servers\/[^/]+\/approval-policy$/,
+];
+
+/** Response headers a passed-through read or write keeps. */
+const PASS_THROUGH_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-disposition",
+  "etag",
+  "last-modified",
+  SESSION_SEQUENCE_HEADER,
+] as const;
+
+/** The user's access to the resolved workspace only, without key authority. */
+/**
+ * The app's access context: the resolved workspace's effective grant only,
+ * never the user's other workspaces or the key's own authority.
+ */
+function scopedAccessContext(access: AccessContext, grant: AccessGrant): AccessContext {
+  const { credential: _credential, ...rest } = access;
+  return {
+    ...rest,
+    subjectId: grant.subjectId,
+    workspaceGrants: [grant],
+    accountGrants: access.accountGrants.filter(
+      (accountGrant) => accountGrant.accountId === grant.accountId,
+    ),
+    defaultWorkspaceId: grant.workspaceId,
+    defaultAccountId: grant.accountId,
+  };
+}
+
+/** `catalog-assets/...` under this proxy's base path, or null. */
+function catalogAssetPath(pathname: string, basePath: string | undefined): string | null {
+  const prefix = `${basePath !== undefined ? basePath.replace(/\/+$/, "") : ""}/v1/catalog-assets/`;
+  const start = basePath !== undefined ? 0 : pathname.indexOf("/v1/catalog-assets/");
+  if (start < 0 || !pathname.startsWith(prefix, start)) return null;
+  const asset = pathname.slice(start + prefix.length);
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*(\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/.test(asset)) return null;
+  return `catalog-assets/${asset}`;
+}
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
@@ -1786,9 +2044,14 @@ function pick(
 function createInput(
   body: Record<string, unknown> | undefined,
   modelSelection: boolean,
+  sessionApp: boolean,
 ): SessionProxyCreateInput {
   for (const key of Object.keys(body ?? {})) {
-    if (!CREATE_FIELDS.has(key) && !(modelSelection && isModelField(key))) {
+    if (
+      !CREATE_FIELDS.has(key) &&
+      !(modelSelection && isModelField(key)) &&
+      !(sessionApp && SESSION_APP_CREATE_FIELDS.has(key))
+    ) {
       reject(
         400,
         "create_field_not_allowed",
@@ -1868,9 +2131,68 @@ function createResources(value: unknown): FileResourceRef[] {
 }
 
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
+type BrowserCreateFields = {
+  modelContext?: string | undefined;
+  clientEventId?: string | undefined;
+  expectedNewSessionDraftRevision?: number | undefined;
+};
+
+/**
+ * The browser's own context and the session app's create bookkeeping. Message
+ * context is appended after the server's, as on follow-up messages. The session
+ * app also sends the id of its first message event and the revision of the
+ * new-chat draft it sent, which the proxy clears once the chat exists. It sends `visibility`
+ * and an empty `connectionAccounts` too: the server chooses both, so those are
+ * dropped, and any account selection is refused.
+ */
+function browserCreateFields(
+  body: Record<string, unknown> | undefined,
+  sessionApp: boolean,
+): BrowserCreateFields {
+  const fields: BrowserCreateFields = {};
+  const modelContext = body?.modelContext;
+  if (modelContext !== undefined && typeof modelContext !== "string") {
+    reject(400, "invalid_model_context", "modelContext must be a string.");
+  }
+  if (modelContext?.trim()) fields.modelContext = modelContext;
+  if (!sessionApp) return fields;
+  const visibility = body?.visibility;
+  if (visibility !== undefined && visibility !== "workspace" && visibility !== "private") {
+    reject(400, "invalid_visibility", "visibility must be workspace or private.");
+  }
+  const accounts = body?.connectionAccounts;
+  if (accounts !== undefined && (!Array.isArray(accounts) || accounts.length > 0)) {
+    reject(
+      403,
+      "connection_account_not_allowed",
+      "The server chooses which connected accounts a chat uses.",
+    );
+  }
+  const clientEventId = body?.clientEventId;
+  if (clientEventId !== undefined) {
+    if (typeof clientEventId !== "string" || !clientEventId) {
+      reject(400, "invalid_client_event_id", "clientEventId must be a non-empty string.");
+    }
+    fields.clientEventId = clientEventId;
+  }
+  const revision = body?.expectedNewSessionDraftRevision;
+  if (revision !== undefined) {
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+      reject(
+        400,
+        "invalid_draft_revision",
+        "expectedNewSessionDraftRevision must be a non-negative integer.",
+      );
+    }
+    fields.expectedNewSessionDraftRevision = revision;
+  }
+  return fields;
+}
+
 function withBrowserCreateChoices(
   created: CreateSessionRequest,
   input: SessionProxyCreateInput,
+  browser: BrowserCreateFields = {},
 ): CreateSessionRequest {
   const existing = created.resources ?? [];
   const attached = new Set(
@@ -1889,7 +2211,42 @@ function withBrowserCreateChoices(
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+    ...(created.clientEventId === undefined && browser.clientEventId
+      ? { clientEventId: browser.clientEventId }
+      : {}),
   };
+}
+
+/**
+ * Clear the new-chat draft the session app just sent. The API can clear it
+ * during create only when the create request is that draft, and the
+ * `createSession` hook decides the request, so the proxy clears it after the
+ * chat exists: the same text-free next draft, one revision on. A draft that
+ * changed meanwhile is left alone, and a failure here never fails the create.
+ */
+async function clearSentNewSessionDraft(
+  client: ProxyClient,
+  workspaceId: string,
+  revision: number,
+): Promise<void> {
+  try {
+    const draft = await client.getNewSessionDraft(workspaceId);
+    if (draft.revision !== revision) return;
+    const {
+      revision: _revision,
+      selectionHistory: _history,
+      updatedAt: _updatedAt,
+      ...rest
+    } = draft;
+    await client.saveNewSessionDraft(workspaceId, {
+      ...rest,
+      text: "",
+      resources: draft.resources.filter((resource) => resource.kind === "repository"),
+      expectedRevision: revision,
+    });
+  } catch (error) {
+    if (!(error instanceof OpenGeniApiError)) throw error;
+  }
 }
 
 /** One multipart recording: only the audio, its MIME type, and its duration pass. */

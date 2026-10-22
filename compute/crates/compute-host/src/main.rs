@@ -508,7 +508,7 @@ fn main() -> std::process::ExitCode {
         .build();
     let result = runtime
         .map_err(anyhow::Error::from)
-        .and_then(|runtime| runtime.block_on(agent_main(cli)));
+        .and_then(|runtime| run_to_end(runtime, agent_main(cli)));
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -516,6 +516,18 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Runs `command` on `runtime` to its end, then stops the runtime
+/// without waiting for work still on its blocking threads, such as a
+/// template's disk copy: the process exits and ends it, as a crash
+/// would, which costs the agent nothing (ADR 10). Waiting would hold the
+/// process up after its lease's renewals have stopped, and the next
+/// agent's start with them. A client command has awaited all it needs.
+fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output = T>) -> T {
+    let output = runtime.block_on(command);
+    runtime.shutdown_background();
+    output
 }
 
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
@@ -875,10 +887,19 @@ async fn run_agent<S: Store>(
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
     let links = config.agent_link.clone();
-    let (handle, agent) = HostAgent::start(config, engine, store).await?;
+    // On a host in a fleet the lease is renewed from before this run takes
+    // back what the previous one left until this one exits.
+    let ((handle, agent), mut joined) = if let Some((fleet, prepared)) = fleet {
+        // Boxed: it holds the agent's start, and this future lives long.
+        let (started, joined) =
+            Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?;
+        (started, Some(joined))
+    } else {
+        (HostAgent::start(config, engine, store).await?, None)
+    };
     // On a host in a fleet only the service creates, adopts and hands off
     // sandboxes; the socket serves the host's own tools the rest.
-    let local = if fleet.is_some() {
+    let local = if joined.is_some() {
         handle.local_to_fleet()
     } else {
         handle.clone()
@@ -886,9 +907,9 @@ async fn run_agent<S: Store>(
     if let Some(canary) = canary {
         tokio::spawn(canary::run(handle.clone(), canary));
     }
-    let joined = async {
-        match fleet {
-            Some((fleet, prepared)) => fleet.run(prepared, handle).await,
+    let in_fleet = async {
+        match &mut joined {
+            Some(joined) => joined.run().await,
             None => std::future::pending().await,
         }
     };
@@ -898,20 +919,29 @@ async fn run_agent<S: Store>(
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
         _ = terminate.recv() => Ok(()),
         result = agent => result.map_err(Into::into),
-        result = joined => result.context("in the fleet"),
+        result = in_fleet => result.context("in the fleet"),
     };
-    // Stopped by a signal, the agent did not get to it: the agent links'
-    // sessions are on disk before the next agent reads them.
-    if let Some(links) = links {
-        links.shutdown().await;
-    }
-    // What happened last, often why it stopped, still reaches the
-    // collector; a collector that is away does not hold the stop up long.
-    if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
-        .await
-        .is_err()
-    {
-        tracing::warn!("stopping before every event reached the collector");
+    let stopping = async {
+        // Stopped by a signal, the agent did not get to it: the agent
+        // links' sessions are on disk before the next agent reads them.
+        if let Some(links) = links {
+            links.shutdown().await;
+        }
+        // What happened last, often why it stopped, still reaches the
+        // collector; a collector that is away does not hold the stop up
+        // long.
+        if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!("stopping before every event reached the collector");
+        }
+    };
+    // The lease is renewed until the process exits, so the next agent
+    // finds as much of its term left as the restart allows.
+    match joined {
+        Some(joined) => joined.stopping(stopping).await,
+        None => stopping.await,
     }
     result
 }
@@ -1177,6 +1207,33 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// Work left on a blocking thread when the command ends does not hold
+    /// the process up: an agent's lease is no longer renewed by then.
+    #[test]
+    fn the_runtime_stops_without_waiting_for_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let began = std::time::Instant::now();
+        let output = run_to_end(runtime, async {
+            let (started, running) = std::sync::mpsc::channel();
+            drop(tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(5));
+            }));
+            running.recv().unwrap();
+            7
+        });
+        assert_eq!(output, 7);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "waited {:?} for blocking work",
+            began.elapsed()
+        );
+    }
 
     /// A host keeps a sixteenth of its processors back, at least half of
     /// one, unless told otherwise.

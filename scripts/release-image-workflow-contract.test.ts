@@ -1467,6 +1467,20 @@ describe("release image workflow contract", () => {
       const step = steps.find((candidate) => candidate.name === name);
       expect(step?.run).toContain("--binary-identifier ai.opengeni.agent");
     }
+    // The LaunchAgent names this bundle in AssociatedBundleIdentifiers so macOS
+    // attributes the background item to the app, not the signing developer.
+    const bundle = steps.find(
+      (candidate) =>
+        candidate.name === "macOS assemble + sign + notarize .app bundle (if creds present)",
+    );
+    expect(bundle?.run).toContain(
+      "<key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>",
+    );
+    const launchd = await readFile(
+      resolve(root, "agent/crates/opengeni-agent-platform/src/service.rs"),
+      "utf8",
+    );
+    expect(launchd).toContain('pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";');
   });
 
   test("agent publication creates only immutable-compatible versioned releases", async () => {

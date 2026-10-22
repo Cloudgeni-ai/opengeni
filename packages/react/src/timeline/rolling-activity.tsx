@@ -1,11 +1,12 @@
 import { renderActivity } from "./activity-rail";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { WrenchIcon } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
 import { CompactActivityContext } from "./shared";
 import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
 import { toolDisplayName } from "./tool-display-name";
+import { ToolKindIcon } from "./tool-icon";
+import { genericToolIconKind } from "./tool-presentation";
 import { toolStepPhase } from "./tool-steps";
 import type { ActivityItem } from "./types";
 import { rollingActivityItem } from "./work-presentation";
@@ -36,7 +37,10 @@ export function RollingActivity({
   const { item, earlierCount } = selected;
   const fallback = (
     <span className="og-rolling-label">
-      <WrenchIcon className="size-3.5" />
+      <ToolKindIcon
+        kind={item.kind === "tool-call" ? genericToolIconKind(item.name) : "wrench"}
+        className="size-3.5"
+      />
       <span>
         {item.kind === "tool-call"
           ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))

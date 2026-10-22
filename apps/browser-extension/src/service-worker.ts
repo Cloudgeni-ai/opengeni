@@ -1,3 +1,4 @@
+import { BRAND } from "./brand";
 import { HANDSHAKE_TIMEOUT_ERROR, agentStatus } from "./agent-status";
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -14,6 +15,7 @@ import {
   type AgentUnavailable,
   type AttachedTab,
   type BridgeCommand,
+  type FoundDownload,
   type BridgeDebuggerEvent,
   type ExtensionDevice,
   type ExtensionCommandResult,
@@ -23,6 +25,9 @@ import {
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
+// Chrome's shortest alarm period; it wakes a stopped worker to reconnect.
+const RECONNECT_ALARM = "reconnect";
+const RECONNECT_ALARM_PERIOD_MINUTES = 0.5;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const INVENTORY_DEBOUNCE_MS = 100;
 const MAX_DEBUGGER_EVENTS = 10_000;
@@ -158,7 +163,7 @@ async function connect(): Promise<void> {
       if (nativePort === connectingPort) handleNativeMessage(message);
     });
     port.onDisconnect.addListener(() => {
-      const error = chrome.runtime.lastError?.message ?? "Opengeni agent disconnected";
+      const error = chrome.runtime.lastError?.message ?? `${BRAND.product} agent disconnected`;
       disconnectPort(connectingPort, error);
     });
     await setBadge(false);
@@ -238,7 +243,7 @@ function handleNativeMessage(message: unknown): void {
     if (refusal.reason === "extension_outdated") requestExtensionUpdate();
     disconnectPort(
       port,
-      `Opengeni agent unavailable: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ""}`,
+      `${BRAND.product} agent unavailable: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ""}`,
       refusal,
     );
     return;
@@ -381,7 +386,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       if (!attachedDebuggerTabs.has(tabId)) {
         throw new BridgeCommandError(
           "debugger_unavailable",
-          "Opengeni is not attached to this tab",
+          `${BRAND.product} is not attached to this tab`,
         );
       }
       assertAllowedDebuggerMethod(command.method);
@@ -392,6 +397,8 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       const response = await chrome.debugger.sendCommand(source, command.method, command.params);
       return { result: response ?? {} };
     }
+    case "downloads.find":
+      return { downloads: await findDownloads(command.url, command.startedAfter) };
     case "debugger.poll": {
       const firstSequence = debuggerEvents[0]?.sequence ?? debuggerSequence + 1;
       const available = debuggerEvents.filter((event) => event.sequence > command.afterSequence);
@@ -404,6 +411,26 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       };
     }
   }
+}
+
+const MAX_FOUND_DOWNLOADS = 16;
+
+/** Completed downloads of one address since a time, as Chrome saved them. */
+async function findDownloads(url: string, startedAfter: string): Promise<FoundDownload[]> {
+  const found = new Map<number, chrome.downloads.DownloadItem>();
+  for (const query of [{ url }, { finalUrl: url }]) {
+    for (const item of await chrome.downloads.search({ ...query, startedAfter, state: "complete" }))
+      found.set(item.id, item);
+  }
+  return [...found.values()]
+    .filter((item) => item.exists && item.filename.length > 0)
+    .sort((left, right) => left.startTime.localeCompare(right.startTime))
+    .slice(0, MAX_FOUND_DOWNLOADS)
+    .map((item) => ({
+      id: item.id,
+      filePath: item.filename,
+      sizeBytes: item.fileSize >= 0 ? item.fileSize : item.bytesReceived,
+    }));
 }
 
 async function requireControllableTab(tabId: number): Promise<void> {
@@ -545,7 +572,7 @@ async function setBadge(connected: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: connected ? "" : "!" });
   if (!connected) await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
   await chrome.action.setTitle({
-    title: connected ? "Opengeni Browser · Connected" : "Opengeni Browser · Agent unavailable",
+    title: `${BRAND.name} · ${connected ? "Connected" : "Agent unavailable"}`,
   });
 }
 
@@ -659,4 +686,14 @@ chrome.runtime.onUpdateAvailable?.addListener(() => {
 });
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
+// Chrome stops an idle service worker, and a stopped worker's reconnect timer
+// dies with it. Without a wake-up, a dropped agent connection stays down until
+// the person happens to touch a tab. An alarm restarts a stopped worker, and
+// its handler reconnects when nothing is connected.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM && !nativePort) void connect();
+});
+void chrome.alarms
+  .create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES })
+  .catch(() => undefined);
 void connect();

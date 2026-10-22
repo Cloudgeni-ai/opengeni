@@ -263,6 +263,7 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -3272,7 +3273,7 @@ async function createSessionForRequestInFileScope(
   // independently intersected with the exact model-visible selection and the
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
-  const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
   const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
@@ -3595,12 +3596,12 @@ async function createSessionForRequestInFileScope(
     toolPolicy,
     productServerIds: [],
   }).firstPartyMcpTools;
-  const googleDrivePublicationEnabled =
-    firstPartyMcpTools.includes("editable_artifact_export") &&
-    firstPartyMcpTools.includes("editable_artifact_export_status") &&
-    (!firstPartyMcpPermissions?.length ||
-      (firstPartyMcpPermissions.includes("artifacts:read") &&
-        firstPartyMcpPermissions.includes("artifacts:publish")));
+  tools = newSessionKnowledgeSearchTools(
+    tools,
+    agentConfig,
+    firstPartyMcpTools,
+    settings.mcpServers,
+  );
   const atlassianEnabled =
     firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
@@ -3626,7 +3627,6 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
-        googleDrivePublicationEnabled,
         atlassianEnabled,
       }),
     );
@@ -4602,11 +4602,6 @@ async function acceptSessionUserMessageInFileScope(
         connectionWorkspace.settings,
       ),
     });
-    const existingEffectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
-      settings,
-      existingSession,
-      connectionWorkspace.settings,
-    );
     const { personalConnectionDelegations, mcpAccountBindings, connectionAccountIntent } =
       await freezeConnectionAccounts({
         db,
@@ -4617,12 +4612,6 @@ async function acceptSessionUserMessageInFileScope(
         resources: [...existingSession.resources, ...requestedResources],
         source: connectionDelegationSource,
         targetSessionId: sessionId,
-        googleDrivePublicationEnabled:
-          existingEffectiveFirstPartyTools.includes("editable_artifact_export") &&
-          existingEffectiveFirstPartyTools.includes("editable_artifact_export_status") &&
-          (!existingSession.firstPartyMcpPermissions?.length ||
-            (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
-              existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
         atlassianEnabled:
           existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
           (!existingSession.firstPartyMcpPermissions?.length ||

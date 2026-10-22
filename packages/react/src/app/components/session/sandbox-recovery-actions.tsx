@@ -72,7 +72,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
     projection.automaticAvailable === true &&
     (projection.automaticLane === "fresh_workspace"
       ? projection.checkpoint === null
-      : projection.checkpoint?.sessionId === props.sessionId);
+      : (projection.automaticCheckpoint ?? projection.checkpoint)?.sessionId === props.sessionId);
   const eligible =
     automaticAvailable ||
     (projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId);

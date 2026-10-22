@@ -94,7 +94,7 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), ('0907_subscription_connection_one_owner.sql'), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
       await owner`insert into schema_migrations(name) values ('0843_indexed_inbox_lineage.sql')`;
       await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });

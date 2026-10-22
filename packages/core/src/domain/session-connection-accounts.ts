@@ -71,12 +71,6 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
     resources: session.resources,
     source: personalConnectionDelegationSourceForGrant(grant),
     targetSessionId: sessionId,
-    googleDrivePublicationEnabled:
-      effectiveFirstPartyTools.includes("editable_artifact_export") &&
-      effectiveFirstPartyTools.includes("editable_artifact_export_status") &&
-      (!session.firstPartyMcpPermissions?.length ||
-        (session.firstPartyMcpPermissions.includes("artifacts:read") &&
-          session.firstPartyMcpPermissions.includes("artifacts:publish"))),
     atlassianEnabled:
       effectiveFirstPartyTools.some((tool) => tool.startsWith("atlassian_")) &&
       (!session.firstPartyMcpPermissions?.length ||
@@ -151,12 +145,6 @@ export async function resolveContinuedConnectionAccounts(input: {
     session,
     workspace.settings,
   );
-  let googleDrivePublicationEnabled =
-    effectiveFirstPartyTools.includes("editable_artifact_export") &&
-    effectiveFirstPartyTools.includes("editable_artifact_export_status") &&
-    (!session.firstPartyMcpPermissions?.length ||
-      (session.firstPartyMcpPermissions.includes("artifacts:read") &&
-        session.firstPartyMcpPermissions.includes("artifacts:publish")));
   const atlassianEnabled =
     effectiveFirstPartyTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!session.firstPartyMcpPermissions?.length ||
@@ -172,7 +160,7 @@ export async function resolveContinuedConnectionAccounts(input: {
   // A pick for a connector the session no longer uses does not apply.
   const applies = (selection: McpConnectionAccountSelection) =>
     selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID
-      ? googleDrivePublicationEnabled
+      ? false
       : selection.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID
         ? personalGitHubRepositoryResources(resources).length > 0
         : tools.some((tool) => tool.kind === "mcp" && tool.id === selection.serverId);
@@ -192,7 +180,6 @@ export async function resolveContinuedConnectionAccounts(input: {
           ? { kind: "subject", subjectId: principalSubjectId, accountId }
           : { kind: "none" },
         targetSessionId: sessionId,
-        googleDrivePublicationEnabled,
         atlassianEnabled,
         authoritySelections: selections,
       });
@@ -230,7 +217,6 @@ export async function resolveContinuedConnectionAccounts(input: {
       );
       selections = selections.filter((selection) => !dropped.has(selection.serverId));
       tools = tools.filter((tool) => !(tool.kind === "mcp" && dropped.has(tool.id)));
-      if (dropped.has(GOOGLE_DRIVE_PUBLICATION_SERVER_ID)) googleDrivePublicationEnabled = false;
       if (dropped.has(PERSONAL_GITHUB_CONNECTION_SURFACE_ID)) {
         resources = withoutPersonalRepositories(resources);
       }

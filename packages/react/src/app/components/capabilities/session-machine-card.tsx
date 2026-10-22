@@ -7,6 +7,7 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   ArrowUpRightIcon,
   CheckIcon,
+  ChevronRightIcon,
   LaptopIcon,
   Loader2Icon,
   MonitorIcon,
@@ -28,6 +29,7 @@ import { LogoTile } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { RowButton } from "../../../ui/page-actions";
 import { useAppContext } from "../../app-context";
+import { useClientConfigFlags } from "../../../hooks/use-client-config-flags";
 import { userErrorText } from "../../../ui/api-error";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { useDesktopThisComputer } from "../desktop/this-computer";
@@ -44,6 +46,11 @@ const WATCH_POLL_MS = 3_000;
 const CHROME_POLL_MS = 5_000;
 /** Stop checking for the extension after this long without a link. */
 const CHROME_POLL_LIMIT_MS = 10 * 60_000;
+/**
+ * After a computer comes online, keep checking quietly for a short while: its
+ * Chrome profile usually links up a few seconds after the machine does.
+ */
+const CHROME_REFRESH_POLL_LIMIT_MS = 60_000;
 
 export { machineUseMessage } from "../../lib/move-chat-to-machine";
 
@@ -119,6 +126,7 @@ export function SessionMachineCapabilityCard({
   const [useError, setUseError] = useState<{ name: string; reason: string | null } | null>(null);
   const [outcome, setOutcome] = useState<{ sandboxId: string; text: string } | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [othersOpen, setOthersOpen] = useState(false);
   const cardRef = useRef<HTMLElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const setupOpener = useRef<HTMLElement | null>(null);
@@ -143,6 +151,16 @@ export function SessionMachineCapabilityCard({
   );
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const reachable = machines.filter((machine) => isMachineComputeSelectable(machine.state));
+  // The machine the agent asked for, while this chat doesn't run on it yet.
+  const requested =
+    (item.requestedSandboxId
+      ? machines.find((machine) => machine.sandboxId === item.requestedSandboxId)
+      : undefined) ?? null;
+  const asking = requested !== null && !requested.active;
+  const requestedName = requested ? machineDisplayName(t, requested) : "";
+  // The person can allow it right here: lead with that, other machines fold away.
+  const allowHere =
+    asking && fleet.canAttach && isMachineComputeSelectable(requested.state) ? requested : null;
   const personalWorkspace =
     context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
@@ -170,12 +188,14 @@ export function SessionMachineCapabilityCard({
           : isMachineComputeSelectable(machine.state)
             ? 2
             : 3;
-    return [...machines].sort(
-      (left, right) =>
-        rank(left) - rank(right) ||
-        machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
-    );
-  }, [justConnected, machines]);
+    return [...machines]
+      .filter((machine) => machine.sandboxId !== allowHere?.sandboxId)
+      .sort(
+        (left, right) =>
+          rank(left) - rank(right) ||
+          machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
+      );
+  }, [allowHere?.sandboxId, justConnected, machines]);
 
   const use = useCallback(
     async (machine: MachineView) => {
@@ -223,7 +243,9 @@ export function SessionMachineCapabilityCard({
     null;
   const chrome = useAttachedChrome(
     workspaceId,
-    fleet.canRead ? (chromeMachine?.enrollmentId ?? null) : null,
+    fleet.canRead && chromeMachine?.enrollmentId
+      ? { enrollmentId: chromeMachine.enrollmentId }
+      : null,
   );
   const fresh = justConnected
     ? (machines.find((machine) => machine.sandboxId === justConnected) ?? null)
@@ -234,19 +256,21 @@ export function SessionMachineCapabilityCard({
   // this chat" is primary and connecting another is a quiet secondary action.
   const actionUnavailable = unavailableOnDeployment
     ? "Connected Machines aren't available on this deployment."
-    : !fleet.canRead
-      ? "You don't have access to this workspace's machines."
-      : fresh && fleet.canAttach && !fresh.active
-        ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
-        : reachable.length > 0 && fleet.canAttach
-          ? "Choose where this chat runs."
-          : reachable.length > 0
-            ? "You can't change where this chat runs."
-            : fleet.canManage
-              ? null
-              : machines.length > 0
-                ? "Turn on one of the machines below to use it here."
-                : "Ask a workspace admin to connect a machine.";
+    : asking && !isMachineComputeSelectable(requested.state)
+      ? `Turn on ${requestedName} to allow it here.`
+      : !fleet.canRead
+        ? "You don't have access to this workspace's machines."
+        : fresh && fleet.canAttach && !fresh.active
+          ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
+          : reachable.length > 0 && fleet.canAttach
+            ? "Choose where this chat runs."
+            : reachable.length > 0
+              ? "You can't change where this chat runs."
+              : fleet.canManage
+                ? null
+                : machines.length > 0
+                  ? "Turn on one of the machines below to use it here."
+                  : "Ask a workspace admin to connect a machine.";
   // Inside the desktop app, the computer it runs on is one click away.
   const desktop = useDesktopThisComputer();
   const desktopReady =
@@ -261,15 +285,30 @@ export function SessionMachineCapabilityCard({
   const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
     useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
+  // While the agent's request can be allowed here, everything else is one
+  // click away instead of competing with it.
+  const folded = allowHere !== null && !othersOpen;
+  const foldable =
+    allowHere !== null && (ordered.length > 0 || chromeMachine !== null || connectAnother);
 
   return (
     <>
       <SessionCapabilityFrame
-        name={recommendation.name || "Connected Machine"}
-        subtitle="Your computer or server"
+        name={asking ? requestedName : recommendation.name || "Connected Machine"}
+        subtitle={
+          asking
+            ? `${stateLabel(requested)} · ${machineScopeLabel(t, requested.scope)}`
+            : "Your computer or server"
+        }
         logo={CONNECTED_MACHINE_LOGO}
         typeLabel="Machine"
-        description={recommendation.rationale}
+        description={
+          allowHere
+            ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
+            : asking
+              ? `The agent asked to use ${requestedName}.`
+              : recommendation.rationale
+        }
         skill={false}
         expanded={false}
         complete={activeMachine !== null || desktopReady}
@@ -283,23 +322,30 @@ export function SessionMachineCapabilityCard({
               : undefined
         }
         actionLabel={
-          offerThisComputer
-            ? desktop.computer.acting
-              ? "Connecting…"
-              : "Use this computer"
-            : "Connect a computer"
+          allowHere
+            ? using === allowHere.sandboxId
+              ? "Allowing…"
+              : "Allow"
+            : offerThisComputer
+              ? desktop.computer.acting
+                ? "Connecting…"
+                : "Use this computer"
+              : "Connect a computer"
         }
-        busy={offerThisComputer && desktop.computer.acting}
-        actionUnavailable={offerThisComputer ? null : actionUnavailable}
+        busy={allowHere ? using !== null : offerThisComputer && desktop.computer.acting}
+        actionUnavailable={allowHere || offerThisComputer ? null : actionUnavailable}
         opensDialog={false}
         note={
-          offerThisComputer
-            ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
-            : fleet.canManage
-              ? "You can remove a connected machine anytime from Machines."
-              : ""
+          allowHere
+            ? ""
+            : offerThisComputer
+              ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+              : fleet.canManage
+                ? "You can remove a connected machine anytime from Machines."
+                : ""
         }
         onOpen={() => {
+          if (allowHere) return void use(allowHere);
           if (!offerThisComputer) return openSetup();
           if (desktop.computer.acting) return;
           if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
@@ -343,7 +389,25 @@ export function SessionMachineCapabilityCard({
                       }`}
                     </Notice>
                   ) : null}
-                  {ordered.length > 0 ? (
+                  {foldable ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="-ml-2 text-fg-muted"
+                      aria-expanded={othersOpen}
+                      onClick={() => setOthersOpen((open) => !open)}
+                    >
+                      <ChevronRightIcon
+                        aria-hidden
+                        className={
+                          othersOpen ? "rotate-90 transition-transform" : "transition-transform"
+                        }
+                      />
+                      Use a different machine
+                    </Button>
+                  ) : null}
+                  {!folded && ordered.length > 0 ? (
                     <RowList label="Connected machines" flush>
                       {ordered.map((machine) => (
                         <MachineRow
@@ -358,7 +422,7 @@ export function SessionMachineCapabilityCard({
                       ))}
                     </RowList>
                   ) : null}
-                  {chromeMachine ? (
+                  {!folded && chromeMachine ? (
                     <ScreenControlStep
                       key={chromeMachine.sandboxId}
                       machine={chromeMachine}
@@ -368,13 +432,13 @@ export function SessionMachineCapabilityCard({
                       onReconnect={() => openSetup(chromeMachine)}
                     />
                   ) : null}
-                  {chromeMachine ? (
+                  {!folded && chromeMachine ? (
                     <ChromeStep
                       chrome={chrome}
                       machineName={machineDisplayName(t, chromeMachine)}
                     />
                   ) : null}
-                  {connectAnother ? (
+                  {!folded && connectAnother ? (
                     <Button
                       type="button"
                       variant="ghost"
@@ -415,6 +479,21 @@ export function SessionMachineCapabilityCard({
         />
       ) : null}
     </>
+  );
+}
+
+/**
+ * An earlier Connected Machine card whose request the agent made again further
+ * down. The newer card is the live one, so this stays a single quiet line.
+ */
+export function RepeatedMachineRequestNote({ chrome = false }: { chrome?: boolean }) {
+  return (
+    <p className="flex items-center gap-2 text-xs text-fg-muted">
+      <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
+      {chrome
+        ? "The agent asked to connect Chrome. It asked again below."
+        : "The agent asked to use a machine. It asked again below."}
+    </p>
   );
 }
 
@@ -493,31 +572,54 @@ function MachineRow({
   );
 }
 
-type ChromeState = {
+export type ChromeState = {
   connected: { name: string } | null;
+  /** A read completed, so a null `connected` means Chrome is not linked yet. */
+  checked: boolean;
   /** Start checking for the extension (after the person opens the store). */
   watch: () => void;
+  /** Checking for the extension after the person opened the store. */
+  watching: boolean;
 };
 
+/** Which Chrome to look for: one on an exact machine, or any the person connected. */
+export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
+
 /**
- * Whether the Opengeni Browser extension linked a Chrome profile on this exact
- * machine. Reads once; polls only after the person opens the store, stops once
- * linked, after a bounded time, or when the inventory is not available to them.
+ * Whether the Opengeni Browser extension linked a Chrome profile the agent can
+ * use (the same check browser_open applies) on this exact machine, or, with
+ * "any", on any machine. Reads once, and again whenever `refreshKey` changes
+ * (for example when a computer comes online); polls only after the person opens
+ * the store, stops once linked, after a bounded time, or when the inventory is
+ * not available to them.
  */
-function useAttachedChrome(workspaceId: string, enrollmentId: string | null): ChromeState {
+export function useAttachedChrome(
+  workspaceId: string,
+  scope: AttachedChromeScope,
+  refreshKey: string | null = null,
+): ChromeState {
   const { client } = useAppContext();
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
   const [connected, setConnected] = useState<{ name: string } | null>(null);
+  const [checked, setChecked] = useState(false);
   const [watchSince, setWatchSince] = useState<number | null>(null);
+  const [refreshSince, setRefreshSince] = useState<number | null>(null);
+  const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
   const linked = connected !== null;
+  const enrollmentId = scope === null ? null : scope === "any" ? "*" : scope.enrollmentId;
 
   useEffect(() => {
     setConnected(null);
+    setChecked(false);
     setDenied(false);
   }, [enrollmentId]);
+
+  useEffect(() => {
+    setRefreshSince(refreshKey === null ? null : Date.now());
+  }, [refreshKey]);
 
   useEffect(() => {
     if (!enrollmentId || denied) return;
@@ -527,9 +629,13 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
         const result = await clientRef.current.listAttachedBrowsers(workspaceId);
         if (cancelled) return;
         const device = result.devices.find(
-          (candidate) => candidate.state === "connected" && candidate.enrollmentId === enrollmentId,
+          (candidate) =>
+            candidate.state === "connected" &&
+            candidate.capabilities.debuggerAttachment &&
+            (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
         );
         setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
+        setChecked(true);
       } catch (failure) {
         // Without inventory access the step still offers the install link.
         if (
@@ -543,10 +649,17 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
       }
     };
     void read();
-    if (linked || watchSince === null) return () => void (cancelled = true);
+    if (linked || (watchSince === null && refreshSince === null)) {
+      return () => void (cancelled = true);
+    }
     const timer = window.setInterval(() => {
-      if (Date.now() - watchSince > CHROME_POLL_LIMIT_MS) {
+      const now = Date.now();
+      const watching = watchSince !== null && now - watchSince <= CHROME_POLL_LIMIT_MS;
+      const refreshing =
+        refreshSince !== null && now - refreshSince <= CHROME_REFRESH_POLL_LIMIT_MS;
+      if (!watching && !refreshing) {
         window.clearInterval(timer);
+        if (watchSince !== null) setExpired(true);
         return;
       }
       if (document.visibilityState !== "hidden") void read();
@@ -555,10 +668,18 @@ function useAttachedChrome(workspaceId: string, enrollmentId: string | null): Ch
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [denied, enrollmentId, linked, watchSince, workspaceId]);
+  }, [denied, enrollmentId, linked, refreshSince, watchSince, workspaceId]);
 
-  const watch = useCallback(() => setWatchSince(Date.now()), []);
-  return { connected, watch };
+  const watch = useCallback(() => {
+    setExpired(false);
+    setWatchSince(Date.now());
+  }, []);
+  return {
+    connected,
+    checked,
+    watch,
+    watching: watchSince !== null && !linked && !expired && !denied,
+  };
 }
 
 /** How long to keep checking for the new consent, or a granted Mac permission. */
@@ -809,6 +930,12 @@ function ScreenControlStep({
 }
 
 function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName: string }) {
+  const { client } = useAppContext();
+  // The deployment's own extension when it ships one, else Opengeni Browser.
+  const extension = useClientConfigFlags(client).browserExtension ?? {
+    name: "Opengeni Browser",
+    installUrl: OPENGENI_BROWSER_EXTENSION_URL,
+  };
   return (
     <div data-slot="chrome-extension">
       <RowList label="Chrome" flush>
@@ -818,7 +945,7 @@ function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName:
           description={
             chrome.connected
               ? `${chrome.connected.name} on ${machineName}`
-              : `Add Opengeni Browser on ${machineName}`
+              : `Add ${extension.name} on ${machineName}`
           }
           control={
             chrome.connected ? (
@@ -829,7 +956,7 @@ function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName:
             ) : (
               <Button asChild size="sm" variant="outline" className="rounded-[10px]">
                 <a
-                  href={OPENGENI_BROWSER_EXTENSION_URL}
+                  href={extension.installUrl}
                   target="_blank"
                   rel="noreferrer"
                   onClick={chrome.watch}

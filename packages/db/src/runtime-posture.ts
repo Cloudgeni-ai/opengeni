@@ -291,6 +291,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
+  // Migration 0907: the invoker-rights trigger that keeps a workspace's own
+  // subscription connection serving only that workspace.
+  "guard_subscription_workspace_owner_reach()",
   // Migration 0716: the authority marker and compatibility guards, the
   // per-path source resolvers and the deferred compatibility check. The
   // triggers fire without the writing role holding EXECUTE.
@@ -1931,6 +1934,7 @@ export const FORCE_RLS_TABLES = [
   "session_human_input_requests",
   "session_list_snapshots",
   "session_mcp_servers",
+  "session_message_search_texts",
   "session_pending_tool_calls",
   "session_pins",
   "session_realtime_connections",
@@ -1971,6 +1975,7 @@ export const FORCE_RLS_TABLES = [
   "site_hostname_holds",
   "site_hostnames",
   "site_limit_profiles",
+  "site_opens",
   "site_platform_brake",
   "site_platform_storage",
   "site_platform_totals",
@@ -2273,6 +2278,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_data_workspace_validation_windows",
   "site_hostnames",
   "site_limit_profiles",
+  "site_opens",
   "site_platform_brake",
   "site_platform_storage",
   "site_platform_totals",
@@ -2394,6 +2400,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "plan_credit_periods",
   "preference_registry_events",
   "preference_registry_snapshots",
+  "session_message_search_texts",
   "session_tenancy_activations",
   "session_work_claims",
   "site_hostname_holds",

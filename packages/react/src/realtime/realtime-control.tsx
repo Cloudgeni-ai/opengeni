@@ -42,6 +42,7 @@ import {
   PickerNavRow,
 } from "../components/model-policy-picker";
 import { cn } from "../lib/cn";
+import { useComposerFooterSignal } from "../lib/composer-footer-signals";
 import type { PickerBillingClass as BillingClass } from "../model-policy";
 import {
   DropdownMenu,
@@ -496,6 +497,7 @@ export function RealtimeVoiceControl(props: {
   useEffect(() => {
     if (!startFailed) setFailureDismissed(false);
   }, [startFailed]);
+  useComposerFooterSignal("realtime-attention", startFailed && !failureDismissed);
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!startFailed) return;

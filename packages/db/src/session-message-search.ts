@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, sql, type SQL } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import type {
   SessionMessageSearchRequest,
@@ -35,6 +35,25 @@ const Cursor = z
   })
   .strict();
 type Position = z.infer<typeof Position>;
+type CandidateRow = {
+  visited: number;
+  lastSessionId: string | null;
+  lastSequence: number | null;
+  rank: number | null;
+  sessionId: string | null;
+  eventId: string | null;
+  sequence: number | null;
+  turnId: string | null;
+  type: "user.message" | "agent.message.completed" | null;
+  sessionTitle: string | null;
+  messageId: unknown;
+  codec: number | null;
+  smallText: unknown;
+};
+
+/** Eligible messages one search statement reads, in key order. Small enough
+ * that a cold window stays far below the request's statement timeout. */
+export const SESSION_MESSAGE_SEARCH_WINDOW = 2_000;
 
 export class SessionMessageSearchCursorError extends Error {
   constructor() {
@@ -48,6 +67,82 @@ export class SessionMessageSearchCursorError extends Error {
  */
 export function sessionMessageLiteralPattern(query: string): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
+}
+
+// Highest code point with a Unicode case mapping (Adlam ends at U+1E943).
+const LAST_CASED_CODE_POINT = 0x1ffff;
+let caseClasses: ReadonlyMap<number, readonly number[]> | undefined;
+
+/** Every code point that `sessionMessageLiteralPattern` treats as the same
+ * character, keyed by each member. Characters absent from the map only match
+ * themselves. Built once from the runtime's own case mappings and verified
+ * against its `iu` matching, so the database filter agrees with the exact
+ * JavaScript matcher (including K/k/U+212A, s/S/U+017F and the Greek sigmas).
+ */
+export function sessionMessageCaseClasses(): ReadonlyMap<number, readonly number[]> {
+  if (caseClasses) return caseClasses;
+  const edges = new Map<number, Set<number>>();
+  const link = (a: number, b: number) => {
+    let set = edges.get(a);
+    if (!set) edges.set(a, (set = new Set()));
+    set.add(b);
+  };
+  for (let cp = 0; cp <= LAST_CASED_CODE_POINT; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const char = String.fromCodePoint(cp);
+    for (const mapped of [char.toLowerCase(), char.toUpperCase()]) {
+      if (mapped === char) continue;
+      const target = mapped.codePointAt(0)!;
+      if (String.fromCodePoint(target) !== mapped) continue;
+      if (!sessionMessageLiteralPattern(char).test(mapped)) continue;
+      link(cp, target);
+      link(target, cp);
+    }
+  }
+  const classes = new Map<number, readonly number[]>();
+  for (const start of edges.keys()) {
+    if (classes.has(start)) continue;
+    const members = new Set([start]);
+    for (const member of members) for (const next of edges.get(member) ?? []) members.add(next);
+    const sorted = [...members].sort((a, b) => a - b);
+    for (const member of sorted) classes.set(member, sorted);
+  }
+  return (caseClasses = classes);
+}
+
+/** A PostgreSQL advanced regular expression matching exactly the strings that
+ * contain `query` under `sessionMessageLiteralPattern`. Every character is a
+ * \u/\U escape, so no character is special and the database collation plays
+ * no part. Null when the query holds a character PostgreSQL text cannot store
+ * (NUL or a lone surrogate): only losslessly encoded text can contain it.
+ */
+export function sessionMessagePostgresPattern(query: string): string | null {
+  const escape = (cp: number) =>
+    cp <= 0xffff
+      ? `\\u${cp.toString(16).padStart(4, "0")}`
+      : `\\U${cp.toString(16).padStart(8, "0")}`;
+  let pattern = "";
+  for (const char of query) {
+    const cp = char.codePointAt(0)!;
+    if (cp === 0 || (cp >= 0xd800 && cp <= 0xdfff)) return null;
+    const members = sessionMessageCaseClasses().get(cp);
+    pattern += members ? `[${members.map(escape).join("")}]` : escape(cp);
+  }
+  return pattern;
+}
+
+/** Database tests over stored message text: `matched` is exact for ordinary
+ * text; `encoded` marks losslessly encoded strings, which only the decoding
+ * reader can inspect and so always remain candidates. */
+export function sessionMessageTextMatchSql(
+  query: string,
+  text: SQL,
+): { matched: SQL; encoded: SQL } {
+  const pattern = sessionMessagePostgresPattern(query);
+  return {
+    matched: pattern === null ? sql`false` : sql`(${text} ~ ${pattern})`,
+    encoded: sql`(left(${text}, ${LOSSLESS_JSON_STRING_PREFIX.length}) = ${LOSSLESS_JSON_STRING_PREFIX})`,
+  };
 }
 
 export function sessionMessageSearchSnippet(text: string, start: number, length: number) {
@@ -76,7 +171,6 @@ export async function scanSessionMessages(
   signal?: AbortSignal,
 ): Promise<SessionMessageSearchResponse> {
   signal?.throwIfAborted();
-  const started = performance.now();
   const binding = createHash("sha256")
     .update(
       JSON.stringify([
@@ -118,15 +212,41 @@ export async function scanSessionMessages(
   const matches: SessionMessageSearchMatch[] = [];
   let exhausted = false;
   const e = schema.sessionEvents;
-  // One bounded batch for ordinary complete messages. Large scalar continuations
-  // alone use the existing lossless slice reader. There is no per-message SQL
-  // round trip for the common small-message/no-hit path.
-  {
+  const c = schema.sessionMessageSearchTexts;
+  // Candidates come from session_message_search_texts. Under row-level
+  // security PostgreSQL only uses an index for a leakproof qualifier or one
+  // that belongs to the row-security policy, and no text pattern operator is
+  // leakproof, so the pattern is that table's restrictive policy: set here,
+  // transaction-locally, it lets the trigram index find exactly the messages
+  // whose text can contain the literal (plus losslessly encoded text, which
+  // only the decoding reader can test). A query PostgreSQL text cannot hold
+  // (NUL or a lone surrogate) leaves the pattern empty: only encoded text.
+  await db.execute(
+    sql`select pg_catalog.set_config('opengeni.session_message_search_pattern', ${
+      sessionMessagePostgresPattern(request.query) ?? ""
+    }, true)`,
+  );
+  // Bounded candidate windows in key order. Each statement reads at most
+  // SESSION_MESSAGE_SEARCH_WINDOW eligible candidates, each joined to its
+  // canonical event under that table's own policies and the list filters;
+  // later windows run while the request budget lasts. Large scalar
+  // continuations alone use the lossless slice reader.
+  const limit = request.limit ?? 20;
+  const budgetStarted = performance.now();
+  let slots = 0;
+  for (;;) {
+    signal?.throwIfAborted();
     const boundary = position
       ? position.skipSession
-        ? sql`${e.sessionId} > ${position.sessionId}::uuid`
-        : sql`(${e.sessionId} > ${position.sessionId}::uuid or (${e.sessionId} = ${position.sessionId}::uuid and ${position.done ? sql`${e.sequence} > ${position.sequence}` : sql`${e.sequence} >= ${position.sequence}`}))`
+        ? sql`${c.sessionId} > ${position.sessionId}::uuid`
+        : sql`(${c.sessionId}, ${c.sequence}) ${position.done ? sql`>` : sql`>=`} (${position.sessionId}::uuid, ${position.sequence}::int)`
       : sql`true`;
+    // One statement checks the next window's text in PostgreSQL and returns
+    // only the first candidates that contain the literal. The cheap
+    // list/visibility predicates and the text test run once per message; the
+    // correlated canonical-copy and unclaimed-prompt checks run only for
+    // candidates, lazily in key order, until the batch is full.
+    //
     // Correlate the exact durable message identity, not turn status or latest
     // model context. The latest full completion for a provider message wins,
     // so an earlier shorter completion cannot hide later retained text. Same-
@@ -135,37 +255,69 @@ export async function scanSessionMessages(
     // Suppression requires the competing copy to retain searchable string text
     // itself: a later text-less completion (failed/empty retry sharing the
     // provider message id) must never hide the earlier complete text.
-    const identities = await db
-      .select({
-        sessionId: e.sessionId,
-        eventId: e.id,
-        sequence: e.sequence,
-        turnId: e.turnId,
-        type: sql<"user.message" | "agent.message.completed">`${e.type}`,
-        sessionTitle: sql<
-          string | null
-        >`case when octet_length(${schema.sessions.title}) <= 2048 then ${schema.sessions.title} else null end`,
-        messageId: sql<unknown>`case when octet_length((${e.payload}->'messageId')::text) <= 2048 then ${e.payload}->'messageId' else null end`,
-        codec: e.payloadCodecVersion,
-        smallText: sql<unknown>`case when octet_length(${e.payload}->>'text') <= 8192 then ${e.payload}->'text' else null end`,
-      })
-      .from(e)
-      .innerJoin(
-        schema.sessions,
-        and(eq(schema.sessions.workspaceId, e.workspaceId), eq(schema.sessions.id, e.sessionId)),
-      )
-      .where(
-        and(
+    const textMatch = sessionMessageTextMatchSql(request.query, sql`${e.payload}->>'text'`);
+    const rows: CandidateRow[] = await db.execute<CandidateRow>(sql`
+      with eligible as materialized (
+        select ${e.id} as id, ${e.sessionId} as session_id, ${e.sequence} as sequence,
+          ${textMatch.matched} as matched, ${textMatch.encoded} as encoded
+        from ${c}
+        inner join ${e} on ${e.workspaceId} = ${c.workspaceId}
+          and ${e.sessionId} = ${c.sessionId} and ${e.sequence} = ${c.sequence}
+        inner join ${schema.sessions}
+          on ${schema.sessions.workspaceId} = ${e.workspaceId} and ${schema.sessions.id} = ${e.sessionId}
+        where ${and(
+          eq(c.workspaceId, workspaceId),
           eq(e.workspaceId, workspaceId),
           ...filters,
           boundary,
-          request.sessionId ? eq(e.sessionId, request.sessionId) : sql`true`,
+          request.sessionId ? eq(c.sessionId, request.sessionId) : sql`true`,
           sql`${e.type} in ('user.message', 'agent.message.completed')`,
           sql`(${e.turnAssociation} is null or ${e.turnAssociation} = 'current')`,
           sql`${e.duplicateOfEventId} is null`,
           sql`jsonb_typeof(${e.payload}->'text') = 'string'`,
-          excludeUnclaimedHumanPromptEventFilter(workspaceId),
-          sql`(${e.type} <> 'agent.message.completed' or not exists (
+        )}
+        order by ${c.sessionId}, ${c.sequence}
+        limit ${sql.raw(String(SESSION_MESSAGE_SEARCH_WINDOW))}
+      ), visited as (
+        select count(*)::int as visited from eligible
+      ), last_visited as (
+        select eligible.session_id as "lastSessionId", eligible.sequence as "lastSequence"
+        from eligible
+        order by eligible.session_id desc, eligible.sequence desc
+        limit 1
+      )
+      select visited.visited, last_visited.*, candidate.*
+      from visited
+      left join last_visited on true
+      left join lateral (
+        select * from (
+          select valid.*${
+            request.groupBy === "session"
+              ? sql`, (count(*) filter (where valid.definite) over (partition by valid."sessionId"
+                  order by valid.sequence rows between unbounded preceding and 1 preceding))::int as earlier`
+              : sql``
+          }
+          from (
+        select ranked.rank, ranked.session_id as "sessionId", ${e.id} as "eventId",
+          ranked.sequence as sequence, ${e.turnId} as "turnId", ${e.type} as type,
+          ranked.matched and not ranked.encoded as definite,
+          case when octet_length(${schema.sessions.title}) <= 2048 then ${schema.sessions.title} else null end as "sessionTitle",
+          case when octet_length((${e.payload}->'messageId')::text) <= 2048 then ${e.payload}->'messageId' else null end as "messageId",
+          ${e.payloadCodecVersion} as codec,
+          case when octet_length(${e.payload}->>'text') <= 8192 then ${e.payload}->'text' else null end as "smallText"
+        from (
+          select eligible.id, eligible.session_id, eligible.sequence, eligible.matched, eligible.encoded,
+            (row_number() over (order by eligible.session_id, eligible.sequence))::int as rank
+          from eligible
+          order by eligible.session_id, eligible.sequence
+          offset 0
+        ) ranked
+        inner join ${e} on ${e.workspaceId} = ${workspaceId} and ${e.id} = ranked.id
+        inner join ${schema.sessions}
+          on ${schema.sessions.workspaceId} = ${e.workspaceId} and ${schema.sessions.id} = ${e.sessionId}
+        where (ranked.matched or ranked.encoded)
+          and ${excludeUnclaimedHumanPromptEventFilter(workspaceId)}
+          and (${e.type} <> 'agent.message.completed' or not exists (
         select 1 from ${schema.sessionEvents} other_message
         where other_message.workspace_id = ${workspaceId} and other_message.session_id = ${e.sessionId}
           and other_message.turn_id = ${e.turnId}
@@ -181,29 +333,60 @@ export async function scanSessionMessages(
               and other_message.sequence < ${e.sequence}
               and other_message.payload->'text' = ${e.payload}->'text'
               and (other_message.payload_codec_version is not distinct from ${e.payloadCodecVersion}
-                or left(${e.payload}->>'text', ${LOSSLESS_JSON_STRING_PREFIX.length}) <> ${LOSSLESS_JSON_STRING_PREFIX})))))`,
-        ),
-      )
-      .orderBy(asc(e.sessionId), asc(e.sequence))
-      .limit(33);
+                or left(${e.payload}->>'text', ${LOSSLESS_JSON_STRING_PREFIX.length}) <> ${LOSSLESS_JSON_STRING_PREFIX})))))
+        order by ranked.session_id, ranked.sequence
+        offset 0
+          ) valid
+        ) grouped
+        -- Grouping needs only each session's first certain hit. Encoded text
+        -- stays a candidate because only the decoding reader can confirm it.
+        where ${request.groupBy === "session" ? sql`grouped.earlier = 0` : sql`true`}
+        order by grouped."sessionId", grouped.sequence
+        limit 33
+      ) candidate on true
+      order by candidate.rank
+    `);
+    const visited = rows[0]?.visited ?? 0;
+    const lastSessionId = rows[0]?.lastSessionId ?? null;
+    const lastSequence = rows[0]?.lastSequence ?? null;
+    const identities = rows.flatMap((row: CandidateRow) =>
+      row.rank === null ||
+      row.sessionId === null ||
+      row.eventId === null ||
+      row.sequence === null ||
+      row.type === null
+        ? []
+        : [
+            {
+              ...row,
+              rank: row.rank,
+              sessionId: row.sessionId,
+              eventId: row.eventId,
+              sequence: row.sequence,
+              type: row.type,
+            },
+          ],
+    );
+    // The cursor's message being resumed mid-text is the first visited row
+    // again; it was already counted by the request that started it.
+    const visitedBefore = scanned - (position && !position.done ? 1 : 0);
     let identityIndex = 0;
-    for (let window = 0; window < 32 && matches.length < (request.limit ?? 20); window++) {
+    let interrupted = false;
+    for (; matches.length < limit; slots++) {
       signal?.throwIfAborted();
-      if (window > 0 && performance.now() - started >= 1_500) break;
-      const identity = identities[identityIndex];
-      if (!identity) {
-        // Grouping can drain a full candidate batch in fewer than 32 windows.
-        // A full batch is not proof that later sessions do not exist.
-        exhausted = identities.length < 33;
+      if (slots >= 32 || (slots > 0 && performance.now() - budgetStarted >= 1_500)) {
+        interrupted = true;
         break;
       }
+      const identity = identities[identityIndex];
+      if (!identity) break;
       const continuing =
         position &&
         !position.done &&
         position.sessionId === identity.sessionId &&
         position.sequence === identity.sequence;
       if (!continuing) {
-        scanned++;
+        scanned = visitedBefore + identity.rank;
         position = {
           sessionId: identity.sessionId,
           sequence: identity.sequence,
@@ -220,7 +403,7 @@ export async function scanSessionMessages(
       // Amortize full-source detoasting/codec validation over adjacent windows,
       // not a larger request budget. A four-window read consumes four of the
       // original 32 slots, even if a match/short source ends it early.
-      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - window);
+      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - slots);
       const slice =
         typeof smallText === "string"
           ? {
@@ -245,7 +428,7 @@ export async function scanSessionMessages(
               offset,
               scalarWindows,
             );
-      window += scalarWindows - 1;
+      slots += scalarWindows - 1;
       if (!slice || slice.omitted) {
         // Deletion/visibility changes never turn into a fabricated message.
         position = { ...position!, done: true };
@@ -255,7 +438,7 @@ export async function scanSessionMessages(
       pattern.lastIndex = Math.max(0, position!.minimumMatchOffset - utf16Offset);
       let found: RegExpExecArray | null;
       const messageId = fromPostgresLosslessJson(identity.messageId, identity.codec);
-      while (matches.length < (request.limit ?? 20) && (found = pattern.exec(slice.text))) {
+      while (matches.length < limit && (found = pattern.exec(slice.text))) {
         matches.push({
           sessionId: identity.sessionId,
           sessionTitle: identity.sessionTitle,
@@ -289,7 +472,7 @@ export async function scanSessionMessages(
         continue;
       }
       const units = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
-      if (matches.length >= (request.limit ?? 20)) {
+      if (matches.length >= limit) {
         if (
           offset + units >= slice.total &&
           position!.minimumMatchOffset >= utf16Offset + slice.text.length
@@ -325,7 +508,32 @@ export async function scanSessionMessages(
         done: false,
       };
     }
-    if (identityIndex >= identities.length && identities.length < 33) exhausted = true;
+    // Every candidate of a short final window is done: the search is complete.
+    const drained = identityIndex >= identities.length && identities.length < 33;
+    if (drained && (visited < SESSION_MESSAGE_SEARCH_WINDOW || lastSessionId === null)) {
+      scanned = visitedBefore + visited;
+      exhausted = true;
+      break;
+    }
+    if (matches.length >= limit || interrupted) break;
+    // The buffered candidates are done. A full candidate batch may leave later
+    // candidates in this window: the next statement resumes after the last.
+    if (drained && lastSessionId !== null && lastSequence !== null) {
+      scanned = visitedBefore + visited;
+      // Nothing else in this window contains the literal: resume after it.
+      // A session that already gave its grouped hit stays skipped.
+      if (!(position?.skipSession && position.sessionId === lastSessionId))
+        position = {
+          sessionId: lastSessionId,
+          sequence: lastSequence,
+          offset: 0,
+          utf16Offset: 0,
+          minimumMatchOffset: 0,
+          matched: false,
+          done: true,
+        };
+    }
+    if (performance.now() - budgetStarted >= 1_500) break;
   }
   signal?.throwIfAborted();
   return {
@@ -339,7 +547,14 @@ export async function scanSessionMessages(
       exhausted || !position
         ? null
         : Buffer.from(
-            JSON.stringify({ version: 1, binding, position, scanned, matched, occurrences }),
+            JSON.stringify({
+              version: 1,
+              binding,
+              position,
+              scanned,
+              matched,
+              occurrences,
+            }),
           ).toString("base64url"),
   };
 }

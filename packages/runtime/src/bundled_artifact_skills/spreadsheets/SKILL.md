@@ -41,8 +41,9 @@ unavailable or does not list that format, the file itself is the deliverable:
 1. Make or edit it in the sandbox with ordinary tools (`openpyxl` for a new
    workbook, the `csv` module for CSV). openpyxl drops charts and images when it
    saves an existing workbook, so for a sent workbook that has them, edit the
-   cell XML inside the .xlsx package directly. Install a missing package with
-   `pip install <package>` if needed.
+   cell XML inside the .xlsx package directly. Managed sandboxes already
+   include openpyxl, so do not check first; run `pip install <package>` only
+   if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.
@@ -50,6 +51,10 @@ unavailable or does not list that format, the file itself is the deliverable:
    and its link. If that tool is not loaded yet, load it with `tool_search` in
    the same batch as your first command. Do not also build a native artifact of
    the same content.
+
+If the person keeps working on that workbook in Excel, mention once that the
+Excel add-in lets you work in it live: `capability_authorization_request` with
+`api:excel-addin` shows its install card.
 
 ## Edit and verify
 

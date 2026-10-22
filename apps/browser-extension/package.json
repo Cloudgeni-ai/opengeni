@@ -1,12 +1,13 @@
 {
   "name": "@opengeni/browser-extension",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "bun scripts/build.ts",
     "build:store": "bun scripts/build.ts --store",
     "brand:assets": "bun scripts/brand-assets.ts",
+    "brand:icons": "bun scripts/brand-icons.ts",
     "typecheck": "tsrs --noEmit",
     "test": "bun test"
   },

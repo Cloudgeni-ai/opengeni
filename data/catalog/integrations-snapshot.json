@@ -14550,6 +14550,75 @@
         "reason": "mcp_sse",
         "httpStatus": 200
       }
+    },
+    {
+      "domain": "drivemcp.googleapis.com",
+      "name": "Google Drive",
+      "description": "Search, read, download, copy and upload Drive files through Google's MCP server, with Opengeni tools for file updates, moves, sharing and change-feed checkpoints. Recurring work uses ordinary agent schedules.",
+      "category": "productivity",
+      "featured": true,
+      "official": false,
+      "mcpUrl": "https://drivemcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file"
+      ],
+      "allowedTools": [
+        "copy_file",
+        "create_file",
+        "download_file_content",
+        "get_file_metadata",
+        "get_file_permissions",
+        "list_recent_files",
+        "read_file_content",
+        "search_files",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission",
+        "get_changes_start_token",
+        "list_changes"
+      ],
+      "requireApproval": [
+        "copy_file",
+        "create_file",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission"
+      ],
+      "connectionOwnership": "personal_only",
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Requires Google Workspace Developer Preview access, Drive API and Drive MCP API, and a registered AI-agent OAuth web client with approved drive.readonly and drive.file scopes. Writes are limited to files authorized for this app."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/drive/api/reference/mcp",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
+      "installUrl": "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
     }
   ],
   "skipped": [

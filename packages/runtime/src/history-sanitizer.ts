@@ -228,18 +228,14 @@ function analyzeHistoryProtocolItems<T extends HistoryItem>(
   if (dropped.size > 0) {
     // Rule 3: drop reasoning items stranded by a dropped tool call. A reasoning
     // item is stranded when the next non-reasoning item after it is dropped.
-    for (let index = 0; index < items.length; index += 1) {
-      if (dropped.has(index) || itemType(items[index]) !== "reasoning") {
-        continue;
-      }
-      for (let next = index + 1; next < items.length; next += 1) {
-        if (itemType(items[next]) === "reasoning") {
-          continue;
-        }
-        if (dropped.has(next)) {
-          dropped.add(index);
-        }
-        break;
+    // Walk backwards so each reasoning run shares its next non-reasoning
+    // item's decision instead of searching through the same run repeatedly.
+    let nextNonReasoningDropped = false;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (itemType(items[index]) === "reasoning") {
+        if (nextNonReasoningDropped) dropped.add(index);
+      } else {
+        nextNonReasoningDropped = dropped.has(index);
       }
     }
   }

@@ -86,18 +86,80 @@ for (const scope of ["workspace", "organization"] as const) {
     await render(state, () => {
       connected++;
     });
-    const disclosure = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-      button.textContent?.includes("Use a setup token"),
+    const method = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Setup token",
     )!;
-    await act(async () => disclosure.click());
+    await act(async () => method.click());
     await fill("Claude subscription setup token", "sk-ant-oat01-test");
     await submit();
     expect(tokens).toEqual(["sk-ant-oat01-test"]);
     expect(connected).toBe(1);
     expect(sessionStorage.getItem(key)).toBeNull();
     await remount({ ...state, connected: true });
-    expect(container.querySelector('input[aria-label="Claude authorization code"]')).toBeNull();
+    expect(
+      container.querySelector<HTMLInputElement>('input[aria-label="Claude authorization code"]')
+        ?.disabled,
+    ).toBe(true);
     expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Sign in to Claude");
+  });
+  test(`${scope}: explicit methods preserve the step and reset clears errors`, async () => {
+    sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));
+    const state = stateFor(
+      {
+        completeWorkspaceClaudeSubscriptionOAuth: async () => {
+          throw new Error("Copy the full code.");
+        },
+        completeOrganizationClaudeSubscriptionOAuth: async () => {
+          throw new Error("Copy the full code.");
+        },
+      },
+      async () => true,
+    );
+    await render(state);
+    const button = (text: string) =>
+      [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (b) => b.textContent === text,
+      )!;
+    expect(container.querySelector('[data-slot="disclosure"]')).toBeNull();
+    expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Complete sign-in");
+    await act(async () => button("Setup token").click());
+    expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Connect Claude");
+    await act(async () => button("Browser").click());
+    expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Complete sign-in");
+    await fill("Claude authorization code", "incorrect");
+    await submit();
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    await act(async () => button("Start again").click());
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Sign in to Claude");
+    expect(sessionStorage.getItem(key)).toBeNull();
+  });
+  test(`${scope}: an API error keeps its reference behind Technical details`, async () => {
+    sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));
+    const failure = async () => {
+      throw new OpenGeniApiError(422, "", {
+        code: "validation_error",
+        correlationId: "ref-1234",
+        displayMessage: "Copy the full authorization code from the Claude page.",
+      });
+    };
+    await render(
+      stateFor(
+        {
+          completeWorkspaceClaudeSubscriptionOAuth: failure,
+          completeOrganizationClaudeSubscriptionOAuth: failure,
+        },
+        async () => true,
+      ),
+    );
+    await fill("Claude authorization code", "incorrect");
+    await submit();
+    const alert = container.querySelector('[role="alert"]')!;
+    expect(alert.querySelector("p")?.textContent).toContain(
+      "Copy the full authorization code from the Claude page.",
+    );
+    expect(alert.querySelector("p")?.textContent).not.toContain("ref-1234");
+    expect(alert.textContent).toContain("Technical details");
   });
   test(`${scope}: late completion from an unmounted form preserves a newer attempt`, async () => {
     sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));

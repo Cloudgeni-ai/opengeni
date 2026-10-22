@@ -154,6 +154,13 @@ export interface ThisComputerDeps {
    * any other agent on the computer.
    */
   browserExtension?: boolean;
+  /**
+   * IDs of the app's own Chrome extensions (its branded build of the Opengeni
+   * Browser extension) that may reach this agent besides Opengeni Browser.
+   * Each is Chrome's 32-letter extension ID. Ignored when `browserExtension`
+   * is false.
+   */
+  browserExtensionIds?: readonly string[];
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
   /**
@@ -312,9 +319,14 @@ export class ThisComputer {
 
   constructor(private readonly deps: ThisComputerDeps) {
     this.installedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
+    const extensionIds = browserExtensionIdsEnv(deps.browserExtensionIds);
     this.agentEnv = {
       ...(deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {}),
-      ...(deps.browserExtension === false ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" } : {}),
+      ...(deps.browserExtension === false
+        ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" }
+        : extensionIds
+          ? { OPENGENI_AGENT_BROWSER_EXTENSION_IDS: extensionIds }
+          : {}),
     };
     this.statePath = join(deps.dataDir, "this-computer.json");
     this.state = this.loadState();
@@ -1402,6 +1414,23 @@ export class ThisComputer {
 }
 
 /** Some permission went from missing to granted between two readings. */
+const CHROME_EXTENSION_ID = /^[a-p]{32}$/u;
+
+/**
+ * The app's own extension IDs as the agent's comma-separated setting, or null
+ * for none. A malformed ID is a packaging mistake, so it fails at startup
+ * instead of leaving that extension silently unable to connect.
+ */
+export function browserExtensionIdsEnv(ids: readonly string[] | undefined): string | null {
+  if (!ids?.length) return null;
+  for (const id of ids) {
+    if (!CHROME_EXTENSION_ID.test(id)) {
+      throw new Error(`"${id}" is not a Chrome extension ID (32 letters from a to p).`);
+    }
+  }
+  return [...new Set(ids)].join(",");
+}
+
 export function newlyGranted(before: Permissions, after: Permissions): boolean {
   if (!before?.required || !after?.required) return false;
   return SCREEN_PERMISSIONS.some((id) => !before.granted[id] && after.granted[id]);

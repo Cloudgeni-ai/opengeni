@@ -1,5 +1,39 @@
 # @opengeni/tool-gateway
 
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.6.0
+- @opengeni/observability@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/observability@4.5.0
+
+## 4.4.1
+
+### Patch Changes
+
+- 47dbfdf: Accept the exact strings `true` and `false` where the tool schema needs a boolean, including inside `anyOf`/`oneOf` input alternatives. Any other string (`"1"`, `"True"`, `" true"`, `""`) is still rejected, and the repaired call must still pass the original schema.
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/observability@4.4.0
+
 ## 4.3.1
 
 ### Patch Changes

@@ -25,6 +25,11 @@ export type Chord = {
   only?: ActionSurface;
   /** Only on this platform. */
   platform?: ChordPlatform;
+  /**
+   * A text-formatting key (⌘B is bold): rich-text editors keep it, so the page
+   * handles it and the desktop menu bar never owns it.
+   */
+  formatting?: boolean;
 };
 
 export function currentPlatform(): ChordPlatform {
@@ -50,11 +55,19 @@ export function matchesChord(
   event: Pick<
     KeyboardEvent,
     "code" | "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "repeat" | "isComposing"
-  >,
+  > &
+    Partial<Pick<KeyboardEvent, "getModifierState">>,
   chord: Chord,
   platform: ChordPlatform,
 ): boolean {
   if (event.repeat || event.isComposing) return false;
+  // Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt chord would take a
+  // character someone is typing: AltGr+A is "ą" on Polish keyboards and AltGr+B
+  // is "{" on Czech and Hungarian ones. Windows apps cannot tell the two apart
+  // either, so on those layouts the character wins.
+  if (platform === "other" && chord.mod && chord.alt && event.getModifierState?.("AltGraph")) {
+    return false;
+  }
   if (event.code === chord.code) {
     if (Boolean(chord.shift) !== event.shiftKey) return false;
   } else {
@@ -109,6 +122,8 @@ const KEY_NAMES: Record<string, { mac: string; other: string; accelerator: strin
   Tab: { mac: "⇥", other: "Tab", accelerator: "Tab" },
   Space: { mac: "Space", other: "Space", accelerator: "Space" },
   Backspace: { mac: "⌫", other: "Backspace", accelerator: "Backspace" },
+  PageUp: { mac: "⇞", other: "PgUp", accelerator: "PageUp" },
+  PageDown: { mac: "⇟", other: "PgDn", accelerator: "PageDown" },
 };
 
 function keyName(code: string, platform: ChordPlatform | "accelerator"): string {

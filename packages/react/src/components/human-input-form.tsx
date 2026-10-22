@@ -30,6 +30,12 @@ import {
   type HumanInputAnswerDraft,
   type HumanInputFormMessages,
 } from "../human-input-model";
+import {
+  forgetHumanInputDraft,
+  readHumanInputDraft,
+  writeHumanInputDraft,
+  type HumanInputDraftScope,
+} from "../human-input-draft-store";
 import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
 import { linkifyText } from "./linkified-text";
 import { useOpenGeniText } from "../messages/runtime";
@@ -48,7 +54,18 @@ export type HumanInputFormProps = {
   loadSkillReview?:
     | ((reference: NonNullable<HumanInputQuestion["skillReview"]>) => Promise<SkillRecord>)
     | undefined;
-  request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt">;
+  /**
+   * With `workspaceId` and `sessionId` (as on a full pending request), unsent
+   * non-secret answers are kept per browser tab and restored when the card
+   * mounts again, e.g. after visiting Settings and coming back.
+   */
+  request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt"> &
+    Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status">>;
+  /**
+   * Resolve only once the response was accepted: the form then forgets the
+   * unsent draft and clears secret fields. Reject when sending failed so the
+   * card keeps what was typed for a retry.
+   */
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   submitting?: boolean | undefined;
   error?: string | null | undefined;
@@ -134,9 +151,36 @@ function HumanInputRequestForm({
   const formId = useId();
   const titleId = useId();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
-    initialDrafts(request.questions),
+  const draftScope = useMemo<HumanInputDraftScope | null>(
+    () =>
+      request.workspaceId && request.sessionId
+        ? { workspaceId: request.workspaceId, sessionId: request.sessionId, requestId: request.id }
+        : null,
+    [request.id, request.sessionId, request.workspaceId],
   );
+  const requestSettled = request.status !== undefined && request.status !== "pending";
+  const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() => ({
+    ...initialDrafts(request.questions),
+    ...(draftScope && !requestSettled ? readHumanInputDraft(draftScope, request) : null),
+  }));
+  // Once a response is accepted, nothing typed afterwards becomes a draft again.
+  const draftClosed = useRef(false);
+  // Mounting (or StrictMode's second mount) is not an edit: rewriting the
+  // restored draft would refresh its age and let it outlive a pending-list
+  // read that already settled it.
+  const mountedDrafts = useRef(drafts);
+  const questionsRef = useRef(request.questions);
+  questionsRef.current = request.questions;
+  useEffect(() => {
+    if (!draftScope) return;
+    if (requestSettled) {
+      draftClosed.current = true;
+      forgetHumanInputDraft(draftScope);
+      return;
+    }
+    if (draftClosed.current || drafts === mountedDrafts.current) return;
+    writeHumanInputDraft(draftScope, questionsRef.current, drafts);
+  }, [draftScope, drafts, requestSettled]);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [submittingInternally, setSubmittingInternally] = useState(false);
@@ -353,6 +397,10 @@ function HumanInputRequestForm({
     setSubmittingInternally(true);
     try {
       await onSubmit(response);
+      if (draftScope) {
+        draftClosed.current = true;
+        forgetHumanInputDraft(draftScope);
+      }
       return true;
     } catch (cause) {
       if (generation === submissionGeneration.current) {

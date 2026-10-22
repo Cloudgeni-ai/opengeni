@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import {
+  EXCEL_ADDIN_CAPABILITY_ID,
+  excelAddinCatalogItem,
+  searchCapabilityCatalogItems,
+} from "@opengeni/core";
 import type { OpStreamConnection } from "@opengeni/events";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { chooseWorkbook, excelAddinInstallUrl } from "../src/mcp/excel-tools";
+import { chooseWorkbook, excelAddin } from "../src/mcp/excel-tools";
 import {
   clampTimeout,
   mintOfficeWorkbookTicket,
@@ -9,10 +14,18 @@ import {
   OfficeWorkbookRelay,
   verifyOfficeWorkbookTicket,
   type OfficeWorkbook,
+  type OfficeWorkbookOwner,
 } from "../src/office-workbooks";
 
 const SECRET = "test-office-ticket-secret";
 const DECODE = new TextDecoder();
+const WS1 = "11111111-1111-4111-8111-111111111111";
+const WS2 = "22222222-2222-4222-8222-222222222222";
+const A: OfficeWorkbookOwner = { subjectId: "user:a", workspaceId: WS1 };
+const B: OfficeWorkbookOwner = { subjectId: "user:b", workspaceId: WS1 };
+/** The same person (or one service identity acting for many) in another workspace. */
+const A2: OfficeWorkbookOwner = { subjectId: "user:a", workspaceId: WS2 };
+const ADDIN = { name: "Opengeni", installUrl: null };
 
 /** A minimal NATS core pub/sub shared by every relay in a test. */
 class FakeOpStream implements OpStreamConnection {
@@ -91,30 +104,30 @@ function fakeAddin(
   return { sent, closed };
 }
 
-function hello(connection: OfficeWorkbookConnection, subjectId: string, name: string) {
+function hello(connection: OfficeWorkbookConnection, owner: OfficeWorkbookOwner, name: string) {
   connection.receive(
     JSON.stringify({
       type: "hello",
-      ticket: mintOfficeWorkbookTicket(SECRET, subjectId).ticket,
+      ticket: mintOfficeWorkbookTicket(SECRET, owner).ticket,
       workbook: { name, app: "Excel on the web", version: "16.0", excelApi: "1.17" },
     }),
   );
 }
 
 describe("office workbook tickets", () => {
-  test("a minted ticket names its subject until it expires", () => {
+  test("a minted ticket names its owner until it expires", () => {
     const now = Date.parse("2026-10-20T12:00:00Z");
-    const { ticket, expiresAt } = mintOfficeWorkbookTicket(SECRET, "user:a", now);
-    expect(verifyOfficeWorkbookTicket(SECRET, ticket, now + 1_000)).toBe("user:a");
+    const { ticket, expiresAt } = mintOfficeWorkbookTicket(SECRET, A, now);
+    expect(verifyOfficeWorkbookTicket(SECRET, ticket, now + 1_000)).toEqual(A);
     expect(Date.parse(expiresAt)).toBe(now + 120_000);
     expect(verifyOfficeWorkbookTicket(SECRET, ticket, now + 120_000)).toBeNull();
   });
 
   test("forged, re-signed or malformed tickets are refused", () => {
-    const { ticket } = mintOfficeWorkbookTicket(SECRET, "user:a");
+    const { ticket } = mintOfficeWorkbookTicket(SECRET, A);
     const [body, signature] = ticket.split(".");
     const forgedBody = Buffer.from(
-      JSON.stringify({ v: 1, sub: "user:b", exp: Date.now() + 60_000, n: "x" }),
+      JSON.stringify({ v: 2, sub: "user:a", ws: WS2, exp: Date.now() + 60_000, n: "x" }),
     ).toString("base64url");
     expect(verifyOfficeWorkbookTicket(SECRET, `${forgedBody}.${signature}`)).toBeNull();
     expect(verifyOfficeWorkbookTicket("other-secret", ticket)).toBeNull();
@@ -136,21 +149,26 @@ describe("office workbook relay", () => {
       logs: ["hi"],
       durationMs: 12,
     }));
-    hello(connection, "user:a", "Budget.xlsx");
+    hello(connection, A, "Budget.xlsx");
     expect(addin.sent[0]).toEqual({ type: "ready", connectionId: connection.id });
 
-    const workbooks = await relay.list("user:a");
+    const workbooks = await relay.list(A);
     expect(workbooks.map((each) => each.name)).toEqual(["Budget.xlsx"]);
-    expect(await relay.list("user:b")).toEqual([]);
+    expect(await relay.list(B)).toEqual([]);
+    expect(await relay.list(A2)).toEqual([]);
 
-    expect(await relay.run("user:a", connection.id, "return 1", 5_000)).toEqual({
+    expect(await relay.run(A, connection.id, "return 1", 5_000)).toEqual({
       kind: "ok",
       value: { echoed: "return 1" },
       logs: ["hi"],
       durationMs: 12,
     });
     // Another person cannot reach it even with its id.
-    expect(await relay.run("user:b", connection.id, "return 1", 5_000)).toEqual({
+    expect(await relay.run(B, connection.id, "return 1", 5_000)).toEqual({
+      kind: "disconnected",
+    });
+    // Nor can the same identity from another workspace.
+    expect(await relay.run(A2, connection.id, "return 1", 5_000)).toEqual({
       kind: "disconnected",
     });
   });
@@ -172,8 +190,8 @@ describe("office workbook relay", () => {
       logs: [],
       durationMs: 40,
     }));
-    hello(connection, "user:a", "Budget.xlsx");
-    const outcome = await relay.run("user:a", connection.id, "x", 5_000);
+    hello(connection, A, "Budget.xlsx");
+    const outcome = await relay.run(A, connection.id, "x", 5_000);
     expect(outcome).toMatchObject({
       kind: "error",
       error: { code: "ItemNotFound", location: "Workbook.worksheets.getItem" },
@@ -184,12 +202,12 @@ describe("office workbook relay", () => {
     const relay = new OfficeWorkbookRelay(new MemoryEventBus(), SECRET);
     const connection = new OfficeWorkbookConnection(relay);
     fakeAddin(connection, () => null);
-    hello(connection, "user:a", "Budget.xlsx");
-    const running = relay.run("user:a", connection.id, "await never()", 5_000);
+    hello(connection, A, "Budget.xlsx");
+    const running = relay.run(A, connection.id, "await never()", 5_000);
     connection.transportClosed();
     expect(await running).toMatchObject({ kind: "unknown" });
-    expect(await relay.list("user:a")).toEqual([]);
-    expect(await relay.run("user:a", connection.id, "return 1", 5_000)).toEqual({
+    expect(await relay.list(A)).toEqual([]);
+    expect(await relay.run(A, connection.id, "return 1", 5_000)).toEqual({
       kind: "disconnected",
     });
   });
@@ -198,7 +216,7 @@ describe("office workbook relay", () => {
     const relay = new OfficeWorkbookRelay(new MemoryEventBus(), SECRET);
     const connection = new OfficeWorkbookConnection(relay);
     fakeAddin(connection, () => null);
-    hello(connection, "user:a", "Budget.xlsx");
+    hello(connection, A, "Budget.xlsx");
     expect(await connection.run("x", 20)).toMatchObject({ kind: "unknown" });
   });
 
@@ -224,23 +242,27 @@ describe("office workbook relay", () => {
     const other = new OfficeWorkbookRelay(bus, SECRET, { presenceWindowMs: 20 });
     const connection = new OfficeWorkbookConnection(holder);
     fakeAddin(connection, (frame) => ({ type: "result", id: frame.id, ok: true, value: 7 }));
-    hello(connection, "user:a", "Budget.xlsx");
+    hello(connection, A, "Budget.xlsx");
 
-    const listed = await other.list("user:a");
+    const listed = await other.list(A);
     expect(listed.map((each) => each.id)).toEqual([connection.id]);
-    expect(await other.list("user:b")).toEqual([]);
-    expect(await other.run("user:a", connection.id, "return 7", 5_000)).toMatchObject({
+    expect(await other.list(B)).toEqual([]);
+    expect(await other.run(A, connection.id, "return 7", 5_000)).toMatchObject({
       kind: "ok",
       value: 7,
     });
-    expect(await other.run("user:b", connection.id, "return 7", 5_000)).toEqual({
+    expect(await other.run(B, connection.id, "return 7", 5_000)).toEqual({
+      kind: "disconnected",
+    });
+    expect(await other.list(A2)).toEqual([]);
+    expect(await other.run(A2, connection.id, "return 7", 5_000)).toEqual({
       kind: "disconnected",
     });
     connection.transportClosed();
-    expect(await other.run("user:a", connection.id, "return 7", 5_000)).toEqual({
+    expect(await other.run(A, connection.id, "return 7", 5_000)).toEqual({
       kind: "disconnected",
     });
-    expect(await other.list("user:a")).toEqual([]);
+    expect(await other.list(A)).toEqual([]);
   });
 
   test("clamps run timeouts", () => {
@@ -261,43 +283,84 @@ describe("chooseWorkbook", () => {
   });
 
   test("needs a connected workbook", () => {
-    expect(chooseWorkbook([], undefined)).toMatchObject({
+    expect(chooseWorkbook([], undefined, ADDIN)).toMatchObject({
       error: expect.stringContaining("No Excel workbook is connected"),
     });
   });
 
-  test("links the add-in install page when no workbook is connected", () => {
-    const result = chooseWorkbook([], undefined, excelAddinInstallUrl("https://app.example/"));
+  test("names the add-in and links its install page when no workbook is connected", () => {
+    const result = chooseWorkbook(
+      [],
+      undefined,
+      excelAddin({ webBaseUrl: "https://app.example/" }),
+    );
     const error = "error" in result ? result.error : "";
+    expect(error).toContain("open the Opengeni add-in");
     expect(error).toContain("give them this link");
     expect(error.endsWith(" https://app.example/excel")).toBe(true);
-    expect(excelAddinInstallUrl(null)).toBeNull();
+    expect(excelAddin({}).installUrl).toBeNull();
+  });
+
+  test("a product's own add-in is named and linked instead", () => {
+    const addin = excelAddin({
+      officeAddinName: "Acme",
+      officeAddinInstallUrl: "https://acme.example/excel-help",
+      webBaseUrl: "https://app.example",
+    });
+    expect(addin).toEqual({ name: "Acme", installUrl: "https://acme.example/excel-help" });
+    const result = chooseWorkbook([], undefined, addin);
+    const error = "error" in result ? result.error : "";
+    expect(error).toContain("open the Acme add-in (Home > Add-ins > Acme)");
+    expect(error).not.toContain("Opengeni");
+    expect(error.endsWith(" https://acme.example/excel-help")).toBe(true);
+  });
+
+  test("the catalog tile names the product's add-in, links its install page and is found by spreadsheet searches", () => {
+    const item = excelAddinCatalogItem(
+      excelAddin({ officeAddinName: "Acme", officeAddinInstallUrl: "https://acme.example/excel" }),
+    );
+    expect(item).toMatchObject({
+      id: EXCEL_ADDIN_CAPABILITY_ID,
+      kind: "api",
+      surfaceType: "first_party_excel_addin",
+      enabled: false,
+      runtime: { available: true },
+      metadata: { addinName: "Acme", installUrl: "https://acme.example/excel" },
+    });
+    expect(item.description).toContain("Acme add-in");
+    expect(item.description).not.toContain("Opengeni");
+    for (const query of ["excel", "spreadsheet", "xlsx", "Excel add-in"]) {
+      expect(searchCapabilityCatalogItems([item], query, 5).map((each) => each.item.id)).toEqual([
+        EXCEL_ADDIN_CAPABILITY_ID,
+      ]);
+    }
+    expect(excelAddinCatalogItem(excelAddin({})).runtime.available).toBe(false);
   });
 
   test("uses the only open workbook when none is named", () => {
-    expect(chooseWorkbook([book("a", "Budget.xlsx")], undefined)).toEqual({
+    expect(chooseWorkbook([book("a", "Budget.xlsx")], undefined, ADDIN)).toEqual({
       workbook: book("a", "Budget.xlsx"),
     });
   });
 
   test("asks which one when several are open", () => {
-    const result = chooseWorkbook([book("a", "Budget.xlsx"), book("b", "Sales.xlsx")], " ");
+    const result = chooseWorkbook([book("a", "Budget.xlsx"), book("b", "Sales.xlsx")], " ", ADDIN);
     expect(result).toMatchObject({ error: expect.stringContaining('"Sales.xlsx" (id b') });
   });
 
   test("matches by id, by name and by name without its extension", () => {
     const books = [book("a", "Budget.xlsx"), book("b", "Sales.xlsx")];
-    expect(chooseWorkbook(books, "b")).toEqual({ workbook: books[1]! });
-    expect(chooseWorkbook(books, "budget.XLSX")).toEqual({ workbook: books[0]! });
-    expect(chooseWorkbook(books, "sales")).toEqual({ workbook: books[1]! });
-    expect(chooseWorkbook(books, "Forecast")).toMatchObject({
+    expect(chooseWorkbook(books, "b", ADDIN)).toEqual({ workbook: books[1]! });
+    expect(chooseWorkbook(books, "budget.XLSX", ADDIN)).toEqual({ workbook: books[0]! });
+    expect(chooseWorkbook(books, "sales", ADDIN)).toEqual({ workbook: books[1]! });
+    expect(chooseWorkbook(books, "Forecast", ADDIN)).toMatchObject({
       error: expect.stringContaining('No open workbook matches "Forecast"'),
     });
   });
 
   test("asks for the id when two open workbooks share a name", () => {
     const books = [book("a", "Book 1"), book("b", "Book 1")];
-    expect(chooseWorkbook(books, "Book 1")).toMatchObject({
+    expect(chooseWorkbook(books, "Book 1", ADDIN)).toMatchObject({
       error: expect.stringContaining("pass its id"),
     });
   });

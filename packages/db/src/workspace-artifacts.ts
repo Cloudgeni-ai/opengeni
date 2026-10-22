@@ -11,7 +11,7 @@ import { parseVerifiedAttemptToolCatalog } from "@opengeni/codemode";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import { isDeepStrictEqual } from "node:util";
 import type { Database } from "./database";
-import { withRlsContext, withWorkspaceRls } from "./database";
+import { withRlsContext, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
 import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
@@ -183,6 +183,50 @@ type ArtifactMutationToolName =
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
+}
+
+/**
+ * Records that a person opened a Site in the console, for the order of their
+ * own Site rows. Only a Site this viewer can see is recorded; the row grants
+ * nothing. Repeated opens only move the time forward.
+ */
+export async function recordSiteOpened(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    viewer: WorkspaceArtifactViewer;
+    siteId: string;
+  },
+): Promise<{ openedAt: string }> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
+    const [site] = await scoped
+      .select({ accountId: schema.workspaceArtifacts.accountId })
+      .from(schema.workspaceArtifacts)
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, input.workspaceId),
+          eq(schema.workspaceArtifacts.id, input.siteId),
+          visibleTo(input.viewer),
+        ),
+      )
+      .limit(1);
+    if (!site) throw new WorkspaceArtifactNotFoundError("Site not found");
+    const [row] = await scoped
+      .insert(schema.siteOpens)
+      .values({
+        accountId: site.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        siteId: input.siteId,
+      })
+      .onConflictDoUpdate({
+        target: [schema.siteOpens.workspaceId, schema.siteOpens.subjectId, schema.siteOpens.siteId],
+        set: { openedAt: sql`greatest(${schema.siteOpens.openedAt}, now())` },
+      })
+      .returning({ openedAt: schema.siteOpens.openedAt });
+    return { openedAt: row!.openedAt.toISOString() };
+  });
 }
 
 export class WorkspaceArtifactConflictError extends Error {

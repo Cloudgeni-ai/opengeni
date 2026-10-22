@@ -1193,103 +1193,86 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([hostedGrant]);
   });
 
-  test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {
-    const drive = googleDriveConnection();
-    const delegation = googleDrivePublicationDelegationFromVisibleConnections({
-      subjectId: "user:owner",
-      connections: [drive],
+  test("an explicit retired publication selection is rejected before reading credentials", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: {} as Parameters<typeof freezePersonalConnectionDelegations>[0]["db"],
+        workspaceId: "workspace-1",
+        settings: { mcpServers: [] },
+        tools: [],
+        source: { kind: "subject", subjectId: "user:owner", accountId: "account-1" },
+        googleDrivePublicationEnabled: true,
+        authoritySelections: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      diagnostic: {
+        reason: "selected_account_unavailable",
+        accounts: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+            reason: "connector_unavailable",
+          },
+        ],
+      },
     });
-    expect(delegation).toEqual({
+  });
+
+  test("native Drive publication never grants fresh or inherited authority", () => {
+    const drive = googleDriveConnection();
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [drive],
+      }),
+    ).toBeNull();
+    expect(
+      googleDrivePublicationDelegationFromVisibleConnections({
+        subjectId: "user:owner",
+        connections: [googleDriveConnection(), drive],
+        authoritySelection: {
+          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+          connectionId: drive.id,
+        },
+      }),
+    ).toBeNull();
+    const historical: McpPersonalConnectionDelegation = {
       serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
       connectionId: drive.id,
       originWorkspaceId: drive.workspaceId,
       ownerSubjectId: "user:owner",
       providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
       kind: "oauth2",
-      // The exact destination frozen at acceptance: a later
-      // connection-settings change can never redirect an already-accepted
-      // turn's publication.
-      outputDestination: {
-        folderId: "folder-1",
-        folderName: "Published",
-        driveId: null,
-        location: "my_drive",
-        selectedAt: "2026-08-14T00:00:00.000Z",
-      },
-    });
-    const inherited = personalConnectionDelegationsFromParent({
-      servers: [],
-      parentDelegations: [delegation!],
-    });
-    expect(inherited).toEqual([delegation]);
-    const received: ResolveConnectionCredentialInput[] = [];
-    const resolver = withFrozenPersonalConnectionDelegations({
-      settings: { mcpServers: [] },
-      personalConnectionDelegations: inherited,
-      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
-      resolveCredential: async (input) => {
-        received.push(input);
-        return {
-          status: "ok",
-          headers: { authorization: "Bearer exact-frozen-drive" },
-          connectionId: input.connectionRef.connectionId!,
-        };
-      },
-    });
-    await resolver({
-      workspaceId: drive.workspaceId,
-      subjectId: "worker:first-party-mcp",
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      toolName: "google_drive_publish_file",
-      destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
+    };
+    const officialServer = {
+      ...personalServer,
+      id: "google-drive",
+      url: "https://drivemcp.googleapis.com/mcp/v1",
       connectionRef: {
-        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-        kind: "oauth2",
-        subjectScope: "subject",
-        scopes: [GOOGLE_DRIVE_FILE_SCOPE],
+        ...personalServer.connectionRef,
+        providerDomain: "drivemcp.googleapis.com",
       },
-    });
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({
-      subjectId: "user:owner",
-      connectionRef: { connectionId: drive.id },
-    });
-  });
-
-  test("fails closed when Google Drive publication authority is missing or ambiguous", () => {
+    };
+    const official: McpPersonalConnectionDelegation = {
+      ...historical,
+      serverId: officialServer.id,
+      connectionId: crypto.randomUUID(),
+      providerDomain: "drivemcp.googleapis.com",
+    };
+    const parentDelegations = [historical, official];
     expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [
-          googleDriveConnection({ grantedScopes: [] }),
-          googleDriveConnection({ subjectId: "user:other" }),
-        ],
+      personalConnectionDelegationsFromParent({
+        servers: [officialServer],
+        parentDelegations,
       }),
-    ).toBeNull();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [googleDriveConnection(), googleDriveConnection()],
-      }),
-    ).toBeNull();
-    const selected = googleDriveConnection();
-    const other = googleDriveConnection();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [selected],
-      }),
-    ).toMatchObject({ connectionId: selected.id, originWorkspaceId: selected.workspaceId });
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [other, selected],
-        authoritySelection: {
-          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-          connectionId: selected.id,
-        },
-      }),
-    ).toMatchObject({ connectionId: selected.id });
+    ).toEqual([official]);
+    // Retirement filters new authority without rewriting historical receipts.
+    expect(parentDelegations).toEqual([historical, official]);
   });
 
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {

@@ -24,8 +24,6 @@ export type Rotation =
 export type SubscriptionSettings = {
   /** Per provider; a provider without an entry spreads work. */
   rotation: Record<ProviderId, Rotation>;
-  /** `automatic` admits both classified shared pools; missing entries retain legacy behavior. */
-  inferenceSource?: Record<ProviderId, "automatic" | "workspace" | "organization">;
   crossProviderFailover: boolean;
   /** Ordered fallback models for a preferred model, possibly on other providers. */
   fallbackOrder: Record<ModelId, ModelId[]>;
@@ -59,14 +57,6 @@ export type Connection = {
   entitledModels: readonly ModelId[];
   /** Administrator access policy on the connection; null or absent allows every entitled model. */
   allowedModelIds?: readonly ModelId[] | null;
-  assignmentPolicies?: readonly {
-    workspaceId: string;
-    inferencePool: "workspace" | "organization";
-    allowedModelIds: readonly ModelId[] | null;
-    excludedModelIds?: readonly ModelId[];
-    allocatorEnabled: boolean;
-    managedByWorkspaceId?: string | null;
-  }[];
   /** Per-model cooldowns (some providers report model-specific limits). */
   modelCooldowns?: Readonly<Record<ModelId, number>>;
   quota: Quota;
@@ -170,7 +160,6 @@ export type EffectiveSettings = {
 
 const SETTING_KEYS: readonly SettingKey[] = [
   "rotation",
-  "inferenceSource",
   "crossProviderFailover",
   "fallbackOrder",
   "personalConnectionsAllowed",
@@ -191,7 +180,7 @@ export function effectiveSettings(policy: SettingsPolicy, workspaceId: string): 
     const overridden = override[key] !== undefined && !policy.locked.includes(key);
     if (overridden) {
       (values as Record<SettingKey, unknown>)[key] =
-        key === "rotation" || key === "inferenceSource" || key === "fallbackOrder"
+        key === "rotation" || key === "fallbackOrder"
           ? { ...policy.organization[key], ...(override[key] as object) }
           : override[key];
     }
@@ -274,20 +263,6 @@ export function authorizationFailure(
     }
     return null;
   }
-  if (connection.assignmentPolicies !== undefined) {
-    const source =
-      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[
-        connection.provider
-      ] ?? "automatic";
-    const matching = connection.assignmentPolicies.filter(
-      (policy) =>
-        policy.workspaceId === workspace.id &&
-        (source === "automatic" || policy.inferencePool === source),
-    );
-    if (matching.length === 0) {
-      return failure("SUB-SET-06", "the effective inference source excludes this assignment");
-    }
-  }
   const scope = connection.ownership.scope;
   const inScope =
     scope.kind === "organization" ||
@@ -327,45 +302,6 @@ export function servingFailure(
       requirement: "SUB-ELIG-03",
       message: "the account's access policy excludes the model",
     };
-  }
-  if (connection.assignmentPolicies !== undefined) {
-    const workspace = byId(world.workspaces, session.workspaceId)!;
-    const source =
-      effectiveSettings(world.settings, workspace.id).values.inferenceSource?.[
-        connection.provider
-      ] ?? "automatic";
-    const matching = connection.assignmentPolicies.filter(
-      (policy) =>
-        policy.workspaceId === workspace.id &&
-        (source === "automatic" || policy.inferencePool === source),
-    );
-    const hasAllocatableAssignment = matching.some((policy) => policy.allocatorEnabled);
-    if (!hasAllocatableAssignment) {
-      return {
-        requirement: "SUB-ELIG-04",
-        message: "the source assignment is excluded from allocation",
-      };
-    }
-    if (
-      !matching.some(
-        (policy) =>
-          policy.allocatorEnabled &&
-          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
-          !policy.excludedModelIds?.includes(modelId),
-      )
-    ) {
-      const hasModelAssignment = matching.some(
-        (policy) =>
-          (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
-          !policy.excludedModelIds?.includes(modelId),
-      );
-      return {
-        requirement: hasModelAssignment ? "SUB-ELIG-04" : "SUB-ELIG-03",
-        message: hasModelAssignment
-          ? "model access exists only on a source assignment excluded from allocation"
-          : "no source assignment allows the model",
-      };
-    }
   }
   if ((connection.modelCooldowns?.[modelId] ?? -Infinity) > now) {
     return { requirement: "SUB-ELIG-03", message: "the account is cooling down for the model" };
@@ -544,42 +480,11 @@ export function pinnedNeverServes(
   if (!model || model.provider !== pinned.provider) return true;
   if (!pinned.entitledModels.includes(model.id)) return true;
   if (pinned.allowedModelIds != null && !pinned.allowedModelIds.includes(model.id)) return true;
-  if (pinned.assignmentPolicies !== undefined) {
-    const source =
-      effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
-        pinned.provider
-      ] ?? "automatic";
-    const assignments = pinned.assignmentPolicies.filter(
-      (policy) =>
-        policy.workspaceId === session.workspaceId &&
-        (source === "automatic" || policy.inferencePool === source),
-    );
-    if (
-      !assignments.some(
-        (policy) =>
-          (policy.allowedModelIds === null || policy.allowedModelIds.includes(model.id)) &&
-          !policy.excludedModelIds?.includes(model.id),
-      )
-    ) {
-      return true;
-    }
-  }
   return !isAuthorized(world, session, { ...pinned, healthy: true, allocatorEnabled: true });
 }
 
 function pinnedAllocationDisabled(world: World, session: Session, pinned: Connection): boolean {
-  if (!pinned.allocatorEnabled) return true;
-  if (pinned.assignmentPolicies === undefined) return false;
-  const source =
-    effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
-      pinned.provider
-    ] ?? "automatic";
-  return !pinned.assignmentPolicies.some(
-    (policy) =>
-      policy.workspaceId === session.workspaceId &&
-      (source === "automatic" || policy.inferencePool === source) &&
-      policy.allocatorEnabled,
-  );
+  return !pinned.allocatorEnabled;
 }
 
 /** Future times at which some quota or model cooldown in the world resets, ascending. */

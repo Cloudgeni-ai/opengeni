@@ -7,6 +7,7 @@ import {
 } from "./attached-bridge";
 import {
   AgentBrowserDriver,
+  type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
 } from "./cdp-driver";
@@ -31,6 +32,14 @@ const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
 // Retry bounds while the event stream is re-established after it broke.
 const RESYNC_RETRY_MIN_MS = 100;
 const RESYNC_RETRY_MAX_MS = 5_000;
+// A tab's download events name the download but not the file Chrome saved;
+// the extension finds that in Chrome's download list. A download is looked up
+// among those of its address started shortly before its event arrived, and
+// Chrome may list it as complete a moment after reporting it complete.
+const DOWNLOAD_START_SLACK_MS = 5_000;
+const DOWNLOAD_FIND_ATTEMPTS = 10;
+const DOWNLOAD_FIND_RETRY_MS = 200;
+const MAX_TRACKED_DOWNLOADS = 1_000;
 
 const EXTENSION_RESTRICTED_SCHEMES = [
   "about:",
@@ -182,6 +191,7 @@ export function createAttachedChromeDriver(
     operationId: string,
     workspaceFileIds: readonly string[],
   ) => Promise<readonly string[]>,
+  downloadEvents?: AgentBrowserDriverOptions["downloadEvents"],
 ): AgentBrowserDriver {
   return new AgentBrowserDriver({
     browserSessionId: session.browserSessionId,
@@ -198,6 +208,9 @@ export function createAttachedChromeDriver(
     // theirs; focus emulation keeps them rendering and taking input.
     focusEmulation: true,
     ...(resolveWorkspaceFiles ? { resolveWorkspaceFiles } : {}),
+    // Chrome saves downloads in the person's own downloads folder; the
+    // session keeps a copy of each one its tabs start.
+    ...(downloadEvents ? { downloadEvents, downloadsSavedByPerson: true } : {}),
   });
 }
 
@@ -268,6 +281,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private resyncing = false;
   // Counts stream breaks, so an attach that spans one is not trusted.
   private streamBreaks = 0;
+  // Downloads a controlled tab started and has not finished: what finding
+  // their saved file needs.
+  private readonly downloads = new Map<string, { url: string; startedAfter: string }>();
+  // Downloads that finished, so a repeated event cannot settle one twice.
+  private readonly finishedDownloads = new Set<string>();
+  // Chrome's ids of saved files already matched to a download here.
+  private readonly claimedDownloadFiles = new Set<number>();
 
   constructor(
     private readonly bridge: AttachedBrowserBridgeTransport,
@@ -450,6 +470,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.tabDetachEpochs.clear();
     this.pendingInput.clear();
     this.uncertainTabs.clear();
+    this.downloads.clear();
     this.listeners.clear();
     this.releaseFlushWaiters();
     this.bridge.close();
@@ -754,9 +775,89 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
+    if (input.method === "Page.downloadWillBegin" || input.method === "Page.downloadProgress") {
+      this.forwardDownloadEvent(input.method, input.params);
+    }
     const sessionId = input.sessionId ?? this.tabSessions.get(input.tabId) ?? null;
     const event: CdpEvent = { method: input.method, params: input.params, sessionId };
     this.emitEvent(event);
+  }
+
+  /** Report a controlled tab's download as Chrome's browser-wide download
+   * events do, with the completed file's path. Chrome saves it in the
+   * person's own downloads folder; the extension finds it there. */
+  private forwardDownloadEvent(method: string, params: Record<string, unknown>): void {
+    const guid = typeof params.guid === "string" ? params.guid : null;
+    if (!guid || this.finishedDownloads.has(guid)) return;
+    if (method === "Page.downloadWillBegin") {
+      if (
+        typeof params.url === "string" &&
+        !this.downloads.has(guid) &&
+        this.downloads.size < MAX_TRACKED_DOWNLOADS
+      ) {
+        this.downloads.set(guid, {
+          url: params.url,
+          startedAfter: new Date(Date.now() - DOWNLOAD_START_SLACK_MS).toISOString(),
+        });
+      }
+      this.emitEvent({ method: "Browser.downloadWillBegin", params, sessionId: null });
+      return;
+    }
+    if (params.state !== "completed") {
+      if (params.state === "canceled") {
+        this.downloads.delete(guid);
+        this.finishedDownloads.add(guid);
+      }
+      this.emitEvent({ method: "Browser.downloadProgress", params, sessionId: null });
+      return;
+    }
+    const download = this.downloads.get(guid);
+    this.downloads.delete(guid);
+    this.finishedDownloads.add(guid);
+    void this.savedDownloadPath(download, params.receivedBytes).then((filePath) => {
+      if (this.stopped) return;
+      this.emitEvent({
+        method: "Browser.downloadProgress",
+        params: { ...params, ...(filePath ? { filePath } : {}) },
+        sessionId: null,
+      });
+    });
+  }
+
+  /** Where Chrome saved a completed download: the oldest file of its address
+   * since it began, of the size it reported, not already matched to another
+   * download. Null when the extension cannot tell (one without download
+   * lookup) or Chrome lists no such file. */
+  private async savedDownloadPath(
+    download: { url: string; startedAfter: string } | undefined,
+    receivedBytes: unknown,
+  ): Promise<string | null> {
+    if (!download) return null;
+    for (let attempt = 0; attempt < DOWNLOAD_FIND_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_FIND_RETRY_MS));
+      if (this.stopped || this.failure) return null;
+      let found: FoundDownload[];
+      try {
+        const result = await this.bridge.request<{ downloads: unknown }>({
+          type: "downloads.find",
+          url: download.url,
+          startedAfter: download.startedAfter,
+        });
+        found = parseFoundDownloads(result.downloads);
+      } catch {
+        return null;
+      }
+      const match = found.find(
+        (candidate) =>
+          !this.claimedDownloadFiles.has(candidate.id) &&
+          (typeof receivedBytes !== "number" || candidate.sizeBytes === receivedBytes),
+      );
+      if (match) {
+        this.claimedDownloadFiles.add(match.id);
+        return match.filePath;
+      }
+    }
+    return null;
   }
 
   private emitEvent(event: CdpEvent): void {
@@ -942,6 +1043,30 @@ const READ_ONLY_TAB_METHODS = new Set([
 
 function mayChangePageContent(method: string): boolean {
   return !READ_ONLY_TAB_METHODS.has(method);
+}
+
+type FoundDownload = { id: number; filePath: string; sizeBytes: number };
+
+function parseFoundDownloads(value: unknown): FoundDownload[] {
+  if (!Array.isArray(value))
+    throw new CdpTransportError("attached Chrome listed downloads invalidly");
+  return value.map((entry) => {
+    const record = requireRecord(entry, "found download");
+    const { id, filePath, sizeBytes } = record;
+    if (
+      typeof id !== "number" ||
+      !Number.isSafeInteger(id) ||
+      typeof filePath !== "string" ||
+      filePath.length === 0 ||
+      filePath.length > 32_768 ||
+      typeof sizeBytes !== "number" ||
+      !Number.isSafeInteger(sizeBytes) ||
+      sizeBytes < 0
+    ) {
+      throw new CdpTransportError("attached Chrome listed a download invalidly");
+    }
+    return { id, filePath, sizeBytes };
+  });
 }
 
 function eventKey(method: string, sessionId: string | null): string {

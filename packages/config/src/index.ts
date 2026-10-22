@@ -4,6 +4,8 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -12,6 +14,8 @@ export {
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -378,6 +382,25 @@ const SettingsSchema = z.object({
   turnWorkerEmergencyMemoryUsage: z.coerce.number().min(0.85).max(0.95).default(0.9),
   turnWorkerMemoryGuardIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   turnWorkerMemoryGuardSustainMs: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
+  // Graceful turn-worker shutdown (rolling deploy, scale-down, memory guard).
+  // After the worker stops polling, in-flight turns may finish naturally for
+  // the grace; the rest are cancelled with WORKER_SHUTDOWN (recoverable
+  // checkpoint) and the SDK force-stops at the force time. Keep the force time
+  // inside the pod's termination grace; the standalone process exits at most
+  // ten seconds after it. The worker keeps at least a ten-second checkpoint
+  // window between grace and force, shortening the grace when needed.
+  turnWorkerShutdownGraceMs: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS),
+  turnWorkerShutdownForceMs: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .max(3_600_000)
+    .default(DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS),
   observabilityStructuredLogs: EnvBoolean.default(false),
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
@@ -439,6 +462,18 @@ const SettingsSchema = z.object({
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
+  // The Excel add-in people connect workbooks with, as agents name it to them
+  // ("open the <name> add-in"), and the page that shows how to add it. A
+  // product that ships its own branded add-in sets both; otherwise agents name
+  // Opengeni's and link this deployment's web app page.
+  officeAddinName: z.string().trim().min(1).max(80).default("Opengeni"),
+  officeAddinInstallUrl: z.string().url().optional(),
+  // The Chrome extension that connects people's own Chrome to their connected
+  // computer, as agents and the chat name it, and where it is installed (its
+  // Chrome Web Store page). A product that ships its own branded build of the
+  // extension sets both; otherwise they name and link Opengeni Browser.
+  browserExtensionName: z.string().trim().min(1).max(80).default("Opengeni Browser"),
+  browserExtensionInstallUrl: z.string().url().startsWith("https://").optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -542,6 +577,9 @@ const SettingsSchema = z.object({
     )
     .optional(),
   integrationsEnabled: EnvBoolean.default(false),
+  // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
+  googleConnectorSetupEnabled: EnvBoolean.default(true),
+  googleDriveMcpEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
@@ -4994,6 +5032,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     turnWorkerEmergencyMemoryUsage: optional("OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE"),
     turnWorkerMemoryGuardIntervalMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS"),
     turnWorkerMemoryGuardSustainMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS"),
+    turnWorkerShutdownGraceMs: optional("OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS"),
+    turnWorkerShutdownForceMs: optional("OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -5017,6 +5057,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
     apiTrustedProxyCidrs: optional("OPENGENI_API_TRUSTED_PROXY_CIDRS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
+    officeAddinName: optional("OPENGENI_OFFICE_ADDIN_NAME"),
+    officeAddinInstallUrl: optional("OPENGENI_OFFICE_ADDIN_INSTALL_URL"),
+    browserExtensionName: optional("OPENGENI_BROWSER_EXTENSION_NAME"),
+    browserExtensionInstallUrl: optional("OPENGENI_BROWSER_EXTENSION_INSTALL_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
@@ -5050,6 +5094,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
     protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
+    googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
+    googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
@@ -5873,6 +5919,18 @@ export function effectiveSandboxLifecycle(
     providerIdleTimeoutMs: null,
     rotationLeadMs: null,
   };
+}
+
+/** How long a box reported missing could still be running anywhere: its hard
+ * lifetime, or the renewable TTL nobody renews once the box is lost. Null when
+ * the backend has no such bound (its loss needs other proof). */
+export function sandboxProviderMaxRemainingLifetimeMs(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): number | null {
+  const lifecycle = effectiveSandboxLifecycle(settings, backend);
+  if (lifecycle.hardLifetimeMs !== null) return lifecycle.hardLifetimeMs;
+  return lifecycle.renewableTtlSeconds !== null ? lifecycle.renewableTtlSeconds * 1000 : null;
 }
 
 /**

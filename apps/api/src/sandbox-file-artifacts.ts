@@ -461,7 +461,9 @@ export function sandboxArtifactRelativePath(value: string, workspaceRoot = "/wor
   }
   if (!relative) {
     throw new HTTPException(400, {
-      message: "sandbox artifact path must name a file inside the active workspace root",
+      // Say which root: on a connected machine the file may exist outside it,
+      // and copying it in is the way forward.
+      message: `sandbox artifact path must name a file inside this session's workspace root ${workspaceRoot}; ${path} is outside it, so copy the file into the workspace first and use that path`,
     });
   }
   if (absolute.length > SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS) {

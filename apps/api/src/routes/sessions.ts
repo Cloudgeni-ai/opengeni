@@ -18,7 +18,7 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
-  scheduledSessionIds,
+  sessionScheduleTargets,
   currentSiteViewerRlsContext,
   nestedPostgresSqlState,
 } from "@opengeni/db";
@@ -413,6 +413,11 @@ type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSes
 
 /** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
 const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
+/** Readers without schedule authority see no schedule relationship at all. */
+const NO_SESSION_SCHEDULE_TARGETS = {
+  scheduled: new Set<string>(),
+  upcoming: new Set<string>(),
+} as const;
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -1037,6 +1042,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
           ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
           ...(query.siteAccessId ? { siteAccessId: query.siteAccessId } : {}),
+          ...(query.siteConversations ? { siteConversations: query.siteConversations } : {}),
           ...(query.createdBy ? { createdBy: query.createdBy } : {}),
           ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
           ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
@@ -1078,16 +1084,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const scheduleTargets =
       hasPermission(grant.permissions, "scheduled_tasks:run") &&
       hasPermission(grant.permissions, "sessions:control")
-        ? await scheduledSessionIds(
+        ? await sessionScheduleTargets(
             db,
             workspaceId,
             [...page.pinned, ...page.sessions].map((session) => session.id),
           )
-        : new Set<string>();
+        : NO_SESSION_SCHEDULE_TARGETS;
     if ("projection" in page) {
       const decorateEntry = (session: (typeof page.sessions)[number]) => ({
         ...session,
-        hasSchedules: scheduleTargets.has(session.id),
+        hasSchedules: scheduleTargets.scheduled.has(session.id),
+        hasUpcomingSchedules: scheduleTargets.upcoming.has(session.id),
         ...(commandActivity.has(session.id)
           ? { backgroundCommandActivity: commandActivity.get(session.id)! }
           : {}),
@@ -1109,7 +1116,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const activity = commandActivity.get(session.id);
       const decorated = {
         ...session,
-        hasSchedules: scheduleTargets.has(session.id),
+        hasSchedules: scheduleTargets.scheduled.has(session.id),
+        hasUpcomingSchedules: scheduleTargets.upcoming.has(session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
       return sessionResponse(decorated, policy);
@@ -1352,8 +1360,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }),
       hasPermission(grant.permissions, "scheduled_tasks:run") &&
       hasPermission(grant.permissions, "sessions:control")
-        ? scheduledSessionIds(db, workspaceId, [sessionId])
-        : Promise.resolve(new Set<string>()),
+        ? sessionScheduleTargets(db, workspaceId, [sessionId])
+        : Promise.resolve(NO_SESSION_SCHEDULE_TARGETS),
       loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
     ]);
     // the task's usage projection. A failed read is `unavailable`,
@@ -1366,7 +1374,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         {
           ...session,
           ...(usageLimit ? { usageLimit } : {}),
-          hasSchedules: scheduleTargets.has(sessionId),
+          hasSchedules: scheduleTargets.scheduled.has(sessionId),
+          hasUpcomingSchedules: scheduleTargets.upcoming.has(sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
             : {}),
@@ -2442,12 +2451,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const targets =
       hasPermission(grant.permissions, "scheduled_tasks:run") &&
       hasPermission(grant.permissions, "sessions:control")
-        ? await scheduledSessionIds(db, workspaceId, sessionIds)
-        : new Set<string>();
+        ? await sessionScheduleTargets(db, workspaceId, sessionIds)
+        : NO_SESSION_SCHEDULE_TARGETS;
     const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
       nodes.map((node) => ({
         ...node,
-        session: { ...node.session, hasSchedules: targets.has(node.session.id) },
+        session: {
+          ...node.session,
+          hasSchedules: targets.scheduled.has(node.session.id),
+          hasUpcomingSchedules: targets.upcoming.has(node.session.id),
+        },
         children: decorateNodes(node.children),
       }));
     const policy = await loadEffectivePolicyContext(
@@ -2459,9 +2472,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header(SESSION_SEQUENCE_HEADER, String(observedSequence));
     return c.json({
       ...lineage,
-      sessionHasSchedules: targets.has(c.req.param("sessionId")),
+      sessionHasSchedules: targets.scheduled.has(c.req.param("sessionId")),
+      sessionHasUpcomingSchedules: targets.upcoming.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
-        sessionResponse({ ...session, hasSchedules: targets.has(session.id) }, policy),
+        sessionResponse(
+          {
+            ...session,
+            hasSchedules: targets.scheduled.has(session.id),
+            hasUpcomingSchedules: targets.upcoming.has(session.id),
+          },
+          policy,
+        ),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
@@ -5871,6 +5892,7 @@ export function sessionListQuery(
 ): {
   originSiteId: string | undefined;
   siteAccessId: string | undefined;
+  siteConversations: "include" | "group" | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -5905,6 +5927,33 @@ export function sessionListQuery(
     });
   if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
     throw new HTTPException(400, { message: "originSiteId must be a Site id" });
+  const siteConversations = query.siteConversations;
+  if (siteConversations !== undefined) {
+    if (siteConversations !== "include" && siteConversations !== "group")
+      throw new HTTPException(400, { message: 'siteConversations must be "include" or "group"' });
+    if (!allowCursor)
+      throw new HTTPException(400, { message: 'siteConversations requires view="page"' });
+    // A Site's own history is already explicit; Site frames never reach this.
+    if (originSiteId !== undefined || siteAccessId !== undefined)
+      throw new HTTPException(400, {
+        message: "siteConversations cannot be combined with a Site filter",
+      });
+    if (
+      siteConversations === "group" &&
+      (query.parentSessionId !== "null" || query.pinsOnly === "true")
+    )
+      throw new HTTPException(400, {
+        message: 'siteConversations="group" requires a root page (parentSessionId=null)',
+      });
+    // Archived is a flat list: its Site conversations are ordinary rows.
+    if (
+      siteConversations === "group" &&
+      (query.archiveStatus === "archived" || query.archivedOnly === "true")
+    )
+      throw new HTTPException(400, {
+        message: 'siteConversations="group" cannot list archived sessions; use "include"',
+      });
+  }
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -6072,6 +6121,7 @@ export function sessionListQuery(
     limit: query.limit,
     originSiteId,
     siteAccessId,
+    siteConversations,
     parentSessionId:
       parentSessionId === undefined
         ? undefined

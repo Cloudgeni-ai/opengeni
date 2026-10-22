@@ -403,7 +403,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
     },
   );
 
-  test("projects each shared membership once across multiple active organizations", async () => {
+  test("projects multiple organizations in one bounded read and keeps later grants fresh", async () => {
     if (!shared || !client) return;
     const userId = `multi-org-${crypto.randomUUID()}`;
     const input = { userId, email: `${userId}@example.test`, name: userId };
@@ -434,7 +434,23 @@ describe("migration 0219 managed-human organization provisioning", () => {
     await shared.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${organizationId}, ${other.defaultWorkspaceId!}, ${initial.subjectId}, 'member')`;
-    const projected = await ensureManagedAccessForUser(client.db, input);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const previousDebug = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_connection, query) => queries.push(query);
+    let projected;
+    try {
+      projected = await ensureManagedAccessForUser(client.db, input);
+    } finally {
+      driver.options.debug = previousDebug;
+    }
+    expect(queries).toHaveLength(6);
+    const projectionQueries = queries.filter((query) =>
+      query.includes('left join "workspace_memberships"'),
+    );
+    expect(projectionQueries).toHaveLength(1);
+    expect(projectionQueries[0]).not.toContain('"workspaces"."settings"');
+    expect(projectionQueries[0]).not.toContain('"workspaces"."agent_instructions"');
     expect(projected.accountGrants).toHaveLength(2);
     expect(projected.workspaceGrants).toHaveLength(4);
     expect(new Set(projected.workspaceGrants.map((grant) => grant.workspaceId)).size).toBe(4);
@@ -446,6 +462,41 @@ describe("migration 0219 managed-human organization provisioning", () => {
         projected.accountGrants.filter((account) => account.accountId === grant.accountId),
       ).toHaveLength(1);
     }
+    expect(projected.defaultAccountId).toBe(initial.defaultAccountId);
+    expect(projected.defaultWorkspaceId).toBe(initial.defaultWorkspaceId);
+    expect(projected.workspaceGrants.slice(0, 2).map((grant) => grant.workspaceId)).toEqual([
+      initial.defaultWorkspaceId!,
+      other.defaultWorkspaceId!,
+    ]);
+
+    await shared.admin`update workspace_memberships set permissions = '["workspace:read"]'::jsonb
+      where account_id = ${organizationId} and subject_id = ${initial.subjectId}`;
+    const narrowed = await ensureManagedAccessForUser(client.db, input);
+    expect(
+      narrowed.workspaceGrants.find((grant) => grant.workspaceId === other.defaultWorkspaceId)
+        ?.permissions,
+    ).toEqual(["workspace:read"]);
+
+    // An organization without persisted workspace rows must still carry its
+    // current name and derived personal grant; the join cannot turn inner.
+    await shared.admin`delete from workspace_memberships
+      where account_id = ${organizationId} and subject_id = ${initial.subjectId}`;
+    await shared.admin`update managed_accounts set name = 'Changed organization'
+      where id = ${organizationId}`;
+    const withoutShared = await ensureManagedAccessForUser(client.db, input);
+    expect(
+      withoutShared.accountGrants.find((grant) => grant.accountId === organizationId)?.metadata,
+    ).toEqual({ accountName: "Changed organization" });
+    expect(
+      withoutShared.workspaceGrants.filter((grant) => grant.accountId === organizationId),
+    ).toHaveLength(1);
+    expect(
+      withoutShared.workspaceGrants.some((grant) => grant.workspaceId === other.defaultWorkspaceId),
+    ).toBe(false);
+
+    await shared.admin`update organization_memberships set status = 'revoked', revoked_at = now()
+      where account_id = ${organizationId} and subject_id = ${initial.subjectId}`;
+    expect(await ensureManagedAccessForUser(client.db, input)).toEqual(initial);
   });
 
   test("keeps the capability narrow and fails closed for fabricated, foreign, and terminal authority", async () => {

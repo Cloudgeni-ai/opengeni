@@ -15,10 +15,11 @@ import {
   type FollowupRequest,
   type FollowupPull,
 } from "./model";
-import { latestRun } from "./planner";
+import { latestRun, infrastructureRetryReason } from "./planner";
 import { latencySummary } from "./journal";
 
 export interface ActiveReads {
+  baseCI(sha: string): Promise<import("./model").BaseCiEvidence>;
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
   runs(manifest: Manifest, branch: string): Promise<Run[]>;
   pullSnapshot(number: number): Promise<PullSnapshot>;
@@ -204,6 +205,14 @@ export class GitHubActiveExecutor implements Executor {
         lastError: null,
       };
     }
+    if (effect.kind === "park") {
+      const id = addComment(ledger, `parking:${effect.key}`, effect.number, effect.body, now);
+      ledger.parked = (ledger.parked ?? []).map((item) =>
+        item.batchId === effect.key
+          ? { ...item, announced: ledger.effects[id]!.status === "done", effectId: id }
+          : item,
+      );
+    }
     if (effect.kind === "announce") {
       const id = addComment(ledger, `ejection:${effect.key}`, effect.number, effect.body, now);
       ledger.ejected = ledger.ejected.map((item) =>
@@ -321,6 +330,10 @@ export class GitHubActiveExecutor implements Executor {
         ledger.ejected = ledger.ejected.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
+      if (patch.status === "done" && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
     });
   }
   private async effectObserved(effect: DurableEffect): Promise<boolean> {
@@ -338,9 +351,35 @@ export class GitHubActiveExecutor implements Executor {
       original.branchHeadSha === request.headSha
     );
   }
+  private async retryApplicable(manifest: Manifest, state: State): Promise<boolean> {
+    const refs = await this.git.remoteRefs(this.writer.remote);
+    if (refs.get(this.writer.baseRef) !== state.main) return false;
+    let current = manifest;
+    const seen = new Set<string>();
+    for (let depth = 0; depth <= this.config.speculationDepth; depth++) {
+      if (
+        seen.has(current.batchId) ||
+        state.ledger.invalidated.includes(current.batchId) ||
+        state.ledger.landed.includes(current.batchId) ||
+        refs.get(`refs/heads/${this.config.branchPrefix}${current.batchId}`) !== current.tipSha
+      )
+        return false;
+      seen.add(current.batchId);
+      if (current.baseSha === state.main) return true;
+      if (!current.predecessor) return false;
+      const parentTip = refs.get(`refs/heads/${this.config.branchPrefix}${current.predecessor}`);
+      if (parentTip !== current.baseSha) return false;
+      await this.git.fetch(this.writer.remote, [parentTip]);
+      const parent = await this.git.inspect(parentTip);
+      if (parent.batchId !== current.predecessor) return false;
+      current = parent;
+    }
+    return false;
+  }
   private async processEffect(state: State, effect: DurableEffect): Promise<string> {
     const now = this.now();
     let postStarted = false;
+    let retryManifest: Manifest | null = null;
     try {
       if (await this.effectObserved(effect)) {
         await this.patchEffect(effect.id, { status: "done", lastError: null });
@@ -357,12 +396,29 @@ export class GitHubActiveExecutor implements Executor {
         });
         return "REST outcome remains uncertain; no duplicate submission";
       }
-      if (effect.attempts >= 5) {
+      if (effect.attempts >= (effect.kind === "rerun" ? 1 : 5)) {
         await this.patchEffect(effect.id, {
           status: "blocked",
           lastError: "REST submission retry budget exhausted",
         });
         return "REST effect blocked by bounded retry budget";
+      }
+      if (effect.kind === "comment" && effect.body.includes("batcher-ejection:")) {
+        const conflict = state.ledger.ejected.some(
+          (e) =>
+            e.reason === "merge-tree conflict against candidate predecessor" &&
+            e.pull.number === effect.number &&
+            effect.body.includes(`<!-- batcher-ejection:${bindingKey(e.pull)} -->`) &&
+            effect.body.includes(`: ${e.reason}. Batch: ${e.batchId}.`),
+        );
+        if (!conflict) {
+          await this.patchEffect(effect.id, {
+            nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
+            lastError:
+              "Comparable base batch-suite evidence unavailable; ejection announcement held",
+          });
+          return "base batch-suite evidence holds pending culprit announcement";
+        }
       }
       if (effect.kind === "followup" && !(await this.validFollowup(effect.request))) {
         await this.patchEffect(effect.id, {
@@ -387,6 +443,39 @@ export class GitHubActiveExecutor implements Executor {
         }
         await this.git.fetch(this.writer.remote, [effect.run.headSha]);
         const manifest = await this.git.inspect(effect.run.headSha);
+        if (!(await this.retryApplicable(manifest, state))) {
+          await this.patchEffect(effect.id, {
+            status: "blocked",
+            lastError:
+              "Candidate invalidated, landed or no longer based on current main/live predecessor; no rerun submitted",
+          });
+          return "obsolete infrastructure retry suppressed";
+        }
+        retryManifest = manifest;
+        const candidate = {
+          manifest,
+          branch: effect.run.branch,
+          runs: await this.reads.runs(manifest, effect.run.branch),
+          containedInBase: false,
+        };
+        const exact = latestRun(candidate, this.config);
+        const intent = state.ledger.retries[manifest.batchId];
+        if (
+          !exact ||
+          exact.id !== effect.run.id ||
+          exact.attempt !== effect.run.attempt ||
+          !infrastructureRetryReason(candidate, exact, this.config) ||
+          intent?.runId !== effect.run.id ||
+          intent.fromAttempt !== effect.run.attempt ||
+          intent.reason !== infrastructureRetryReason(candidate, exact, this.config)
+        ) {
+          await this.patchEffect(effect.id, {
+            status: "blocked",
+            lastError:
+              "Retry requires first-attempt exact candidate infrastructure evidence and matching durable intent",
+          });
+          return "ineligible or stale retry suppressed; no POST issued";
+        }
         const ready = await this.reads.ready();
         if (
           manifest.pulls.some(
@@ -418,6 +507,13 @@ export class GitHubActiveExecutor implements Executor {
         return "REST claim changed before submission; reconcile on next owner";
       // There is deliberately no claim that this read makes GitHub POST atomic
       // with the lease. Stable markers / attempt identity reconcile its outcome.
+      if (retryManifest && !(await this.retryApplicable(retryManifest, beforePost))) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          lastError: "Candidate became obsolete after retry claim; no rerun submitted",
+        });
+        return "obsolete infrastructure retry suppressed after claim";
+      }
       if (effect.kind === "followup") {
         if (await this.reads.findFollowup(effect.request)) {
           await this.patchEffect(effect.id, { status: "done", lastError: null });
@@ -709,6 +805,10 @@ export class GitHubActiveExecutor implements Executor {
       };
       if (observed)
         ledger.ejected = ledger.ejected.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
+      if (observed && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
     });

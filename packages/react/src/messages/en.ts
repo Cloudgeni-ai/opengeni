@@ -383,7 +383,7 @@ export const englishMessages = {
   "browserViewer.inputResultUnknown": "Input result unknown",
   "browserViewer.inspectThePageBeforeContinuing": "Inspect the page before continuing.",
   "browserViewer.installTheOpengeniBrowserExtension":
-    "Install the Opengeni Browser extension in the profile you want to use.",
+    "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
   "browserViewer.itsPrivateStateIsSaved":
     "Its private state is saved. Opening it creates a fresh, isolated browser process.",
@@ -879,7 +879,10 @@ export const englishMessages = {
   "connectSetup.account": "Account",
   "connectSetup.accountLabel": "Account: {label}",
   "connectSetup.addingSelectedTools": "Adding selected tools…",
+  "connectSetup.finishingSetup": "Finishing setup…",
   "connectSetup.addSelectedTools": "Add selected tools",
+  "connectSetup.adminApprovalLink": "Admin approval link",
+  "connectSetup.afterTheyApproveConnectAgain": "After they approve, connect again.",
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
   "connectSetup.anOwnerThenConnectsThe":
@@ -905,12 +908,17 @@ export const englishMessages = {
   "connectSetup.connectionSetupCouldNotContinue":
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
+  "connectSetup.copyAdminApprovalLink": "Copy admin approval link",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
     'Don\'t see your organization? Only its owners can connect it. Choose "Install on another GitHub account" and pick the organization: GitHub lets you send its owners a request to approve.',
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
+  "connectSetup.microsoftAdminApprovalMaybe":
+    "Microsoft didn't grant access. If it said your organization needs an admin to approve {product}, a Microsoft 365 admin can approve it for everyone.",
+  "connectSetup.microsoftAdminApprovalRequired":
+    "Your organization needs a Microsoft 365 admin to approve {product} before you can connect.",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
@@ -920,6 +928,7 @@ export const englishMessages = {
   "connectSetup.openProviderVerificationPageNew": "Open provider verification page (new tab)",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
+  "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
   "connectSetup.setupExpired": "Setup expired",
@@ -1299,6 +1308,8 @@ export const englishMessages = {
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
+  "lib.format.accountUnavailable":
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
@@ -1806,7 +1817,7 @@ export const englishMessages = {
   "modelPolicy.billedToTheWorkspaceProvider": "Billed to the workspace provider account",
   "modelPolicy.billedToTheWorkspaceVercel": "Billed to the workspace Vercel account",
   "modelPolicy.blockedByWorkspacePolicy": "Blocked by workspace policy",
-  "modelPolicy.claudeSubscription": "Claude subscription",
+  "modelPolicy.claudeSubscription": "Claude",
   "modelPolicy.claudeSubscriptionExternalBilling": "Claude subscription · external billing",
   "modelPolicy.codex": "Codex",
   "modelPolicy.codexSubscriptionExternalBilling": "Codex subscription · external billing",
@@ -2758,8 +2769,14 @@ export const englishMessages = {
   "sessionAdmission.tryAgain": "Try again",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
+  "sessionAgentsModel.couldNotStartItsNextStep": "Could not start its next step",
+  "sessionAgentsModel.failed": "Failed",
   "sessionAgentsModel.idle": "Idle",
+  "sessionAgentsModel.needsYou": "Needs you",
+  "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  "sessionAgentsModel.stuck": "Stuck",
+  "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
     "Reconnect this integration to use its tools in this conversation.",
   "sessionAuthRecommendation.reviewPermissionToUseYour":
@@ -3981,8 +3998,8 @@ export const englishMessages = {
   "timeline.toolStep.shareFile.running": "Sharing a file",
   "timeline.toolStep.signIn.done": "Signed in",
   "timeline.toolStep.signIn.running": "Signing in",
-  "timeline.toolStep.startHelper.done": "Got help from another assistant",
-  "timeline.toolStep.startHelper.running": "Getting help from another assistant",
+  "timeline.toolStep.startHelper.done": "Started a worker",
+  "timeline.toolStep.startHelper.running": "Starting a worker",
   "timeline.toolStep.switchComputer.done": "Switched computers",
   "timeline.toolStep.switchComputer.running": "Switching computers",
   "timeline.toolStep.syncPosts.done": "Synced posts",

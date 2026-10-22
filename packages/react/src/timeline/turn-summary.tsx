@@ -31,6 +31,7 @@ import {
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ShimmerText } from "./shimmer-text";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
 export type {
@@ -611,7 +612,7 @@ function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): Reac
       : t("timeline.turnSummary.waiting"));
   return (
     <span data-og-exchange-status={status.kind}>
-      <span className={status.kind === "working" ? "og-shimmer-text" : undefined}>{label}</span>
+      {status.kind === "working" ? <ShimmerText>{label}</ShimmerText> : <span>{label}</span>}
       {status.since ? <LiveElapsed since={status.since} /> : null}
     </span>
   );

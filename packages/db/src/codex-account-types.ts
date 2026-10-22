@@ -38,6 +38,8 @@ export type CodexAccountStatus = {
    * their own (it was connected there).
    */
   ownInWorkspaceIds?: string[];
+  /** Organization list only: who the account reaches. */
+  reach?: import("./subscription-core/administration").SubscriptionCoreConnectionReach;
   id: string;
   source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   chatgptAccountId: string | null;

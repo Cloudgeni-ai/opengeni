@@ -7,7 +7,7 @@ import { Fragment, type RefObject } from "react";
 import { useAppActions } from "../../lib/actions/actions-provider";
 import { applicableChords, chordLabel, type Chord } from "../../lib/actions/chords";
 import {
-  APP_ACTIONS,
+  appActions,
   findAction,
   type ActionGroup,
   type AppAction,
@@ -53,7 +53,7 @@ export default function ShortcutSheet(props: {
   const { platform, surface } = actions.env;
   const menuAction = findAction("commandMenu.open");
   const menuChord = menuAction ? actions.chordsFor(menuAction)[0] : undefined;
-  const rows: SheetRow[] = APP_ACTIONS.flatMap((action) => {
+  const rows: SheetRow[] = appActions().flatMap((action) => {
     const here = applicableChords(action.chords, surface, platform);
     const desktop = surface === "web" ? applicableChords(action.chords, "desktop", platform) : [];
     if (here.length === 0 && desktop.length === 0) return [];

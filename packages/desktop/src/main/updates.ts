@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { dialog, Notification } from "electron";
 import type { AppUpdater } from "electron-updater";
 
+import type { DesktopUpdateState } from "../contract";
 import type { DesktopUpdateFeed } from "./config";
 import { resolveUpdateFeedUrl } from "./update-feed";
 
-const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
+const CHECK_EVERY_MS = 60 * 60 * 1000;
 const FIRST_CHECK_DELAY_MS = 15_000;
+const RESTART_GRACE_MS = 20_000;
 
 /**
  * Whether installing an update needs the person's password: Linux deb and rpm
@@ -37,8 +39,10 @@ export type UpdateMenuState =
 
 /**
  * App updates from the product's feed. Downloads happen in the background; the
- * update installs on the next quit, or right away from its notification or the
- * menu. The updater loads after startup, so it never slows launch.
+ * update installs on the next quit, or right away from the app's Update button,
+ * its notification or the menu. Asking to update while the download is still
+ * running restarts as soon as it finishes. The updater loads after startup, so
+ * it never slows launch.
  */
 export class AppUpdates {
   private updater: AppUpdater | null = null;
@@ -46,6 +50,10 @@ export class AppUpdates {
   private lastUrl: string | null = null;
   private state: UpdateMenuState = { kind: "idle" };
   private announcedVersion: string | null = null;
+  /** Download progress, 0 to 100, while downloading. */
+  private percent: number | null = null;
+  /** The person asked to update: restart once the download is done. */
+  private restartWhenReady = false;
   private readonly needsPassword = updateNeedsPassword();
 
   constructor(
@@ -70,6 +78,38 @@ export class AppUpdates {
 
   get menuState(): UpdateMenuState {
     return this.state;
+  }
+
+  /** What the web app's Update button shows. */
+  get pageState(): DesktopUpdateState {
+    const { state } = this;
+    if (state.kind === "downloading") {
+      return {
+        kind: "downloading",
+        version: state.version,
+        percent: this.percent,
+        restartWhenReady: this.restartWhenReady,
+      };
+    }
+    if (state.kind === "ready") {
+      return { kind: "ready", version: state.version, restartWhenReady: this.restartWhenReady };
+    }
+    return { kind: "none" };
+  }
+
+  /**
+   * The Update button: restart into a downloaded update now, or finish the
+   * download first and then restart without asking again.
+   */
+  install(): void {
+    this.restartWhenReady = true;
+    if (this.state.kind === "ready") {
+      this.onChange();
+      this.restart();
+      return;
+    }
+    this.onChange();
+    if (this.state.kind === "idle") void this.check(false);
   }
 
   /** The menu action: restart into a downloaded update, or check now and say what happened. */
@@ -103,7 +143,10 @@ export class AppUpdates {
         return;
       }
       // A downloaded update stays ready; otherwise the download is under way.
-      if (this.kind() === "checking") this.setState({ kind: "downloading", version });
+      if (this.kind() === "checking") {
+        this.percent = null;
+        this.setState({ kind: "downloading", version });
+      }
       if (interactive && this.kind() === "downloading") {
         void dialog.showMessageBox({
           type: "info",
@@ -124,7 +167,10 @@ export class AppUpdates {
   }
 
   private noUpdate(interactive: boolean): void {
-    if (this.kind() === "checking") this.setState({ kind: "idle" });
+    if (this.kind() === "checking") {
+      this.restartWhenReady = false;
+      this.setState({ kind: "idle" });
+    }
     if (interactive) this.upToDate();
   }
 
@@ -142,13 +188,37 @@ export class AppUpdates {
         autoUpdater.autoDownload = true;
         // Quitting never asks for a password; those updates wait for Restart.
         autoUpdater.autoInstallOnAppQuit = !this.needsPassword;
+        autoUpdater.on("download-progress", (progress: { percent?: number }) => {
+          if (this.state.kind !== "downloading" || typeof progress?.percent !== "number") return;
+          // Whole steps of five keep the button moving without flooding the pages.
+          const percent = Math.min(100, Math.max(0, Math.floor(progress.percent / 5) * 5));
+          if (percent === this.percent) return;
+          this.percent = percent;
+          this.onChange();
+        });
         autoUpdater.on("update-downloaded", (info) => {
+          this.percent = null;
           this.setState({ kind: "ready", version: info.version });
+          if (this.restartWhenReady) {
+            this.restart();
+            return;
+          }
           this.announce(info.version);
         });
         autoUpdater.on("error", () => {
           // A failed download returns to idle so the next check can retry it.
-          if (this.state.kind === "downloading") this.setState({ kind: "idle" });
+          if (this.state.kind !== "downloading") return;
+          const asked = this.restartWhenReady;
+          this.restartWhenReady = false;
+          this.percent = null;
+          this.setState({ kind: "idle" });
+          if (asked) {
+            void dialog.showMessageBox({
+              type: "warning",
+              message: "Couldn't download the update",
+              detail: "Check your connection. The app tries again in a while.",
+            });
+          }
         });
         this.updater = autoUpdater;
         return autoUpdater;
@@ -174,6 +244,13 @@ export class AppUpdates {
     if (!this.updater) return;
     this.beforeRestart();
     this.updater.quitAndInstall();
+    // Still running a while later: the restart didn't happen, so the button
+    // offers it again instead of saying "Restarting…" forever.
+    setTimeout(() => {
+      if (!this.restartWhenReady) return;
+      this.restartWhenReady = false;
+      this.onChange();
+    }, RESTART_GRACE_MS).unref();
   }
 
   /** Read through a call: events change the state while a check awaits. */

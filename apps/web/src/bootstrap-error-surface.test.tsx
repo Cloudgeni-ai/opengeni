@@ -55,11 +55,11 @@ describe("bootstrap error surface", () => {
   });
 
   test.each([
-    { status: 503, body: "unavailable", attempts: 3, title: "Opengeni is temporarily unavailable" },
-    { status: 401, body: "unauthorized", attempts: 1, title: "Opengeni couldn't start" },
-    { status: 403, body: "forbidden", attempts: 1, title: "Opengeni couldn't start" },
-    { status: 500, body: "invalid configuration", attempts: 1, title: "Opengeni couldn't start" },
-    { status: 200, body: "not json", attempts: 1, title: "Opengeni couldn't start" },
+    { status: 503, body: "unavailable", attempts: 3, title: "Temporarily unavailable" },
+    { status: 401, body: "unauthorized", attempts: 1, title: "Couldn't start" },
+    { status: 403, body: "forbidden", attempts: 1, title: "Couldn't start" },
+    { status: 500, body: "invalid configuration", attempts: 1, title: "Couldn't start" },
+    { status: 200, body: "not json", attempts: 1, title: "Couldn't start" },
   ])(
     "stops at the terminal configuration surface: %s",
     async ({ status, body, attempts, title }) => {
@@ -154,7 +154,11 @@ describe("bootstrap error surface", () => {
           jest.advanceTimersByTime(500);
         });
         expect(container.textContent).toContain("No workspace access");
-        expect(counts.get(failingPath)).toBe(initialRequests + 1);
+        // The SDK retries a failed safe read (503 or transport error) once
+        // more after at most 250 ms. The access bootstrap effect ran twice and
+        // its SDK reads take no caller signal, so the superseded read also
+        // completes its one bounded retry; config reads bypass the SDK client.
+        expect(counts.get(failingPath)).toBe(initialRequests + (stage === "access" ? 2 : 1));
       } finally {
         await act(async () => root.unmount());
         globalThis.fetch = originalFetch;
@@ -189,11 +193,11 @@ describe("bootstrap error surface", () => {
         await Promise.resolve();
       });
 
-      expect(container.textContent).toContain("Opengeni is under maintenance");
+      expect(container.textContent).toContain("Under maintenance");
       expect(container.textContent).toContain("We'll be back shortly");
       expect(container.textContent).not.toContain("API 503");
       expect(container.textContent).not.toContain('{"error":"maintenance"}');
-      expect(document.body.textContent?.match(/Opengeni is under maintenance/gu)).toHaveLength(1);
+      expect(document.body.textContent?.match(/Under maintenance/gu)).toHaveLength(1);
       expect(configRequests).toBe(1);
 
       const retry = [...container.querySelectorAll("button")].find(
@@ -208,7 +212,7 @@ describe("bootstrap error surface", () => {
       });
 
       expect(configRequests).toBe(2);
-      expect(container.textContent).toContain("Opengeni is under maintenance");
+      expect(container.textContent).toContain("Under maintenance");
       expect(container.textContent).not.toContain("API 503");
     } finally {
       await act(async () => root.unmount());

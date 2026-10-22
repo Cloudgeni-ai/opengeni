@@ -84,8 +84,6 @@ export type SubscriptionConnection = {
   excludedModelIds: readonly ModelId[];
   /** Administrator access policy; null allows every entitled model. */
   allowedModelIds: readonly ModelId[] | null;
-  /** Per-workspace, per-source policy; one canonical connection may have both memberships. */
-  assignmentPolicies?: readonly SubscriptionAssignmentPolicy[];
   /** Incremented on every credential refresh; fences quota observations. */
   refreshGeneration: number;
   quota: SubscriptionQuota | null;
@@ -144,25 +142,11 @@ export type RotationSetting =
   | { mode: "primary_first"; primaryConnectionId: string | null }
   | { mode: "spread" };
 
-export type InferenceSource = "automatic" | "workspace" | "organization";
-export type InferencePool = "workspace" | "organization";
-
-/** Source-specific authorization and service policy for one workspace assignment. */
-export type SubscriptionAssignmentPolicy = {
-  workspaceId: string;
-  inferencePool: InferencePool;
-  allowedModelIds: readonly ModelId[] | null;
-  excludedModelIds?: readonly ModelId[];
-  allocatorEnabled: boolean;
-  managedByWorkspaceId?: string | null;
-};
-
-/** Per workspace and provider switches (SUB-SET-06). */
+/**
+ * Per workspace and provider switch (SUB-SET-06). Which accounts serve is
+ * each account's reach and its own switch (D-50), never a workspace setting.
+ */
 export type ProviderSwitches = {
-  /** New authoritative pool selection; omitted only for legacy stored settings. */
-  inferenceSource?: InferenceSource;
-  /** Compatibility projection: false means workspace-only; true means automatic/organization. */
-  useOrganizationAccounts: boolean;
   enabled: boolean;
 };
 

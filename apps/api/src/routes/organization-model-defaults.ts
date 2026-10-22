@@ -101,6 +101,9 @@ export function registerOrganizationModelDefaultsRoutes(app: Hono, deps: ApiRout
                 ? {}
                 : { modelCompactionThresholds: patch.modelCompactionThresholds }),
               ...(patch.realtimeVoice === undefined ? {} : { realtimeVoice: patch.realtimeVoice }),
+              ...(patch.realtimeDefaultModel === undefined
+                ? {}
+                : { realtimeDefaultModel: patch.realtimeDefaultModel }),
             },
           }),
         ),

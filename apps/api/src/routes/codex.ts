@@ -134,6 +134,7 @@ export function codexAccountJson(
     // P3 rotation cooldown: when set and in the future, this account is cooling-down.
     exhaustedUntil: row.exhaustedUntil,
     ...(row.ownInWorkspaceIds ? { ownInWorkspaceIds: row.ownInWorkspaceIds } : {}),
+    ...(row.reach ? { reach: row.reach } : {}),
     appsDesignated: options.appsCredentialId === row.id,
     canEnableApps:
       row.source === "workspace" &&

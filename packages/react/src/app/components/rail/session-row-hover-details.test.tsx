@@ -257,6 +257,13 @@ describe("SessionRowHoverDetails", () => {
       "Started by a schedule",
     );
     expect(render(entry({ hasSchedules: true })).textContent).toContain("On a schedule");
+    expect(render(entry({ hasSchedules: true, hasUpcomingSchedules: true })).textContent).toContain(
+      "On a schedule",
+    );
+    // A paused schedule, or a one-time schedule whose time passed, is not upcoming.
+    expect(
+      render(entry({ hasSchedules: true, hasUpcomingSchedules: false })).textContent,
+    ).not.toContain("schedule");
     expect(
       render(
         entry({

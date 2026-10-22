@@ -9,6 +9,7 @@ import {
   elideSupersededViewImagePairs,
   extractOpenSuffixMembers,
   normalizeComputerCallActions,
+  repairHistoryProtocolItems,
   projectRejectedProviderArtifactsFromSerializedRunState,
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
@@ -952,5 +953,59 @@ describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connect
       "function_call_result",
       "message",
     ]);
+  });
+});
+
+describe("history repair reasoning runs", () => {
+  test("preserves reasoning boundaries, references and the exact recoverable suffix", () => {
+    const beforeOrphan = [reasoning("orphan-1"), reasoning("orphan-2")];
+    const beforeKept = [reasoning("kept-1"), reasoning("kept-2")];
+    const beforeDangling = [reasoning("dangling-1"), reasoning("dangling-2")];
+    const trailing = [reasoning("trailing-1"), reasoning("trailing-2")];
+    const kept = [userMessage("keep"), functionCall("paired"), functionResult("paired")];
+    const dangling = functionCall("pending");
+    const items = Object.freeze(
+      [
+        ...beforeOrphan,
+        functionResult("missing"),
+        ...beforeKept,
+        ...kept,
+        ...beforeDangling,
+        dangling,
+        ...trailing,
+      ].map((item) => Object.freeze(item)),
+    );
+    const serialized = JSON.stringify(items);
+    const expected = [...beforeKept, ...kept, ...trailing];
+    const repaired = repairHistoryProtocolItems(items);
+    expect(repaired).toEqual(expected);
+    repaired.forEach((item, index) => expect(item).toBe(expected[index]));
+    const suffix = extractOpenSuffixMembers(items);
+    expect(suffix).toHaveLength(1);
+    expect(suffix[0]!.callItem).toBe(dangling);
+    expect(suffix[0]!.reasoningItems).toEqual(beforeDangling);
+    suffix[0]!.reasoningItems.forEach((item, index) => expect(item).toBe(beforeDangling[index]));
+    expect(JSON.stringify(items)).toBe(serialized);
+  });
+
+  test("repairs long stranded reasoning runs with linear input reads", () => {
+    const kept = userMessage("keep exact text");
+    const items = [
+      kept,
+      ...Array.from({ length: 1024 }, (_, i) => reasoning(`rs_${i}`)),
+      functionCall("pending"),
+    ];
+    let reads = 0;
+    // Count input visits instead of asserting a machine-dependent time budget.
+    const observed = new Proxy(items, {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const repaired = repairHistoryProtocolItems(observed);
+    expect(repaired).toEqual([kept]);
+    expect(repaired[0]).toBe(kept);
+    expect(reads).toBeLessThanOrEqual(items.length * 8);
   });
 });

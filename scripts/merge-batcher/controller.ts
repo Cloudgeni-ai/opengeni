@@ -20,7 +20,7 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, type Action } from "./planner";
+import { plan, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
 
@@ -32,7 +32,8 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string };
+  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "park"; number: number; body: string; key: string };
 export interface Transaction {
   expectedState: string | null;
   nextState: string;
@@ -173,6 +174,8 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
+      // Do not make full-main-CI observation availability a hidden admission
+      // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
       ready: eligible,
       candidates,
@@ -218,7 +221,10 @@ export class Controller {
     const records = await this.journal.records(observation.now);
     const stamp = (stages: Ledger["stages"]) =>
       Object.fromEntries(
-        Object.entries(stages).map(([id, { observedAt: _, ...sample }]) => [id, sample]),
+        Object.entries(stages).map(([id, { observedAt, ...sample }]) => {
+          void observedAt;
+          return [id, sample];
+        }),
       );
     const checkpoint =
       this.config.mode === "active" &&
@@ -305,21 +311,29 @@ export class Controller {
       effect = { kind: "land", manifest, expectedBase: observation.baseSha };
       ledger.landed.push(manifest.batchId);
     } else if (action.kind === "retry") {
-      if (action.run.trusted && action.run.outcome === "code_failure") {
-        const id = action.candidate.manifest.batchId;
-        ledger.codeFailures[id] = [
-          ...new Set([
-            ...(ledger.codeFailures[id] ?? []),
-            `${action.run.id}/${action.run.attempt}`,
-          ]),
-        ];
-      }
-      ledger.retries[action.candidate.manifest.batchId] = {
+      const reason = infrastructureRetryReason(action.candidate, action.run, this.config);
+      if (!reason) throw new Error("Ineligible infrastructure retry");
+      const id = action.candidate.manifest.batchId;
+      const retry = {
         runId: action.run.id,
         fromAttempt: action.run.attempt,
         requestedAt: observation.now,
+        reason,
       };
+      ledger.retries[id] = retry;
+      if (ledger.stages[id]) ledger.stages[id]!.retry = retry;
       effect = { kind: "retry", run: action.run };
+    } else if (action.kind === "park") {
+      const item = action.parked;
+      ledger.parked = (ledger.parked ?? []).map((entry) =>
+        entry.batchId === item.batchId ? { ...entry, announced: true } : entry,
+      );
+      effect = {
+        kind: "park",
+        number: item.pull.number,
+        key: item.batchId,
+        body: `Merge batcher parked exact head ${item.pull.headSha} after singleton batch ${item.batchId} failed on base ${item.baseSha} (run ${item.runId}, attempt ${item.attempt}). This is not a culprit attribution or ejection. Other ready heads may proceed. This head will not automatically retry, including after a new ready event or main advancement; a changed head can re-enter. Comparable base evidence is unavailable; job names do not establish a common failure.\n\n<!-- batcher-parking:${item.batchId} -->`,
+      };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
       ledger.ejected = ledger.ejected.map((e) =>
@@ -345,6 +359,10 @@ export class Controller {
           Date.parse(observation.now) + this.config.leaseSeconds * 1000,
         ).toISOString();
         Object.assign(ledger, await this.journal.records(observation.now));
+        if (action.kind === "retry") {
+          const id = action.candidate.manifest.batchId;
+          if (ledger.stages[id]) ledger.stages[id]!.retry = ledger.retries[id]!;
+        }
         if (effect.kind === "publish" || effect.kind === "land") {
           const sample = ledger.stages[effect.manifest.batchId];
           if (sample)
@@ -381,6 +399,7 @@ export class Controller {
       schemaVersion: 1,
       observedAt: observation.now,
       baseSha: observation.baseSha,
+      baseCI: observation.baseCI ?? null,
       ready: observation.ready,
       excluded: observation.excluded,
       candidates: observation.candidates,

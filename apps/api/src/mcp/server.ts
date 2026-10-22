@@ -16,13 +16,9 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
-import { registerExcelTools } from "./excel-tools";
+import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
-import {
-  sessionChatUrl,
-  withMachinePermissionCard,
-  type MachinePermissionCardPost,
-} from "./machine-permission-card";
+import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
@@ -136,6 +132,7 @@ import {
   recordSyncedSocialPosts,
   getScheduledTaskIncludingDeleted,
   requireSession,
+  requireWorkspace,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -212,8 +209,10 @@ import {
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
   CONNECTED_MACHINE_CAPABILITY_ID,
+  EXCEL_ADDIN_CAPABILITY_ID,
+  browserExtension,
   nativeConnectionCapabilityRecommendations,
-  OPENGENI_BROWSER_EXTENSION_URL,
+  userSetupCardPayload,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -302,8 +301,7 @@ import {
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionToolPolicyContext,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -2299,7 +2297,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result. The artifactId is also the file's workspace File ID, so tools that take workspace file IDs, such as a browser upload action, accept it. A new file gets this chat's visibility (Only me in an Only me chat, otherwise the workspace) unless you pass visibility; to change an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check the result's access.whoCanOpen before sharing a link with anyone.",
+        "Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.",
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -4322,21 +4320,23 @@ function registerFleetTools(
     };
   };
 
-  // A refusal that only the owner's permission can resolve posts the Connected
-  // Machine card right away, in the agent's own turn, so the person can allow
-  // the machine without the agent having to find and call the card tool. Only
-  // exact agent attempts post it. A repeated machine refusal in the same turn
-  // reuses that turn's machine card (it lists every machine); the lookup and
-  // append run atomically under the attempt fence so parallel refusals cannot
-  // stack copies. Cards for every other capability are never limited.
-  const machinePermissionCard =
-    (toolName: string): MachinePermissionCardPost =>
-    async () => {
+  // A refusal the person can fix themselves (USER_SETUP_BLOCKERS, for example
+  // the owner not having allowed this chat to use their machine yet) posts the
+  // setup card right away, in the agent's own turn, so the person sees the fix
+  // without the agent having to find and call the card tool. Only exact agent
+  // attempts post it. A machine card names the machine the agent asked for, so
+  // it can lead with allowing that machine. A repeated refusal for the same
+  // machine in the same turn reuses that turn's card; the lookup and append run
+  // atomically under the attempt fence so parallel refusals cannot stack
+  // copies. Cards for every other capability are never limited.
+  const userSetupCard =
+    (toolName: string, target: string): UserSetupCardPost =>
+    async (blocker) => {
+      const requestedSandboxId = UUID_TARGET.test(target) ? target.toLowerCase() : null;
       if (!exactAgentAttemptClaims(grant)) return null;
       const claims = exactAgentCommandContext(grant, sessionId);
-      const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
-        (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
-      )!;
+      const payload = userSetupCardPayload(blocker, { toolName, requestedSandboxId });
+      if (!payload) return null;
       const appended = await appendTurnCapabilityCardOnce(
         deps.db,
         grant.workspaceId,
@@ -4344,19 +4344,13 @@ function registerFleetTools(
         claims.callerTurnId,
         claims.callerExecutionGeneration,
         claims.callerAttemptId,
-        item.id,
-        {
-          type: "tool.auth_needed",
-          payload: capabilityCardPayload(item, {
-            action: "connect",
-            rationale: "Allow this chat to use your computer.",
-            toolName,
-          }),
-        },
+        blocker.capabilityId,
+        { type: "tool.auth_needed", payload },
+        requestedSandboxId,
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
       if (!appended.accepted) {
-        throw new Error("The calling turn was replaced before the machine card committed.");
+        throw new Error("The calling turn was replaced before the setup card committed.");
       }
       return {
         eventId: appended.existingEventId ?? appended.events[0]?.id ?? null,
@@ -4391,9 +4385,9 @@ function registerFleetTools(
     },
     async ({ target }) =>
       json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_attach"),
+          userSetupCard("sandbox_attach", target),
         ),
       ),
   );
@@ -4407,9 +4401,9 @@ function registerFleetTools(
     },
     async ({ target }) =>
       json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_swap"),
+          userSetupCard("sandbox_swap", target),
         ),
       ),
   );
@@ -4451,12 +4445,12 @@ function registerFleetTools(
             )
           : null;
       return json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await runOnSandbox(services, await fleetContext(), target, typedOp, {
             ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
             ...(secretResolver ? { secretResolver } : {}),
           }),
-          machinePermissionCard("run_on"),
+          userSetupCard("run_on", target),
         ),
       );
     },
@@ -4477,9 +4471,10 @@ function registerFleetTools(
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.
         await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-        const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
-          (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
-        )!;
+        const item = nativeConnectionCapabilityRecommendations({
+          connectedMachines: true,
+          browserExtension: browserExtension(deps.settings),
+        }).find((candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID)!;
         const setup = await capabilitySetupProjection(
           deps,
           grant.workspaceId,
@@ -4507,7 +4502,7 @@ function registerFleetTools(
             setup.status === "ready"
               ? `${setup.detail} The Connected Machine card lists them, so the person can choose one for this chat or connect another.`
               : "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+          } Check sandboxes_list after they confirm. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on the connected machine.`,
         });
       }
       return json(
@@ -4537,7 +4532,7 @@ function registerConnectedMachineTools(
     {
       description:
         "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
-        OPENGENI_BROWSER_EXTENSION_URL +
+        browserExtension(deps.settings).installUrl +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
     },
@@ -4569,7 +4564,7 @@ function registerConnectedMachineTools(
     {
       description:
         "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: the platform records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for the app that runs the agent (the name macOS lists in those panes): open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch that app on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
-        OPENGENI_BROWSER_EXTENSION_URL +
+        browserExtension(deps.settings).installUrl +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
     },
@@ -6693,16 +6688,18 @@ function registerCapabilityDiscoveryTools(
     }
     return await Promise.all(
       items.map((item) =>
-        capabilitySetupProjection(
-          deps,
-          grant.workspaceId,
-          item,
-          availableServerIds,
-          acceptedServerIds,
-          accountSelectionKnown,
-          availableFirstPartyTools,
-          new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-        ),
+        item.id === EXCEL_ADDIN_CAPABILITY_ID
+          ? excelAddinSetup(deps, grant, sessionId)
+          : capabilitySetupProjection(
+              deps,
+              grant.workspaceId,
+              item,
+              availableServerIds,
+              acceptedServerIds,
+              accountSelectionKnown,
+              availableFirstPartyTools,
+              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+            ),
       ),
     );
   };
@@ -6724,6 +6721,7 @@ function registerCapabilityDiscoveryTools(
         ...current.items,
         ...nativeConnectionCapabilityRecommendations({
           connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+          browserExtension: browserExtension(deps.settings),
         }),
       ];
       const ranked = searchCapabilityCatalogItems(candidates, query, limit ?? 8);
@@ -6797,6 +6795,7 @@ function registerCapabilityDiscoveryTools(
         ...current.items,
         ...nativeConnectionCapabilityRecommendations({
           connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+          browserExtension: browserExtension(deps.settings),
         }),
       ].find((candidate) => candidate.id === capabilityId);
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
@@ -6836,7 +6835,7 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can choose a machine for this chat or connect another. Chrome needs the browser extension (${browserExtension(deps.settings).installUrl}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {
@@ -6855,7 +6854,9 @@ function registerCapabilityDiscoveryTools(
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
-            : "The recommendation was posted for human confirmation. No access has been granted yet.",
+            : item.id === EXCEL_ADDIN_CAPABILITY_ID
+              ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
+              : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );
@@ -7424,6 +7425,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
+/** A machine target given by its sandboxes_list id (not "session"/"default"). */
+const UUID_TARGET = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const SESSION_DISCOVERY_REVISION_MAX = (1n << 65n) - 1n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -7925,15 +7928,23 @@ async function withMcpEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session]),
+  // Share projection metadata only within this authorized full-detail response.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  void workspaceRead.catch(() => undefined);
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session], workspaceRead),
   ]);
   return sessionWithEffectiveToolPolicy(
     session,
-    workspaceServerIds,
-    workspaceDefaultServerIds,
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
     effectiveToolsContext,
   );
 }

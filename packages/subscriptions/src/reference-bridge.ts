@@ -23,7 +23,6 @@
  *   preferred model without an entry (D-35).
  */
 import * as reference from "./reference-model";
-import { inferenceSourceFor } from "./settings";
 import type {
   CacheFacts,
   PlacementDecision,
@@ -118,9 +117,6 @@ function referenceConnection(
     refusalUntil: connection.quota?.exhaustedUntil ?? null,
     entitledModels: entitled,
     allowedModelIds: connection.allowedModelIds,
-    ...(connection.assignmentPolicies === undefined
-      ? {}
-      : { assignmentPolicies: connection.assignmentPolicies }),
     modelCooldowns: { ...connection.quota?.modelCooldowns },
     quota: capacity,
   };
@@ -154,12 +150,7 @@ export function toReferenceWorld(input: PlacementInput): {
               authority.sharedSessionChoice.connectionId === connection.id)),
       );
     }
-    if (connection.assignmentPolicies !== undefined) return true;
-    const source = inferenceSourceFor(settings, connection.provider);
-    const managedHere = connection.ownership.managedByWorkspaceId === workspace.id;
-    if (source === "workspace") return managedHere;
-    if (source === "organization") return !managedHere;
-    return source === "automatic" || managedHere;
+    return true;
   });
   const providers = new Set([
     ...input.models.map((model) => model.provider),
@@ -172,9 +163,6 @@ export function toReferenceWorld(input: PlacementInput): {
       settings: {
         organization: {
           rotation: settings.rotation,
-          inferenceSource: Object.fromEntries(
-            [...providers].map((provider) => [provider, inferenceSourceFor(settings, provider)]),
-          ),
           crossProviderFailover: settings.crossProviderFailover,
           fallbackOrder: Object.fromEntries(
             Object.entries(settings.fallbackOrder).map(([modelId, order]) => [modelId, [...order]]),

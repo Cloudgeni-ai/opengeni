@@ -169,7 +169,6 @@ export {
   createSubscriptionConnection,
   isSubscriptionProviderCutoverEnabled,
   listSubscriptionConnectionsForPlacement,
-  listSubscriptionConnectionAssignmentPolicies,
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
@@ -185,7 +184,6 @@ export {
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   writeSubscriptionSessionBinding,
-  type SubscriptionConnectionAssignmentPolicy,
   type SubscriptionCapacityWaiter,
   type SubscriptionCapacityWakeDelivery,
   type DueSubscriptionCapacityWaiter,
@@ -316,6 +314,7 @@ import {
   childTerminalResultFinalAnswerWithGoalContinuations,
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryResponse,
@@ -449,6 +448,7 @@ export {
   setSubscriptionCoreAllocator,
   setSubscriptionCorePrimary,
   setSubscriptionCoreRotation,
+  type SubscriptionCoreConnectionReach,
   type SubscriptionCoreConnectionRow,
   type SubscriptionCoreWake,
   type SubscriptionCoreWorkspaceView,
@@ -783,6 +783,7 @@ import type {
   SessionMemoryScope,
   SessionListResponse,
   SessionListTotals,
+  SiteConversationGroup,
   SessionListEntryResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -1057,6 +1058,7 @@ import {
   historyItemType,
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
+import { readSessionHistoryToolIdentityPage } from "./session-history-tool-identities";
 import {
   assertAgentCommandAuthorityInTransaction,
   canonicalSessionCommandHash,
@@ -2480,7 +2482,7 @@ async function projectManagedOrganizationAccess(
     subjectId: string;
     subjectLabel: string;
     organizationMemberships: OrganizationMemberType[];
-    preferredDefaultWorkspaceId?: string | null;
+    userId: string;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const activeOrganizationMemberships = input.organizationMemberships.flatMap(
@@ -2508,43 +2510,69 @@ async function projectManagedOrganizationAccess(
     throw new Error("Inactive managed organization unexpectedly passed active membership");
   }
 
+  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  // Preserve the final scope of the old per-organization loop. These authority
+  // tables are non-RLS: every join is explicitly limited to the subject and the
+  // active organization ids just returned by the canonical membership helper.
+  await setRlsContext(db, {
+    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
+    workspaceId: null,
+  });
+  const rows = await db
+    .select({
+      accountId: schema.managedAccounts.id,
+      accountName: schema.managedAccounts.name,
+      workspaceId: schema.workspaces.id,
+      permissions: schema.workspaceMemberships.permissions,
+      preferredDefaultWorkspaceId: sql<string | null>`(
+        select legacy.id from ${schema.workspaces} legacy
+        join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
+        where fallback.id = ${defaultAccountId}::uuid
+          and fallback.external_source = 'better-auth:user'
+          and fallback.external_id = ${input.userId}
+          and legacy.external_source = 'better-auth:user'
+          and legacy.external_id = ${`${input.userId}:default`}
+        limit 1
+      )`,
+    })
+    .from(schema.managedAccounts)
+    .leftJoin(
+      schema.workspaceMemberships,
+      and(
+        eq(schema.workspaceMemberships.accountId, schema.managedAccounts.id),
+        eq(schema.workspaceMemberships.subjectId, input.subjectId),
+      ),
+    )
+    .leftJoin(
+      schema.workspaces,
+      and(
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
+      ),
+    )
+    .where(
+      inArray(
+        schema.managedAccounts.id,
+        activeOrganizationMemberships.map((row) => row.organizationId),
+      ),
+    )
+    .orderBy(desc(schema.workspaces.createdAt));
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
-    await setRlsContext(db, {
-      accountId: organizationMembership.organizationId,
-      workspaceId: null,
-    });
-    // These authority tables are non-RLS, so the account GUC does not scope this query.
-    const persistedMemberships = await db
-      .select({
-        membership: schema.workspaceMemberships,
-        workspace: schema.workspaces,
-      })
-      .from(schema.workspaceMemberships)
-      .innerJoin(
-        schema.workspaces,
-        and(
-          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
-          eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.workspaceMemberships.subjectId, input.subjectId),
-          eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
-          eq(schema.workspaces.accountId, organizationMembership.organizationId),
-        ),
-      )
-      .orderBy(desc(schema.workspaces.createdAt));
     workspaceGrants.push(
-      ...persistedMemberships.map((row) => ({
-        workspaceId: row.workspace.id,
-        accountId: row.workspace.accountId,
-        subjectId: input.subjectId,
-        subjectLabel: input.subjectLabel,
-        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
-        principalKind: "human_session" as const,
-      })),
+      ...rows
+        .filter(
+          (row) =>
+            row.accountId === organizationMembership.organizationId && row.workspaceId !== null,
+        )
+        .map((row) => ({
+          workspaceId: row.workspaceId!,
+          accountId: row.accountId,
+          subjectId: input.subjectId,
+          subjectLabel: input.subjectLabel,
+          permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
+          principalKind: "human_session" as const,
+        })),
     );
   }
   for (const organizationMembership of activeOrganizationMemberships) {
@@ -2563,28 +2591,13 @@ async function projectManagedOrganizationAccess(
       });
     }
   }
-  const organizationAccounts = await db
-    .select({
-      id: schema.managedAccounts.id,
-      name: schema.managedAccounts.name,
-    })
-    .from(schema.managedAccounts)
-    .where(
-      inArray(
-        schema.managedAccounts.id,
-        activeOrganizationMemberships.map((membership) => membership.organizationId),
-      ),
-    );
-  const organizationNameById = new Map(
-    organizationAccounts.map((organization) => [organization.id, organization.name]),
-  );
-  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
-        grant.workspaceId === input.preferredDefaultWorkspaceId,
+        grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
     )?.workspaceId ?? defaultPersonalWorkspaceId;
   return {
     accessContext: {
@@ -2644,44 +2657,12 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
-    const [fallbackAccount] = await tx
-      .select({ id: schema.managedAccounts.id })
-      .from(schema.managedAccounts)
-      .where(
-        and(
-          eq(schema.managedAccounts.externalSource, "better-auth:user"),
-          eq(schema.managedAccounts.externalId, input.userId),
-        ),
-      )
-      .limit(1);
     if (existingOrganizationMemberships.some((membership) => membership.status === "active")) {
-      const firstActiveMembership = existingOrganizationMemberships.find(
-        (membership) => membership.status === "active" && membership.personalWorkspaceId !== null,
-      );
-      let preferredDefaultWorkspaceId: string | null = null;
-      if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
-        await setRlsContext(txDb, {
-          accountId: fallbackAccount.id,
-          workspaceId: null,
-        });
-        const [legacyDefaultWorkspace] = await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(
-            and(
-              eq(schema.workspaces.accountId, fallbackAccount.id),
-              eq(schema.workspaces.externalSource, "better-auth:user"),
-              eq(schema.workspaces.externalId, `${input.userId}:default`),
-            ),
-          )
-          .limit(1);
-        preferredDefaultWorkspaceId = legacyDefaultWorkspace?.id ?? null;
-      }
       return await projectManagedOrganizationAccess(txDb, {
         subjectId,
         subjectLabel,
         organizationMemberships: existingOrganizationMemberships,
-        preferredDefaultWorkspaceId,
+        userId: input.userId,
       });
     }
     if (
@@ -19195,10 +19176,66 @@ export async function scheduledSessionIds(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Set<string>> {
-  if (sessionIds.length === 0) return new Set();
+  return (await sessionScheduleTargets(db, workspaceId, sessionIds)).scheduled;
+}
+
+/**
+ * Whether a schedule can still start a run on its own: it is active, and its
+ * cadence has a run left after `now`. A paused schedule, a one-time schedule
+ * whose time has passed (fired or missed), an interval past its end, and a
+ * manual task never fire by themselves. Malformed specs are not upcoming.
+ *
+ * A one-time run stops being upcoming as soon as `runAt` passes, even while
+ * 0761's 24-hour missed-run catch-up could still start it: the indicator shows
+ * what is ahead, not a late catch-up. Nothing writes at `runAt`/`endAt`, so a
+ * list read before that moment keeps the icon until its next refresh.
+ */
+export function scheduledTaskHasUpcomingRun(
+  task: { status: string; schedule: unknown },
+  now: Date,
+): boolean {
+  if (task.status !== "active") return false;
+  const spec =
+    task.schedule && typeof task.schedule === "object"
+      ? (task.schedule as Record<string, unknown>)
+      : null;
+  const later = (value: unknown) => {
+    const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(at) && at > now.getTime();
+  };
+  switch (spec?.type) {
+    case "once":
+      return later(spec.runAt);
+    case "interval":
+      return spec.endAt === undefined || spec.endAt === null || later(spec.endAt);
+    case "calendar":
+      return true;
+    default:
+      return false;
+  }
+}
+
+export type SessionScheduleTargets = {
+  /** Sessions any current schedule targets, including paused and finished ones. */
+  scheduled: Set<string>;
+  /** Sessions an active schedule targets that can still start a run. */
+  upcoming: Set<string>;
+};
+
+export async function sessionScheduleTargets(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  now: Date = new Date(),
+): Promise<SessionScheduleTargets> {
+  if (sessionIds.length === 0) return { scheduled: new Set(), upcoming: new Set() };
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
-      .selectDistinct({ sessionId: schema.scheduledTasks.reusableSessionId })
+      .select({
+        sessionId: schema.scheduledTasks.reusableSessionId,
+        status: schema.scheduledTasks.status,
+        schedule: schema.scheduledTasks.schedule,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -19208,7 +19245,13 @@ export async function scheduledSessionIds(
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
       );
-    return new Set(rows.flatMap((row) => (row.sessionId ? [row.sessionId] : [])));
+    const targets: SessionScheduleTargets = { scheduled: new Set(), upcoming: new Set() };
+    for (const row of rows) {
+      if (!row.sessionId) continue;
+      targets.scheduled.add(row.sessionId);
+      if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+    }
+    return targets;
   });
 }
 
@@ -29955,6 +29998,37 @@ function wellFormedDriverText(value: unknown): unknown {
   return Array.isArray(value) ? value.map(wellFormedDriverText) : value;
 }
 
+/**
+ * A new Site conversation is filed in the project of the chat that created the
+ * Site (the tree of its first version's session), so the Site's sidebar row and
+ * its conversations sit together. Without a Site origin, or a creating chat,
+ * the session stays unfiled.
+ */
+async function siteHomeChannelId(
+  tx: Database,
+  workspaceId: string,
+  metadata: Record<string, unknown>,
+): Promise<string | null> {
+  const origin = metadata._opengeniSiteOrigin;
+  const siteId =
+    origin && typeof origin === "object" ? (origin as { siteId?: unknown }).siteId : undefined;
+  if (typeof siteId !== "string" || !z.string().uuid().safeParse(siteId).success) return null;
+  const [home] = await rawRows<{ channelId: string | null }>(
+    tx,
+    sql`
+      select root.channel_id::text as "channelId"
+      from ${schema.workspaceArtifactVersions} version
+      join ${schema.sessions} source
+        on source.workspace_id = version.workspace_id and source.id = version.source_session_id
+      join ${schema.sessions} root
+        on root.workspace_id = source.workspace_id and root.id = source.root_session_id
+      where version.workspace_id = ${workspaceId} and version.artifact_id = ${siteId}::uuid
+        and version.revision = 1 and root.site_access_root_id is null
+      limit 1`,
+  );
+  return home?.channelId ?? null;
+}
+
 async function createSessionInTransaction(
   tx: SessionActivityDatabase,
   input: SessionCreateInput,
@@ -30244,6 +30318,10 @@ async function createSessionInTransaction(
     input.workspaceId,
     parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
   );
+  const channelId =
+    input.channelId === undefined && !input.parentSessionId
+      ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
+      : (input.channelId ?? null);
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
@@ -30280,7 +30358,7 @@ async function createSessionInTransaction(
         variableSetId,
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
-        channelId: input.channelId ?? null,
+        channelId,
         firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
@@ -31980,6 +32058,13 @@ export type SessionListFilterOptions = {
   siteAccessId?: string;
   /** Sessions created through this published Site, independent of project. */
   originSiteId?: string;
+  /**
+   * Ordinary discovery omits conversations that run inside a Site. `include`
+   * lists them as ordinary rows (search, pins, branches); `group` keeps them
+   * out of root rows but counts them in totals and returns `siteGroups`.
+   * Presentation only: native ownership and Site RLS still decide access.
+   */
+  siteConversations?: "include" | "group";
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
   /** Exact frozen creator identity. */
@@ -32996,12 +33081,33 @@ async function sessionListTotalsInScope(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
-): Promise<SessionListTotals> {
+  withSiteRows = false,
+): Promise<SessionListTotals & { sites: SiteConversationGroup[]; sitesTruncated: boolean }> {
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+  // A grouped rail counts Site conversations in its project totals and gets
+  // their Site rows here; its ordinary rows still omit them.
+  const siteConversations = options.siteConversations ? "include" : undefined;
+  // Sites this person opened join the rows only in the plain view: a root
+  // filter (Mine, search, creator, dates, archived content, another person's
+  // scope) or an agent caller lists only Sites its listed chats created.
+  const withOpenedSites =
+    withSiteRows &&
+    !options.needsYouOnly &&
+    !options.mineOnly &&
+    !options.search?.trim() &&
+    !options.contentArchivedOnly &&
+    !options.scopeSubjectId &&
+    !options.createdBy &&
+    !options.updatedFrom &&
+    !options.updatedBefore &&
+    !options.createdFrom &&
+    !options.createdBefore &&
+    !options.authorizationScope?.agentAccessViewer;
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
     ...sessionFilters({
       ...options,
+      ...(siteConversations ? { siteConversations } : {}),
       parentSessionId: null,
       needsYouOnly: false,
       archiveStatus: "all",
@@ -33010,7 +33116,11 @@ async function sessionListTotalsInScope(
       ? []
       : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
   );
-  const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
+  const rows = await rawRows<{
+    needsYouCount: number;
+    groups: SessionListTotals["groups"];
+    sites: SiteConversationGroup[] | null;
+  }>(
     db,
     sql`
     -- Inline this subject's state so each lateral lookup can use the session
@@ -33031,6 +33141,11 @@ async function sessionListTotalsInScope(
         ${schema.sessions.activeTurnId} as active_turn_id,
         ${schema.sessions.inputWaitUntil} as input_wait_until,
         ${schema.sessions.inputWaitTurnId} as input_wait_turn_id,
+        ${schema.sessions.siteId} as site_id,
+        ${schema.sessions.siteAccessRootId} is not null as site_conversation,
+        ${schema.sessions.updatedAt} as updated_at,
+        ${schema.sessions.createdAt} as created_at,
+        ${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'title' as origin_title,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
         coalesce(root_personal.archived, false) as archived,
         coalesce(root_personal.pinned, false) as pinned,
@@ -33101,6 +33216,9 @@ async function sessionListTotalsInScope(
       from roots root left join attention_roots attention on attention.root_id = root.id
     ), measured as (
       select nodes.*,
+        root.site_conversation as root_site_conversation, root.site_id as root_site_id,
+        root.updated_at as root_updated_at, root.created_at as root_created_at,
+        root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
         nodes.actively_working as active_work,
         case when nodes.status = 'requires_action' then (
@@ -33157,20 +33275,149 @@ async function sessionListTotalsInScope(
         count(*) filter (where unread)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
+    ), site_conv as (
+      -- Site conversations nest under their Site's row in their own project.
+      -- Pinned ones live with pins.
+      select root.*, root.channel_id as row_channel_id
+      from roots root
+      where ${
+        withSiteRows
+          ? sql`root.site_conversation and root.site_id is not null and not root.pinned
+            ${
+              options.needsYouOnly
+                ? sql`and root.id in (select id from root_attention where needs_you)`
+                : sql``
+            }`
+          : sql`false`
+      }
+    ), site_conv_totals as (
+      select site_id, row_channel_id as channel_id, count(*)::int as conversations,
+        max(updated_at) as updated_at, max(created_at) as created_at,
+        (array_agg(origin_title order by updated_at desc, id desc)
+          filter (where origin_title is not null))[1] as origin_title
+      from site_conv group by site_id, row_channel_id
+    ), site_home as (
+      -- A Site sits in the project of the chat that created it (the tree of
+      -- its first version's session), as far as this viewer can see that
+      -- chat; new Site conversations are filed there too. A Site without
+      -- conversations here is listed when this viewer lists its creating
+      -- chat, or opened it. Candidates are the live Sites in this viewer's
+      -- audience (one row each); revision 1 is a unique-index lookup.
+      select artifact.id as site_id, creator.channel_id
+      from ${schema.workspaceArtifacts} artifact
+      join lateral (
+        select version.source_session_id from ${schema.workspaceArtifactVersions} version
+        where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
+          and version.revision = 1
+      ) first_version on true
+      left join ${schema.sessions} source
+        on source.workspace_id = ${workspaceId} and source.id = first_version.source_session_id
+      left join ${schema.sessions} creator
+        on creator.workspace_id = ${workspaceId} and creator.id = source.root_session_id
+        and creator.site_access_root_id is null
+      where ${withSiteRows && !options.needsYouOnly ? sql`true` : sql`false`}
+        and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
+        and (artifact.visibility = 'workspace_shared'
+          or artifact.owner_subject_id = ${options.subjectId})
+        and artifact.id not in (select site_id from site_conv)
+        and (exists (select 1 from roots listed where listed.id = creator.id)
+          ${
+            withOpenedSites
+              ? sql`or exists (
+            select 1 from ${schema.siteOpens} opened
+            where opened.workspace_id = ${workspaceId}
+              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)`
+              : sql``
+          })
+    ), site_keys as (
+      select * from site_conv_totals
+      union all
+      select site_id, channel_id, 0, null, null, null from site_home
+    ), site_rows as (
+      -- One row per Site and project. The title is the Site's current one when
+      -- its audience includes this viewer (the catalog's rule; RLS only
+      -- isolates the workspace), else the creation-time label. A row without
+      -- conversations needs a live Site the viewer can see. Activity is the
+      -- latest of its conversations, its own changes and this person opening
+      -- it. One extra row reports truncation.
+      select key.site_id as "siteId", key.channel_id as "channelId",
+        coalesce(site.title, key.origin_title, '') as title,
+        key.conversations,
+        greatest(key.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
+        coalesce(key.created_at, site.created_at) as "createdAt"
+      from site_keys key
+      left join lateral (
+        select artifact.title, artifact.status, artifact.created_at, artifact.updated_at
+        from ${schema.workspaceArtifacts} artifact
+        where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
+          and (artifact.visibility = 'workspace_shared'
+            or artifact.owner_subject_id = ${options.subjectId})
+      ) site on true
+      left join lateral (
+        select opened.opened_at from ${schema.siteOpens} opened
+        where opened.workspace_id = ${workspaceId} and opened.subject_id = ${options.subjectId}
+          and opened.site_id = key.site_id
+      ) opened on true
+      where (key.conversations > 0 or site.status = 'active')
+        ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
+      order by 5 desc, 1, 2
+      limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
+    ), site_status as (
+      -- Status counts follow project totals: active, unpinned trees only.
+      select conv.site_id, conv.row_channel_id, count(*)::int as total,
+        count(*) filter (where node.status = 'requires_action')::int as attention,
+        min(node.attention_since) as "attentionSince",
+        count(*) filter (where node.status = 'failed' and node.unread)::int as failed,
+        count(*) filter (where node.pause_revision is null and
+          (node.status in ('running', 'recovering') or node.input_wait))::int as active,
+        count(*) filter (where node.pause_revision is null and
+          node.status in ('queued', 'waiting_capacity'))::int as queued,
+        count(*) filter (where node.pause_revision is null and node.input_wait)::int as waiting,
+        count(*) filter (where node.unread)::int as unread,
+        count(*) filter (where node.active_work)::int as "activeWork"
+      from measured node join site_conv conv on conv.id = node.root_id
+      group by conv.site_id, conv.row_channel_id
+    ), site_grouped as (
+      select site_rows.*, coalesce(status.total, 0) as total,
+        coalesce(status.attention, 0) as attention, status."attentionSince",
+        coalesce(status.failed, 0) as failed, coalesce(status.active, 0) as active,
+        coalesce(status.queued, 0) as queued, coalesce(status.waiting, 0) as waiting,
+        coalesce(status.unread, 0) as unread, coalesce(status."activeWork", 0) as "activeWork"
+      from site_rows left join site_status status
+        on status.site_id = site_rows."siteId"
+        and status.row_channel_id is not distinct from site_rows."channelId"
     )
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
-      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups
+      coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
+      coalesce((select jsonb_agg(to_jsonb(site_grouped)
+        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        from site_grouped), '[]'::jsonb) as sites
   `,
   );
   const result = rows[0];
+  const iso = (value: string | null) => (value ? new Date(value).toISOString() : null);
+  const sites = result?.sites ?? [];
   return {
     needsYouCount: Number(result?.needsYouCount ?? 0),
     groups: (result?.groups ?? []).map((group) => ({
       ...group,
-      attentionSince: group.attentionSince ? new Date(group.attentionSince).toISOString() : null,
+      attentionSince: iso(group.attentionSince),
     })),
+    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map((site) => ({
+      ...site,
+      updatedAt: iso(site.updatedAt)!,
+      createdAt: iso(site.createdAt)!,
+      attentionSince: iso(site.attentionSince),
+    })),
+    sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
+
+/**
+ * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
+ * for a long time fall past it; the Artifacts page lists every Site.
+ */
+export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
 function sessionFilters(
   options: Pick<
@@ -33184,6 +33431,7 @@ function sessionFilters(
     | "channelId"
     | "originSiteId"
     | "siteAccessId"
+    | "siteConversations"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -33217,9 +33465,14 @@ function sessionFilters(
       eq(schema.sessions.siteId, options.originSiteId),
       sql`${schema.sessions.siteAccessRootId} is not null`,
     );
-  } else {
+  } else if (
+    options.siteConversations !== "include" ||
+    options.authorizationScope?.agentAccessViewer
+  ) {
     // App-internal execution is not ordinary workspace conversation discovery.
     // This is presentation scope only: native ownership and Site RLS still apply.
+    // The console rail opts in explicitly (`include` or `group`); agent
+    // callers keep their own-root bound so the option never widens discovery.
     const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
     filters.push(
       ownRoot
@@ -33470,6 +33723,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !hasChannel &&
     !options.originSiteId &&
     !options.siteAccessId &&
+    options.siteConversations !== "include" &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33485,6 +33739,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   return JSON.stringify([
     ...(options.siteAccessId ? [["siteAccess", options.siteAccessId]] : []),
     ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
+    // `group` returns the same rows as the default; only `include` changes them.
+    ...(options.siteConversations === "include" ? [["siteConversations", "include"]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
@@ -33842,7 +34098,27 @@ export async function listVisibleSessionInvalidationIds(
   sessionIds: string[],
   authority: SessionListReadAuthority,
 ): Promise<string[]> {
-  if (!sessionIds.length) return [];
+  return (await listVisibleSessionInvalidationHints(db, workspaceId, sessionIds, authority))
+    .sessionIds;
+}
+
+/**
+ * Ordinary IDs plus, separately, the viewer's own visible Site conversations.
+ * A rail with Site rows refreshes their summaries for the latter without
+ * treating every unknown Site conversation as a full list invalidation.
+ */
+export async function listVisibleSessionInvalidationHints(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<{ sessionIds: string[]; siteSessionIds: string[] }> {
+  if (!sessionIds.length) return { sessionIds: [], siteSessionIds: [] };
+  // Exactly the rows ordinary discovery omits (an agent keeps its own root).
+  const ownRoot = authority.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+  const siteOnly = ownRoot
+    ? sql<boolean>`(${schema.sessions.siteAccessRootId} is not null and ${schema.sessions.rootSessionId} is distinct from ${ownRoot}::uuid)`
+    : sql<boolean>`${schema.sessions.siteAccessRootId} is not null`;
   return await withWorkspaceSubjectRls(
     db,
     workspaceId,
@@ -33850,16 +34126,24 @@ export async function listVisibleSessionInvalidationIds(
     async (tx) => {
       await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
       const rows = await tx
-        .select({ id: schema.sessions.id })
+        .select({
+          id: schema.sessions.id,
+          site: siteOnly,
+        })
         .from(schema.sessions)
         .where(
           and(
             eq(schema.sessions.workspaceId, workspaceId),
             inArray(schema.sessions.id, sessionIds),
-            ...sessionFilters({ ...authority, archiveStatus: "all" }),
+            // Hints carry no content. Site conversations use the same viewer
+            // authorization (and agent bound) as `siteConversations=include`.
+            ...sessionFilters({ ...authority, archiveStatus: "all", siteConversations: "include" }),
           ),
         );
-      return rows.map((row) => row.id);
+      return {
+        sessionIds: rows.filter((row) => !row.site).map((row) => row.id),
+        siteSessionIds: rows.filter((row) => row.site).map((row) => row.id),
+      };
     },
     { isolationLevel: "read committed" },
   );
@@ -33890,16 +34174,43 @@ async function readSessionListForSubject(
         }
         if (options.includeTotals && options.parentSessionId !== null && !options.pinsOnly)
           throw new SessionListCursorError("Attention totals require root or global pin pages");
-        const totals = options.includeTotals
-          ? await sessionListTotalsInScope(
-              tx,
-              workspaceId,
-              options.pinsOnly
-                ? { ...options, archiveStatus: "active", parentSessionId: null }
-                : options,
-            )
-          : undefined;
+        const groupSites = options.siteConversations === "group";
+        if (
+          groupSites &&
+          (options.parentSessionId !== null ||
+            options.pinsOnly ||
+            archiveMode === "archived" ||
+            options.originSiteId ||
+            options.siteAccessId)
+        )
+          throw new SessionListCursorError("Site rows require an ordinary, non-archived root page");
+        // Site rows are a complete section like pins: read once, with page one.
+        const siteGroupsRequested = groupSites && !options.cursor;
+        const completeTotals =
+          options.includeTotals || siteGroupsRequested
+            ? await sessionListTotalsInScope(
+                tx,
+                workspaceId,
+                options.pinsOnly
+                  ? { ...options, archiveStatus: "active", parentSessionId: null }
+                  : options,
+                siteGroupsRequested,
+              )
+            : undefined;
+        const totals =
+          options.includeTotals && completeTotals
+            ? { needsYouCount: completeTotals.needsYouCount, groups: completeTotals.groups }
+            : undefined;
+        const siteGroups = siteGroupsRequested ? (completeTotals?.sites ?? []) : undefined;
+        const siteGroupsTruncated = siteGroupsRequested && completeTotals?.sitesTruncated === true;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
+        // A pinned Site conversation is a personal shortcut like any other pin.
+        const pinnedFilters = groupSites
+          ? [
+              eq(schema.sessions.workspaceId, workspaceId),
+              ...sessionFilters({ ...options, siteConversations: "include" }),
+            ]
+          : filters;
         const ordinaryPinFilter =
           archiveMode === "archived"
             ? sql`true`
@@ -34229,7 +34540,7 @@ async function readSessionListForSubject(
                     eq(schema.sessionPins.workspaceId, workspaceId),
                     eq(schema.sessionPins.subjectId, options.subjectId),
                     eq(schema.sessionPins.pinned, true),
-                    ...filters,
+                    ...pinnedFilters,
                   ),
                 )
                 .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
@@ -34362,6 +34673,9 @@ async function readSessionListForSubject(
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
             ...(options.mineOnly ? { mineOnly: true as const } : {}),
+            ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
+            ...(siteGroups ? { siteGroups } : {}),
+            ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -34374,6 +34688,9 @@ async function readSessionListForSubject(
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
           ...(options.mineOnly ? { mineOnly: true as const } : {}),
+          ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
+          ...(siteGroups ? { siteGroups } : {}),
+          ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -36597,7 +36914,10 @@ type LineageIdRow = {
  * before RLS is considered. Up to 63 ancestors are returned root-first; an
  * invalid, cyclic, foreign, or deeper chain fails closed instead of presenting
  * a partial path as if it were rooted. Descendants are capped at depth 5 and
- * 200 total rows, returned as a nested tree.
+ * 200 total rows, returned as a nested tree with each level newest first (as
+ * the sidebar lists chats). The cap keeps shallower agents before deeper ones
+ * and newer before older, so a long fleet loses its oldest grandchildren
+ * first, never a direct child picked at random.
  */
 export async function getSessionLineage(
   db: Database,
@@ -36654,13 +36974,13 @@ export async function getSessionLineage(
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
     const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, depth, path) as (
-        select child.id, child.parent_session_id, 1, array[${sessionId}, child.id]
+      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
         from ${schema.sessions} child
         where child.workspace_id = ${workspaceId}
           and child.parent_session_id = ${sessionId}
         union all
-        select child.id, child.parent_session_id, descendants.depth + 1, descendants.path || child.id
+        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
         from ${schema.sessions} child
         join descendants on child.parent_session_id = descendants.id
         where child.workspace_id = ${workspaceId}
@@ -36669,7 +36989,7 @@ export async function getSessionLineage(
       )
       select id, parent_session_id as "parentSessionId", depth, path, false as cycle
       from descendants
-      order by path
+      order by depth, created_at desc, id desc
       limit ${descendantLimit + 1}
     `)) as LineageIdRow[];
     const truncated = childRows.length > descendantLimit;
@@ -40837,7 +41157,7 @@ const DURABLE_TOOL_CALL_SCAN_PAGE = 32;
  * calls still read the whole turn before staying pending.
  */
 async function durableToolCallPairIdsTx(
-  tx: Pick<Database, "select">,
+  tx: Pick<Database, "execute">,
   scope: { workspaceId: string; sessionId: string; turnId: string },
   pending: Array<{ id: string; callId: string; callType: string }>,
 ): Promise<string[]> {
@@ -40851,32 +41171,16 @@ async function durableToolCallPairIdsTx(
   const durable: string[] = [];
   let before: number | null = null;
   while (unproven.size > 0) {
-    const page = await tx
-      .select({
-        position: schema.sessionHistoryItems.position,
-        item: schema.sessionHistoryItems.item,
-        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, scope.workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, scope.sessionId),
-          eq(schema.sessionHistoryItems.turnId, scope.turnId),
-          before === null ? undefined : lt(schema.sessionHistoryItems.position, before),
-        ),
-      )
-      .orderBy(desc(schema.sessionHistoryItems.position))
-      .limit(DURABLE_TOOL_CALL_SCAN_PAGE);
+    const page = await readSessionHistoryToolIdentityPage(
+      tx,
+      scope,
+      before,
+      DURABLE_TOOL_CALL_SCAN_PAGE,
+    );
     // Positions are unique per session, so each row is strictly older than
     // every row already seen.
     for (const row of page) {
-      const item = fromPostgresLosslessJson(row.item, row.itemCodecVersion) as Record<
-        string,
-        unknown
-      >;
-      const callId = historyCallId(item);
-      const type = historyItemType(item);
+      const { callId, type } = row;
       if (callId === null || type === null) continue;
       const call = unproven.get(callId);
       if (!call) continue;
@@ -44386,7 +44690,7 @@ const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
 
 type ProviderLossRecord = {
   version: 1;
-  source: "drain_probe" | "warm_resume";
+  source: "drain_probe" | "warm_resume" | "continuity_restore";
   leaseId: string;
   lostEpoch: number;
   instanceId: string | null;
@@ -44394,7 +44698,33 @@ type ProviderLossRecord = {
   observedAt: string;
   /** The lost object's recorded hard provider deadline, when known. */
   providerDeadlineAt: string | null;
+  /** Backend-specific proof that the lost object, and with it every copy of
+   * the workspace that only it held, no longer exists anywhere. A NotFound on
+   * its own is an observation, not proof: without this (or Modal's hard
+   * lifetime, or the compute control plane's own answer) the loss may at most
+   * restore a checkpoint, never continue on an empty workspace. */
+  deathProof?: ProviderDeathProof;
 };
+
+type ProviderDeathProof = {
+  /** `workspace_absent`: the same Docker daemon reports the exact container
+   * gone and its owned host workspace directory no longer exists.
+   * `provider_lifetime`: the provider ends every box within a known bound,
+   * so none can still be running after `provenAt`. */
+  kind: "workspace_absent" | "provider_lifetime";
+  provenAt: string;
+};
+
+function parsedProviderDeathProof(value: unknown): ProviderDeathProof | null | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const proof = value as Record<string, unknown>;
+  return (proof.kind === "workspace_absent" || proof.kind === "provider_lifetime") &&
+    typeof proof.provenAt === "string" &&
+    Number.isFinite(Date.parse(proof.provenAt))
+    ? { kind: proof.kind, provenAt: proof.provenAt }
+    : null;
+}
 
 function providerLossRecord(
   resumeState: Record<string, unknown> | null | undefined,
@@ -44403,7 +44733,9 @@ function providerLossRecord(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return record.version === 1 &&
-    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    (record.source === "drain_probe" ||
+      record.source === "warm_resume" ||
+      record.source === "continuity_restore") &&
     typeof record.leaseId === "string" &&
     typeof record.lostEpoch === "number" &&
     Number.isSafeInteger(record.lostEpoch) &&
@@ -44414,7 +44746,8 @@ function providerLossRecord(
     Number.isFinite(Date.parse(record.observedAt)) &&
     (record.providerDeadlineAt === null ||
       (typeof record.providerDeadlineAt === "string" &&
-        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+        Number.isFinite(Date.parse(record.providerDeadlineAt)))) &&
+    parsedProviderDeathProof(record.deathProof) !== null
     ? (record as ProviderLossRecord)
     : null;
 }
@@ -44430,7 +44763,17 @@ function providerLossRecordForLostRow(
   row: LeaseRow,
   source: ProviderLossRecord["source"],
   observedAt: string,
+  /** The provider's bound on how long any box can still run after this
+   * observation (its hard lifetime, or the renewable TTL nobody renews any
+   * more), when it has one. */
+  providerMaxRemainingLifetimeMs?: number | null,
 ): ProviderLossRecord {
+  const lifetimeEndsAt =
+    typeof providerMaxRemainingLifetimeMs === "number" &&
+    Number.isSafeInteger(providerMaxRemainingLifetimeMs) &&
+    providerMaxRemainingLifetimeMs >= 0
+      ? Date.parse(observedAt) + providerMaxRemainingLifetimeMs + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : null;
   return {
     version: 1,
     source,
@@ -44440,7 +44783,32 @@ function providerLossRecordForLostRow(
     workspaceGeneration: Number(row.workspace_generation),
     observedAt,
     providerDeadlineAt: timestampIso(row.provider_deadline_at),
+    ...(lifetimeEndsAt !== null && Number.isFinite(lifetimeEndsAt)
+      ? {
+          deathProof: {
+            kind: "provider_lifetime" as const,
+            provenAt: new Date(lifetimeEndsAt).toISOString(),
+          },
+        }
+      : {}),
   };
+}
+
+/** The carried loss record with `workspace_absent` proof added, minting the
+ * record when an older loss transition never wrote one. Never moves a record
+ * to another lease or workspace generation. */
+function providerLossRecordWithWorkspaceAbsent(
+  row: LeaseRow,
+  provenAt: string,
+): ProviderLossRecord {
+  const carried = providerLossRecord(row.resume_state);
+  const base =
+    carried &&
+    carried.leaseId === row.id &&
+    carried.workspaceGeneration === Number(row.workspace_generation)
+      ? carried
+      : providerLossRecordForLostRow(row, "continuity_restore", provenAt);
+  return { ...base, deathProof: { kind: "workspace_absent", provenAt } };
 }
 
 function resumeStateWithPreservedArchives(
@@ -45782,24 +46150,31 @@ async function sandboxGroupRecoveryBlockersTx(
   });
 }
 
-/** A registered CURRENT native Modal checkpoint older than the lost workspace.
- * The restore path independently verifies the opaque bytes and provider binding. */
+/** The CURRENT checkpoint older than the lost workspace: on Modal a registered
+ * native checkpoint, elsewhere the lease's own verified portable archive (which
+ * has no native artifact). The restore path independently verifies the bytes
+ * against the descriptor, and a native checkpoint's provider binding. */
 async function verifiedAutomaticCheckpointSelectionTx(
   tx: Database,
   row: LeaseRow,
   session: typeof schema.sessions.$inferSelect,
   recovery: SandboxRecoveryState,
-): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+): Promise<SandboxCheckpointSelection | null> {
   const descriptor = recovery.archive.current;
   if (
     recovery.archive.status !== "available" ||
     currentWorkspaceArchiveWasAbandoned(row) ||
-    descriptor?.version !== 2 ||
-    row.current_checkpoint_artifact_id === null ||
+    !descriptor ||
     row.archive_generation === null ||
     Number(row.archive_generation) >= Number(row.workspace_generation)
   )
     return null;
+  if ((row.resume_backend_id ?? row.backend) !== "modal") {
+    return descriptor.version === 1 && row.current_checkpoint_artifact_id === null
+      ? checkpointSelectionForSession(row, session, descriptor)
+      : null;
+  }
+  if (descriptor.version !== 2 || row.current_checkpoint_artifact_id === null) return null;
   const [artifact] = await rawRows<{ valid: boolean }>(
     tx,
     sql`select exists(select 1 from sandbox_checkpoint_artifacts
@@ -45820,8 +46195,8 @@ function checkpointSelectionForSession(
   row: LeaseRow,
   session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
   descriptor: { revision: string; capturedAt: string },
-): import("@opengeni/contracts").SandboxRecoverySelection | null {
-  const parsed = SandboxRecoverySelection.safeParse({
+): SandboxCheckpointSelection | null {
+  const parsed = SandboxCheckpointSelection.safeParse({
     version: 1,
     sessionId: session.id,
     sandboxGroupId: row.sandbox_group_id,
@@ -45892,7 +46267,7 @@ type AutomaticRecoveryLane =
   | {
       kind: "checkpoint";
       state: "available" | "authorized";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       operationId: string | null;
       initiatingSessionId: string | null;
       attempt: number;
@@ -45919,6 +46294,7 @@ type AutomaticRecoveryLane =
         | "restore_retry_backoff"
         | "restore_retry_exhausted"
         | "provider_lifetime_unexpired"
+        | "provider_death_unproven"
         | "authorization_pending"
         | "authorization_invalid";
       /** For a timed wait: the earliest time a new decision (Retry or a new
@@ -45934,10 +46310,42 @@ function isoTimestamp(...candidates: Array<string | null | undefined>): string {
   return new Date().toISOString();
 }
 
-/** Structural system continuity for a definitively lost managed Modal box.
- * Prefer the latest verified registered checkpoint; otherwise continue on a
- * new EMPTY workspace. Never for an ambiguous provider state, an unresolved
- * create, a live explicit authorization, or an unsettled late capture. Group
+/** Backends whose lost boxes the system may recover by itself. Connected
+ * Machines and backend-less sessions are never system recovered. */
+function automaticRecoveryBackend(
+  session: Pick<typeof schema.sessions.$inferSelect, "sandboxBackend">,
+  row: Pick<LeaseRow, "backend" | "resume_backend_id">,
+): boolean {
+  const backend = row.resume_backend_id ?? row.backend;
+  return (
+    session.sandboxBackend === backend &&
+    row.backend === backend &&
+    backend !== "none" &&
+    backend !== "selfhosted"
+  );
+}
+
+/** When the lost object is proven gone, as a database-clock epoch, or null
+ * when nothing proves it. Modal: past its hard lifetime, which no Modal
+ * sandbox outlives in any workspace. Compute: the control plane, which is
+ * authoritative for its own sandboxes, is the only source of a compute
+ * NotFound. Others: the backend-specific proof the loss recorded. */
+function providerDeathProvenAtMs(row: LeaseRow, loss: ProviderLossRecord): number | null {
+  const backend = row.resume_backend_id ?? row.backend;
+  if (backend === "modal") {
+    return loss.providerDeadlineAt
+      ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  }
+  if (backend === "compute") return Date.parse(loss.observedAt);
+  return loss.deathProof ? Date.parse(loss.deathProof.provenAt) : null;
+}
+
+/** Structural system continuity for a definitively lost managed box. Prefer
+ * the latest verified checkpoint; otherwise, only with proof the lost object is
+ * gone (providerDeathProvenAtMs), continue on a new EMPTY workspace. Never for
+ * an ambiguous provider state, an unresolved create, a live explicit
+ * authorization, or an unsettled late capture. Group
  * quiescence is checked separately, at the exact deciding attempt. Rows
  * written by older confirmDrainCold/lost-instance code qualify as-is: the
  * decision reads current lease truth, not a new loss-time receipt. */
@@ -45970,7 +46378,7 @@ async function automaticRecoveryLaneTx(
     };
   if (pendingFreshWorkspaceRecovery(row.resume_state))
     return { kind: "unavailable", reason: "authorization_invalid" };
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
+  if (!automaticRecoveryBackend(session, row))
     return { kind: "unavailable", reason: "not_applicable" };
   const automatic = automaticCheckpointMarker(row.resume_state);
   if (automatic?.status === "accepted") {
@@ -46086,13 +46494,12 @@ async function automaticRecoveryLaneTx(
     };
   }
   // No checkpoint Opengeni can restore automatically. An empty workspace is
-  // irreversible for the running sandbox, so it additionally waits until the
-  // lost object is past its hard provider lifetime: no Modal sandbox outlives
-  // it in any workspace, so a misconfigured credential or namespace cannot
-  // turn a live box into a false loss here.
-  const lifetimeEndsAt = loss.providerDeadlineAt
-    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
-    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  // irreversible for the running sandbox, so it needs proof that the lost
+  // object, and any workspace only it held, is really gone. A NotFound alone
+  // can come from a misconfigured credential or namespace, or a daemon under
+  // memory pressure, and must never turn a live workspace into an empty one.
+  const lifetimeEndsAt = providerDeathProvenAtMs(row, loss);
+  if (lifetimeEndsAt === null) return { kind: "unavailable", reason: "provider_death_unproven" };
   if (now < lifetimeEndsAt)
     return {
       kind: "unavailable",
@@ -46283,12 +46690,15 @@ async function projectPublicSandboxRecovery(
     currentWorkspace &&
     (currentWorkspace.reason === "fresh_workspace_selected" ||
       currentWorkspace.reason === "archive_retry_selected" ||
-      canRevalidateCurrentWorkspaceArchive(row) ||
-      row.backend !== "modal")
+      canRevalidateCurrentWorkspaceArchive(row))
   )
     return currentWorkspace;
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
-    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  // Explicit historical-checkpoint consent stays Modal-only; system continuity
+  // after a loss serves every automatically recoverable backend.
+  const modalHome = session.sandboxBackend === "modal" && row.backend === "modal";
+  const homeUnsupported = (): SandboxRecoveryProjection =>
+    currentWorkspace ?? { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  if (!modalHome && !automaticRecoveryBackend(session, row)) return homeUnsupported();
   const publicRecovery = row.public_recovery as Record<string, unknown> | null;
   const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
   if (publicRecovery && acceptedSelection.success && publicRecovery.sessionId === input.sessionId) {
@@ -46328,10 +46738,18 @@ async function projectPublicSandboxRecovery(
   if (purpose === "preview") {
     const lane = await automaticRecoveryLaneTx(tx, row, session);
     if (lane.kind === "checkpoint" || lane.kind === "fresh_workspace") {
-      const checkpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      const automaticCheckpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      // `checkpoint` keeps its public shape: a native checkpoint only. A
+      // portable one is named by `automaticCheckpoint` alone.
+      const nativeCheckpoint = SandboxRecoverySelection.safeParse(automaticCheckpoint);
+      const checkpoint = nativeCheckpoint.success ? nativeCheckpoint.data : null;
+      const blocked = (blockedReason: string): SandboxRecoveryProjection => ({
+        ...unavailable(blockedReason, checkpoint),
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
+      });
       const reason =
         lane.state === "authorized" ? null : await automaticLaneQuiescenceReason(tx, row, session);
-      if (reason) return unavailable(reason, checkpoint);
+      if (reason) return blocked(reason);
       // Retry reopens the latest failed turn, and never with a tool call whose
       // outcome it cannot prove. A new message still recovers the sandbox.
       const [retryTarget] = await rawRows<{ unresolved: boolean }>(
@@ -46342,12 +46760,13 @@ async function projectPublicSandboxRecovery(
               where turn.workspace_id = ${input.workspaceId} and turn.session_id = ${session.id}
               order by turn.position desc, turn.created_at desc limit 1)) as unresolved`,
       );
-      if (retryTarget?.unresolved) return unavailable("retry_tool_outcome_unresolved", checkpoint);
+      if (retryTarget?.unresolved) return blocked("retry_tool_outcome_unresolved");
       return {
         version: 1,
         status: "eligible",
         reason: null,
         checkpoint,
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
         operationId: null,
         automaticAvailable: true,
         automaticLane: lane.kind,
@@ -46363,6 +46782,7 @@ async function projectPublicSandboxRecovery(
     )
       return unavailable(lane.reason, null, lane.availableAt);
   }
+  if (!modalHome) return homeUnsupported();
   // A system decision already owns this lease; consent may not compete with it.
   if (
     pendingFreshWorkspaceRecovery(row.resume_state) ||
@@ -46391,8 +46811,13 @@ async function projectPublicSandboxRecovery(
     !row.current_checkpoint_artifact_id
   )
     return unavailable("registered_current_checkpoint_required");
-  const selection = checkpointSelectionForSession(row, session, descriptor);
-  if (!selection) return unavailable("checkpoint_metadata_invalid");
+  // Human consent is offered only for a registered native checkpoint, so the
+  // public selection always names its artifact.
+  const parsedSelection = SandboxRecoverySelection.safeParse(
+    checkpointSelectionForSession(row, session, descriptor),
+  );
+  if (!parsedSelection.success) return unavailable("checkpoint_metadata_invalid");
+  const selection = parsedSelection.data;
   if (selection.archiveGeneration >= selection.workspaceGeneration)
     return unavailable("historical_checkpoint_not_required", selection);
   if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
@@ -46810,7 +47235,7 @@ export type AutomaticSandboxRecoveryAuthorization =
   | {
       status: "authorized" | "already_authorized";
       lane: "checkpoint";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       groupSessionCount: number;
     }
   | {
@@ -46862,7 +47287,7 @@ async function writeAutomaticRecoveryReceiptsTx(
           ? input.actor
           : { type: "service", subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT };
       if (input.lane.kind === "checkpoint") {
-        const checkpoint = SandboxRecoverySelection.parse({
+        const checkpoint = SandboxCheckpointSelection.parse({
           ...input.lane.selection,
           sessionId: member.id,
           routeEpoch: member.activeEpoch,
@@ -47268,7 +47693,7 @@ export async function getSandboxRecoveryDiscontinuity(
       );
     }
     if (rows[0].action === "sandbox.recovery.automatic") {
-      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      const selection = SandboxCheckpointSelection.parse(rows[0].result.checkpoint);
       return automaticSandboxRecoveryDiscontinuity(
         selection,
         rows[0].result.scope === "shared" ? "shared" : "session",
@@ -47482,7 +47907,7 @@ async function authorizedHistoricalArchiveGeneration(
     // until verified warm publication.
     if (!session) return null;
     return session.sandboxGroupId === row.sandbox_group_id &&
-      session.sandboxBackend === "modal" &&
+      automaticRecoveryBackend(session, row) &&
       (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
       metadata?.version === 1 &&
       metadata.automaticHistoricalCheckpoint === true &&
@@ -47491,7 +47916,7 @@ async function authorizedHistoricalArchiveGeneration(
       metadata.leaseEpoch === Number(row.lease_epoch) &&
       metadata.workspaceGeneration === Number(row.workspace_generation) &&
       metadata.archiveGeneration === archiveGeneration &&
-      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      (metadata.artifactId ?? null) === row.current_checkpoint_artifact_id &&
       archiveGeneration !== null &&
       archiveGeneration < Number(row.workspace_generation) &&
       metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
@@ -47937,6 +48362,9 @@ export async function failSandboxRematerialization(
     failureCode: string;
     retryable: boolean;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -47969,7 +48397,9 @@ export async function failSandboxRematerialization(
         }
         const current = recoveryStateFromLeaseRow(row);
         const continuity =
-          input.retryable && !input.discardContinuity ? continuityRecoveryFromLeaseRow(row) : null;
+          input.retryable && !input.discardContinuity && !input.providerWorkspaceAbsent
+            ? continuityRecoveryFromLeaseRow(row)
+            : null;
         const terminalStatus: SandboxRestoreStatus = continuity
           ? "pending"
           : input.retryable
@@ -48007,7 +48437,15 @@ export async function failSandboxRematerialization(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = JSON.stringify(recoveryResumeState(row, recovery));
+        const resumeStateJson = JSON.stringify(
+          recoveryResumeState(
+            row,
+            recovery,
+            input.providerWorkspaceAbsent
+              ? providerLossRecordWithWorkspaceAbsent(row, new Date().toISOString())
+              : undefined,
+          ),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -50724,6 +51162,9 @@ export async function markWarmLeaseInstanceLost(
     expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
+    /** The backend's bound on how long the lost box could still run (its hard
+     * lifetime or unrenewed TTL), when it has one. Recorded as death proof. */
+    providerMaxRemainingLifetimeMs?: number | null;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
@@ -50851,7 +51292,12 @@ export async function markWarmLeaseInstanceLost(
         const coldResumeState = recoveryResumeState(
           current,
           recovery,
-          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+          providerLossRecordForLostRow(
+            current,
+            "warm_resume",
+            observedAt,
+            input.providerMaxRemainingLifetimeMs,
+          ),
         );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
@@ -51283,6 +51729,9 @@ export async function failWarmingToCold(
     sandboxGroupId: string;
     expectedEpoch: number;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -51304,11 +51753,22 @@ export async function failWarmingToCold(
         if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
-        const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
+        const continuity =
+          input.discardContinuity || input.providerWorkspaceAbsent
+            ? null
+            : continuityRecoveryFromLeaseRow(row);
         // A pending empty-workspace decision must survive a failed empty create;
-        // otherwise a null envelope would look like an ordinary new lease.
+        // otherwise a null envelope would look like an ordinary new lease. So
+        // must the evidence of a lost workspace: dropping it would let the next
+        // owner publish an empty box as if nothing had ever been there.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-        const hasRecovery = hasArchive || continuity !== null || freshPending;
+        const carriedLoss = providerLossRecord(row.resume_state);
+        const hasRecovery =
+          hasArchive ||
+          continuity !== null ||
+          freshPending ||
+          carriedLoss !== null ||
+          input.providerWorkspaceAbsent === true;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         // beginSandboxRematerialization already proved this exact registered
         // checkpoint unusable in this warming epoch. Keep that terminal truth
@@ -51367,7 +51827,15 @@ export async function failWarmingToCold(
           ...(continuity ? { continuity } : {}),
         };
         const resumeStateJson = hasRecovery
-          ? JSON.stringify(recoveryResumeState(row, recovery))
+          ? JSON.stringify(
+              recoveryResumeState(
+                row,
+                recovery,
+                input.providerWorkspaceAbsent
+                  ? providerLossRecordWithWorkspaceAbsent(row, now)
+                  : undefined,
+              ),
+            )
           : null;
         await tx.execute(sql`
           update sandbox_leases set
@@ -54130,6 +54598,9 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The backend's bound on how long a box reported missing could still
+     * run, when it has one. Recorded as death proof on the loss. */
+    providerMaxRemainingLifetimeMs?: number | null;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
     /** The reaper stopped the exact provider box (or proved it gone) before
@@ -54439,7 +54910,14 @@ export async function confirmDrainCold(
               recoveryResumeState(
                 row,
                 recovery,
-                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
+                workspaceLost
+                  ? providerLossRecordForLostRow(
+                      row,
+                      "drain_probe",
+                      now,
+                      input.providerMaxRemainingLifetimeMs,
+                    )
+                  : undefined,
               ),
             )
           : null;
@@ -86998,7 +87476,9 @@ export async function appendSessionEventsForTurnAttempt(
 
 /**
  * Append a capability card for the calling turn unless that turn already shows
- * a current card for the same capability. The lookup runs inside the attempt
+ * a current card for the same capability (and, for a card that names the
+ * machine it asks for, the same machine, and for a card with a purpose such as
+ * the Chrome setup card, the same purpose). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
  */
@@ -87011,8 +87491,11 @@ export async function appendTurnCapabilityCardOnce(
   attemptId: string,
   capabilityId: string,
   input: AppendEventInput,
+  requestedSandboxId: string | null = null,
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
+  const payloadPurpose = (input.payload as { purpose?: unknown } | undefined)?.purpose;
+  const purpose = typeof payloadPurpose === "string" ? payloadPurpose : "";
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -87035,6 +87518,8 @@ export async function appendTurnCapabilityCardOnce(
             and duplicate_of_event_id is null
             and (turn_association is null or turn_association = 'current')
             and payload -> 'capability' ->> 'id' = ${capabilityId}
+            and coalesce(payload ->> 'requestedSandboxId', '') = ${requestedSandboxId ?? ""}
+            and coalesce(payload ->> 'purpose', '') = ${purpose}
           order by sequence
           limit 1
         `,

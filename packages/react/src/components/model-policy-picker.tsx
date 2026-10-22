@@ -96,6 +96,8 @@ export type ModelPolicyPickerProps = {
   allowModelOptions?: boolean | undefined;
   /** Settings → Models. Shown when the catalog has no model that can run. */
   connectModelsHref?: string | undefined;
+  /** The deployment offers Claude subscriptions; the connect panel lists Claude too. */
+  claudeSubscriptionAvailable?: boolean | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */

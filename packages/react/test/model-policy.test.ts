@@ -591,7 +591,7 @@ describe("model display across connection scopes", () => {
     const groups = groupPickerRowsByBillingClass(englishText, rows, {
       selectedId: "workspace-claude-subscription/claude-opus-5-5",
     });
-    expect(groups.map((group) => group.label)).toEqual(["Claude subscription", "API keys"]);
+    expect(groups.map((group) => group.label)).toEqual(["Claude", "API keys"]);
     expect(groups[0]!.rows.map((row) => row.id)).toEqual([
       "workspace-claude-subscription/claude-opus-5-5",
     ]);

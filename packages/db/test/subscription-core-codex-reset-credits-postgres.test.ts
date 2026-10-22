@@ -122,31 +122,29 @@ async function sharedConnection(
     workspaces?: string[];
     managedBy?: string | null;
     expiresAt?: Date;
+    /** Ignored: a workspace's own connection is the one it manages (D-50). */
     pool?: "workspace" | "organization";
   } = {},
 ): Promise<string> {
+  // A workspace's own connection reaches only that workspace.
+  const managed = options.managedBy ?? null;
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label
+      allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+      managed_by_workspace_id, label
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
-      'shared', ${options.scope ?? "organization"}, ${`chatgpt-${label}`}, 'pro',
+      'shared', ${managed ? "workspaces" : (options.scope ?? "organization")}, ${!managed},
+      ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false, resetCreditAvailableCount: 2 })}::jsonb,
       ${(options.expiresAt ?? new Date(Date.now() + 86_400_000)).toISOString()}::timestamptz,
       ${options.managedBy ?? null}::uuid, ${label}
     ) returning id::text as id`;
-  for (const workspaceId of options.workspaces ?? []) {
+  for (const workspaceId of managed ? [managed] : (options.workspaces ?? [])) {
     await shared!.admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
       values (${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid)`;
-  }
-  for (const workspaceId of [org.personalWorkspaceId, org.sharedWorkspaceId]) {
-    await shared!.admin`
-      insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool
-      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid,
-        ${options.pool ?? "organization"})`;
   }
   return row!.id;
 }

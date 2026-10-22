@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { Field, TextArea, TextInput } from "./field";
-import { FormFrame } from "./form-dialog";
+import { FormFrame, useFormOverlay } from "./form-dialog";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -97,6 +97,98 @@ test("Enter submits; success calls onSubmitted", async () => {
   });
   expect(onSubmit).toHaveBeenCalledTimes(1);
   expect(submitted).toHaveBeenCalledTimes(1);
+});
+
+test("a save that finishes after the person left the form doesn't close it again", async () => {
+  // Closing a form page navigates back to it: a late success must not.
+  const submitted = mock();
+  let finish!: () => void;
+  const onSubmit = mock(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await act(async () =>
+    root.render(
+      <FormFrame
+        title="Where it can be used"
+        submitLabel="Save"
+        onSubmit={onSubmit}
+        onSubmitted={submitted}
+      >
+        <Field label="Name">
+          <TextInput defaultValue="Team plan" />
+        </Field>
+      </FormFrame>,
+    ),
+  );
+  await act(async () => {
+    container.querySelector("form")!.requestSubmit();
+    await flush();
+  });
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  // The person navigates elsewhere while the save runs.
+  await act(async () => root.render(<p>Another page</p>));
+  await act(async () => {
+    finish();
+    await flush();
+  });
+  expect(submitted).not.toHaveBeenCalled();
+  expect(container.textContent).toBe("Another page");
+});
+
+test("a dialog its owner closed during the save can be dismissed again after reopening", async () => {
+  // As FormDialog: closing unmounts the form while the overlay stays mounted.
+  // The owner closes the confirm and then awaits a refresh (Secrets, Disconnect).
+  let finish!: () => void;
+  let overlay!: ReturnType<typeof useFormOverlay>;
+  let setOpenFromOwner!: (open: boolean) => void;
+  const pending: boolean[] = [];
+  function Confirm() {
+    const [open, setOpen] = useState(true);
+    setOpenFromOwner = setOpen;
+    overlay = useFormOverlay({
+      open,
+      onOpenChange: setOpen,
+      onPendingChange: (next) => pending.push(next),
+    });
+    return open ? (
+      <FormFrame
+        {...overlay.frameProps}
+        title="Disconnect"
+        submitLabel="Disconnect"
+        onSubmit={async () => {
+          setOpen(false);
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        }}
+      >
+        <p>Agents here stop using its items.</p>
+      </FormFrame>
+    ) : null;
+  }
+  await act(async () => root.render(<Confirm />));
+  await act(async () => {
+    container.querySelector("form")!.requestSubmit();
+    await flush();
+  });
+  expect(container.querySelector("form")).toBeNull();
+  await act(async () => {
+    finish();
+    await flush();
+  });
+  expect(pending).toEqual([true, false]);
+  await act(async () => setOpenFromOwner(true));
+  const escape = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+  overlay.contentProps.onEscapeKeyDown(escape);
+  const outside = new Event("pointerdown", { cancelable: true });
+  overlay.contentProps.onPointerDownOutside(outside);
+  expect(escape.defaultPrevented).toBe(false);
+  expect(outside.defaultPrevented).toBe(false);
+  await act(async () => overlay.rootProps.onOpenChange(false));
+  expect(container.querySelector("form")).toBeNull();
 });
 
 test("returning false keeps the form open and focuses the first invalid field", async () => {

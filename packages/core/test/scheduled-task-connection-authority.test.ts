@@ -8,7 +8,7 @@ const googleTools = ["editable_artifact_export", "editable_artifact_export_statu
 const connectorPermissions = ["artifacts:read", "artifacts:publish", "connections:read"] as const;
 
 describe("scheduled connection-authority surface eligibility", () => {
-  test("uses subject-expanded runtime defaults for scheduler-created sessions", () => {
+  test("keeps retired native surfaces disabled despite runtime defaults", () => {
     const rawSettings = testSettings({ defaultFirstPartyMcpTools: [] });
     const runtimeSettings = testSettings({
       defaultFirstPartyMcpTools: [...googleTools, "atlassian_search"],
@@ -19,12 +19,12 @@ describe("scheduled connection-authority surface eligibility", () => {
       atlassianEnabled: false,
     });
     expect(scheduledConnectionSurfaceEligibility(runtimeSettings, null)).toEqual({
-      googleDrivePublicationEnabled: true,
+      googleDrivePublicationEnabled: false,
       atlassianEnabled: false,
     });
   });
 
-  test("an existing-session target overrides deployment defaults", () => {
+  test("keeps retired native surfaces disabled for existing-session targets", () => {
     const defaultOn = testSettings({
       defaultFirstPartyMcpTools: [...googleTools, "atlassian_search"],
     });
@@ -43,7 +43,7 @@ describe("scheduled connection-authority surface eligibility", () => {
       firstPartyMcpPermissions: [...connectorPermissions],
     };
     expect(scheduledConnectionSurfaceEligibility(defaultOff, targetOn)).toEqual({
-      googleDrivePublicationEnabled: true,
+      googleDrivePublicationEnabled: false,
       atlassianEnabled: false,
     });
   });

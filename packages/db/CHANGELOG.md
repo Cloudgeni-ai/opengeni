@@ -1,5 +1,90 @@
 # @opengeni/db
 
+## 4.6.1
+
+### Patch Changes
+
+- d0eb91c: A session's sub-agents now come back newest first at each level, and the 200-agent cap keeps direct agents and newer ones before deeper or older ones (it used to keep an arbitrary subset ordered by id). `sessionAgentAttention` and `formatWaitingSince` in `@opengeni/react/session-agents-model` give the word a manager must act on (Needs you · 10h, Failed, Stuck, Paused) for web and native. The phone's agents sheet shows that word in place of the time, and folds each agent's own agents behind a count.
+  - @opengeni/codemode@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/subscriptions@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- cfefee3: Let organization administrators inspect usage on independent subscription connections concurrently. Keep the organization membership fence shared for these reads, while lifecycle writers and each connection's credential custody retain their exclusive locks. Demotion still waits for in-flight provider reads and prevents subsequent reads and quota recording.
+- 1b8ca50: Read only tool identity fields when proving durable call/result pairs, instead of transferring full history payloads. Preserve row order, codec handling, identity precedence, authorization, and canonical model history.
+- acbf24e: Withhold pooled subscription capacity while an account's other main limit is exhausted, and report the next usable reset when the pool is already exhausted.
+- bce44cc: Session message search checks message text in the database. A search over a large workspace used to read about 33 messages per request, and once the database step took longer than the request's time budget it advanced by a single message per request, so searching a long history never finished. One request now checks every remaining message and reads only the ones that contain the text, so a search with no hits over about 240,000 messages finishes in one request of about 1.5 seconds. Grouped (per-chat) search returns up to a full batch of chats per request instead of one. Matching is unchanged: literal, Unicode case-insensitive, with the same offsets, snippets and cursors.
+- 51d84b7: Migration 0907 (one owner per subscription account) now finishes in seconds on large databases instead of timing out, and is now a maintenance migration: releases park database clients while it runs, because it locks the subscription tables for the whole fold (about six seconds at 30,000 accounts and 100,000 workspaces). It waits at most five seconds to take each set of locks; that bounds only the wait, not how long it then holds them. A disconnected account that a workspace still managed while it reached other workspaces no longer stops the migration; it becomes the organization's. The end state is otherwise unchanged.
+- Updated dependencies [6c7b552]
+- Updated dependencies [f838cb7]
+- Updated dependencies [acbf24e]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/codemode@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- 81a516c: Organizations and workspaces can choose the default voice model. Organization → Models → Voice and a workspace's Voice settings gain a "Default voice model" choice: the model a new voice conversation starts with. A workspace follows its organization's choice unless it picks its own, and "Automatic" keeps the previous behaviour (GPT Realtime when available, otherwise the first available model). People can still pick another model when they talk, and a model someone already picked on their device stays their choice while it remains available.
+
+  API: `OrganizationModelDefaults.realtimeDefaultModel` and `UpdateWorkspaceSettingsRequest.realtimeDefaultModel` (a voice model id, or null for automatic or to follow the organization), and the realtime model catalog marks `workspaceDefault` and `organizationDefault`. The packaged voice control starts with the person's own usable pick, then the workspace default, then the organization default. Rolling migration 0903 adds one nullable column.
+
+- 84b1a18: Every subscription account now has exactly one owner: the organization, one workspace, or one person, and it is used wherever it reaches and nowhere else. The per-workspace split between a workspace's own copy of an account and the organization's copy, the preference that chose between them, and "Set aside" are gone; each account has one on/off switch. A migration keeps everyone's access exactly as it was.
+
+  The organization's account lists now include `reach` (who each account reaches), and the organization's Models page lists every account once, grouped by provider, with its owner and a summary of how many are on and how many need reconnecting. Accounts that are turned off fold away when a provider has several, and the page no longer reads every workspace's accounts or each account's access one by one.
+
+### Patch Changes
+
+- 2677b14: Read router-history presence for session response pages in one scoped transaction instead of one transaction per session. Preserve the indexed history predicate and existing effective-tool response fields.
+- 032d671: Batch Knowledge evidence visibility checks within each read and exclude keyword nonmatches before traversing their evidence graphs. Search ordering, pagination, access predicates and agent-attempt locks remain unchanged; no authority decisions are cached between reads.
+- d705817: Read managed human workspace grants, organization names and the legacy default workspace together instead of issuing serial queries for each organization. Every request still resolves live memberships and permissions; provisioning, default selection and personal-workspace access are unchanged.
+- 9ba6486: When a turn fails because one of Opengeni's own database checks refused it, the failure now records which check refused it: the database function names and line numbers on the call chain, for example `admit_turn_resources:31`. Before, the record kept only the error code. The refusal message and SQL text are still never copied. A one-off permission refusal can now be traced after the fact without server logs.
+- eec0cab: Export `SubscriptionCoreConnectionReach` so packages that return account reach can emit their declarations.
+- 25d1500: Infrastructure-only session events, such as the idle sandbox reaper terminating a shared box, no longer move a session's `updatedAt`, so stopped sessions keep their real last-activity time in the sidebar and session lists (migration 0904). Sessions and session list entries now carry `hasUpcomingSchedules`, and the sidebar schedule icon only appears for schedules that can still fire. A session whose schedules are all paused or expired keeps a distinct "No upcoming runs" schedule button in its header. Editing only a schedule's timing now refreshes open session lists (migration 0905).
+- 9a3df31: Use keyed personal-state reads for session-list totals, with a concurrent session-first index. Generic prepared plans no longer repeatedly scan a large workspace's personal-state range when most other workspaces are small. List contents, permissions and transaction behavior are unchanged.
+- 73a4ad9: Reduce repeated database-readiness catalog work by inspecting table and routine namespaces together, aggregating policy facts once, and reading activation-presence facts with connection identity. Every readiness check still reads and validates current catalog state in one read-only repeatable-read transaction.
+- ec6a821: Restore the migration connection's inherited statement and lock timeouts after each batched backfill, including failure or query cancellation, instead of resetting them to zero. Later migrations, including concurrent index builds, retain the operator-configured statement deadline. Historical migration SQL and per-batch timeout directives remain unchanged; no new production timeout is introduced.
+- 9c0c6d1: Keep the public sandbox recovery response compatible now that every managed backend recovers a lost sandbox. `SandboxRecoverySelection.artifactId` is a required native checkpoint id again, as it was before, so existing SDK readers never receive null there. A portable checkpoint that an automatic Retry restores is named by the new optional `SandboxRecoveryProjection.automaticCheckpoint` (`SandboxCheckpointSelection`, whose `artifactId` is null for a portable archive); `checkpoint` is set as well only when that checkpoint is native. The packaged recovery actions read `automaticCheckpoint` first. Older clients still recover these sessions when the next message is sent; they only lack the Retry shortcut for a portable checkpoint.
+- 6282659: Keep each response-page router-history probe on its early-stopping index scan, so a long-running session's router items are not all collected before the first match.
+- a75f55e: A lost sandbox now recovers by itself on every managed backend, not only Modal. Docker, compute and the other hosted providers restore their latest verified checkpoint automatically, with the same "files may be older" warning Modal already gives. A session continues on an empty workspace only with proof that the lost sandbox is really gone: the compute control plane's own answer, a Docker workspace directory that the same daemon shows deleted, or a provider lifetime that has run out. A single transient or false "not found" (for example during host memory pressure) can therefore at most restore a checkpoint and never empties a workspace by itself. A failed rebuild after a loss keeps that loss on record instead of silently starting the session on an empty workspace, so the person who controls the chat can still choose Retry or an empty workspace without any database repair. `SandboxRecoverySelection.artifactId` is now nullable, because a portable checkpoint has no native artifact.
+- f4508d6: Allow scheduled runs to use the selected organization-shared Slack bot while preserving installation versions, sharing generations, workspace restrictions and live revocation checks.
+- f0c2065: Exclude child trees outside the selected root scope before aggregating session-list totals. Preserve child visibility, archive, pin, attention and control-state semantics while avoiding unrelated descendant reads.
+- aa280c9: Use the existing event tool-name projection for named tool-history reads, avoiding decompression of excluded calls' arguments. Legacy rows and losslessly encoded identities retain their existing fallback and output behavior.
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [d295544]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/subscriptions@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

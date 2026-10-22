@@ -22,7 +22,7 @@ import {
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
-import { subscribeSessionListHints } from "./session-list-hints";
+import { subscribeSessionListHints, type SessionListHintIds } from "./session-list-hints";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
@@ -744,7 +744,7 @@ export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
     | {
         source: SessionListChangeSource;
         subjectId: string;
-        authorizeIds: (ids: string[]) => Promise<string[]>;
+        authorizeIds: (ids: string[]) => Promise<SessionListHintIds>;
       }
     | undefined;
 };

@@ -14,7 +14,7 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "e5bdede31aecd86a0b065842042af6d7060f676829a86dc5dbc3635b744dabf3"
+      "sha256": "a6751cf8972052614992619dcc195ff472681f601643cfebcaa0fbfcf3c11f2e"
     },
     {
       "path": ".github/workflows/backup-image.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "4867729c6c02084ef4d06d174e8e3ed55a0749665ffd2e0ea77c9112f1727f8f"
+      "sha256": "725cc8a51447a01859bab7501ab5d4df2eba6b33c73e65d3a32d6a1468f39894"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -90,7 +90,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "1efaf114d5c527f2b989e02e2efd7f4891afed81c9c055219c9b7f4d1bafbd5b"
+      "sha256": "cc073f9fdcbde42166d8659bc476cf83ff4613c70cda646743aa98d9f0e8bccc"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -118,7 +118,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "64bdde85544855219207534b659ae9638e233e486c00480c21f23f4d090172fb"
+      "sha256": "082ee3d6e80234629223a52f7c5e7ce9b9db8f6854335c12fa722cf3365313bb"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -150,7 +150,7 @@
     },
     {
       "path": ".github/workflows/source-admission.yml",
-      "sha256": "dff0ac659656f7158bad6936bcc1fdee321beccfdf134944f087612efef37a3f"
+      "sha256": "969a9015d7d38d7c1198ecc98fe484bd25c18c7096810237dc4417d73781e28e"
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",

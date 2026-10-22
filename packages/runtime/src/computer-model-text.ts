@@ -359,11 +359,15 @@ export function computerObservationText(observation: ComputerTextObservation): s
         : `Changed elements since ${semantic.baseObservationId}; elements not listed are unchanged and keep their refs:`,
     );
   } else if (rendered.listed === 0) {
-    lines.push("The accessibility tree has no readable elements; use the screenshot.");
+    lines.push(
+      rendered.omitted
+        ? `No element is listed: the accessibility tree's ${plural(rendered.omitted, "element")} are all hidden, unlabeled or repeated; use the screenshot.`
+        : "The accessibility tree has no readable elements; use the screenshot.",
+    );
   }
   lines.push(...rendered.lines);
   const notes = [
-    rendered.omitted
+    rendered.omitted && rendered.listed > 0
       ? `${plural(rendered.omitted, "hidden, unlabeled or repeated element")} not shown`
       : null,
     semantic.kind === "diff" && semantic.removedRefs.length > 0
@@ -497,7 +501,7 @@ export function computerTargetsText(targets: readonly ComputerTextTarget[]): str
 
 /** Fixed text, so a listing renders identically for the same targets. */
 const OFF_SCREEN_NOTE =
-  "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.";
+  "A window marked off screen, such as one on another Space or a full-screen app, can be neither captured nor read until it is back on screen. Minimized windows and windows of hidden apps are not marked: reading one brings it back on screen behind the person's front window.";
 
 export function computerOpenText(output: {
   session: Parameters<typeof computerSessionLine>[0];

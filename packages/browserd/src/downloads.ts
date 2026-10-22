@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   BrowserDownload,
   BrowserDownloadExportReceipt,
@@ -58,6 +58,10 @@ export type BrowserDownloadProgressEvent = {
   totalBytes: number | null;
   /** Where Chromium saved the completed file, when it reports it. */
   filePath?: string | null;
+  /** For a browser that belongs to the person (attached Chrome): where their
+   * own Chrome saved the completed file, or null when it could not be found.
+   * The store copies that file and never moves, changes or removes it. */
+  personFilePath?: string | null;
   /** Resolves once every browser event Chromium emitted before this call has
    * reached the store, for example a round trip on the event connection. */
   eventBarrier?: () => Promise<void>;
@@ -341,6 +345,11 @@ export class BrowserDownloadStore {
         return { cancelReason: null };
       }
       if (event.state === "completed") {
+        if (event.personFilePath !== undefined) {
+          await this.completeFromPersonFile(row, receivedBytes, totalBytes, event.personFilePath);
+          await this.resolveHeld();
+          return { cancelReason: null };
+        }
         await this.complete(
           row,
           receivedBytes,
@@ -697,6 +706,66 @@ export class BrowserDownloadStore {
       if (observation) observation.conflict = true;
       else this.observe(row, null, true);
       await this.discardFiles(row.guid, fileName, observation?.identity ?? null, eventBarrier);
+      this.settle(
+        row.guid,
+        "failed",
+        eventReceivedBytes,
+        eventTotalBytes,
+        null,
+        "download_integrity_failed",
+      );
+    }
+  }
+
+  /** Keep a copy of a download the person's own browser saved. Their file is
+   * theirs: it is read, never moved, changed or removed, and nothing else
+   * shares the copy, so it settles at once. Its size must be the bytes the
+   * browser reported; anything else means the file found is not this
+   * download's, or changed since. */
+  private async completeFromPersonFile(
+    row: DownloadRow,
+    eventReceivedBytes: number,
+    eventTotalBytes: number | null,
+    personFilePath: string | null,
+  ): Promise<void> {
+    this.observe(row, null, false);
+    if (personFilePath === null || !isAbsolute(personFilePath)) {
+      this.settle(
+        row.guid,
+        "failed",
+        eventReceivedBytes,
+        eventTotalBytes,
+        null,
+        "download_location_unavailable",
+      );
+      return;
+    }
+    const path = this.filePath(row);
+    try {
+      await rm(path, { force: true });
+      await copyRegularFile(personFilePath, path);
+      const sizeBytes = (await exactRegularFile(path)).size;
+      if (
+        sizeBytes > this.maxFileBytes ||
+        this.otherActiveBytes(row.guid) + sizeBytes > this.maxSessionBytes
+      ) {
+        await this.removePhysicalFiles(row.guid);
+        this.settle(
+          row.guid,
+          "failed",
+          Math.max(eventReceivedBytes, sizeBytes),
+          eventTotalBytes ?? sizeBytes,
+          null,
+          "download_quota_exceeded",
+        );
+        return;
+      }
+      if (sizeBytes !== eventReceivedBytes) throw new Error("download size differs");
+      const sha256 = await sha256File(path);
+      if (process.platform !== "win32") await chmod(path, 0o400);
+      this.settle(row.guid, "completed", sizeBytes, sizeBytes, sha256, null);
+    } catch {
+      await this.removePhysicalFiles(row.guid);
       this.settle(
         row.guid,
         "failed",
@@ -1241,6 +1310,12 @@ async function keepFile(source: string, target: string): Promise<FileIdentity> {
     if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EXDEV" && code !== "EOPNOTSUPP")
       throw error;
   }
+  return await copyRegularFile(source, target);
+}
+
+/** Copy a regular file to a new `target` from one open handle, returning the
+ * source's identity. The source is only read. */
+async function copyRegularFile(source: string, target: string): Promise<FileIdentity> {
   const input = await open(source, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const facts = await input.stat({ bigint: true });

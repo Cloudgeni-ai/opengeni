@@ -233,6 +233,26 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "An answered or skipped response came through the structured session UI and is already routed",
     );
+    expect(captured?.instructions).toContain(
+      "Send the user's request in their own words and in the language they spoke",
+    );
+    expect(captured?.instructions).toContain(
+      "Do not add tools, commands, methods, steps, scope, examples, output formats, or assumptions the user did not state",
+    );
+    expect(captured?.instructions).toContain(
+      "When the user corrects, criticizes, or redirects work, relay what they said as they said it",
+    );
+    expect(captured?.instructions).toContain(
+      "or when the answer is already in the session context or this conversation",
+    );
+    expect(captured?.instructions).toContain(
+      'Never answer it with a promise such as "I\'ll do that" or "I\'ll stop that" without passing it on.',
+    );
+    expect(captured?.instructions).toContain(
+      "Never state a result, status, change, name, number, time, or identifier the backend has not reported.",
+    );
+    expect(captured?.instructions).not.toContain("complete standalone task");
+    expect(captured?.instructions).not.toContain("make a reasonable assumption");
     expect(captured?.instructions).not.toContain("Opengeni");
     expect(captured?.instructions).not.toContain("client delegation");
     expect(captured?.instructions).not.toContain("Steer with");

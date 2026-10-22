@@ -180,15 +180,11 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         xai: { mode: "spread" },
       };
       const organizationProviders = {
-        codex: {
-          inferenceSource: "automatic" as const,
-          useOrganizationAccounts: true,
-          enabled: true,
-        },
-        claude: { useOrganizationAccounts: false, enabled: true },
+        codex: { enabled: true },
+        claude: { enabled: true },
       };
       const workspaceProviders = {
-        codex: { useOrganizationAccounts: false, enabled: false },
+        codex: { enabled: false },
       };
       const organizationFallbackOrder = { "codex/model-a": ["claude/model-b"] };
       const workspaceFallbackOrder = { "codex/model-a": ["xai/model-c"] };
@@ -254,15 +250,8 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         ),
       );
       expect(actual).toEqual(expected);
-      expect(actual.values.providers.codex).toEqual({
-        inferenceSource: "workspace",
-        useOrganizationAccounts: false,
-        enabled: false,
-      });
-      expect(actual.values.providers.claude).toEqual({
-        useOrganizationAccounts: false,
-        enabled: true,
-      });
+      expect(actual.values.providers.codex).toEqual({ enabled: false });
+      expect(actual.values.providers.claude).toEqual({ enabled: true });
       expect(actual.sources.providers.codex).toBe("workspace");
       expect(actual.sources.providers.claude).toBe("organization");
       expect(actual.sources.personalFallbackAllowed).toBe("organization");
@@ -888,10 +877,10 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       values (${fixture.accountId}, ${fixture.workspaceId}, ${managerSubject}, 'admin')`;
       const [connection] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
-        account_id, provider, credential_encrypted, scope_kind, managed_by_workspace_id,
-        allowed_model_ids
+        account_id, provider, credential_encrypted, scope_kind, allow_personal_workspaces,
+        managed_by_workspace_id, allowed_model_ids
       ) values (
-        ${fixture.accountId}, 'codex', 'v1:delegated', 'workspaces',
+        ${fixture.accountId}, 'codex', 'v1:delegated', 'workspaces', false,
         ${fixture.workspaceId}::uuid, ARRAY['model-a']::text[]
       ) returning id::text as id`;
       await shared!.admin`
@@ -932,7 +921,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       expect((await current()).allowed_model_ids).toEqual(["model-b"]);
       // Scope stays an organization administrator's decision.
       expect(await asManager(fixture.workspaceId, sql`scope_kind = 'organization'`)).toBe("42501");
-      expect(await asManager(fixture.workspaceId, sql`allow_personal_workspaces = false`)).toBe(
+      expect(await asManager(fixture.workspaceId, sql`allow_personal_workspaces = true`)).toBe(
         "42501",
       );
       // The same person acting from another workspace cannot change the models.
@@ -954,7 +943,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       expect(await current()).toEqual({
         allowed_model_ids: ["model-b"],
         scope_kind: "workspaces",
-        allow_personal: true,
+        allow_personal: false,
       });
 
       await shared!.admin`

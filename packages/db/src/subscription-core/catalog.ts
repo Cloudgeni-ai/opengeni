@@ -8,9 +8,7 @@
  *
  * Connections that count, for one workspace and one acting subject:
  *
- * - active, allocatable shared connections in chat placement's effective
- *   inference pools. Automatic includes both workspace and organization
- *   candidates;
+ * - active, allocatable shared connections that reach the workspace;
  * - the acting person's own personal connections, only in their own Personal
  *   workspace (generic workspace readers never represent a private session's
  *   exact accepted context), only while the effective settings allow
@@ -20,17 +18,15 @@
  *   owner's Personal workspace, which this catalog reader does not represent.
  *
  * A connection's model policy is what placement intersects: the connection
- * allowlist and exclusions, and the workspace assignment policies of the
- * effective inference source. Nothing here returns credential material.
+ * allowlist and exclusions. Nothing here returns credential material.
  */
-import { inferenceSourceFor, providerSwitchesFor } from "@opengeni/subscriptions";
+import { providerSwitchesFor } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
 import { rawRows, rlsContextForWorkspace, withRlsContext, type Database } from "../database";
 import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
 import {
   decodeSubscriptionQuota,
   listSubscriptionConnectionsForPlacement,
-  listSubscriptionConnectionAssignmentPolicies,
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
 } from "../subscription-core-repository";
@@ -54,24 +50,9 @@ export type SubscriptionCoreServingConnection = {
   /** Models the connection excludes. */
   excludedModelIds: string[];
   /**
-   * The workspace assignment policies of the effective inference source; null
-   * when none apply (personal, or a shared connection classified by
-   * management). Placement requires one of them to admit the model.
-   * `inferencePool` names the pool each policy belongs to, so a caller that
-   * reads one pool (a provider's per-pool model prefix) applies only that
-   * pool's policies.
-   */
-  assignments: Array<{
-    allowedModelIds: string[] | null;
-    excludedModelIds: string[];
-    inferencePool?: "workspace" | "organization";
-  }> | null;
-  /**
-   * The inference pools of this workspace that the connection serves under
-   * the effective source: its applicable assignment policies' pools, or,
-   * without assignment rows, its management classification (`workspace`
-   * when this workspace manages it, else `organization`). Empty for a
-   * personal connection, which belongs to no shared pool.
+   * The legacy model-prefix pool the connection serves in this workspace:
+   * `workspace` for the workspace's own connection, else `organization`.
+   * Empty for a personal connection, which belongs to no shared pool.
    */
   pools: Array<"workspace" | "organization">;
   /**
@@ -84,10 +65,7 @@ export type SubscriptionCoreServingConnection = {
   modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
-type ModelPolicy = Pick<
-  SubscriptionCoreServingConnection,
-  "allowedModelIds" | "excludedModelIds" | "assignments"
->;
+type ModelPolicy = Pick<SubscriptionCoreServingConnection, "allowedModelIds" | "excludedModelIds">;
 
 /** Placement's static model admission for one connection (allowlists and exclusions). */
 export function subscriptionCoreConnectionAllowsModel(
@@ -95,16 +73,7 @@ export function subscriptionCoreConnectionAllowsModel(
   modelId: string,
 ): boolean {
   if (connection.excludedModelIds.includes(modelId)) return false;
-  if (connection.allowedModelIds !== null && !connection.allowedModelIds.includes(modelId))
-    return false;
-  return (
-    connection.assignments === null ||
-    connection.assignments.some(
-      (policy) =>
-        (policy.allowedModelIds === null || policy.allowedModelIds.includes(modelId)) &&
-        !policy.excludedModelIds.includes(modelId),
-    )
-  );
+  return connection.allowedModelIds === null || connection.allowedModelIds.includes(modelId);
 }
 
 /**
@@ -113,18 +82,7 @@ export function subscriptionCoreConnectionAllowsModel(
  * allowlist cannot be listed; placement still refuses those models.
  */
 export function subscriptionCoreConnectionAllowlist(connection: ModelPolicy): string[] | null {
-  let allowed = connection.allowedModelIds;
-  if (connection.assignments !== null) {
-    const assignmentUnion = connection.assignments.some((policy) => policy.allowedModelIds === null)
-      ? null
-      : [...new Set(connection.assignments.flatMap((policy) => policy.allowedModelIds ?? []))];
-    allowed =
-      allowed === null
-        ? assignmentUnion
-        : assignmentUnion === null
-          ? allowed
-          : allowed.filter((modelId) => assignmentUnion.includes(modelId));
-  }
+  const allowed = connection.allowedModelIds;
   return allowed === null
     ? null
     : allowed.filter((modelId) => subscriptionCoreConnectionAllowsModel(connection, modelId));
@@ -195,7 +153,6 @@ export async function listSubscriptionCoreServingConnections(
         input.accountId,
         input.workspaceId,
       );
-      const source = inferenceSourceFor(effective.values, providerId);
       if (!providerSwitchesFor(effective.values, providerId).enabled) return [];
       const [workspace] = await rawRows<{ kind: string }>(
         tx,
@@ -217,41 +174,22 @@ export async function listSubscriptionCoreServingConnections(
         )
           return false;
         const scope = connection.ownership.scope;
-        if (
-          scope.kind !== "organization" &&
-          !(
-            scope.kind === "workspaces" &&
-            (scope.workspaceIds.includes(input.workspaceId) ||
-              (workspace?.kind === "personal" && scope.allowPersonalWorkspaces))
-          )
-        )
-          return false;
-        if (connection.assignmentPolicies)
-          return connection.assignmentPolicies.some(
-            (policy) =>
-              policy.allocatorEnabled &&
-              (source === "automatic" || policy.inferencePool === source),
-          );
         return (
-          source === "automatic" ||
-          source ===
-            (connection.ownership.managedByWorkspaceId === input.workspaceId
-              ? "workspace"
-              : "organization")
+          scope.kind === "organization" ||
+          (scope.kind === "workspaces" &&
+            (scope.workspaceIds.includes(input.workspaceId) ||
+              (workspace?.kind === "personal" && scope.allowPersonalWorkspaces)))
         );
       });
       const sharedIds = shared.map((candidate) => candidate.id);
-      const [policies, exclusions] = await Promise.all([
+      const exclusions =
         sharedIds.length === 0
-          ? Promise.resolve([])
-          : listSubscriptionConnectionAssignmentPolicies(tx, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              provider: providerId,
-            }),
-        sharedIds.length === 0
-          ? Promise.resolve([])
-          : rawRows<{ id: string; excluded_models: string[] | null; plan_type: string | null }>(
+          ? []
+          : await rawRows<{
+              id: string;
+              excluded_models: string[] | null;
+              plan_type: string | null;
+            }>(
               tx,
               sql`select connection.id::text as id, connection.excluded_models, connection.plan_type
                 from subscription_connections connection
@@ -260,54 +198,32 @@ export async function listSubscriptionCoreServingConnections(
                     sharedIds.map((id) => sql`${id}::uuid`),
                     sql`, `,
                   )})`,
-            ),
-      ]);
+            );
       const excludedById = new Map(exclusions.map((row) => [row.id, row.excluded_models ?? []]));
-      const servingShared = shared.map((candidate) => {
-        const applicable = policies.filter(
-          (policy) =>
-            policy.connectionId === candidate.id &&
-            policy.allocatorEnabled &&
-            (source === "automatic" || policy.inferencePool === source),
-        );
-        const classified = policies.some((policy) => policy.connectionId === candidate.id);
-        return {
-          connectionId: candidate.id,
-          ownership: "shared" as const,
-          planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
-          allowedModelIds:
-            candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
-          excludedModelIds: excludedById.get(candidate.id) ?? [],
-          // Placement reads explicit rows; without one the connection keeps
-          // its management classification and only its own allowlist applies.
-          assignments: classified
-            ? applicable.map((policy) => ({
-                allowedModelIds: policy.allowedModelIds,
-                excludedModelIds: policy.excludedModels,
-                inferencePool: policy.inferencePool,
-              }))
+      const servingShared = shared.map((candidate) => ({
+        connectionId: candidate.id,
+        ownership: "shared" as const,
+        planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
+        allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
+        excludedModelIds: excludedById.get(candidate.id) ?? [],
+        pools: [
+          candidate.ownership.kind === "shared" &&
+          candidate.ownership.managedByWorkspaceId === input.workspaceId
+            ? ("workspace" as const)
+            : ("organization" as const),
+        ],
+        cooledDownModelIds: [],
+        modelCatalog:
+          candidate.observedModelSlugs != null &&
+          candidate.modelCatalogObservedAt != null &&
+          candidate.modelCatalogExpiresAt != null
+            ? {
+                slugs: [...candidate.observedModelSlugs],
+                observedAt: candidate.modelCatalogObservedAt,
+                expiresAt: candidate.modelCatalogExpiresAt,
+              }
             : null,
-          pools: classified
-            ? [...new Set(applicable.map((policy) => policy.inferencePool))].sort()
-            : [
-                candidate.ownership.kind === "shared" &&
-                candidate.ownership.managedByWorkspaceId === input.workspaceId
-                  ? ("workspace" as const)
-                  : ("organization" as const),
-              ],
-          cooledDownModelIds: [],
-          modelCatalog:
-            candidate.observedModelSlugs != null &&
-            candidate.modelCatalogObservedAt != null &&
-            candidate.modelCatalogExpiresAt != null
-              ? {
-                  slugs: [...candidate.observedModelSlugs],
-                  observedAt: candidate.modelCatalogObservedAt,
-                  expiresAt: candidate.modelCatalogExpiresAt,
-                }
-              : null,
-        };
-      });
+      }));
       if (
         !personalWorkspace ||
         !providerSwitchesFor(effective.values, providerId).enabled ||
@@ -331,7 +247,6 @@ export async function listSubscriptionCoreServingConnections(
             planType: row.plan_type,
             allowedModelIds: row.allowed_model_ids ?? null,
             excludedModelIds: [],
-            assignments: null,
             pools: [],
             cooledDownModelIds: liveModelCooldowns(decodeSubscriptionQuota(row), now),
           })),

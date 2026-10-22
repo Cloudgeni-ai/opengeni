@@ -177,6 +177,44 @@ describe("control reply recovery", () => {
     expect(refusal.error?.detail.never_sent).toBeUndefined();
   });
 
+  test("an expired refusal is never reissued, even when it answers the attempt's only request call", async () => {
+    // One request call is not one transmission: the transport resends the same
+    // delivery on the agent's hello and on its own reconnect, and resolves with
+    // whatever answers the resend. After a self-update handover the predecessor
+    // may have run the delivery and lost its reply; the successor, which never
+    // issued the token, then refuses the resend as expired. That refusal cannot
+    // prove nothing ran, so minting a fresh token would run the mutation twice.
+    let probes = 0;
+    const deliveries: Array<{ target: string; resendOn?: string }> = [];
+    const refusal = ControlResponse.fromPartial({
+      requestId: mutation.requestId,
+      error: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "receipt expired or unknown; earlier execution may have occurred",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target, _payload, options) {
+        if (target === subject) {
+          probes++;
+          return leaseReply();
+        }
+        // The predecessor ran this delivery; the successor answered its resend.
+        deliveries.push({ target, resendOn: options.resendOn });
+        return { data: ControlResponse.encode(refusal).finish() };
+      },
+    }));
+    expect(await rpc.request(subject, mutation, { timeoutMs: 100 })).toEqual(refusal);
+    expect(deliveries).toHaveLength(1);
+    // The delivery was resendable on the agent's hello, so one call may carry
+    // several transmissions.
+    expect(deliveries[0]?.resendOn).toBe(subject.replace(/\.rpc$/, ".hello"));
+    expect(probes).toBe(1); // Never mint a new identity to retry the mutation.
+  });
+
   test("a v2 peer that omits its lease fails before publishing the mutation", async () => {
     let calls = 0;
     const rpc = new NatsControlRpc(async () => ({

@@ -46,6 +46,7 @@ export type {
   CreatedConversation,
 } from "./hooks/use-new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";

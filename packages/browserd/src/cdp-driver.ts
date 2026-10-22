@@ -186,6 +186,8 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 /** How long the controller's own close request may take to be acknowledged. */
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
+/** How long an action's locator waits for its element to appear or enable. */
+const LOCATOR_WAIT_MS = 10_000;
 /** Response types that stay open for the life of the page by design. */
 const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
@@ -392,6 +394,9 @@ type TargetState = {
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
+  /** Chrome's buffered console messages and exceptions already reported for
+   * this tab, so each on-demand replay appends only what is new. */
+  runtimeDiagnosticKeys: Set<string>;
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
@@ -420,6 +425,10 @@ type TargetState = {
   unsubscribe: Array<() => void>;
   /** Set only while dispatching one action of a traced command. */
   actionTrace?: { actionIndex: number; trace: InteractionDispatchTrace } | undefined;
+  /** Set only while dispatching a later action of a batch without
+   * fenceEachAction: its locator wait may follow the page to a new document.
+   * Every other action acts only on the document it was checked against. */
+  locatorFollowsNavigation?: boolean;
   /** Cross-origin iframes (out-of-process frames) by frame id. Each has its own
    * flattened CDP session, auto-attached from this page session. */
   oopifs: Map<string, OopifSession>;
@@ -468,6 +477,10 @@ export type AgentBrowserDriverOptions = {
       cancellation: "confirmed" | "uncertain",
     ): Promise<void>;
   };
+  /** Downloads are saved by the person's own browser (attached Chrome) in
+   * their own downloads folder: completed events carry that file's path, the
+   * store copies it, and the person's download is never cancelled. */
+  downloadsSavedByPerson?: boolean;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
   /** Whether the lifecycle runner or this controller-owned CDP connection
@@ -601,6 +614,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     | undefined;
   private readonly downloadDirectory: string | null;
   private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
+  private readonly downloadsSavedByPerson: boolean;
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   /** The size the agent last set. Tabs that open afterwards get it too, as
@@ -692,6 +706,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? resolvePath(options.downloadDirectory)
       : null;
     this.downloadEvents = options.downloadEvents;
+    this.downloadsSavedByPerson = options.downloadsSavedByPerson ?? false;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
     this.windowParking =
       options.parkIdleWindowsAfterMs === undefined
@@ -1344,6 +1359,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "diagnostic limit",
     );
     return await this.withTarget(targetId, async (state) => {
+      if (!kinds || kinds.has("console") || kinds.has("page_error")) {
+        await this.harvestRuntimeDiagnostics(state);
+      }
       const available = state.diagnosticEntries.filter(
         (entry) => entry.sequence > afterSequence && (!kinds || kinds.has(entry.kind)),
       );
@@ -1711,6 +1729,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
+        state.locatorFollowsNavigation =
+          command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
         const effectsBeforeAction = state.actionEffectCount;
         try {
           if (action.type === "handle_dialog") {
@@ -1733,6 +1753,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           state.nodeRoute = null;
           state.actionTrace = undefined;
+          state.locatorFollowsNavigation = false;
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length)
@@ -1748,6 +1769,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         } catch (error) {
           state.nodeRoute = null;
           state.actionTrace = undefined;
+          state.locatorFollowsNavigation = false;
           if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
             // This action counts as run once it sent input: that input is
             // what opened the dialog, or it may have had effects before it.
@@ -2145,11 +2167,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             (candidate) => candidate.frame.id === frameId,
           );
           // Browser download events are process-wide. Unknown frames must not
-          // become downloads belonging to another context.
-          if (this.browserContextId && !state) return;
+          // become downloads belonging to another context, nor, in the
+          // person's own browser, to this session.
+          if ((this.browserContextId || this.downloadsSavedByPerson) && !state) return;
           if (this.downloadEvents) {
             const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-            if (this.browserContextId) this.ownedDownloads.add(guid);
+            if (this.browserContextId || this.downloadsSavedByPerson) this.ownedDownloads.add(guid);
             const suggestedFilename =
               typeof event.params.suggestedFilename === "string"
                 ? event.params.suggestedFilename
@@ -2178,7 +2201,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Browser.downloadProgress", (event) => {
           if (!this.downloadEvents) return;
           const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
+          if (
+            (this.browserContextId || this.downloadsSavedByPerson) &&
+            !this.ownedDownloads.has(guid)
+          )
+            return;
           const state = event.params.state;
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
@@ -2200,10 +2227,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state,
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
-              filePath,
+              ...(this.downloadsSavedByPerson
+                ? state === "completed"
+                  ? { personFilePath: filePath }
+                  : {}
+                : { filePath }),
               // Browser events and replies share this connection in order, so
               // a reply proves every earlier download event was delivered.
-              ...(state === "completed"
+              ...(state === "completed" && !this.downloadsSavedByPerson
                 ? {
                     eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
                   }
@@ -2212,6 +2243,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
+              // The person's download is theirs to keep; only this session's
+              // copy is refused, and the store kept none.
+              if (this.downloadsSavedByPerson) {
+                await this.downloadEvents?.reject(guid, cancelReason, "confirmed");
+                return;
+              }
               const cancelled = await connection
                 .send("Browser.cancelDownload", { guid, ...this.contextScope() })
                 .then(
@@ -2559,8 +2596,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       const initialized = (async () => {
         await Promise.all([
+          // Runtime stays disabled: a page can detect an enabled Runtime
+          // domain (it serializes every console argument), the common
+          // automation tell. Console messages and exceptions are read on
+          // demand instead (harvestRuntimeDiagnostics).
           connection.send("Page.enable", {}, { sessionId }),
-          connection.send("Runtime.enable", {}, { sessionId }),
+          // Lightpanda 0.3.5 does not replay earlier console messages when
+          // Runtime is enabled, so an on-demand read would find nothing. It
+          // keeps Runtime enabled and reports them as they happen.
+          ...(this.engine === "lightpanda"
+            ? [connection.send("Runtime.enable", {}, { sessionId })]
+            : []),
           connection.send("DOM.enable", {}, { sessionId }),
           connection.send("Accessibility.enable", {}, { sessionId }),
           connection.send("Network.enable", {}, { sessionId }),
@@ -2632,6 +2678,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
       diagnosticEntries: [],
       diagnosticSequence: 0,
+      runtimeDiagnosticKeys: new Set(),
       inflightRequests: new Set(),
       networkTrackingOverflow: false,
       failedRequests: new Set(),
@@ -2688,42 +2735,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         },
         sessionId,
       ),
-      connection.on(
-        "Runtime.consoleAPICalled",
-        (event) => {
-          const level = consoleLevel(event.params.type);
-          if (level === "error") state.diagnostics.consoleErrorCount += 1;
-          this.appendDiagnostic(state, {
-            kind: "console",
-            level,
-            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
-            url: null,
-            method: null,
-            status: null,
-            filename: null,
-          });
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Runtime.exceptionThrown",
-        (event) => {
-          state.diagnostics.pageErrorCount += 1;
-          const details = isRecord(event.params.exceptionDetails)
-            ? event.params.exceptionDetails
-            : {};
-          this.appendDiagnostic(state, {
-            kind: "page_error",
-            level: "error",
-            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
-            url: boundedUrlField(details.url),
-            method: null,
-            status: null,
-            filename: null,
-          });
-        },
-        sessionId,
-      ),
+      ...(this.engine === "lightpanda"
+        ? [
+            connection.on(
+              "Runtime.consoleAPICalled",
+              (event) => this.appendRuntimeDiagnostic(state, "console", event.params),
+              sessionId,
+            ),
+            connection.on(
+              "Runtime.exceptionThrown",
+              (event) => this.appendRuntimeDiagnostic(state, "page_error", event.params),
+              sessionId,
+            ),
+          ]
+        : []),
       connection.on(
         "Network.requestWillBeSent",
         (event) => {
@@ -3333,10 +3358,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof attached.sessionId !== "string") {
         throw new Error("browser could not attach its hidden metadata target");
       }
-      await Promise.all([
-        connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
-        connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
-      ]);
+      await connection.send("Page.enable", {}, { sessionId: attached.sessionId });
       if (this.userAgentMetadataSource === "intercepted_local") {
         await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
       } else {
@@ -3988,7 +4010,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "hover": {
-        const node = await this.resolveActionLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator, { input: false });
         const point = await this.actionPoint(
           state,
           node.backendDOMNodeId,
@@ -4046,7 +4068,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (action.text && action.mode === "keys") {
           // One key press per character for split one-time-code boxes and
           // pages that listen for keydown and move focus themselves.
+          // Such pages usually move focus a frame after the key (React
+          // effects), so the next key waits for that frame; sent at once,
+          // keys land in the old box and overwrite or drop characters.
+          let first = true;
           for (const character of action.text) {
+            if (!first) await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+            first = false;
             await this.pressKey(state, characterKey(character));
           }
           return;
@@ -4119,7 +4147,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         const effectsBeforeScroll = state.actionEffectCount;
         let moved: unknown;
         if (action.locator) {
-          const node = await this.resolveActionLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator, { input: false });
           moved = await this.callOnNode(
             state,
             node.backendDOMNodeId,
@@ -4145,9 +4173,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "drag": {
-        const from = await this.resolveActionLocator(state, action.from);
+        const from = await this.resolveActionLocator(state, action.from, { input: false });
         const fromRoute = state.nodeRoute;
-        const to = await this.resolveActionLocator(state, action.to);
+        const to = await this.resolveActionLocator(state, action.to, { input: false });
         if (fromRoute !== state.nodeRoute) {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
@@ -4628,7 +4656,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<string> {
     let value: unknown;
     if (locator) {
-      const node = await this.resolveActionLocator(state, locator);
+      const node = await this.resolveActionLocator(state, locator, { input: false });
       value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
         { value: content },
       ]);
@@ -4697,16 +4725,85 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Resolve a locator an action is about to act on and, when the command is
    * traced, record which element it resolved to before any input is sent. */
+  /**
+   * The element an action acts on, once it can take the action. A role, label,
+   * text, placeholder, test id or CSS locator waits for its element to appear,
+   * as after a click that loads the next page or a form that renders late; an
+   * input action also waits while the element is disabled, as in a form whose
+   * fields stay greyed out until it loads. So a batch of steps across page
+   * changes runs without an observation between them. A ref names a node the
+   * caller already saw, so it does not wait to appear. The wait ends at
+   * LOCATOR_WAIT_MS; the action then fails as it would have without waiting.
+   * Only a later action of a batch without fenceEachAction may follow the page
+   * to a new document while it waits; any other action stops with
+   * document_stale before input, as its document fence requires.
+   */
   private async resolveActionLocator(
     state: TargetState,
     locator: BrowserLocator,
+    options: { input?: boolean } = {},
   ): Promise<CdpAccessibilityEntry> {
-    const entry = await this.resolveLocator(state, locator);
+    const input = options.input ?? true;
+    const deadline = Date.now() + LOCATOR_WAIT_MS;
+    const fence = state.locatorFollowsNavigation
+      ? null
+      : { document: state.documentGeneration, frame: state.frameGeneration };
+    let pause = 25;
+    let entry: CdpAccessibilityEntry;
+    for (;;) {
+      let found: CdpAccessibilityEntry | null = null;
+      try {
+        found = await this.resolveLocator(state, locator);
+      } catch (error) {
+        if (
+          locator.kind === "ref" ||
+          !(
+            error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found"
+          ) ||
+          Date.now() >= deadline
+        ) {
+          throw error;
+        }
+      }
+      if (
+        fence &&
+        (state.documentGeneration !== fence.document || state.frameGeneration !== fence.frame)
+      ) {
+        throw new InteractionDefiniteDriverError(
+          "document_stale",
+          "browser document changed while the action waited for its element",
+        );
+      }
+      if (found) {
+        if (!input || Date.now() >= deadline || !(await this.nodeDisabled(state, found))) {
+          entry = found;
+          break;
+        }
+      }
+      await delay(pause);
+      pause = Math.min(pause * 2, 200);
+    }
     const current = state.actionTrace;
     if (current) {
       current.trace.record(await this.describeResolvedTarget(state, entry, current.actionIndex));
     }
     return entry;
+  }
+
+  /** Whether a resolved element is disabled, natively or with aria-disabled. */
+  private async nodeDisabled(state: TargetState, entry: CdpAccessibilityEntry): Promise<boolean> {
+    if (entry.nodeId !== "" && entry.states.includes("disabled")) return true;
+    try {
+      return (
+        (await this.callOnNode(state, entry.backendDOMNodeId, NODE_DISABLED_FUNCTION, [])) === true
+      );
+    } catch (error) {
+      // A node that went away is re-resolved on the next try.
+      if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
+        return true;
+      }
+      throw error;
+    }
   }
 
   private async describeResolvedTarget(
@@ -5843,6 +5940,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       await delay(50);
     }
+    // Some live pages never go quiet: a long poll or a request the page keeps
+    // open is indistinguishable from a slow fetch until it ends. Network idle
+    // waits for the page to settle, so a document that finished loading has
+    // settled as far as anything will within the wait; failing here would
+    // make a completed navigation look uncertain.
+    if (action.condition === "network_idle" && (await this.documentReady(state))) return;
     throw new InteractionDefiniteDriverError("timeout", "browser wait condition timed out", true);
   }
 
@@ -6408,14 +6511,126 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /**
+   * Append the tab's console messages and uncaught exceptions that were not
+   * reported yet. The page session never keeps Runtime enabled, because a page
+   * can detect that. Chrome buffers these messages per document and replays
+   * them all, before answering, when Runtime is enabled; a brief enable, then
+   * disable, reads them only when the caller asks for diagnostics.
+   */
+  private async harvestRuntimeDiagnostics(state: TargetState): Promise<void> {
+    // Lightpanda reports these live (see attachTarget); enabling and disabling
+    // Runtime here would only stop that stream.
+    if (this.engine === "lightpanda") return;
+    const connection = await this.ensureConnection();
+    const sessionId = state.sessionId;
+    const replayed: Array<
+      | { kind: "console"; key: string; params: Record<string, unknown> }
+      | { kind: "page_error"; key: string; params: Record<string, unknown> }
+    > = [];
+    const stops = [
+      connection.on(
+        "Runtime.consoleAPICalled",
+        (event) => {
+          const params = event.params;
+          replayed.push({
+            kind: "console",
+            key: `console:${String(params.executionContextId)}:${String(params.timestamp)}:${String(params.type)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Runtime.exceptionThrown",
+        (event) => {
+          const params = event.params;
+          const details = isRecord(params.exceptionDetails) ? params.exceptionDetails : {};
+          replayed.push({
+            kind: "page_error",
+            key: `exception:${String(details.exceptionId)}:${String(params.timestamp)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+    ];
+    try {
+      // The replay arrives before the enable response on the same session.
+      await connection.send("Runtime.enable", {}, { sessionId });
+    } finally {
+      for (const stop of stops) stop();
+      void connection.send("Runtime.disable", {}, { sessionId }).catch(() => undefined);
+    }
+    if (this.states.get(state.targetId) !== state) return;
+    const current = new Set<string>();
+    for (const message of replayed) {
+      current.add(message.key);
+      if (state.runtimeDiagnosticKeys.has(message.key)) continue;
+      this.appendRuntimeDiagnostic(
+        state,
+        message.kind,
+        message.params,
+        runtimeTimestamp(message.params.timestamp),
+      );
+    }
+    // Chrome drops a document's messages with the document, so anything it no
+    // longer replays cannot come back; keep only the keys it still holds.
+    state.runtimeDiagnosticKeys = current;
+  }
+
+  /** Record one Runtime console message or uncaught exception for the tab.
+   * A replayed message carries when it was logged; a live one happened now. */
+  private appendRuntimeDiagnostic(
+    state: TargetState,
+    kind: "console" | "page_error",
+    params: Record<string, unknown>,
+    occurredAt?: string,
+  ): void {
+    if (kind === "console") {
+      const level = consoleLevel(params.type);
+      if (level === "error") state.diagnostics.consoleErrorCount += 1;
+      this.appendDiagnostic(
+        state,
+        {
+          kind: "console",
+          level,
+          message: consoleMessage(params.args, (text) => this.typedSecrets.redact(text)),
+          url: null,
+          method: null,
+          status: null,
+          filename: null,
+        },
+        occurredAt,
+      );
+    } else {
+      state.diagnostics.pageErrorCount += 1;
+      const details = isRecord(params.exceptionDetails) ? params.exceptionDetails : {};
+      this.appendDiagnostic(
+        state,
+        {
+          kind: "page_error",
+          level: "error",
+          message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
+          url: boundedUrlField(details.url),
+          method: null,
+          status: null,
+          filename: null,
+        },
+        occurredAt,
+      );
+    }
+  }
+
   private appendDiagnostic(
     state: TargetState,
     entry: Omit<BrowserDiagnosticEntry, "sequence" | "occurredAt">,
+    occurredAt: string = this.timestamp(),
   ): void {
     const parsed = BrowserDiagnosticEntry.parse({
       ...entry,
       sequence: ++state.diagnosticSequence,
-      occurredAt: this.timestamp(),
+      occurredAt,
     });
     state.diagnosticEntries.push(parsed);
     if (state.diagnosticEntries.length > INTERACTION_MAX_DIAGNOSTIC_ENTRIES) {
@@ -6906,6 +7121,15 @@ const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
   requestAnimationFrame(() => requestAnimationFrame(done));
 })`;
 
+/** Resolves once work a page scheduled in response to the last key (a task
+ * queued in the next animation frame, such as a React effect moving focus)
+ * has run, or after 50 ms in a tab that does not animate (background). */
+const AFTER_KEY_EFFECTS_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  setTimeout(done, 50);
+  requestAnimationFrame(() => setTimeout(done, 0));
+})`;
+
 // A child frame's scroll can also move its parent documents, which this frame
 // cannot read, so only top-level frames report positions.
 const SCROLL_POSITIONS_FUNCTION = `function() {
@@ -6924,14 +7148,36 @@ const SCROLL_POSITIONS_FUNCTION = `function() {
   return positions.join(",");
 }`;
 
+// Page-side helpers shared by the hit tests below. topHit is the element on
+// top at a point in the target's own tree scope. It uses elementsFromPoint:
+// for a shadow-DOM control whose label is text slotted in from the light DOM
+// (a web-component button), the single-element query answers with the host,
+// while elementsFromPoint answers with the control itself. owns follows the
+// flat tree (slot assignment, then parents, then shadow hosts), the tree that
+// pointer events travel, so slotted content counts as inside its slot's
+// element and shadow content as inside its host.
+const HIT_HELPERS = `
+  const topHit = (target, x, y) => {
+    const root = target.getRootNode();
+    const scope = root && typeof root.elementsFromPoint === "function" ? root : document;
+    return scope.elementsFromPoint(x, y)[0] ?? null;
+  };
+  const owns = (ancestor, node) => {
+    for (let current = node; current; ) {
+      if (current === ancestor) return true;
+      current = current.assignedSlot ?? current.parentNode ?? null;
+      if (current instanceof ShadowRoot) current = current.host;
+    }
+    return false;
+  };`;
+
 const HIT_TEST_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  return Boolean(hit && (element === hit || element.contains?.(hit)));
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && owns(element, hit));
 }`;
 
 // Describes the element on top at the target's centre by its nearest
@@ -6941,10 +7187,9 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!hit || hit === element || element.contains(hit) || hit.contains(element)) return null;
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!hit || owns(element, hit) || owns(hit, element)) return null;
   const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
   let node = hit;
   for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
@@ -6969,10 +7214,9 @@ const POINTER_TRANSPARENT_FUNCTION = `function() {
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  return Boolean(hit && hit !== element && !element.contains(hit) && hit.contains(element));
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && !owns(element, hit) && owns(hit, element));
 }`;
 
 // Whether the element at the target's centre belongs to a sticky element, or
@@ -6982,10 +7226,9 @@ const STICKY_COVER_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  let node = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!node || element === node || element.contains(node)) return false;
+  ${HIT_HELPERS}
+  let node = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!node || owns(element, node)) return false;
   while (node instanceof Element) {
     const position = getComputedStyle(node).position;
     if (position === "sticky") return true;
@@ -7021,6 +7264,13 @@ const VISIBLE_FUNCTION = `function() {
 
 const CHECKED_FUNCTION = `function() {
   return typeof this.checked === "boolean" ? this.checked : null;
+}`;
+
+/** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
+const NODE_DISABLED_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element)) return false;
+  return element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
 }`;
 
 const SELECT_OPTIONS_FUNCTION = `function(values) {
@@ -7412,6 +7662,13 @@ function browserDialog(params: Record<string, unknown>, openedAt: string): Brows
     defaultPrompt: boundedTextField(params.defaultPrompt, 32_768) ?? "",
     openedAt,
   });
+}
+
+/** A CDP Runtime timestamp (milliseconds since the epoch) as an ISO time. */
+function runtimeTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {

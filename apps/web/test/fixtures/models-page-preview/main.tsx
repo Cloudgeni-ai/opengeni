@@ -5,7 +5,7 @@ import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
 import { browserPage, type NavigationHost } from "@opengeni/react/app/lib/navigation";
 import { useConsoleSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import type { ModelsView } from "@opengeni/react/app/lib/models-route";
-import { useAppContext } from "./context";
+import { PreviewAppContextProvider, useAppContext } from "./context";
 import { WorkspaceModelsPage } from "../../../src/components/models/workspace-models-page";
 import "../../../src/styles.css";
 
@@ -43,7 +43,10 @@ const navigate = async (options: { search?: unknown }) => {
   for (const listener of listeners) listener();
 };
 const location = () => current;
-const workspaces = [{ id: "design", name: "Design", kind: "shared" } as never];
+const workspaces = [
+  { id: "design", name: "Design", kind: "shared" } as never,
+  ...(params.get("many") === "1" ? [{ id: "research", name: "Research", kind: "shared" } as never] : []),
+];
 const navigation: NavigationHost = {
   useNavigate: () => navigate,
   useLocation: () => location(),
@@ -90,11 +93,13 @@ function Page() {
 
 createRoot(document.getElementById("root")!).render(
   <AppHostProvider host={{ navigation } as never}>
+    <PreviewAppContextProvider>
     <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
       <div className="mx-auto max-w-3xl">
         <Page />
       </div>
       <Toaster />
     </main>
+    </PreviewAppContextProvider>
   </AppHostProvider>,
 );

@@ -5,11 +5,11 @@ import type { Session, SessionEvent, SessionQueueSnapshot, SessionTurn } from "@
 import { buildTimeline, type ComposerState, type TimelineItem } from "@opengeni/react/session";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 import { registerDom, renderComponent, flush } from "../../../../packages/react/test/render-hook";
-import { SessionStartupProvider } from "@opengeni/react/app/lib/session-startup";
+import { SessionStartupProvider } from "../../../../packages/react/src/lib/session-startup";
 import {
   sessionStartupTimeline,
   useSessionStartupTimeline,
-} from "@opengeni/react/app/lib/session-startup-timeline";
+} from "../../../../packages/react/src/lib/session-startup-timeline";
 registerDom();
 const start = new Date(Date.now() - 35_000).toISOString();
 const session = {

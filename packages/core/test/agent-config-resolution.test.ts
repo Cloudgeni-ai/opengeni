@@ -10,10 +10,103 @@ import { HTTPException } from "hono/http-exception";
 import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
+  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
 } from "../src/domain/agent-config-resolution";
 
 const settings = testSettings();
+
+describe("new-session Knowledge search selection", () => {
+  // Mirrors the built-in Knowledge (`docs`) server that settings loading adds.
+  const builtInServers = [
+    { id: "docs", allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"] },
+  ];
+  const config = resolveSessionAgentConfigForCreate({
+    settings,
+    creator: "api",
+    request: { capabilities: "all" },
+    instructions: undefined,
+    workspaceSettings: {},
+    parent: null,
+    goal: false,
+  }).config!;
+
+  test("persists only search as eager without mutating the source selection", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["skill_read"] },
+      { kind: "mcp", id: "docs" },
+    ];
+    const saved = JSON.stringify(tools);
+    expect(
+      newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"], builtInServers),
+    ).toEqual([
+      { kind: "mcp", id: "opengeni", eager: ["skill_read", "knowledge_search"] },
+      tools[1],
+    ]);
+    expect(JSON.stringify(tools)).toBe(saved);
+  });
+
+  test("does not attach servers, enable a disabled family or widen selected tools", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionKnowledgeSearchTools(tools, null, ["knowledge_search"], builtInServers)).toBe(
+      tools,
+    );
+    expect(
+      newSessionKnowledgeSearchTools(
+        tools,
+        { ...config, capabilities: { ...config.capabilities, knowledge: false } },
+        ["knowledge_search"],
+        builtInServers,
+      ),
+    ).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toBe(tools);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: [] }];
+    expect(
+      newSessionKnowledgeSearchTools(narrowed, config, ["knowledge_search"], builtInServers),
+    ).toBe(narrowed);
+    expect(
+      newSessionKnowledgeSearchTools([], config, ["knowledge_search"], builtInServers),
+    ).toEqual([]);
+  });
+
+  test("uses an already attached Docs search if first-party search is unavailable", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "docs", allowedTools: ["knowledge_search"] },
+    ];
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toEqual([
+      tools[0],
+      { ...tools[1], eager: ["knowledge_search"] },
+    ]);
+  });
+
+  test("does not mark search eager on a deployment's own docs server without it", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "docs" }];
+    const customDocs = [{ id: "docs", allowedTools: ["search_documents", "fetch_document"] }];
+    expect(newSessionKnowledgeSearchTools(tools, config, [], customDocs)).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], [{ id: "docs" }])).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [], builtInServers)).toEqual([
+      { kind: "mcp", id: "docs", eager: ["knowledge_search"] },
+    ]);
+  });
+
+  test("preserves explicit all-eager and leaves ordinary configuration updates unchanged", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni", eager: true }];
+    expect(
+      newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"], builtInServers),
+    ).toEqual(tools);
+    const oldTools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(
+      applySessionAgentConfigWriteThrough({
+        config,
+        tools: oldTools,
+        firstPartyMcpTools: ["knowledge_search"],
+        productServerIds: [],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      }).tools,
+    ).toEqual(oldTools);
+  });
+});
 
 function failure(fn: () => unknown): { status: number; code: string } | null {
   try {

@@ -110,12 +110,15 @@ export function RailTrailingMetadata({
   summary,
   scheduled = false,
   relativeTime,
+  jumpKey,
   creator,
   quickActionSlots = 0,
 }: {
   summary: RailAggregateStatus;
   scheduled?: boolean | undefined;
   relativeTime?: string | undefined;
+  /** The key that opens this row ("⌘3"), shown in place of the time while ⌘ is held. */
+  jumpKey?: string | undefined;
   /** Rightmost items replaced in place by the row's desktop quick actions. */
   quickActionSlots?: number | undefined;
   /**
@@ -135,7 +138,14 @@ export function RailTrailingMetadata({
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)
       : "";
-  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram && !quickActionSlots)
+  if (
+    !scheduled &&
+    !hasStatusMarker &&
+    !hasRelativeTime &&
+    !jumpKey &&
+    !hasMonogram &&
+    !quickActionSlots
+  )
     return null;
   const items = Children.toArray([
     scheduled ? (
@@ -163,7 +173,15 @@ export function RailTrailingMetadata({
         <RailAggregateDot summary={summary} />
       </span>
     ) : null,
-    hasRelativeTime ? (
+    jumpKey ? (
+      <kbd
+        key="time"
+        data-session-row-jump-key
+        className="inline-flex h-4.5 min-w-9 shrink-0 items-center justify-center rounded-[4px] border border-border bg-surface-2 px-1 font-sans text-2xs leading-none font-medium whitespace-nowrap text-fg-muted"
+      >
+        {jumpKey}
+      </kbd>
+    ) : hasRelativeTime ? (
       <span
         key="time"
         className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg"
@@ -213,6 +231,7 @@ export function SessionRowContent({
   summary,
   scheduled = false,
   relativeTime,
+  jumpKey,
   creator,
   quickActionSlots = 0,
 }: {
@@ -224,6 +243,8 @@ export function SessionRowContent({
   summary: RailAggregateStatus;
   scheduled?: boolean | undefined;
   relativeTime?: string | undefined;
+  /** See RailTrailingMetadata. */
+  jumpKey?: string | undefined;
   quickActionSlots?: number | undefined;
   /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
   creator?: CreatorRef | null | undefined;
@@ -251,6 +272,7 @@ export function SessionRowContent({
         summary={summary}
         scheduled={scheduled}
         relativeTime={relativeTime}
+        jumpKey={jumpKey}
         creator={creator}
       />
     </>

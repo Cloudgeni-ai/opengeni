@@ -74,7 +74,7 @@ describe("toolDisplayName", () => {
   });
 
   test("built-in tool names read as plain steps; other bare names are de-slugged", () => {
-    expect(toolDisplayName(englishText, "session_create")).toBe("Got help from another assistant");
+    expect(toolDisplayName(englishText, "session_create")).toBe("Started a worker");
     expect(toolDisplayName(englishText, "bash")).toBe("Bash");
   });
 
@@ -1930,6 +1930,37 @@ describe("buildTimeline", () => {
     expect(item.failure).toBeNull();
   });
 
+  test("a worker started through tool_invoke is the same worker item", () => {
+    reset();
+    const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0001";
+    const receipt = {
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_create",
+      resource: { type: "session", id: workerId, state: "queued" },
+    };
+    const items = buildTimeline(englishText, [
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "tool_invoke",
+        arguments: JSON.stringify({
+          name: "opengeni__session_create",
+          arguments: { title: "Drift check", initialMessage: "Run the drift check on prod" },
+        }),
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: JSON.stringify(receipt) }] },
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    const item = items[0] as WorkerItem;
+    expect(item.kind).toBe("worker");
+    expect(item.action).toBe("spawn");
+    expect(item.title).toBe("Drift check");
+    expect(item.prompt).toBe("Run the drift check on prod");
+    expect(item.workerSessionId).toBe(workerId);
+  });
+
   test("session_create keeps the manager's title for the spawned agent", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -3580,6 +3611,86 @@ describe("buildTimeline", () => {
         rationale: "This lets me inspect the repositories you asked about.",
       },
     });
+  });
+
+  test("only the newest Connected Machine card for the same request stays a full card", () => {
+    reset();
+    const machineCard = (turnId: string, requestedSandboxId?: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "sandbox_swap",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Allow this chat to use your computer.",
+            requiredVariables: [],
+          },
+          ...(requestedSandboxId ? { requestedSandboxId } : {}),
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      machineCard("turn-1", "11111111-1111-4111-8111-111111111111"),
+      machineCard("turn-2", "22222222-2222-4222-8222-222222222222"),
+      machineCard("turn-3", "11111111-1111-4111-8111-111111111111"),
+      machineCard("turn-4"),
+      machineCard("turn-5"),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.requestedSandboxId, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "11111111-1111-4111-8111-111111111111", true],
+      ["turn-2", "22222222-2222-4222-8222-222222222222", false],
+      ["turn-3", "11111111-1111-4111-8111-111111111111", false],
+      ["turn-4", null, true],
+      ["turn-5", null, false],
+    ]);
+  });
+
+  test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {
+    reset();
+    const card = (turnId: string, purpose?: "chrome") =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: purpose ? "browser_open" : "sandbox_swap",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Connect your Chrome so the agent can use it.",
+            requiredVariables: [],
+          },
+          ...(purpose ? { purpose } : {}),
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "chrome"),
+      card("turn-2"),
+      card("turn-3", "chrome"),
+      card("turn-4"),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.purpose ?? null, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "chrome", true],
+      ["turn-2", null, true],
+      ["turn-3", "chrome", false],
+      ["turn-4", null, false],
+    ]);
   });
 
   test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {

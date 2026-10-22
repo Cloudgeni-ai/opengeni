@@ -41,6 +41,8 @@
 //!   vm/firecracker/template-<key>/ the VM building it: its jail, and
 //!     ordinal                      the ordinal whose user its VMM runs as
 //!   used/<shape>                   when the shape was last used (see uses)
+//!   inputs/hashes.json             the input files' hashes, kept for the
+//!                                  next agent (see hashes)
 //! ```
 //!
 //! Anything a build left when the agent stopped is removed on start, its VM
@@ -51,9 +53,11 @@
 //! A shape unused for a while (see [`uses`]) retires: its template is
 //! removed and no ready sandboxes are kept of it until its next create.
 
+mod hashes;
 mod shape;
 mod uses;
 
+pub(crate) use hashes::Hashes;
 pub use shape::{Keep, Shape};
 pub(crate) use uses::{Uses, write_use};
 
@@ -63,8 +67,8 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_core::{DiskSpace, LoanId, Step};
@@ -155,8 +159,9 @@ pub(crate) struct Sources {
     /// The guest port that says a booted guest is ready for work: a guest
     /// image that answers elsewhere is another guest.
     pub ready_port: u32,
-    /// The content hash of each file, with the metadata it was read under.
-    pub hashes: Mutex<HashMap<PathBuf, (Stamp, String)>>,
+    /// The content hash of each file, with the metadata it was read under,
+    /// kept for the next agent too.
+    pub hashes: Hashes,
 }
 
 impl Sources {
@@ -207,63 +212,12 @@ impl Sources {
     /// What the file at `path` holds, hashed again only when its metadata
     /// says it may have changed.
     fn content(&self, path: &Path) -> io::Result<FileId> {
-        let stamp = Stamp::of(&fs::metadata(path)?);
-        let known = self
-            .hashes
-            .lock()
-            .map_err(|_| io::Error::other("template input hashes poisoned"))?
-            .get(path)
-            .filter(|(seen, _)| *seen == stamp)
-            .map(|(_, hash)| hash.clone());
-        let hash = if let Some(hash) = known {
-            hash
-        } else {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update_reader(fs::File::open(path)?)?;
-            // A file written to while it was read has no one content.
-            if Stamp::of(&fs::metadata(path)?) != stamp {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    format!("{} changed while it was read", path.display()),
-                ));
-            }
-            let hash = hasher.finalize().to_hex().to_string();
-            self.hashes
-                .lock()
-                .map_err(|_| io::Error::other("template input hashes poisoned"))?
-                .insert(path.to_owned(), (stamp, hash.clone()));
-            hash
-        };
+        let (len, hash) = self.hashes.of(path)?;
         Ok(FileId {
             path: path.to_owned(),
-            len: stamp.len,
+            len,
             blake3: hash,
         })
-    }
-}
-
-/// What a file's metadata says about its content. Every write to a file,
-/// and every replacement of it, changes one of these: the kernel moves a
-/// file's change time on each, and nothing can set it back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Stamp {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified_ns: i128,
-    changed_ns: i128,
-}
-
-impl Stamp {
-    fn of(metadata: &fs::Metadata) -> Self {
-        let ns = |secs: i64, nanos: i64| i128::from(secs) * 1_000_000_000 + i128::from(nanos);
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified_ns: ns(metadata.mtime(), metadata.mtime_nsec()),
-            changed_ns: ns(metadata.ctime(), metadata.ctime_nsec()),
-        }
     }
 }
 
@@ -1273,7 +1227,7 @@ fn keep_fitting(dir: &Path, sources: &Sources) -> Vec<Template> {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         let name = entry.file_name();
-        if name == "vm" || name == uses::USED {
+        if name == "vm" || name == uses::USED || name == hashes::INPUTS {
             continue;
         }
         let fitting = read_inputs(&path)

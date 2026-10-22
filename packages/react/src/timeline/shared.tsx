@@ -9,6 +9,7 @@ import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
 import type { ToolCallTruncation, ToolOutputPreview } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
+import { ShimmerText } from "./shimmer-text";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -204,14 +205,14 @@ export function ActivityDisclosure({
     return (
       <span className="og-rolling-label">
         <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
-        <span className="og-command-reel">
+        <ShimmerText active="ancestor" tone="reel" className="og-command-reel">
           <span className="og-reel-title">{title}</span>
           {(compactPreview === undefined ? preview : compactPreview) ? (
             <span className="og-reel-preview text-og-fg-subtle">
               {compactPreview === undefined ? preview : compactPreview}
             </span>
           ) : null}
-        </span>
+        </ShimmerText>
       </span>
     );
   const hasBody = expandable && (children != null || truncation != null);
@@ -253,7 +254,11 @@ export function ActivityDisclosure({
         <span className="size-3.5 shrink-0" />
       )}
       <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
-      <span className={cn("og-command-reel", running && "og-command-reel-running")}>
+      <ShimmerText
+        active={Boolean(running)}
+        tone="reel"
+        className={cn("og-command-reel", running && "og-command-reel-running")}
+      >
         <span
           className={cn(
             "min-w-0 shrink truncate text-og-base font-medium",
@@ -267,7 +272,7 @@ export function ActivityDisclosure({
         ) : (
           <span className="flex-1" />
         )}
-      </span>
+      </ShimmerText>
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
           terse settle chip (hidden once expanded — the body owns the detail). */}
       {media && !open ? (

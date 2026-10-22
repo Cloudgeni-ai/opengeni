@@ -7,11 +7,25 @@ import {
 import {
   admissibleWorkspaceModel,
   loadWorkspaceModelSelectionInput,
+  resolveWorkspaceCatalogSettings,
   resolveWorkspaceModelSelection,
   selectDefaultSessionModel,
   type WorkspaceModelSelection,
 } from "@opengeni/core";
 import { getOrganizationModelDefaults, getWorkspace, type Database } from "@opengeni/db";
+
+/** Resolve the current catalog before applying the viewer's workspace policy. */
+export async function loadSiteModelSelectionInput(
+  deps: { db: Database; settings: Settings; catalogSourceSettings?: Settings },
+  scope: { accountId: string; workspaceId: string; subjectId: string },
+) {
+  const catalog = await resolveWorkspaceCatalogSettings(
+    deps.db,
+    deps.catalogSourceSettings ?? deps.settings,
+    scope,
+  );
+  return loadWorkspaceModelSelectionInput(deps.db, catalog.settings, scope);
+}
 
 /**
  * The model of a Site agent conversation by who the viewer is.
@@ -99,7 +113,7 @@ export async function siteCreditModelSelections(
   scope: { accountId: string; workspaceId: string },
   siteId: string,
 ): Promise<WorkspaceModelSelection[]> {
-  const input = await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+  const input = await loadSiteModelSelectionInput(deps, {
     ...scope,
     subjectId: `site:${siteId}`,
   });
@@ -117,7 +131,7 @@ export async function resolveSiteOutsideModel(
   input: { siteId: string; agentModel: string | null },
 ): Promise<SiteOutsideModelChoice> {
   const [selectionInput, workspace, organization] = await Promise.all([
-    loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+    loadSiteModelSelectionInput(deps, {
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
       // The Site's own principal: it holds no personal subscription authority.
@@ -127,7 +141,7 @@ export async function resolveSiteOutsideModel(
     getOrganizationModelDefaults(deps.db, scope.accountId),
   ]);
   return siteOutsideModelChoice({
-    settings: deps.settings,
+    settings: selectionInput.settings,
     selections: resolveWorkspaceModelSelection(selectionInput),
     agentModel: input.agentModel,
     workspaceDefaults: resolveWorkspaceSessionDefaults(workspace?.settings ?? {}),

@@ -1747,6 +1747,19 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 0908 personal Site opens: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0909 session message search texts: read-only, FORCE RLS; the owner's
+          // trigger writes them.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
@@ -1798,7 +1811,11 @@ describe("runtime database posture evaluator", () => {
         1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
         1 + // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
         1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
-        1; // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
+        1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
+        1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
+        1; // 0909 session message search texts: read-only, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("site_opens");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
       expect(RUNTIME_FULL_DML_TABLES).toContain("session_title_operations");
       expect(FORCE_RLS_TABLES).toContain("site_session_access");

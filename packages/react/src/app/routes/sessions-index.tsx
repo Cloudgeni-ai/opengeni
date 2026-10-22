@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
@@ -259,6 +260,7 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const starters = useSessionUiFeature("starters");
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -1237,6 +1239,7 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
+                      connectionAccounts.onSelectionError(error);
                       // A brief outage shows the updating notice, not a toast.
                       return (
                         draftConflict ||
@@ -1314,6 +1317,7 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
+                    connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
                     // An unconfirmed create keeps its idempotency key, so the
                     // person's next Send cannot start a second session.
@@ -2018,15 +2022,17 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
-        <NewSessionStarters
-          workspaceId={workspaceId}
-          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
-          disabled={busy || newSessionDraft.loading}
-          onSelect={(prompt) => {
-            setMessage(prompt);
-            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
-          }}
-        />
+        {starters ? (
+          <NewSessionStarters
+            workspaceId={workspaceId}
+            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            disabled={busy || newSessionDraft.loading}
+            onSelect={(prompt) => {
+              setMessage(prompt);
+              composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}
@@ -2222,6 +2228,7 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
+      claudeSubscriptionAvailable={context.clientConfig.claudeSubscriptionEnabled === true}
       onModelChange={(model) => {
         onPolicyChosen();
         context.setModel(model);

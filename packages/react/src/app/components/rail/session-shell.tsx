@@ -27,7 +27,7 @@ import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-p
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
-import { SessionStartupProvider } from "../../lib/session-startup";
+import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
   requestSessionUsageLimitEditor,
   sessionUsageLimitCapability,
@@ -51,8 +51,8 @@ import {
   SessionComputeIndicator,
   sessionSupportsFleetSwitching,
 } from "../session/sandbox-switcher";
-import { CodexAccountIndicator } from "../session/codex-account-indicator";
-import { ModelAccountIndicator } from "../session/model-account-indicator";
+import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
+import { subscriptionAccountProvider } from "../session/subscription-account";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
@@ -61,7 +61,6 @@ import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
-import { isCodexProductModel } from "../../lib/session-model";
 import { isIntelligenceEffort } from "../../lib/session-tools";
 import { useSessionRepliesMute } from "../../lib/inbox";
 import { useSessionAdminAccess } from "../session/session-admin-access";
@@ -343,7 +342,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
+      <div
+        className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
+        // Lets page chrome (the desktop title bar) follow the rail without a
+        // document-wide `:has()` selector.
+        data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
+      >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
           <nav
@@ -410,6 +414,7 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
+  const brand = useSessionUiFeature("brand");
   const context = useAppContext();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -461,11 +466,20 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
+    // Both schedule facts come from one read, so a newer lineage never pairs
+    // with an older session read (an older server sends no upcoming flag).
+    const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
       <SessionRouteHeader
         session={{
           ...context.session,
-          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+          ...(lineageSchedules === undefined
+            ? {}
+            : {
+                hasSchedules: lineageSchedules,
+                hasUpcomingSchedules:
+                  lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+              }),
         }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
@@ -476,18 +490,22 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     );
   }
 
-  // Mobile, off a session route: the slim brand strip.
+  // Mobile, off a session route: the slim brand strip. A host without
+  // Opengeni's brand keeps only the menu button, or no strip at all.
+  if (!brand && !hamburger) return null;
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
-      <Link
-        to="/workspaces/$workspaceId/sessions"
-        params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-fg"
-      >
-        <BrandMark className="w-5" />
-        <Wordmark className="text-[17px]" />
-      </Link>
+      {brand ? (
+        <Link
+          to="/workspaces/$workspaceId/sessions"
+          params={{ workspaceId: rail.workspaceId }}
+          className="flex items-center gap-2 text-fg"
+        >
+          <BrandMark className="w-5" />
+          <Wordmark className="text-[17px]" />
+        </Link>
+      ) : null}
     </header>
   );
 }
@@ -529,9 +547,10 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const credentialSource = selectedRow?.catalog.credentialSource;
-  const subscriptionProvider =
-    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  const accountProvider = subscriptionAccountProvider(
+    displayModelId,
+    selectedRow?.catalog.credentialSource,
+  );
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
@@ -641,24 +660,16 @@ function SessionRouteHeader({
           <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
         ) : null
       }
-      codexSlot={
-        policyReady && isCodexProductModel(displayModelId) ? (
-          <CodexAccountIndicator
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            model={displayModelId}
-            modelReady={policyReady}
-            events={events}
-          />
-        ) : policyReady && subscriptionProvider ? (
-          <ModelAccountIndicator
+      accountSlot={
+        policyReady && accountProvider ? (
+          <SubscriptionAccountIndicator
             workspaceId={session.workspaceId}
             sessionId={session.id}
             organizationId={
               context.workspaces.find((candidate) => candidate.id === session.workspaceId)
                 ?.accountId ?? null
             }
-            provider={subscriptionProvider}
+            provider={accountProvider}
             servingTurnId={lastStarted.policy?.turnId}
             events={events}
           />

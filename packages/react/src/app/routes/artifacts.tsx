@@ -1,7 +1,6 @@
 import { t } from "../lib/console-text";
 import { ArtifactSessionPage } from "../components/session/artifact-session-page";
 import type {
-  SiteViewer,
   ToolGatewayIdentity,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -12,7 +11,6 @@ import {
   artifactLoadErrorMessage,
   artifactLoadErrorView,
   type PublishedHtmlArtifactToolBridge,
-  type SiteToolBridgeFactory,
 } from "../../artifacts";
 import { loadSiteSnapshot } from "../../sites";
 import { SiteConversations } from "../components/artifacts/site-conversations";
@@ -62,6 +60,7 @@ import { useAppContext } from "../app-context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "../lib/artifact-access";
 import { useAppApi } from "../lib/app-api";
 import { createSiteToolBridge } from "../lib/site-tool-bridge";
+import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { readyNewChat } from "../lib/ready-new-chat";
 import { userErrorText } from "../../ui/api-error";
 import { newArtifactPrompt, siteEditPrompt } from "../lib/site-edit-prompt";
@@ -77,18 +76,6 @@ import type { ArtifactCatalogFilters } from "../lib/artifact-catalog";
 import type { ArtifactReturnSearch, SiteDetailTab } from "../lib/routes";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
-
-/** The signed-in member as Site code sees them (`site.viewer`) in the console. */
-function useConsoleSiteViewer(): SiteViewer {
-  const { accessContext, authSession } = useAppContext();
-  const subjectId = accessContext.subjectId;
-  const name = authSession?.user?.name ?? null;
-  const email = authSession?.user?.email ?? null;
-  return useMemo(
-    () => ({ kind: "member", id: `user:${subjectId}`, name, email, signedIn: true }),
-    [email, name, subjectId],
-  );
-}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -420,22 +407,8 @@ function EmbeddedSiteDetail({
   controls?: EmbeddedSiteControls | undefined;
 }) {
   const { client } = useAppContext();
-  const api = useAppApi();
   const viewer = useConsoleSiteViewer();
-  const toolBridge = useCallback<SiteToolBridgeFactory>(
-    (site) => {
-      const scope = { workspaceTools: client.tools.forWorkspace(workspaceId), workspaceId };
-      return site
-        ? createSiteToolBridge(api, {
-            ...scope,
-            artifactId: site.artifactId,
-            siteVersionId: site.siteVersionId,
-            requestedTools: site.requestedTools,
-          })
-        : createSiteToolBridge(api, scope);
-    },
-    [api, client, workspaceId],
-  );
+  const toolBridge = useConsoleSiteToolBridge(workspaceId);
   return (
     <SiteView
       client={client}

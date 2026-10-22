@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConnectController, type ConnectAttempt, type ConnectTransport } from "@opengeni/connect";
 import { ConnectSetup } from "../src/connect";
+import { curatedAutoAdvance } from "../src/connect-setup";
 
 async function render(
   nextAction: ConnectAttempt["nextAction"],
@@ -161,6 +162,41 @@ test("a GitHub owner-approval request reads as a calm waiting state, not an erro
   expect(html).not.toContain("Choose which tools to add");
 });
 
+test("a Microsoft organization that needs admin approval gets a link for its administrator", async () => {
+  const link =
+    "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=client-1&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite&state=microsoft_admin_consent";
+  const required = await render({ type: "none" }, "failed", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "admin_consent_required",
+      message: `Your organization requires a Microsoft 365 administrator to approve this app first. Send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(required).toContain("needs a Microsoft 365 admin to approve");
+  expect(required).toContain("Admin approval link");
+  expect(required).toContain(`href="${link.replaceAll("&", "&amp;")}"`);
+  expect(required).toContain("Copy admin approval link");
+  expect(required).not.toContain("Connection setup could not continue");
+  const declined = await render({ type: "none" }, "cancelled", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "provider_denied",
+      message: `Microsoft did not grant access. If Microsoft said your organization needs an administrator to approve this app, send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(declined).toContain("If it said your organization needs an admin");
+  const other = await render({ type: "none" }, "cancelled", {
+    error: {
+      code: "provider_denied",
+      message: "Authorization was not completed. Start a new connection attempt.",
+      retryable: false,
+    },
+  });
+  expect(other).not.toContain("Admin approval link");
+});
+
 test("GitHub account selection explains how a non-owner requests an organization install", async () => {
   const accounts = [
     {
@@ -185,4 +221,89 @@ test("GitHub account selection explains how a non-owner requests an organization
   expect(github).toContain("send its owners");
   const other = await render({ type: "select_account", accounts }, "account_selection");
   expect(other).not.toContain("Only its owners can connect it");
+});
+
+const curatedPreview: ConnectAttempt["nextAction"] = {
+  type: "preview",
+  previewId: "preview",
+  contentHash: "hash",
+  operations: [
+    { id: "read", label: "Read mail", kind: "read" },
+    { id: "send", label: "Send mail", kind: "mutation" },
+  ],
+};
+
+test("a built-in integration finishes by itself after sign-in instead of asking to choose tools", async () => {
+  const connected = await render({ type: "none" }, "connected_but_incomplete", {
+    completionRequirement: "integration",
+  });
+  expect(connected).toContain("Finishing setup");
+  expect(connected).not.toContain("Choose tools");
+  const preview = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "definition", definitionId: "microsoft-outlook-mail" },
+  });
+  expect(preview).toContain("Finishing setup");
+  expect(preview).not.toContain("Add selected tools");
+});
+
+test("built-in integrations advance to the preview and install every reviewed tool", () => {
+  const base = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-outlook-mail",
+    ownership: "personal" as const,
+    revision: 2,
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration" as const,
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toEqual({ type: "retry" });
+  expect(curatedAutoAdvance({ ...base, state: "preview", nextAction: curatedPreview })).toEqual({
+    type: "install",
+    previewId: "preview",
+    contentHash: "hash",
+    operationIds: ["read", "send"],
+  });
+  // Errors, custom sources and connection-only providers stay with the person.
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      error: { code: "source_changed", message: "changed", retryable: true },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      completionRequirement: "connection",
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toBeNull();
+});
+
+test("a custom OpenAPI source keeps the explicit tool review", async () => {
+  const html = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+  });
+  expect(html).toContain("Add selected tools");
+  expect(html).not.toContain("Finishing setup");
 });
