@@ -6,7 +6,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserSupervisor,
   type BrowserSupervisorSessionOptions,
   managedChromiumLaunchExecutable,
@@ -17,23 +17,16 @@ import {
  * killed outright, as a service stop does, and recovers in a second one. */
 export async function openManagedRecoverySupervisor(
   rootDirectory: string,
-  socketRootDirectory: string,
 ): Promise<BrowserSupervisor> {
   return await BrowserSupervisor.open({
     rootDirectory,
-    socketRootDirectory,
     createDriver: async (context) => {
       // Launch exactly what the production driver launches, including after
       // recovery, while applying the same container launch flags as the
       // other Chromium CI fixtures.
       const { browserExecutablePath } = await managedChromiumLaunchExecutable(context);
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: "og",
-        sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-        socketDirectory: context.socketDirectory,
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: context.profileDirectory,
-        downloadDirectory: context.downloadDirectory,
-        screenshotDirectory: context.screenshotDirectory,
         headed: context.headed,
         ...(browserExecutablePath ? { browserExecutablePath } : {}),
         launchArguments: ["--no-sandbox", "--disable-gpu"],
@@ -89,12 +82,10 @@ function flatten(nodes: readonly InteractionSemanticNodeValue[]): InteractionSem
 if (import.meta.main) {
   const input = JSON.parse(process.argv[2]!) as {
     rootDirectory: string;
-    socketRootDirectory: string;
     options: BrowserSupervisorSessionOptions;
   };
   const supervisor = await openManagedRecoverySupervisor(
     input.rootDirectory,
-    input.socketRootDirectory,
   );
   const created = await supervisor.createSession(input.options);
   const clicked = await supervisor.action(clickFirstButton(created.observation));

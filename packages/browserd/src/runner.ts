@@ -13,10 +13,10 @@ import {
   realpath,
   rm,
   stat as fileStatus,
+  statfs,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
 import {
   BROWSER_SHARED_NETWORK_NOTICE,
   browserNetworkIsolationScript,
@@ -33,10 +33,12 @@ import {
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 10 * 60_000;
-const MAX_STDOUT_BYTES = 32 * 1024 * 1024;
-const MAX_STDERR_BYTES = 1024 * 1024;
-const MAX_ARGUMENTS = 256;
-const MAX_ARGUMENT_BYTES = 4 * 1024 * 1024;
+/** How often a launch checks for Chrome's DevToolsActivePort. */
+const DEVTOOLS_PORT_POLL_MS = 20;
+/** The Chrome stderr tail quoted when a launch fails. */
+const LAUNCH_FAILURE_STDERR_BYTES = 2 * 1024;
+/** Chrome refuses to start on a smaller /dev/shm unless told to use disk. */
+const MIN_DEV_SHM_AVAILABLE_BYTES = 256 * 1024 * 1024;
 const DAEMON_STOP_TIMEOUT_MS = 3_000;
 const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
@@ -45,17 +47,17 @@ const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
 const PROCESS_INVENTORY_LIMITS = { maxBytes: 32 * 1024 * 1024, timeoutMs: 10_000 } as const;
 /** One process's command line plus its environment. */
 const PROCESS_ENVIRONMENT_LIMITS = { maxBytes: 1024 * 1024, timeoutMs: 2_000 } as const;
-/** An agent-browser daemon without a browser child that is younger than this
- * may still be starting its browser, so startup reconciliation leaves it. */
+/** A launcher daemon from an earlier release without a browser child that is
+ * younger than this may still be starting its browser, so startup
+ * reconciliation leaves it. */
 const ORPHANED_DAEMON_MIN_AGE_MS = 120_000;
 const CHROME_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
 
 /** Chromium features every managed browser turns off. Chromium honors only
- * the last `--disable-features` switch, agent-browser sends its own, and its
- * launch-argument list splits on commas, so the launch wrapper appends this
- * one complete switch after every other argument. */
+ * the last `--disable-features` switch, so the launch wrapper appends this one
+ * complete switch after every other argument. */
 const MANAGED_CHROME_DISABLED_FEATURES = [
-  // agent-browser's own default, which any later switch would re-enable.
+  // The translate bar would cover pages and offer to rewrite them.
   "Translate",
   // Component-update suppression does not stop Chromium's on-demand local
   // model downloads. Managed profiles must not each fetch gigabytes of AI
@@ -75,12 +77,6 @@ const MANAGED_CHROME_DISABLED_FEATURES = [
 ] as const;
 
 export const MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT = `--disable-features=${MANAGED_CHROME_DISABLED_FEATURES.join(",")}`;
-
-export type AgentBrowserEnvelope<T = unknown> = {
-  success: boolean;
-  data: T | null;
-  error: string | null;
-};
 
 export class AgentBrowserCommandError extends Error {
   constructor(
@@ -108,13 +104,8 @@ export type AgentBrowserJsonCommand = <T = unknown>(
   options?: AgentBrowserRunOptions,
 ) => Promise<T>;
 
-export type AgentBrowserRunnerOptions = {
-  namespace: string;
-  sessionName: string;
-  socketDirectory: string;
+export type ManagedBrowserRunnerOptions = {
   profileDirectory: string;
-  downloadDirectory: string;
-  screenshotDirectory: string;
   headed: boolean;
   /** Run a headed managed browser without any native window. On a person's
    * own desktop a windowed managed browser shows up in front of them, takes
@@ -129,19 +120,12 @@ export type AgentBrowserRunnerOptions = {
   browserLaunchHelperPath?: string;
   workingDirectory?: string;
   environment?: Readonly<Record<string, string | undefined>>;
-  provider?: {
-    id: "browserbase" | "kernel";
-    apiKey: string;
-    endpoint?: string;
-    timeoutSeconds?: number;
-    stealth?: boolean;
-  };
-  /** Private launch authority. It is injected into the daemon environment,
-   * never into argv, logs, or durable browser metadata. */
+  /** Private launch authority. Only the proxy server reaches Chrome's argv;
+   * its credentials stay in this process and answer the proxy's challenges
+   * over CDP, never in argv, logs, or durable browser metadata. */
   proxyUrl?: string;
   launchArguments?: readonly string[];
   timezone?: string;
-  binary?: ResolvedAgentBrowserBinary;
   /** Private completed launch receipt, checked again before attaching/launching. */
   recoverOwnedProcess?: OwnedManagedBrowserProcess;
   allowOwnedProcessLaunch?: boolean;
@@ -163,14 +147,6 @@ export type OwnedManagedBrowserProcess = {
   cdpEndpoint: string;
 };
 
-type OwnedAgentBrowserDaemon = {
-  pid: number;
-  birth: string;
-  executablePath: string;
-  pidFile: string;
-  pidFileIdentity: { device: number; inode: number };
-};
-
 export type BrowserProfileCryptoPolicy =
   | "chromium_basic"
   | "chromium_mock_keychain"
@@ -182,378 +158,199 @@ export function browserProfileCryptoPolicy(platform: NodeJS.Platform): BrowserPr
   return "platform_bound";
 }
 
-export class AgentBrowserJsonRunner {
-  readonly binary: ResolvedAgentBrowserBinary;
-  private readonly environment: NodeJS.ProcessEnv;
-  private readonly globalArguments: readonly string[];
-  private readonly workingDirectory: string;
-  private readonly daemonPidFile: string;
-  private readonly browserPidFile: string;
-  private readonly profileDirectory: string;
-  private readonly managedBrowserExecutable: string | null;
-  private readonly chromeStderrDrainPaths: readonly string[];
-  private readonly browserScope: LinuxBrowserScope | null;
+/** Credentials a managed browser's proxy route asks for. Chrome cannot take
+ * them on its command line; the controller answers the proxy's challenges over
+ * CDP instead. */
+export type ManagedBrowserProxyCredentials = { username: string; password: string };
+
+type BrowserExit = { code: number | null; signal: NodeJS.Signals | null; error: string | null };
+
+type LaunchedBrowser = {
+  /** The spawned process: Chrome itself, except for the macOS background
+   * launcher, which stays alive for Chrome's whole lifetime. */
+  pid: number;
+  cdpUrl: string;
+  exit: Promise<BrowserExit>;
+  exited: BrowserExit | null;
+};
+
+/**
+ * Launches and owns one managed Chrome. Chrome runs detached, so it outlives a
+ * controller restart and the next controller can adopt it from its receipt.
+ *
+ * The controller is the browser's only CDP client. Pages can tell when any
+ * client enables the Runtime domain on them (anti-bot scripts log a crafted
+ * object and watch for the inspector reading it), so no launcher or helper may
+ * keep sessions attached to its pages.
+ */
+export class ManagedBrowserRunner {
   /** Set when this managed browser shares the machine's network because
    * isolating it is unavailable here; shown once to the agent at launch. */
   readonly networkNotice: string | null;
+  readonly proxyCredentials: ManagedBrowserProxyCredentials | null;
+  private readonly profileDirectory: string;
+  private readonly workingDirectory: string;
+  private readonly environment: NodeJS.ProcessEnv;
+  private readonly launchExecutable: string | null;
+  private readonly launchArguments: readonly string[];
+  private readonly browserPidFile: string;
+  /** The macOS background launcher records Chrome's PID itself. */
+  private readonly launcherRecordsBrowserPid: boolean;
+  /** The browser binary the managed PID runs; refined to the exec'd binary
+   * once a Linux launch through a wrapper script has started. */
+  private managedBrowserExecutable: string | null;
+  private readonly chromeStderrDrainPaths: readonly string[];
+  private readonly chromeStderrLog: string | null;
+  private readonly browserScope: LinuxBrowserScope | null;
   private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
-  private readonly headlessManaged: boolean;
-  private readonly daemonRunDirectory: string;
-  private predecessorDaemon: OwnedAgentBrowserDaemon | null = null;
+  /** The launcher daemon of a browser an earlier release started, if it
+   * still runs; it does not exit with its browser and is stopped with it. */
+  private legacyLauncher: LaunchingAgentBrowserDaemon | null = null;
   private recoveredBrowserClosed = false;
+  private launched: LaunchedBrowser | null = null;
+  private launching: Promise<LaunchedBrowser> | null = null;
 
   private constructor(
-    binary: ResolvedAgentBrowserBinary,
-    options: AgentBrowserRunnerOptions,
-    browserLaunch?: ManagedBrowserLaunch,
+    options: ManagedBrowserRunnerOptions,
+    proxy: PrivateProxyAuthority | null,
+    launch: {
+      executable: string | null;
+      browserLaunch: ManagedBrowserLaunch | undefined;
+      sandboxUnavailable: boolean;
+      smallSharedMemory: boolean;
+    } | null,
   ) {
-    this.binary = binary;
-    this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
     this.profileDirectory = resolve(options.profileDirectory);
-    const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
-    this.environment = isolatedEnvironment(options, proxy);
-    this.globalArguments = [
-      ...(proxy ? ["--proxy", proxy.server] : []),
-      ...(options.provider ? ["--provider", options.provider.id] : []),
-    ];
-    this.daemonPidFile = join(
-      resolve(options.socketDirectory),
-      "namespaces",
-      options.namespace,
-      "run",
-      `${options.sessionName}.pid`,
-    );
+    this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
     this.browserPidFile = join(this.profileDirectory, "..", "browser.pid");
+    // Only a live browser is reattached; an exited one is launched afresh.
+    this.recoveredProcess = launch === null ? (options.recoverOwnedProcess ?? null) : null;
+    this.proxyCredentials =
+      proxy?.username != null && proxy.password != null
+        ? { username: proxy.username, password: proxy.password }
+        : null;
+    const browserLaunch = launch?.browserLaunch;
+    this.launchExecutable = launch?.executable ?? null;
+    this.launcherRecordsBrowserPid = browserLaunch?.backgroundBrowserExecutable !== undefined;
+    this.environment = launchEnvironment(options, browserLaunch, this.browserPidFile);
+    this.launchArguments = managedChromeArguments({
+      platform: process.platform,
+      windowed: windowedBrowser(options),
+      profileDirectory: this.profileDirectory,
+      proxyServer: proxy?.server ?? null,
+      additional: options.launchArguments ?? [],
+      sandboxUnavailable: launch?.sandboxUnavailable ?? false,
+      smallSharedMemory: launch?.smallSharedMemory ?? false,
+    });
     this.managedBrowserExecutable =
-      options.environment?.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ??
+      browserLaunch?.backgroundBrowserExecutable ??
       (browserLaunch && "actualExecutablePath" in browserLaunch
         ? (browserLaunch.actualExecutablePath ?? null)
-        : (options.browserExecutablePath ?? null));
+        : (launch?.executable ?? options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
+    this.chromeStderrLog = browserLaunch?.stderrLog ?? null;
     this.browserScope = browserLaunch?.scope ?? null;
     this.networkNotice = browserLaunch?.networkNotice ?? null;
-    this.recoveredProcess = options.recoverOwnedProcess ?? null;
-    this.headlessManaged = !windowedBrowser(options) && !options.provider;
-    this.daemonRunDirectory = dirname(this.daemonPidFile);
   }
 
-  static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
-    validateSegment(options.namespace, "namespace");
-    validateSegment(options.sessionName, "session name");
-    assertAgentBrowserSocketPath(options);
+  static async create(options: ManagedBrowserRunnerOptions): Promise<ManagedBrowserRunner> {
+    const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
+    if (options.timezone) supportedTimezone(options.timezone);
     if (options.recoverOwnedProcess) {
       const state = await inspectOwnedManagedBrowserProcess(options.recoverOwnedProcess);
       if (state === "live") {
-        const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
-        const runner = new AgentBrowserJsonRunner(binary, options);
-        if (options.provider) throw daemonLineageUnavailable();
-        runner.predecessorDaemon = await runner.predecessorDaemonIdentity(
-          options.recoverOwnedProcess,
-        );
+        const runner = new ManagedBrowserRunner(options, proxy, null);
+        runner.legacyLauncher = await launchingAgentBrowserDaemon(options.recoverOwnedProcess.pid);
         return runner;
       }
       // A positively exited process permits a new launch only in this exact
       // directory. No missing-memory/PID-file inference or pre-launch kill.
       if (state !== "exited" || options.allowOwnedProcessLaunch !== true)
         throw new AgentBrowserCommandError("process_failed", "owned browser outcome is unknown");
-      // The browser is proven gone and no process runs its profile, but the
-      // agent-browser daemon that launched it does not exit with its browser:
-      // after its controller died it keeps running with nothing to serve.
-      // Stop every daemon identified, from its own environment, as started
-      // for this exact profile or socket directory before checking records.
-      await stopOrphanedAgentBrowserDaemons(options.profileDirectory, options.socketDirectory);
-      await assertNoLiveDaemonRecords(options.socketDirectory, options.namespace);
+      // A browser an earlier release launched leaves its launcher daemon
+      // running after the browser is gone; stop the one for this profile.
+      await stopOrphanedAgentBrowserDaemons(options.profileDirectory);
     }
-    for (const directory of [
-      options.socketDirectory,
-      options.profileDirectory,
-      options.downloadDirectory,
-      options.screenshotDirectory,
-    ]) {
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      await chmod(directory, 0o700);
-    }
-    const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
-    const browserLaunch = await managedBrowserLaunch(options);
-    const browserPidFile = join(resolve(options.profileDirectory), "..", "browser.pid");
+    await mkdir(options.profileDirectory, { recursive: true, mode: 0o700 });
+    await chmod(options.profileDirectory, 0o700);
+    const [browserLaunch, sandboxUnavailable, smallSharedMemory] = await Promise.all([
+      managedBrowserLaunch(options),
+      chromeSandboxUnavailable(),
+      sharedMemoryTooSmall(),
+    ]);
+    const executable =
+      browserLaunch?.executablePath ??
+      (options.browserExecutablePath
+        ? resolve(options.browserExecutablePath)
+        : ((await defaultChromeExecutable()) ?? null));
     if (browserLaunch?.backgroundBrowserExecutable && !options.recoverOwnedProcess) {
       await terminateManagedBrowser({
-        pidFile: browserPidFile,
+        pidFile: join(resolve(options.profileDirectory), "..", "browser.pid"),
         profileDirectory: resolve(options.profileDirectory),
         executablePath: browserLaunch.backgroundBrowserExecutable,
       });
     }
-    const { recoverOwnedProcess: _recoverOwnedProcess, ...launchOptions } = options;
-    return new AgentBrowserJsonRunner(
-      binary,
-      {
-        ...launchOptions,
-        ...(browserLaunch
-          ? {
-              browserExecutablePath: browserLaunch.executablePath,
-              environment: {
-                ...options.environment,
-                ...(browserLaunch.backgroundBrowserExecutable
-                  ? {
-                      OPENGENI_BACKGROUND_BROWSER_EXECUTABLE:
-                        browserLaunch.backgroundBrowserExecutable,
-                      OPENGENI_BACKGROUND_BROWSER_PID_FILE: browserPidFile,
-                    }
-                  : {}),
-              },
-            }
-          : {}),
-      },
+    return new ManagedBrowserRunner(options, proxy, {
+      executable,
       browserLaunch,
-    );
+      sandboxUnavailable,
+      smallSharedMemory,
+    });
   }
 
+  /** `get cdp-url` launches the browser when it is not running and returns its
+   * private CDP endpoint; `close` waits for a browser asked to close over CDP
+   * to exit. */
   async run<T = unknown>(
     args: readonly string[],
     options: AgentBrowserRunOptions = {},
   ): Promise<T> {
-    if (this.recoveredProcess) {
-      if (args.length === 2 && args[0] === "get" && args[1] === "cdp-url") {
+    if (args.length === 2 && args[0] === "get" && args[1] === "cdp-url") {
+      if (this.recoveredProcess) {
         if ((await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "live") {
           throw new AgentBrowserCommandError("process_failed", "owned browser is unavailable");
         }
         return { cdpUrl: this.recoveredProcess.cdpEndpoint } as T;
       }
-      if (args.length === 1 && args[0] === "close") return {} as T;
-      throw new AgentBrowserCommandError(
-        "driver_rejected",
-        "reattached browser accepts only its CDP transport",
-      );
+      return { cdpUrl: (await this.ensureLaunched(options)).cdpUrl } as T;
     }
-    validateArguments(args);
-    const timeoutMs = boundedTimeout(options.timeoutMs);
-    if (options.signal?.aborted) {
-      throw new AgentBrowserCommandError("aborted", "agent-browser command was aborted");
+    if (args.length === 1 && args[0] === "close") {
+      if (!this.recoveredProcess) await this.awaitBrowserExit(options);
+      return {} as T;
     }
-    const child = spawn(this.binary.path, ["--json", ...this.globalArguments, ...args], {
-      cwd: this.workingDirectory,
-      env: this.environment,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: false,
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let overflow: "stdout" | "stderr" | null = null;
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutBytes += chunk.byteLength;
-      if (stdoutBytes <= MAX_STDOUT_BYTES) stdout.push(chunk);
-      else {
-        overflow = "stdout";
-        interrupt?.(
-          new AgentBrowserCommandError(
-            "process_failed",
-            "agent-browser stdout exceeded its bounded transport envelope",
-          ),
-        );
-      }
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderrBytes += chunk.byteLength;
-      if (stderrBytes <= MAX_STDERR_BYTES) stderr.push(chunk);
-      else {
-        overflow = "stderr";
-        interrupt?.(
-          new AgentBrowserCommandError(
-            "process_failed",
-            "agent-browser stderr exceeded its bounded transport envelope",
-          ),
-        );
-      }
-    });
-
-    let interrupt: ((error: AgentBrowserCommandError) => void) | null = null;
-    const interrupted = new Promise<never>((_resolve, reject) => {
-      interrupt = (error) => {
-        if (interrupt === null) return;
-        interrupt = null;
-        child.kill("SIGKILL");
-        child.stdout.destroy();
-        child.stderr.destroy();
-        reject(error);
-      };
-    });
-    const timer = setTimeout(
-      () => interrupt?.(new AgentBrowserCommandError("timeout", "agent-browser command timed out")),
-      timeoutMs,
+    throw new AgentBrowserCommandError(
+      "driver_rejected",
+      "managed browser accepts only its CDP transport",
     );
-    timer.unref?.();
-    const abort = () => {
-      interrupt?.(new AgentBrowserCommandError("aborted", "agent-browser command was aborted"));
-    };
-    options.signal?.addEventListener("abort", abort, { once: true });
-    const exit = await Promise.race([
-      new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolveExit, reject) => {
-        child.once("error", (error) => {
-          reject(
-            new AgentBrowserCommandError(
-              "process_failed",
-              "agent-browser process could not start",
-              (error as NodeJS.ErrnoException).code ?? null,
-            ),
-          );
-        });
-        child.once("close", (code, signal) => resolveExit({ code, signal }));
-      }),
-      interrupted,
-    ]).finally(() => {
-      interrupt = null;
-      clearTimeout(timer);
-      options.signal?.removeEventListener("abort", abort);
-    });
-    if (overflow) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        `agent-browser ${overflow} exceeded its bounded transport envelope`,
-      );
-    }
-    const output = Buffer.concat(stdout).toString("utf8").trim();
-    let envelope: AgentBrowserEnvelope<T>;
-    try {
-      envelope = parseEnvelope<T>(output);
-    } catch (error) {
-      if (exit.code !== 0 || exit.signal !== null) {
-        throw new AgentBrowserCommandError("process_failed", "agent-browser process failed");
-      }
-      throw error;
-    }
-    if (!envelope.success) {
-      throw new AgentBrowserCommandError(
-        "driver_rejected",
-        "agent-browser rejected the command",
-        boundedDriverMessage(envelope.error),
-      );
-    }
-    if (exit.code !== 0 || exit.signal !== null) {
-      throw new AgentBrowserCommandError("process_failed", "agent-browser process failed");
-    }
-    return envelope.data as T;
   }
 
-  /** Stop only the daemon whose private PID sidecar resolves to this exact
-   * pinned executable. Used when upstream `close` cannot reconcile a failed
-   * browser launch; never scans or kills by name. */
-  async daemonPid(): Promise<number | null> {
+  async terminate(): Promise<void> {
     if (this.recoveredProcess) {
-      const daemon = this.predecessorDaemon;
-      if (!daemon) return null;
-      return (await assertDaemonIdentity(daemon)) ? daemon.pid : null;
-    }
-    const pid = await readDaemonPid(this.daemonPidFile);
-    if (pid === null || !(await processRunning(pid))) return null;
-    if (!(await sameExecutable(pid, this.binary.path))) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "agent-browser daemon PID does not identify the pinned executable",
-      );
-    }
-    return pid;
-  }
-
-  async terminate(expectedPid?: number | null): Promise<void> {
-    if (this.recoveredProcess) {
-      const daemon = this.predecessorDaemon;
-      if (expectedPid != null && expectedPid !== daemon?.pid) throw daemonLineageUnavailable();
-      if (!daemon) {
-        // The launcher exited before this controller adopted the browser.
-        // The browser's own receipt identity is the whole proof.
-        if (!this.recoveredBrowserClosed) {
-          await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
-          this.recoveredBrowserClosed = true;
-        }
-        await this.cleanupChromeStderrDrain();
-        return;
-      }
-      const daemonLive = await assertDaemonIdentity(daemon);
       if (!this.recoveredBrowserClosed) {
-        if (daemonLive) {
-          // A browser that already shut down, for example at the controller's
-          // own close request, has no lineage left to prove; its receipt
-          // alone shows that it exited.
-          let parent: number | null = null;
-          let lineageError: unknown = null;
-          try {
-            parent = await processParentPid(this.recoveredProcess.pid);
-          } catch (error) {
-            lineageError = error;
-          }
-          if (
-            parent !== daemon.pid &&
-            (await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "exited"
-          )
-            throw lineageError ?? daemonLineageUnavailable();
-        }
         await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
         // Preserve a proved stop for the same cleanup retry; a missing macOS
         // PID still cannot authorize a fresh exact-directory launch.
         this.recoveredBrowserClosed = true;
       }
-      await terminateOwnedAgentBrowserDaemon(daemon);
+      await stopLaunchingAgentBrowserDaemon(this.legacyLauncher);
       await this.cleanupChromeStderrDrain();
       return;
     }
-    const recordedPid = await readDaemonPid(this.daemonPidFile);
-    if (recordedPid !== null && expectedPid != null && recordedPid !== expectedPid) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "agent-browser daemon identity changed during shutdown",
-      );
+    if (this.launched && !this.launcherRecordsBrowserPid) {
+      // The browser is this runner's own unreaped child, so its PID cannot
+      // name another process; stop it directly rather than re-proving its
+      // profile lock, which Chrome already removes while it exits.
+      await stopLaunchedBrowser(this.launched);
+      await rm(this.browserPidFile, { force: true });
+    } else if (process.platform === "linux" || process.platform === "darwin") {
+      await terminateManagedBrowser({
+        pidFile: this.browserPidFile,
+        profileDirectory: this.profileDirectory,
+        executablePath: this.managedBrowserExecutable,
+        discoverByProfile: this.chromeStderrDrainPaths.length > 0,
+      });
     }
-    const pid = recordedPid ?? expectedPid ?? null;
-    if (pid === null || !(await processRunning(pid))) {
-      await rm(this.daemonPidFile, { force: true });
-      await this.terminateManagedBrowser();
-      await this.cleanupChromeStderrDrain();
-      return;
-    }
-    if (!(await sameExecutable(pid, this.binary.path))) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "agent-browser daemon PID does not identify the pinned executable",
-      );
-    }
-    signalProcess(pid, "SIGTERM");
-    if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-      if (!(await sameExecutable(pid, this.binary.path))) {
-        throw new AgentBrowserCommandError(
-          "process_failed",
-          "agent-browser daemon identity changed before forced termination",
-        );
-      }
-      signalProcess(pid, "SIGKILL");
-      if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-        throw new AgentBrowserCommandError(
-          "process_failed",
-          "agent-browser daemon did not terminate",
-        );
-      }
-    }
-    await rm(this.daemonPidFile, { force: true });
-    await this.terminateManagedBrowser();
     await this.cleanupChromeStderrDrain();
-  }
-
-  private async terminateManagedBrowser(): Promise<void> {
-    if (this.recoveredProcess) {
-      await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
-      return;
-    }
-    await terminateManagedBrowser({
-      pidFile: this.browserPidFile,
-      profileDirectory: this.profileDirectory,
-      executablePath: this.managedBrowserExecutable,
-      discoverByProfile: this.chromeStderrDrainPaths.length > 0,
-    });
   }
 
   async ownedProcessIdentity(
@@ -571,16 +368,17 @@ export class AgentBrowserJsonRunner {
       recordedPid === null && process.platform === "linux"
         ? await findLinuxManagedBrowserProcess(this.profileDirectory, this.managedBrowserExecutable)
         : null;
-    let pid = recordedPid ?? discovered?.pid;
-    const needsHeadlessWitness = this.headlessManaged && cdpBrowserPid !== undefined;
-    if (!pid && needsHeadlessWitness && process.platform === "darwin")
-      pid = await readProfileBrowserPid(this.profileDirectory);
+    const pid = recordedPid ?? discovered?.pid;
     if (!pid || !(await processRunning(pid))) return null;
-    if (cdpBrowserPid !== undefined && cdpBrowserPid !== pid) throw daemonLineageUnavailable();
+    if (cdpBrowserPid !== undefined && cdpBrowserPid !== pid) throw browserLineageUnavailable();
+    // A browser this runner spawned is identified by its own PID; Chrome's
+    // profile lock must name the same process.
+    const launchedHere =
+      this.launched !== null && this.launched.exited === null && this.launched.pid === pid;
     const executablePath =
       this.managedBrowserExecutable ??
       discovered?.executablePath ??
-      (needsHeadlessWitness ? await processExecutablePath(pid) : null);
+      (launchedHere ? await processExecutablePath(pid) : null);
     if (!executablePath) return null;
     await assertManagedBrowserIdentity(pid, this.profileDirectory, executablePath);
     const receipt = {
@@ -591,95 +389,125 @@ export class AgentBrowserJsonRunner {
       cdpEndpoint,
     };
     if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return null;
-    if (needsHeadlessWitness) await this.headlessDaemonIdentity(receipt, this.daemonPidFile);
+    if (launchedHere && (await readProfileBrowserPid(this.profileDirectory)) !== pid)
+      throw browserLineageUnavailable();
     if (this.browserScope) await collectBrowserIntoScope(this.browserScope, pid);
     return receipt;
   }
 
-  /** Adopt a live browser launched by an earlier controller, possibly an
-   * earlier release, headed or headless. The browser itself was already proven
-   * from its receipt: PID birth, exact executable, exact private profile and
-   * CDP endpoint. Its profile lock must still name it. When its launcher daemon
-   * is still running it must be the browser's direct parent and the only live
-   * record in this private namespace, and it is retired with the browser. A
-   * launcher that already exited (for example, stopped with its old service)
-   * leaves the proven browser adoptable on its own. */
-  private async predecessorDaemonIdentity(
-    browser: OwnedManagedBrowserProcess,
-  ): Promise<OwnedAgentBrowserDaemon | null> {
-    if ((await readProfileBrowserPid(this.profileDirectory)) !== browser.pid)
-      throw daemonLineageUnavailable();
-    const live: { pid: number; path: string }[] = [];
-    for (const path of await daemonPidRecords(this.daemonRunDirectory)) {
-      const pid = await readDaemonPid(path);
-      if (pid !== null && (await processRunning(pid))) live.push({ pid, path });
-    }
-    if (live.length === 0) return null;
-    const parentPid = await processParentPid(browser.pid);
-    if (live.length !== 1 || live[0]!.pid !== parentPid) throw daemonLineageUnavailable();
-    const pidFile = live[0]!.path;
-    const metadata = await lstat(pidFile);
-    const daemon = {
-      pid: parentPid,
-      birth: await processBirth(parentPid),
-      executablePath: await processExecutableIdentity(parentPid),
-      pidFile,
-      pidFileIdentity: { device: metadata.dev, inode: metadata.ino },
-    };
-    await assertDaemonIdentity(daemon);
-    if (
-      (await processBirth(browser.pid)) !== browser.birth ||
-      (await processParentPid(browser.pid)) !== daemon.pid ||
-      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
-    )
-      throw daemonLineageUnavailable();
-    return daemon;
-  }
-
-  private async headlessDaemonIdentity(
-    browser: OwnedManagedBrowserProcess,
-    initialPidFile?: string,
-  ): Promise<OwnedAgentBrowserDaemon> {
-    if (
-      !this.headlessManaged ||
-      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
-    )
-      throw daemonLineageUnavailable();
-    const parentPid = await processParentPid(browser.pid);
-    const files = await daemonPidRecords(this.daemonRunDirectory);
-    const live: { pid: number; path: string }[] = [];
-    for (const path of files) {
-      const pid = await readDaemonPid(path);
-      if (pid !== null && (await processRunning(pid))) live.push({ pid, path });
-    }
-    if (
-      live.length !== 1 ||
-      live[0]!.pid !== parentPid ||
-      (initialPidFile !== undefined && live[0]!.path !== initialPidFile) ||
-      !(await sameExecutable(parentPid, this.binary.path))
-    )
-      throw daemonLineageUnavailable();
-    const pidFile = live[0]!.path;
-    const metadata = await lstat(pidFile);
-    const daemon = {
-      pid: parentPid,
-      birth: await processBirth(parentPid),
-      executablePath: await realpath(this.binary.path),
-      pidFile,
-      pidFileIdentity: { device: metadata.dev, inode: metadata.ino },
-    };
-    await assertDaemonIdentity(daemon);
-    if (
-      (await processBirth(browser.pid)) !== browser.birth ||
-      (await processParentPid(browser.pid)) !== daemon.pid ||
-      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
-    )
-      throw daemonLineageUnavailable();
-    return daemon;
-  }
-
   get reattachedOwnedProcess(): OwnedManagedBrowserProcess | null {
     return this.recoveredProcess;
+  }
+
+  private async ensureLaunched(options: AgentBrowserRunOptions): Promise<LaunchedBrowser> {
+    if (this.launched && this.launched.exited === null) return this.launched;
+    this.launching ??= this.launch(options).finally(() => {
+      this.launching = null;
+    });
+    return await this.launching;
+  }
+
+  private async launch(options: AgentBrowserRunOptions): Promise<LaunchedBrowser> {
+    const timeoutMs = boundedTimeout(options.timeoutMs);
+    if (options.signal?.aborted) {
+      throw new AgentBrowserCommandError("aborted", "browser launch was aborted");
+    }
+    if (!this.launchExecutable) {
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "no browser executable is installed",
+        "Chrome not found. Install Google Chrome or Chromium on this machine.",
+      );
+    }
+    const activePort = join(this.profileDirectory, "DevToolsActivePort");
+    // A port file left by an earlier run names a browser that is gone.
+    await rm(activePort, { force: true });
+    const child = spawn(this.launchExecutable, this.launchArguments, {
+      cwd: this.workingDirectory,
+      env: this.environment,
+      // Chrome leads its own process group and session, so stopping this
+      // controller's group leaves it running for the next controller.
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const exit = new Promise<BrowserExit>((resolveExit) => {
+      child.once("exit", (code, signal) => resolveExit({ code, signal, error: null }));
+      child.once("error", (error) =>
+        resolveExit({
+          code: null,
+          signal: null,
+          error: (error as NodeJS.ErrnoException).code ?? "spawn_failed",
+        }),
+      );
+    });
+    child.unref();
+    const launched: LaunchedBrowser = { pid: child.pid ?? 0, cdpUrl: "", exit, exited: null };
+    void exit.then((value) => {
+      launched.exited = value;
+    });
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (launched.exited) throw await this.launchFailure(launched.exited);
+      const endpoint = await readDevToolsEndpoint(activePort);
+      if (endpoint) {
+        launched.cdpUrl = endpoint;
+        break;
+      }
+      if (options.signal?.aborted || Date.now() >= deadline) {
+        stopLaunchedProcessGroup(child.pid);
+        throw options.signal?.aborted
+          ? new AgentBrowserCommandError("aborted", "browser launch was aborted")
+          : new AgentBrowserCommandError(
+              "timeout",
+              "browser launch timed out",
+              "Chrome did not start its DevTools endpoint in time.",
+            );
+      }
+      await Promise.race([new Promise((done) => setTimeout(done, DEVTOOLS_PORT_POLL_MS)), exit]);
+    }
+    if (!this.launcherRecordsBrowserPid && launched.pid > 0) {
+      // A configured wrapper script (for example a distribution launcher)
+      // execs the real browser in place; identify the PID by that binary.
+      if (process.platform === "linux") {
+        this.managedBrowserExecutable = await processExecutablePath(launched.pid);
+      }
+      await writeFile(this.browserPidFile, `${launched.pid}\n`, { mode: 0o600 });
+    }
+    this.launched = launched;
+    return launched;
+  }
+
+  private async awaitBrowserExit(options: AgentBrowserRunOptions): Promise<void> {
+    const launched = this.launched;
+    if (!launched || launched.exited) return;
+    const timeoutMs = boundedTimeout(options.timeoutMs);
+    const exited = await Promise.race([
+      launched.exit.then(() => true),
+      new Promise<false>((done) => setTimeout(() => done(false), timeoutMs).unref?.()),
+    ]);
+    if (!exited) {
+      throw new AgentBrowserCommandError("timeout", "managed browser did not close in time");
+    }
+  }
+
+  private async launchFailure(exit: BrowserExit): Promise<AgentBrowserCommandError> {
+    if (exit.error === "ENOENT") {
+      return new AgentBrowserCommandError(
+        "driver_rejected",
+        "browser executable is missing",
+        `Chrome not found at ${this.launchExecutable}.`,
+      );
+    }
+    const status = exit.error ?? exit.signal ?? String(exit.code);
+    const stderr = this.chromeStderrLog ? await fileTail(this.chromeStderrLog) : "";
+    return new AgentBrowserCommandError(
+      "driver_rejected",
+      "browser exited during launch",
+      boundedDriverMessage(
+        `Chrome exited early (${status}) without writing DevToolsActivePort${stderr ? `. Chrome stderr: ${stderr}` : ""}`,
+      ),
+    );
   }
 
   private async cleanupChromeStderrDrain(): Promise<void> {
@@ -688,6 +516,168 @@ export class AgentBrowserJsonRunner {
         async (path) => await rm(path, { force: true, recursive: true }),
       ),
     );
+  }
+}
+
+/** Chrome's own switches for a managed browser, before the wrapper's fixed
+ * arguments and its trailing disabled-feature list. Popup blocking and native
+ * scrollbars stay as in an ordinary Chrome: switching either off is a
+ * well-known automation signal, and an agent's clicks are user gestures that
+ * may open popups anyway. */
+export function managedChromeArguments(input: {
+  platform: NodeJS.Platform;
+  windowed: boolean;
+  profileDirectory: string;
+  proxyServer: string | null;
+  additional?: readonly string[];
+  sandboxUnavailable?: boolean;
+  smallSharedMemory?: boolean;
+}): string[] {
+  return [
+    "--remote-debugging-port=0",
+    `--user-data-dir=${resolve(input.profileDirectory)}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    // Background services of a person's browser that an agent's must not run:
+    // updates, sync, preinstalled apps and metrics upload. Pages see none.
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--metrics-recording-only",
+    // An occluded or busy managed window keeps rendering and answering CDP,
+    // and a reposted form never stops on a native prompt.
+    "--disable-backgrounding-occluded-windows",
+    "--disable-hang-monitor",
+    "--disable-prompt-on-repost",
+    ...(input.windowed ? [] : ["--headless=new", "--window-size=1280,720"]),
+    // Headless Chrome elsewhere keeps WebGL through SwiftShader, as on Linux.
+    ...(!input.windowed && input.platform !== "linux" ? ["--enable-unsafe-swiftshader"] : []),
+    ...(input.proxyServer ? [`--proxy-server=${input.proxyServer}`] : []),
+    ...browserLaunchArguments(input.platform, input.additional, input.windowed),
+    // Chrome's sandbox cannot start as root or inside most containers.
+    ...(input.sandboxUnavailable ? ["--no-sandbox"] : []),
+    ...(input.smallSharedMemory ? ["--disable-dev-shm-usage"] : []),
+  ];
+}
+
+async function chromeSandboxUnavailable(): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  if (process.getuid?.() === 0) return true;
+  if (process.platform !== "linux") return false;
+  for (const marker of ["/.dockerenv", "/run/.containerenv"]) {
+    try {
+      await access(marker, constants.F_OK);
+      return true;
+    } catch {
+      // Not this container runtime.
+    }
+  }
+  try {
+    return /docker|kubepods|lxc/u.test(await readFile("/proc/1/cgroup", "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+async function sharedMemoryTooSmall(): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  try {
+    const stats = await statfs("/dev/shm");
+    return stats.bavail * stats.bsize < MIN_DEV_SHM_AVAILABLE_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function windowsChromeExecutables(): string[] {
+  return [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA]
+    .filter((base): base is string => Boolean(base))
+    .flatMap((base) => [
+      join(base, "Google", "Chrome", "Application", "chrome.exe"),
+      join(base, "Chromium", "Application", "chrome.exe"),
+    ]);
+}
+
+/** The machine's own Chrome when no launch wrapper or configured executable
+ * names one. */
+async function defaultChromeExecutable(): Promise<string | undefined> {
+  if (process.platform === "linux") return await linuxChromeExecutable();
+  if (process.platform === "darwin") return await firstExecutable(MACOS_BROWSER_EXECUTABLES);
+  if (process.platform === "win32") return await firstExecutable(windowsChromeExecutables());
+  return undefined;
+}
+
+/** The CDP endpoint Chrome records in its profile once DevTools listens, or
+ * null while the file is absent or still being written. */
+async function readDevToolsEndpoint(path: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const [port, browserPath] = raw.trim().split("\n");
+  if (
+    !port ||
+    !/^[1-9][0-9]{0,4}$/u.test(port) ||
+    !/^\/devtools\/browser\/[0-9a-f-]{36}$/u.test(browserPath ?? "")
+  )
+    return null;
+  const endpoint = `ws://127.0.0.1:${port}${browserPath}`;
+  validateOwnedCdpEndpoint(endpoint);
+  return endpoint;
+}
+
+async function stopLaunchedBrowser(launched: LaunchedBrowser): Promise<void> {
+  const stopped = async (): Promise<boolean> => {
+    if (launched.exited !== null) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        launched.exit.then(() => true),
+        new Promise<false>((done) => {
+          timer = setTimeout(done, DAEMON_STOP_TIMEOUT_MS, false);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  if (launched.exited !== null || launched.pid <= 0) return;
+  signalProcess(launched.pid, "SIGTERM");
+  if (await stopped()) return;
+  stopLaunchedProcessGroup(launched.pid);
+  if (!(await stopped())) {
+    throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
+  }
+}
+
+function stopLaunchedProcessGroup(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+  } catch {
+    // Already gone.
+  }
+}
+
+async function fileTail(path: string): Promise<string> {
+  let file;
+  try {
+    file = await open(path, "r");
+  } catch {
+    return "";
+  }
+  try {
+    const { size } = await file.stat();
+    const length = Math.min(size, LAUNCH_FAILURE_STDERR_BYTES);
+    const buffer = Buffer.alloc(length);
+    await file.read(buffer, 0, length, size - length);
+    return buffer.toString("utf8").trim();
+  } finally {
+    await file.close();
   }
 }
 
@@ -754,6 +744,8 @@ type ManagedBrowserLaunch = {
   actualExecutablePath?: string | null;
   backgroundBrowserExecutable?: string;
   cleanupPaths?: readonly string[];
+  /** Where the launch wrapper keeps Chrome's last stderr bytes. */
+  stderrLog?: string;
   scope?: LinuxBrowserScope | null;
   networkNotice?: string | null;
 };
@@ -794,12 +786,12 @@ export function browserScopeEntry(
 }
 
 async function managedBrowserLaunch(
-  options: AgentBrowserRunnerOptions,
+  options: ManagedBrowserRunnerOptions,
 ): Promise<ManagedBrowserLaunch | undefined> {
   const configured = options.browserExecutablePath
     ? resolve(options.browserExecutablePath)
     : undefined;
-  if (process.platform === "linux" && !options.provider) {
+  if (process.platform === "linux") {
     const executable = configured ?? (await linuxChromeExecutable());
     if (executable) {
       const [scopeLauncher, isolation, fixedArguments] = await Promise.all([
@@ -821,7 +813,7 @@ async function managedBrowserLaunch(
   }
   // Offscreen and headless are the same new-headless Chrome on macOS; both
   // present the host display and an ordinary User-Agent.
-  if (process.platform === "darwin" && !windowedBrowser(options) && !options.provider) {
+  if (process.platform === "darwin" && !windowedBrowser(options)) {
     const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
     if (!executable) return undefined;
     return await chromeStderrDrainWrapper(
@@ -831,7 +823,7 @@ async function managedBrowserLaunch(
       await macosOffscreenChromeArguments(executable),
     );
   }
-  if (process.platform !== "darwin" || !options.headed || options.provider) {
+  if (process.platform !== "darwin" || !options.headed) {
     return configured ? { executablePath: configured } : undefined;
   }
 
@@ -845,26 +837,23 @@ async function managedBrowserLaunch(
   if (!helper) return { executablePath: executable };
   await access(helper, constants.X_OK);
   // The packaged helper stays alive for Chrome's full lifetime while using a
-  // non-activating LaunchServices launch. This preserves agent-browser's
-  // DevToolsActivePort/child-process handshake and keeps the window capturable.
+  // non-activating LaunchServices launch, records Chrome's PID, and keeps the
+  // window capturable. Chrome still writes DevToolsActivePort to its profile.
   return {
     executablePath: helper,
     backgroundBrowserExecutable: executable,
   };
 }
 
-/** The pinned agent-browser daemon keeps Chrome's stderr pipe open after
- * DevToolsActivePort appears but does not consume it. A noisy managed Chrome
- * fills that pipe and then stops answering even browser-level CDP requests.
- * Keep Chrome's PID/process group unchanged with shell exec, while a private
- * reader consumes stderr and retains only the last bounded diagnostic bytes.
+/** A launch wrapper that keeps Chrome's PID/process group unchanged with shell
+ * exec, while a private reader consumes Chrome's stderr and retains only the
+ * last bounded diagnostic bytes (quoted when a launch fails).
  *
- * Fixed Chrome arguments that agent-browser cannot carry (its argument list
- * is comma-separated, and a User-Agent contains commas) are added here too,
- * and so is the managed browser's complete disabled-feature list.
+ * Fixed Chrome arguments are added here too, and so is the managed browser's
+ * complete disabled-feature list, last.
  *
  * With a reachable systemd user manager the wrapper first re-executes itself
- * through `systemd-run --scope`, which execs in place: the PID agent-browser
+ * through `systemd-run --scope`, which execs in place: the PID the controller
  * spawned stays Chrome's PID, and the stderr reader plus every Chrome child
  * start inside the browser's own scope.
  *
@@ -937,6 +926,7 @@ async function chromeStderrDrainWrapper(
       executablePath: wrapper,
       actualExecutablePath,
       cleanupPaths,
+      stderrLog: log,
       scope,
     };
   } catch (error) {
@@ -1284,31 +1274,6 @@ async function firstExecutable(candidates: readonly string[]): Promise<string | 
   return undefined;
 }
 
-async function readDaemonPid(path: string): Promise<number | null> {
-  let metadata;
-  try {
-    metadata = await lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > 16) {
-    throw new AgentBrowserCommandError(
-      "process_failed",
-      "agent-browser daemon PID file is invalid",
-    );
-  }
-  const raw = (await readFile(path, "utf8")).trim();
-  if (!/^[1-9][0-9]{0,9}$/u.test(raw)) {
-    throw new AgentBrowserCommandError("process_failed", "agent-browser daemon PID is invalid");
-  }
-  const pid = Number(raw);
-  if (!Number.isSafeInteger(pid) || pid < 2 || pid > 2_147_483_647) {
-    throw new AgentBrowserCommandError("process_failed", "agent-browser daemon PID is invalid");
-  }
-  return pid;
-}
-
 async function sameExecutable(pid: number, expectedPath: string): Promise<boolean> {
   const expected = await realpath(expectedPath);
   if (process.platform === "linux") {
@@ -1629,113 +1594,28 @@ async function boundedProcessOutput(
 }
 
 /** Whether this managed browser opens a native window. */
-function windowedBrowser(options: AgentBrowserRunnerOptions): boolean {
+function windowedBrowser(options: ManagedBrowserRunnerOptions): boolean {
   return options.headed && options.offscreen !== true;
 }
 
-function isolatedEnvironment(
-  options: AgentBrowserRunnerOptions,
-  proxy: PrivateProxyAuthority | null,
+/** Chrome's environment: only the machine basics a browser needs, the
+ * caller's explicit additions, and the route's timezone. */
+function launchEnvironment(
+  options: ManagedBrowserRunnerOptions,
+  browserLaunch: ManagedBrowserLaunch | undefined,
+  browserPidFile: string,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of PASSTHROUGH_ENVIRONMENT_KEYS) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
   Object.assign(environment, options.environment);
-  for (const key of Object.keys(environment)) {
-    if (key.startsWith("AGENT_BROWSER_")) delete environment[key];
-  }
-  for (const key of [
-    "BROWSERBASE_API_KEY",
-    "KERNEL_API_KEY",
-    "KERNEL_ENDPOINT",
-    "KERNEL_HEADLESS",
-    "KERNEL_STEALTH",
-    "KERNEL_TIMEOUT_SECONDS",
-    "KERNEL_PROFILE_NAME",
-  ]) {
-    delete environment[key];
-  }
-  Object.assign(environment, {
-    AGENT_BROWSER_NAMESPACE: options.namespace,
-    AGENT_BROWSER_SESSION: options.sessionName,
-    AGENT_BROWSER_SOCKET_DIR: resolve(options.socketDirectory),
-    AGENT_BROWSER_PROFILE: resolve(options.profileDirectory),
-    AGENT_BROWSER_DOWNLOAD_PATH: resolve(options.downloadDirectory),
-    AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
-    AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
-    AGENT_BROWSER_HEADED: windowedBrowser(options) ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(
-      process.platform,
-      options.launchArguments,
-      windowedBrowser(options),
-    ),
-    NO_COLOR: "1",
-  });
-  if (proxy) {
-    environment.AGENT_BROWSER_PROXY = proxy.server;
-    if (proxy.username !== null && proxy.password !== null) {
-      environment.AGENT_BROWSER_PROXY_USERNAME = proxy.username;
-      environment.AGENT_BROWSER_PROXY_PASSWORD = proxy.password;
-    }
-  }
   if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
-  if (options.provider?.id === "browserbase") {
-    environment.BROWSERBASE_API_KEY = providerCredential(options.provider.apiKey);
-  } else if (options.provider?.id === "kernel") {
-    environment.KERNEL_API_KEY = providerCredential(options.provider.apiKey);
-    environment.KERNEL_HEADLESS = options.headed ? "false" : "true";
-    environment.KERNEL_STEALTH = options.provider.stealth === true ? "true" : "false";
-    if (options.provider.timeoutSeconds !== undefined) {
-      if (
-        !Number.isSafeInteger(options.provider.timeoutSeconds) ||
-        options.provider.timeoutSeconds < 1 ||
-        options.provider.timeoutSeconds > 86_400
-      ) {
-        throw new Error("Kernel browser timeout is invalid");
-      }
-      environment.KERNEL_TIMEOUT_SECONDS = String(options.provider.timeoutSeconds);
-    }
-    if (options.provider.endpoint) {
-      environment.KERNEL_ENDPOINT = providerEndpoint(options.provider.endpoint);
-    }
-  }
-  if (options.browserExecutablePath) {
-    environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(options.browserExecutablePath);
+  if (browserLaunch?.backgroundBrowserExecutable) {
+    environment.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE = browserLaunch.backgroundBrowserExecutable;
+    environment.OPENGENI_BACKGROUND_BROWSER_PID_FILE = browserPidFile;
   }
   return environment;
-}
-
-function providerCredential(value: string): string {
-  if (
-    Buffer.byteLength(value) < 1 ||
-    Buffer.byteLength(value) > 8_192 ||
-    /[\u0000-\u001f\u007f]/u.test(value)
-  ) {
-    throw new Error("external browser provider credential is invalid");
-  }
-  return value;
-}
-
-function providerEndpoint(value: string): string {
-  if (Buffer.byteLength(value) > 16_384) {
-    throw new Error("external browser provider endpoint is invalid");
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error("external browser provider endpoint is invalid");
-  }
-  if (
-    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
-    parsed.username ||
-    parsed.password ||
-    parsed.hash
-  ) {
-    throw new Error("external browser provider endpoint is invalid");
-  }
-  return parsed.toString().replace(/\/$/u, "");
 }
 
 type PrivateProxyAuthority = {
@@ -1800,7 +1680,7 @@ export function browserLaunchArguments(
   platform: NodeJS.Platform,
   additional: readonly string[] = [],
   headed = false,
-): string {
+): string[] {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
     policy === "chromium_basic"
@@ -1809,7 +1689,7 @@ export function browserLaunchArguments(
         ? "--use-mock-keychain"
         : null;
   const validatedAdditional = additional.map((argument) => {
-    if (!argument.startsWith("--") || argument.length > 512 || /[,\r\n\0]/u.test(argument)) {
+    if (!argument.startsWith("--") || argument.length > 512 || /[\r\n\0]/u.test(argument)) {
       throw new Error("browser launch argument is invalid");
     }
     return argument;
@@ -1850,9 +1730,7 @@ export function browserLaunchArguments(
     platform === "linux" ? "--enable-unsafe-swiftshader" : null,
     profileCryptoArgument,
     ...validatedAdditional,
-  ]
-    .filter((value): value is string => value !== null)
-    .join(",");
+  ].filter((value): value is string => value !== null);
 }
 
 const PASSTHROUGH_ENVIRONMENT_KEYS = [
@@ -1877,78 +1755,10 @@ const PASSTHROUGH_ENVIRONMENT_KEYS = [
   "COMSPEC",
 ] as const;
 
-export function assertAgentBrowserSocketPath(
-  options: Pick<AgentBrowserRunnerOptions, "namespace" | "sessionName" | "socketDirectory">,
-): void {
-  if (process.platform === "win32") return;
-  const projected = join(
-    resolve(options.socketDirectory),
-    "namespaces",
-    options.namespace,
-    "run",
-    `agent-browser-${options.sessionName}.sock`,
-  );
-  if (Buffer.byteLength(projected) > 100) {
-    throw new Error("agent-browser socket directory and identifiers exceed the Unix socket limit");
-  }
-}
-
-function parseEnvelope<T>(output: string): AgentBrowserEnvelope<T> {
-  const line = output
-    .split(/\r?\n/u)
-    .map((candidate) => candidate.trim())
-    .filter(Boolean)
-    .at(-1);
-  if (!line)
-    throw new AgentBrowserCommandError("invalid_response", "agent-browser returned no JSON");
-  let value: unknown;
-  try {
-    value = JSON.parse(line);
-  } catch {
-    throw new AgentBrowserCommandError("invalid_response", "agent-browser returned invalid JSON");
-  }
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    typeof (value as { success?: unknown }).success !== "boolean"
-  ) {
-    throw new AgentBrowserCommandError(
-      "invalid_response",
-      "agent-browser returned an invalid response envelope",
-    );
-  }
-  const candidate = value as {
-    success: boolean;
-    data?: unknown;
-    error?: unknown;
-  };
-  return {
-    success: candidate.success,
-    data: (candidate.data ?? null) as T | null,
-    error: typeof candidate.error === "string" ? candidate.error : null,
-  };
-}
-
-function validateSegment(value: string, label: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value)) {
-    throw new Error(`agent-browser ${label} must be a bounded safe identifier`);
-  }
-}
-
-function validateArguments(args: readonly string[]): void {
-  if (args.length === 0 || args.length > MAX_ARGUMENTS) {
-    throw new Error("agent-browser command has an invalid argument count");
-  }
-  const bytes = args.reduce((total, argument) => total + Buffer.byteLength(argument), 0);
-  if (bytes > MAX_ARGUMENT_BYTES || args.some((argument) => argument.includes("\0"))) {
-    throw new Error("agent-browser command exceeds its bounded argument envelope");
-  }
-}
-
 function boundedTimeout(value: number | undefined): number {
   const timeout = value ?? DEFAULT_COMMAND_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_COMMAND_TIMEOUT_MS) {
-    throw new Error("agent-browser timeout must be a positive bounded integer");
+    throw new Error("browser command timeout must be a positive bounded integer");
   }
   return timeout;
 }
@@ -2048,14 +1858,14 @@ async function processBirth(pid: number): Promise<string> {
   return birth;
 }
 
-function daemonLineageUnavailable(): AgentBrowserCommandError {
-  return new AgentBrowserCommandError("process_failed", "owned browser daemon lineage is unproven");
+function browserLineageUnavailable(): AgentBrowserCommandError {
+  return new AgentBrowserCommandError("process_failed", "owned browser lineage is unproven");
 }
 
 async function readProfileBrowserPid(profileDirectory: string): Promise<number> {
   const path = join(profileDirectory, "SingletonLock");
   const before = await lstat(path);
-  if (!before.isSymbolicLink()) throw daemonLineageUnavailable();
+  if (!before.isSymbolicLink()) throw browserLineageUnavailable();
   const value = await readlink(path);
   const match = /^[^/\u0000]{1,200}-([1-9][0-9]{0,9})$/u.exec(value);
   const pid = Number(match?.[1]);
@@ -2067,7 +1877,7 @@ async function readProfileBrowserPid(profileDirectory: string): Promise<number> 
     before.dev !== after.dev ||
     before.ino !== after.ino
   )
-    throw daemonLineageUnavailable();
+    throw browserLineageUnavailable();
   return pid;
 }
 
@@ -2084,7 +1894,7 @@ async function processParentPid(pid: number): Promise<number> {
     parent < 2 ||
     parent > 2_147_483_647
   )
-    throw daemonLineageUnavailable();
+    throw browserLineageUnavailable();
   return parent;
 }
 
@@ -2093,147 +1903,8 @@ async function processExecutablePath(pid: number): Promise<string> {
     process.platform === "linux"
       ? await readlink(`/proc/${pid}/exe`)
       : (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
-  if (!path || !path.startsWith("/")) throw daemonLineageUnavailable();
+  if (!path || !path.startsWith("/")) throw browserLineageUnavailable();
   return await realpath(path);
-}
-
-/** The executable a running process was started from, as recorded for later
- * exact comparison. On Linux this is the kernel's own link text, which stays
- * stable (with a " (deleted)" suffix) after an upgrade removes the old runtime.
- * On macOS it is the path ps reports, kept as reported: an agent upgrade
- * removes the old runtime while its daemon still runs, so the path can no
- * longer be resolved. */
-async function processExecutableIdentity(pid: number): Promise<string> {
-  if (process.platform === "linux") {
-    const link = await readlink(`/proc/${pid}/exe`);
-    if (!link.startsWith("/")) throw daemonLineageUnavailable();
-    return link;
-  }
-  if (process.platform === "darwin") {
-    const path = await darwinProcessCommand(pid);
-    if (!path.startsWith("/")) throw daemonLineageUnavailable();
-    return path;
-  }
-  return await processExecutablePath(pid);
-}
-
-async function darwinProcessCommand(pid: number): Promise<string> {
-  return (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
-}
-
-async function executableMatches(pid: number, recorded: string): Promise<boolean> {
-  if (process.platform === "linux") {
-    try {
-      if ((await readlink(`/proc/${pid}/exe`)) === recorded) return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
-  }
-  if (process.platform === "darwin" && (await darwinProcessCommand(pid)) === recorded) return true;
-  try {
-    return await sameExecutable(pid, recorded);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-async function daemonPidRecords(directory: string): Promise<string[]> {
-  const namespace = dirname(directory);
-  const namespaces = dirname(namespace);
-  for (const path of [dirname(namespaces), namespaces, namespace, directory]) {
-    let metadata: Awaited<ReturnType<typeof lstat>>;
-    try {
-      metadata = await lstat(path);
-    } catch (error) {
-      // A removed record directory (a temp-directory cleanup, for example)
-      // holds no records, exactly like an empty one. Its daemon, if any, has
-      // also lost its socket and cannot be reached by another controller.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw daemonLineageUnavailable();
-  }
-  const entries = await readdir(directory, { withFileTypes: true });
-  if (entries.length > 64) throw daemonLineageUnavailable();
-  const paths: string[] = [];
-  for (const entry of entries) {
-    if (!entry.name.endsWith(".pid")) continue;
-    if (
-      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.pid$/u.test(entry.name) ||
-      !entry.isFile() ||
-      entry.isSymbolicLink()
-    )
-      throw daemonLineageUnavailable();
-    paths.push(join(directory, entry.name));
-  }
-  return paths;
-}
-
-async function assertNoLiveDaemonRecords(
-  socketDirectory: string,
-  namespace: string,
-): Promise<void> {
-  const directory = join(resolve(socketDirectory), "namespaces", namespace, "run");
-  for (const path of await daemonPidRecords(directory)) {
-    const pid = await readDaemonPid(path);
-    if (pid !== null && (await processRunning(pid))) throw daemonLineageUnavailable();
-  }
-}
-
-async function assertDaemonIdentity(daemon: OwnedAgentBrowserDaemon): Promise<boolean> {
-  for (const path of await daemonPidRecords(dirname(daemon.pidFile))) {
-    const pid = await readDaemonPid(path);
-    if (
-      pid !== null &&
-      (await processRunning(pid)) &&
-      (path !== daemon.pidFile || pid !== daemon.pid)
-    )
-      throw daemonLineageUnavailable();
-  }
-  const live = await processRunning(daemon.pid);
-  if (live) {
-    if ((await processBirth(daemon.pid)) !== daemon.birth)
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "owned agent-browser daemon birth changed",
-      );
-    if (!(await executableMatches(daemon.pid, daemon.executablePath)))
-      throw daemonLineageUnavailable();
-  }
-  const pid = await readDaemonPid(daemon.pidFile);
-  if (pid === null && !live) return false;
-  const metadata = pid === null ? null : await lstat(daemon.pidFile);
-  if (
-    pid !== daemon.pid ||
-    metadata?.dev !== daemon.pidFileIdentity.device ||
-    metadata?.ino !== daemon.pidFileIdentity.inode
-  )
-    throw new AgentBrowserCommandError(
-      "process_failed",
-      "owned agent-browser daemon identity changed",
-    );
-  if (live && (await processBirth(daemon.pid)) !== daemon.birth) throw daemonLineageUnavailable();
-  return live;
-}
-
-async function terminateOwnedAgentBrowserDaemon(daemon: OwnedAgentBrowserDaemon): Promise<void> {
-  if (await assertDaemonIdentity(daemon)) {
-    signalProcess(daemon.pid, "SIGTERM");
-    if (!(await waitForProcessStop(daemon.pid, DAEMON_STOP_TIMEOUT_MS))) {
-      if (await assertDaemonIdentity(daemon)) {
-        signalProcess(daemon.pid, "SIGKILL");
-        if (!(await waitForProcessStop(daemon.pid, DAEMON_STOP_TIMEOUT_MS)))
-          throw new AgentBrowserCommandError(
-            "process_failed",
-            "owned agent-browser daemon did not stop",
-          );
-      }
-    }
-  }
-  await assertDaemonIdentity(daemon);
-  await rm(daemon.pidFile, { force: true });
 }
 
 async function terminateOwnedManagedBrowserProcess(
@@ -2302,8 +1973,14 @@ export async function stopEndedManagedBrowserProcess(
   await stopOrphanedAgentBrowserDaemons(profileDirectory).catch(() => undefined);
 }
 
-/** The pinned agent-browser executable as installed (agent-browser) or as
- * shipped per platform (agent-browser-darwin-arm64 and so on). */
+/* Releases before the controller launched Chrome itself started every managed
+ * browser through an agent-browser daemon. Such a browser can still be running
+ * (a connected machine keeps its browsers across an agent update), and its
+ * daemon does not exit with it. The helpers below find and stop those legacy
+ * daemons; nothing launches one any more.
+ *
+ * The agent-browser executable as installed (agent-browser) or as shipped per
+ * platform (agent-browser-darwin-arm64 and so on). */
 const AGENT_BROWSER_EXECUTABLE_NAME = /^agent-browser(?:-[a-z0-9-]+)?(?:\.exe)?$/u;
 
 type LaunchingAgentBrowserDaemon = { pid: number; birth: string };

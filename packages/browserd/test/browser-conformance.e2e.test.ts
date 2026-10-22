@@ -14,7 +14,7 @@ import {
 } from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserDownloadStore,
   BrowserWorkspaceFileStager,
   LightpandaRunner,
@@ -85,13 +85,8 @@ e2e(
           binary: lightpandaBinary,
           sessionDirectory: join(directory, "lightpanda"),
         })
-      : await AgentBrowserJsonRunner.create({
-          namespace: `conformance_${randomUUID().slice(0, 8)}`,
-          sessionName: "s",
-          socketDirectory: join(directory, "s"),
+      : await ManagedBrowserRunner.create({
           profileDirectory: join(directory, "profile"),
-          downloadDirectory: downloadStore.filesDirectory,
-          screenshotDirectory: join(directory, "screenshots"),
           headed: false,
           ...(browserExecutablePath ? { browserExecutablePath } : {}),
         });

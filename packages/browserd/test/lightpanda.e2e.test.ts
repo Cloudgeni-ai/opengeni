@@ -16,7 +16,6 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" && binaryPath ? test : tes
 
 e2e("runs Lightpanda as an exact capability-scoped managed browser", async () => {
   const directory = await mkdtemp("/tmp/ogb-lightpanda-");
-  const socketDirectory = `/tmp/lps-${randomUUID().slice(0, 8)}`;
   const binary = await resolvePinnedLightpandaBinary({ binaryPath: binaryPath! });
   const page = Bun.serve({
     hostname: "127.0.0.1",
@@ -32,7 +31,6 @@ e2e("runs Lightpanda as an exact capability-scoped managed browser", async () =>
   });
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
     lightpandaBinary: async () => binary,
   });
   const reference = {
@@ -69,13 +67,11 @@ e2e("runs Lightpanda as an exact capability-scoped managed browser", async () =>
     page.stop(true);
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 
 e2e("recovers a lost Lightpanda process without replaying mutations", async () => {
   const directory = await mkdtemp("/tmp/ogb-lightpanda-recovery-");
-  const socketDirectory = `/tmp/lpr-${randomUUID().slice(0, 8)}`;
   const binary = await resolvePinnedLightpandaBinary({ binaryPath: binaryPath! });
   const page = Bun.serve({
     hostname: "127.0.0.1",
@@ -86,7 +82,6 @@ e2e("recovers a lost Lightpanda process without replaying mutations", async () =
   let driverCreations = 0;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
     createDriver: async (context): Promise<BrowserSupervisorDriver> => {
       driverCreations += 1;
       const runner = await LightpandaRunner.create({
@@ -139,7 +134,6 @@ e2e("recovers a lost Lightpanda process without replaying mutations", async () =
     page.stop(true);
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 

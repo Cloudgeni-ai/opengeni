@@ -26,7 +26,6 @@ e2e(
       "OPENGENI_ATTACHED_BROWSER_CONNECTION_GENERATION",
     );
     const directory = await mkdtemp("/tmp/ogb-attached-e2e-");
-    const socketDirectory = await mkdtemp("/tmp/ogs-attached-");
     const fixture = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -39,7 +38,6 @@ e2e(
     });
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
-      socketRootDirectory: socketDirectory,
     });
     const adminToken = `admin.${"a".repeat(48)}`;
     const controlToken = `control.${"c".repeat(48)}`;
@@ -123,7 +121,6 @@ e2e(
       await server.stop();
       fixture.stop(true);
       await rm(directory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
   30_000,
@@ -137,7 +134,6 @@ e2e(
       "OPENGENI_ATTACHED_BROWSER_CONNECTION_GENERATION",
     );
     const directory = await mkdtemp("/tmp/ogb-attached-e2e-");
-    const socketDirectory = await mkdtemp("/tmp/ogs-attached-");
     const fixture = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -150,7 +146,6 @@ e2e(
     });
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
-      socketRootDirectory: socketDirectory,
     });
     const adminToken = `admin.${"a".repeat(48)}`;
     const controlToken = `control.${"c".repeat(48)}`;
@@ -254,7 +249,6 @@ e2e(
       await server.stop();
       fixture.stop(true);
       await rm(directory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
   60_000,

@@ -5,7 +5,6 @@ import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./h
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
   BrowserActionCommand,
@@ -54,7 +53,6 @@ import {
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import { BrowserRecording, type RecordingFrameSource, type RecordingSummary } from "./recording";
-import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
 import { ExternalProviderCdpRunner } from "./external-provider-runner";
@@ -67,8 +65,7 @@ import {
 } from "./media";
 import {
   AgentBrowserCommandError,
-  AgentBrowserJsonRunner,
-  assertAgentBrowserSocketPath,
+  ManagedBrowserRunner,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
   reapOrphanedAgentBrowserDaemons,
@@ -335,14 +332,12 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
 
 export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   sessionDirectory: string;
-  socketDirectory: string;
   profileDirectory: string;
   restoredProfile: boolean;
   recoverOwnedProcess?: OwnedManagedBrowserProcess;
   allowOwnedProcessLaunch?: boolean;
   headlessSessionCookies?: HeadlessSessionCookies;
   downloadDirectory: string;
-  screenshotDirectory: string;
   headed: boolean;
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
@@ -376,9 +371,7 @@ export type BrowserSupervisorOptions = {
    * the background. */
   passkeys?: boolean;
   rootDirectory: string;
-  socketRootDirectory?: string;
   maxSessions?: number;
-  agentBrowserBinary?: ResolvedAgentBrowserBinary;
   /** Resolves the verified Lightpanda binary when a Lightpanda session first needs it. */
   lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>;
   headlessShell?: VerifiedHeadlessShell;
@@ -461,7 +454,6 @@ type ValidatedBrowserSupervisorSessionOptions = Omit<
 /** One placement-local authority hosting many independently fenced browser sessions. */
 export class BrowserSupervisor {
   readonly rootDirectory: string;
-  readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
   private readonly passkeysEnabled: boolean;
@@ -499,16 +491,6 @@ export class BrowserSupervisor {
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
-    this.socketRootDirectory = resolve(
-      options.socketRootDirectory ?? defaultSocketRoot(this.rootDirectory),
-    );
-    if (!options.createDriver) {
-      assertAgentBrowserSocketPath({
-        socketDirectory: join(this.socketRootDirectory, "0".repeat(16)),
-        namespace: "og",
-        sessionName: `b${"0".repeat(16)}`,
-      });
-    }
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
     this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
@@ -522,7 +504,6 @@ export class BrowserSupervisor {
           ? this.createEphemeralDriver(context, options)
           : createBrowserDriver(
               context,
-              options.agentBrowserBinary,
               options.lightpandaBinary,
               options.headlessShell,
               options.networkIsolation !== false,
@@ -565,7 +546,6 @@ export class BrowserSupervisor {
       // replace it until its retained shutdown has positively completed.
       if (pool) await pool.close();
       const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
-      const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
         authorityKey: key,
         onTerminal: () => {
@@ -577,26 +557,19 @@ export class BrowserSupervisor {
           });
         },
         launch: async () => {
-          const runner = await AgentBrowserJsonRunner.create({
-            namespace: "og",
-            sessionName: `e${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-            socketDirectory: poolSocketDirectory,
+          const runner = await ManagedBrowserRunner.create({
             profileDirectory: join(poolDirectory, "profile"),
-            downloadDirectory: join(poolDirectory, "downloads"),
-            screenshotDirectory: join(poolDirectory, "screenshots"),
             headed: false,
             ...(options.networkIsolation === false ? { networkIsolation: false } : {}),
             ...(context.browserExecutablePath
               ? { browserExecutablePath: context.browserExecutablePath }
               : {}),
-            ...(options.agentBrowserBinary ? { binary: options.agentBrowserBinary } : {}),
           });
           return {
             run: runner.run.bind(runner),
             terminate: async () => {
               await runner.terminate();
               await rm(poolDirectory, { recursive: true, force: true });
-              await rm(poolSocketDirectory, { recursive: true, force: true });
             },
           };
         },
@@ -619,12 +592,7 @@ export class BrowserSupervisor {
       recursive: true,
       mode: 0o700,
     });
-    await mkdir(supervisor.socketRootDirectory, {
-      recursive: true,
-      mode: 0o700,
-    });
     await chmod(supervisor.rootDirectory, 0o700);
-    await chmod(supervisor.socketRootDirectory, 0o700);
     if (!options.createDriver) {
       await reapManagedBrowserProcesses(supervisor.rootDirectory, async (directory) => {
         // A durable launch/retirement history can include an accepted unknown
@@ -638,8 +606,9 @@ export class BrowserSupervisor {
           throw error;
         }
       });
-      // Daemons whose browser is gone serve nothing and never exit on their
-      // own. Startup must not fail because one of them could not be stopped.
+      // Launcher daemons an earlier release left behind after their browser
+      // ended serve nothing and never exit on their own. Startup must not
+      // fail because one of them could not be stopped.
       await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
     }
     return supervisor;
@@ -1670,11 +1639,9 @@ export class BrowserSupervisor {
     options: ValidatedBrowserSupervisorSessionOptions,
   ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
-    const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
     const uploadDirectory = join(sessionDirectory, "uploads");
-    const screenshotDirectory = join(sessionDirectory, "screenshots");
     if (
       !options.recoverExistingWorkingDirectory &&
       !options.restore &&
@@ -1806,13 +1773,7 @@ export class BrowserSupervisor {
         // Validate every path consumed by the existing writers before opening
         // any journal RW or creating a driver. Missing adjunct directories may
         // be recreated only after the exact profile/receipt proof above.
-        for (const path of [
-          socketDirectory,
-          downloadDirectory,
-          uploadDirectory,
-          screenshotDirectory,
-          join(downloadDirectory, "files"),
-        ])
+        for (const path of [downloadDirectory, uploadDirectory, join(downloadDirectory, "files")])
           await assertOptionalDirectory(path);
         for (const path of ["operations.sqlite", "state-transfers.sqlite"])
           await assertOptionalRegularFile(join(sessionDirectory, path));
@@ -1847,13 +1808,7 @@ export class BrowserSupervisor {
       // never the launch.
       await markProfileExitedCleanly(profileDirectory).catch(() => false);
     }
-    for (const directory of [
-      sessionDirectory,
-      socketDirectory,
-      downloadDirectory,
-      uploadDirectory,
-      screenshotDirectory,
-    ]) {
+    for (const directory of [sessionDirectory, downloadDirectory, uploadDirectory]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
@@ -1929,7 +1884,6 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
       sessionDirectory,
-      socketDirectory,
       profileDirectory,
       restoredProfile: restoredProfileMaterialized,
       ...(recoveredReceipt && recoveredReceipt.intent !== "adopt"
@@ -1940,7 +1894,6 @@ export class BrowserSupervisor {
         : {}),
       ...(restoredCookies ? { headlessSessionCookies: restoredCookies } : {}),
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
-      screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
       resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
@@ -2740,10 +2693,6 @@ export class BrowserSupervisor {
     }
     if (!abandoned) throw workingRuntimeUnavailable();
     if (!removeState) return;
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
     await rm(sessionDirectory, { recursive: true, force: true });
   }
 
@@ -2791,10 +2740,6 @@ export class BrowserSupervisor {
     } finally {
       journal.close();
     }
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
     if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
   }
 
@@ -2855,10 +2800,6 @@ export class BrowserSupervisor {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     await rename(sessionDirectory, target);
-    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
-      recursive: true,
-      force: true,
-    });
   }
 
   private retireWorkingRuntime(runtime: Runtime) {
@@ -3010,18 +2951,6 @@ export class BrowserSupervisor {
     const recording = runtime.recording;
     runtime.recording = null;
     await recording?.discard();
-    // Recovery inspects the exact daemon namespace for live owners. Preserve
-    // that evidence for suspension; missing namespace state is not exit proof.
-    if (driverClosed && runtime.workingReceipt?.intent !== "suspend") {
-      try {
-        await rm(join(this.socketRootDirectory, shortDigest(runtime.options.browserSessionId)), {
-          recursive: true,
-          force: true,
-        });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
     if (
       removeState &&
       driverClosed &&
@@ -3119,7 +3048,6 @@ export async function managedChromiumLaunchExecutable(
 
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
-  binary?: ResolvedAgentBrowserBinary,
   lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>,
   headlessShell?: VerifiedHeadlessShell,
   networkIsolation = true,
@@ -3216,17 +3144,8 @@ async function createBrowserDriver(
     context.headed &&
     !context.linkedComputer &&
     (process.platform === "darwin" || (process.platform === "linux" && !linuxGraphicalDisplay()));
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: "og",
-    // A close followed immediately by another daemon using the same socket
-    // name races agent-browser's asynchronous socket teardown. Every physical
-    // driver lifecycle therefore gets a private socket identity; durable state
-    // lives solely in the explicitly supplied profile directory.
-    sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-    socketDirectory: context.socketDirectory,
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory: context.profileDirectory,
-    downloadDirectory: context.downloadDirectory,
-    screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
     ...(networkIsolation ? {} : { networkIsolation: false }),
     ...(offscreen ? { offscreen: true } : {}),
@@ -3241,7 +3160,6 @@ async function createBrowserDriver(
         }
       : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
-    ...(binary ? { binary } : {}),
   }).catch((error: unknown) => {
     // Recovery proves the previous browser's state before reattaching or
     // relaunching. A proof that cannot be completed is a definite refusal
@@ -4032,15 +3950,6 @@ function canonicalValue(value: unknown): unknown {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function defaultSocketRoot(rootDirectory: string): string {
-  const base = process.platform === "win32" ? tmpdir() : "/tmp";
-  return join(base, "ogb-s", shortDigest(resolve(rootDirectory)));
-}
-
-function shortDigest(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 /** Bounded, content-free cause for a launch receipt; never page data or secrets. */

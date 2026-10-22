@@ -414,7 +414,6 @@
         "@opengeni/contracts": "workspace:*",
         "@opengeni/interaction": "workspace:*",
         "@trycua/cua-driver": "0.37.0",
-        "agent-browser": "0.33.2",
         "zod": "4.4.3",
       },
       "devDependencies": {
@@ -2906,7 +2905,6 @@
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 
-    "agent-browser": ["agent-browser@0.33.2", "", { "bin": { "agent-browser": "./bin/agent-browser.js" } }, "sha512-e+TZ0G04uw2rs+lVB8gn0IWTT7ErfiAl3jQ4zNNwyqDhgXWJKhqxYKkyibjuBGXLzx/APlzU3IWAsOVdRwh0DA=="],
 
     "agent-cli-detector": ["agent-cli-detector@0.1.7", "", { "bin": { "agent-cli-detector": "dist/cli.js" } }, "sha512-d8OWDVdZMgjhLUT9ZPgSv/BdFFF9pVuscC0JdUSz3bjwE15gcp6u/o0/JooM2yyAWC49KThFhXlgTXRa9B7yng=="],
 

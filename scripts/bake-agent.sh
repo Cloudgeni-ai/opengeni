@@ -110,12 +110,11 @@ fi
 
 for target in $TARGETS; do
   case "$target" in
-    x86_64-unknown-linux-musl) bun_target=bun-linux-x64; browser_arch=x64 ;;
-    aarch64-unknown-linux-musl) bun_target=bun-linux-arm64; browser_arch=arm64 ;;
+    x86_64-unknown-linux-musl) bun_target=bun-linux-x64 ;;
+    aarch64-unknown-linux-musl) bun_target=bun-linux-arm64 ;;
     *) log "unsupported canary interaction target $target"; exit 1 ;;
   esac
   browserd="$STAGE_DIR/opengeni-browserd-$target"
-  agent_browser="$STAGE_DIR/opengeni-agent-browser-$target"
   computer_native="$STAGE_DIR/opengeni-computer-native-$target"
   log "building the complete $target interaction runtime"
   (
@@ -127,15 +126,8 @@ for target in $TARGETS; do
     # The compiled runtime carries Bun's own root list (see #5314).
     bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "$browserd"
     bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "$browserd"
-    OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
-    OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
-    OPENGENI_BROWSERD_TARGET_MUSL=false \
-    OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-$target" \
-      bun packages/browserd/scripts/stage-agent-browser.ts
-    cp "packages/browserd/dist/opengeni-agent-browser-$target" "$agent_browser"
   )
   test -s "$browserd"
-  test -s "$agent_browser"
   interp="$(readelf -l "$browserd" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
   case "$target:$interp" in
     x86_64-unknown-linux-musl:/lib64/ld-linux-x86-64.so.2|aarch64-unknown-linux-musl:/lib/ld-linux-aarch64.so.1) ;;
@@ -162,12 +154,11 @@ for target in $TARGETS; do
   (
     cd "$AGENT_DIR"
     OPENGENI_EMBEDDED_BROWSERD="$browserd" \
-    OPENGENI_EMBEDDED_AGENT_BROWSER="$agent_browser" \
     OPENGENI_EMBEDDED_COMPUTER_NATIVE="$computer_native" \
       cargo zigbuild --locked --release --target "$target" -p opengeni-agent
   )
   cp "$AGENT_DIR/target/$target/release/opengeni-agent" "$STAGE_DIR/opengeni-agent-$target"
-  for component in opengeni-agent opengeni-browserd opengeni-agent-browser opengeni-computer-native; do
+  for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
     asset="$component-$target"
     test -s "$STAGE_DIR/$asset"
     chmod 0755 "$STAGE_DIR/$asset"
@@ -181,7 +172,7 @@ done
 
 # Nothing enters the image input directory until every requested target is built.
 for target in $TARGETS; do
-  for component in opengeni-agent opengeni-browserd opengeni-agent-browser opengeni-computer-native; do
+  for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
     asset="$component-$target"
     cp "$STAGE_DIR/$asset" "$STAGE_DIR/$asset.sha256" "$BAKED_DIR/"
     if [ "$HAVE_KEY" = "1" ]; then cp "$STAGE_DIR/$asset.minisig" "$BAKED_DIR/"
