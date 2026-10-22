@@ -22107,6 +22107,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Whether people can connect their own computers to this deployment. Absent
     // on older servers: clients then treat it as unknown.
     connectedMachines: z.boolean().optional(),
+    // The Chrome extension people add to connect their own Chrome, and its
+    // Chrome Web Store page. Absent on older servers: Opengeni Browser.
+    browserExtension: z.object({ name: z.string(), installUrl: z.string().url() }).optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.

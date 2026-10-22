@@ -383,7 +383,7 @@ export const englishMessages = {
   "browserViewer.inputResultUnknown": "Input result unknown",
   "browserViewer.inspectThePageBeforeContinuing": "Inspect the page before continuing.",
   "browserViewer.installTheOpengeniBrowserExtension":
-    "Install the Opengeni Browser extension in the profile you want to use.",
+    "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
   "browserViewer.itsPrivateStateIsSaved":
     "Its private state is saved. Opening it creates a fresh, isolated browser process.",

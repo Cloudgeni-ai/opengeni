@@ -445,6 +445,12 @@ const SettingsSchema = z.object({
   // Opengeni's and link this deployment's web app page.
   officeAddinName: z.string().trim().min(1).max(80).default("Opengeni"),
   officeAddinInstallUrl: z.string().url().optional(),
+  // The Chrome extension that connects people's own Chrome to their connected
+  // computer, as agents and the chat name it, and where it is installed (its
+  // Chrome Web Store page). A product that ships its own branded build of the
+  // extension sets both; otherwise they name and link Opengeni Browser.
+  browserExtensionName: z.string().trim().min(1).max(80).default("Opengeni Browser"),
+  browserExtensionInstallUrl: z.string().url().startsWith("https://").optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -5025,6 +5031,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     officeAddinName: optional("OPENGENI_OFFICE_ADDIN_NAME"),
     officeAddinInstallUrl: optional("OPENGENI_OFFICE_ADDIN_INSTALL_URL"),
+    browserExtensionName: optional("OPENGENI_BROWSER_EXTENSION_NAME"),
+    browserExtensionInstallUrl: optional("OPENGENI_BROWSER_EXTENSION_INSTALL_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
