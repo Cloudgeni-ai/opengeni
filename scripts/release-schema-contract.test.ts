@@ -2341,6 +2341,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0912_session_message_search_backfill_cleanup.sql",
+      "0913_session_events_tool_call_identity.sql",
       "0911_session_message_search_trigram_index.sql",
       "0910_session_message_search_backfill.sql",
       "0909_session_message_search_index.sql",

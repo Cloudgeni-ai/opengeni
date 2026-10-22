@@ -375,7 +375,10 @@ sessions receive fallback input. Terminal reads suppress pending notifications,
 not history; running reads suppress neither. Failed/cancelled sessions retain
 audit only. Replaceable fanout follows commit. Separate conversation history
 uses sequence cursors; `packages/db/src/session-event-slices.ts` transfers bounded
-message-scalar slices, never whole histories. Full-history Find
+message-scalar slices, never whole histories. Exact tool-name/call-ID filters use
+trigger-maintained metadata to avoid detoasting skipped arguments and outputs.
+Legacy rows retain their payload fallback (and its read cost); these projections
+do not authorize access or replace the retained payload. Full-history Find
 (`packages/db/src/session-message-search.ts`) coalesces authorized scalar windows
 into bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).

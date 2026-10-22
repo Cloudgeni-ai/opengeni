@@ -124,7 +124,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
     // Current event readers project 0810's usage source key and 0889's tool name.
-    await owner`ALTER TABLE session_events ADD COLUMN usage_source_key text, ADD COLUMN tool_name text`;
+    await owner`ALTER TABLE session_events ADD COLUMN usage_source_key text, ADD COLUMN tool_name text, ADD COLUMN tool_call_id text`;
     // Current session/turn adapters project 0608's nullable context fields.
     // Stage only empty reader columns for historical seeds, not its authority
     // triggers or backfill; remove them before the real ordered 0608 replay.
@@ -311,7 +311,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       DROP COLUMN content_archive,
       DROP COLUMN content_archive_purged_at`;
     await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
-    await owner`ALTER TABLE session_events DROP COLUMN usage_source_key, DROP COLUMN tool_name`;
+    await owner`ALTER TABLE session_events DROP COLUMN usage_source_key, DROP COLUMN tool_name, DROP COLUMN tool_call_id`;
     // Assert the attribution repair's literal policy invariance before the
     // separately governed 0591 planner optimization. This fixture already
     // stages future receipts to replay a historical migration boundary; retain
