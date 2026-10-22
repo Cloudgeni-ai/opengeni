@@ -1,5 +1,7 @@
 # @opengeni/connect
 
+## 4.4.1
+
 ## 4.3.1
 
 ### Patch Changes

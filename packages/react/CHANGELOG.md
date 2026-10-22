@@ -1,5 +1,83 @@
 # @opengeni/react
 
+## 4.4.1
+
+### Minor Changes
+
+- 2a2acb2: Chats and workspaces across the whole account, from the keyboard. ⌘K now finds chats in all of your workspaces (this workspace's first, others tagged with their workspace) and finds workspaces by name; "Switch workspace…" lists them to pick from. Control+Tab in the desktop app reaches recent chats in other workspaces too. ⌥⌘↑ and ⌥⌘↓ (Ctrl+Alt+↑ and Ctrl+Alt+↓ on Windows and Linux) go to the previous and next workspace, and the workspace picker lists every workspace, grouped by organization, in that order. ⌘K and the desktop Chat menu also offer "Fork chat", which forks from the latest message.
+- b58a428: The desktop kit now fits a product whose web app has its own routes and its own server.
+
+  - `webPaths` in the desktop kit's config says where the product's web app shows a workspace, a session, the inbox and settings. The app reads links, reopens the last page and opens notifications and menu commands with it. `parseAppLink`, `parseComputerConnectLink` and `computerConnectUrl` take the same `AppWebPaths`; `OPENGENI_WEB_PATHS` is Opengeni's own web app and stays the default.
+  - The "Open in app" handoff uses the app's own scheme: `parseAppLink(url, { scheme })`, `appHandoffUrl(url, scheme)` and `openInAppUrl(url, scheme)`.
+  - `allowOtherServers: false` hides "Use another server" on the first-run page, and the app then signs in to its own server only. Its messages name the configured server instead of Opengeni's.
+  - `agentPath`, `agentConfigDir` and `adoptStandaloneAgent` pass through to `ThisComputer`, so an app can keep its own agent apart from a separately installed one.
+
+- e3c07bc: Embedded chats can now explain why a message didn't start. When a shared chat still runs on someone else's personal computer and another participant's message is held, `SessionStartNotice` from `@opengeni/react/session-ui` says why in the reader's language, lists the machines they're allowed to use, and offers one recheck once the chat has moved. The saved message is kept and is never sent twice, and access rules are unchanged. `useSessionStart` and the matching model helpers are available from `@opengeni/react/session` for custom layouts, and all text comes from the new `sessionAdmission.*` message keys. The React Native session screen shows the same explanation and machine choices. The hosted app now uses these same components.
+- 182eff6: Embedded conversations now show the same startup row as the Opengeni web app while a new chat's first turn starts (queued, preparing the sandbox, contacting the model), instead of a separate "Thinking…" loader that the turn's work row later replaced.
+
+  `SessionConversation` and `useSessionConversation` take a `pendingPrompt` (`{ text, sentAt }`) and accept a `null` session ID. A host whose server creates the session can render the conversation the moment the person sends, with their message and the startup row, and pass the session ID when its create call returns. It stays the same mounted conversation, so the message and startup row stay in place through the hand-over to live history, with no empty "No activity yet." frame. `OpenGeniChat` passes the first prompt the same way when it opens a chat it just created, and `CreatedConversation` now includes `sentAt`.
+
+- 926e0b8: The Excel add-in now has its own Capabilities tile, "Microsoft Excel". The tile explains the add-in, shows the three setup steps and links to the deployment's install page. It uses the deployment's own add-in name and install URL (`OPENGENI_OFFICE_ADDIN_NAME`, `OPENGENI_OFFICE_ADDIN_INSTALL_URL`).
+
+  Agents can find it with `capability_catalog_search` (excel, spreadsheet, xlsx) and post its install card with `capability_authorization_request` (`api:excel-addin`). The card reports ready when the person already has a workbook open with the add-in. `excel_run` and the spreadsheets Skill tell agents to offer the add-in when someone works on a spreadsheet and no workbook is connected. `excelAddin`, `excelAddinCatalogItem` and `EXCEL_ADDIN_CAPABILITY_ID` are exported from `@opengeni/core`.
+
+- 25d1500: Infrastructure-only session events, such as the idle sandbox reaper terminating a shared box, no longer move a session's `updatedAt`, so stopped sessions keep their real last-activity time in the sidebar and session lists (migration 0904). Sessions and session list entries now carry `hasUpcomingSchedules`, and the sidebar schedule icon only appears for schedules that can still fire. A session whose schedules are all paused or expired keeps a distinct "No upcoming runs" schedule button in its header. Editing only a schedule's timing now refreshes open session lists (migration 0905).
+- 201c380: Add `homeSessionSections` to `@opengeni/react/session-list-model`: every pinned conversation, then up to fifteen recently used ones (running first), so pins never push recent work off a phone home screen. The mobile app's home screen now lists Pinned and Recent chats under the composer, scrolls through them, and ends with a link to all sessions. Relative times between 45 and 59 seconds now read "1m" instead of "0m".
+
+### Patch Changes
+
+- dd61c8d: The keyboard action list is built on first use (`appActions()` replaces `APP_ACTIONS`), so its icons are never read before the chunk that defines them has loaded, whichever page a visitor opens first.
+- efd4df0: Typing with AltGr on Windows no longer fires Ctrl+Alt shortcuts. AltGr+A ("ą" on Polish keyboards) no longer archives the chat, and AltGr+B ("{" on Czech and Hungarian keyboards) no longer toggles the workspace panel. The typed character now reaches the message box.
+- 4ff99bd: A turn's answer no longer jumps past the work row when the turn finishes. Once the agent declares its answer, the "Working" row moves above it while the turn is still running, the same place the "Worked for" row takes afterwards, so the answer someone is reading stays where it is.
+- 23dfcb2: Keep the chat directory's status-change check free of the rail's status code, so eager pages no longer load the command menu's status marks and the production web build passes again.
+- b800b7f: The command menu's chats and the Control+Tab switcher show each chat's status with the sidebar's marks: working, queued, waiting, needs you (and for how long), failed, unread, scheduled, and who started it. Statuses show only while they are known to be current; chats outside the sidebar on screen are read again when a list opens and every 20 seconds while it stays open.
+- a506901: Compact session times ("3d") now count calendar days in the viewer's time zone, the same way the long form ("4 days ago") does, so the sidebar and the command menu show the same age for a chat.
+- dfa5df0: Opening a chat puts the cursor in its composer: choosing a chat from the command menu or Control+Tab focuses the composer once the menu closes and the composer is ready, and opening or reloading a chat focuses it when nothing else has focus.
+- 565253c: The in-flight shimmer on "Working", running tools, running agents, transcription and timeline loading labels no longer keeps the main thread busy. It used to animate a text-clipped gradient, which repainted the text on every frame for as long as anything was running and slowed typing and scrolling in long chats. The new `ShimmerText` slides a masked highlight copy with transforms only, so the compositor runs it. It looks the same and still turns off for reduced motion and forced colors. The `og-shimmer-text` class remains for host markup.
+- 343c1aa: Connecting a built-in integration such as Outlook or Gmail now finishes by itself after sign-in: setup loads the reviewed tools and installs them, showing "Finishing setup…" instead of stopping at a "Choose tools" step. Before, closing the window or leaving the page at that step left the account connected with no tools, so agents could not use it. Custom OpenAPI and GraphQL sources still ask which tools to add, and any error brings the manual controls back.
+- 524ddde: The desktop app shows an Update button at the bottom of the sidebar as soon as it finds a new version. One click installs it: a downloaded update restarts the app at once, otherwise the download finishes and the app restarts by itself. The app now checks for updates every hour, and the desktop bridge gains an `updates` capability (state, install and change events).
+- 73132c4: A form whose save finishes after the person has already left it (for example navigated to another page) no longer closes itself afterwards, so it can't pull them back to where the form was.
+- 85c0948: A dialog that its owner closes while a save is still running, such as a confirm that closes and then refreshes the page, can again be dismissed with Escape or a click outside when it is reopened. The form still tells its owner when the save ends, even after it has closed.
+- 67ce6ff: Unsent answers to an agent's question are no longer lost when you leave the session and come back. Typed text, Other text and selections are kept in the browser tab until you send or skip, the question expires, or it is answered elsewhere. Secret answers are never kept.
+- dbc847f: When an agent is refused a personal (Only me) machine, the Connected Machine card now names the machine it asked for and leads with Allow; other machines and setup fold under "Use a different machine". The card event carries the requested machine as `requestedSandboxId`. If the agent asks again in a later turn, only the newest card stays a full card and earlier ones become one short line, so a chat no longer piles up copies of the same card.
+- b81d318: Connecting Outlook or OneDrive no longer dead-ends when a Microsoft 365 organization requires an administrator to approve the app. When Microsoft refuses or the person returns from its "Need admin approval" page, the connect dialog explains that a Microsoft 365 admin can approve the app for everyone and offers an admin approval link to open or copy. The administrator lands on a short confirmation page, and people connect again afterwards. The connect attempt's error message carries the same link, so agents can pass it on.
+- 7157f58: Typing in the composer and streaming replies no longer restyle the whole page. Several stylesheet rules used `:has()` on an element other than the one being styled (the composer footer's voice states, the macOS title bar beside a collapsed sidebar, connect-form labels, and the avatar group count), which made Chromium recompute styles for every element on each DOM change: about 35 ms per keystroke in a long chat. The composer footer now carries `data-footer-transcription-capturing`, `data-footer-transcription-attention` and `data-footer-realtime-attention` itself, the session shell carries `data-rail-collapsed`, and `AvatarGroupCount` takes a `size` prop instead of inferring it. A test keeps such selectors out.
+- 81a516c: Organizations and workspaces can choose the default voice model. Organization → Models → Voice and a workspace's Voice settings gain a "Default voice model" choice: the model a new voice conversation starts with. A workspace follows its organization's choice unless it picks its own, and "Automatic" keeps the previous behaviour (GPT Realtime when available, otherwise the first available model). People can still pick another model when they talk, and a model someone already picked on their device stays their choice while it remains available.
+
+  API: `OrganizationModelDefaults.realtimeDefaultModel` and `UpdateWorkspaceSettingsRequest.realtimeDefaultModel` (a voice model id, or null for automatic or to follow the organization), and the realtime model catalog marks `workspaceDefault` and `organizationDefault`. The packaged voice control starts with the person's own usable pick, then the workspace default, then the organization default. Rolling migration 0903 adds one nullable column.
+
+- 486abe4: The packaged voice control keeps the model of a voice conversation that is already running when the voice model catalog loads afterwards (for example after reopening a session with a live call). It no longer switches to the workspace's or organization's default model and replaces the running call's controller.
+- 9c0c6d1: Keep the public sandbox recovery response compatible now that every managed backend recovers a lost sandbox. `SandboxRecoverySelection.artifactId` is a required native checkpoint id again, as it was before, so existing SDK readers never receive null there. A portable checkpoint that an automatic Retry restores is named by the new optional `SandboxRecoveryProjection.automaticCheckpoint` (`SandboxCheckpointSelection`, whose `artifactId` is null for a portable archive); `checkpoint` is set as well only when that checkpoint is native. The packaged recovery actions read `automaticCheckpoint` first. Older clients still recover these sessions when the next message is sent; they only lack the Retry shortcut for a portable checkpoint.
+- 67882a3: Screen readers now read the session header's read-only access mark ("Workspace session access. Visible to people in …") and the Private mark for Personal workspace chats. Both were focusable spans with an `aria-label` but no role, which ARIA does not allow, so assistive technology could skip the label.
+- 84c8b32: `createSessionProxyHandler` accepts `sessionApp: true`, so the packaged `SessionApp` runs behind a product's session proxy with no Opengeni credential in the browser (`<SessionApp apiBaseUrl="/api/opengeni" …/>`). The app sees only the resolved workspace and the resolved user's access to it. Its other reads in that workspace, and in chats `authorizeSession` admits, pass through as that user, so Opengeni's permissions decide what they see. A short list of the app's own writes passes too: pinning a chat, moving it to a project, managing projects, the new-chat draft and a chat's tool approval settings. Every other write is refused. Rosters, keys, budgets and administration stay closed even for reads. All existing proxy routes keep their rules, including the host's `createSession` and message hooks.
+
+  Startup error screens no longer name Opengeni, so a product that embeds the app shows neutral text ("Couldn't start", "Under maintenance").
+
+- b7943f4: ⌘B (Ctrl+B) toggles the sidebar, ⌥⌘B (Ctrl+Alt+B) toggles a chat's workspace panel, and ⌃⌘A (Ctrl+Alt+A) archives or restores the current chat. The sidebar and panel buttons and the chat menu show their keys. ⌃⌘S (Ctrl+Shift+S) still toggles the sidebar, and the menu bar shows it because rich text keeps ⌘B for bold.
+- 886dc39: Site stills in the artifact library now also require their no-network policy from the frame itself, so supporting browsers block outside requests before the Site markup is parsed.
+- f7f7987: Show an actionable error when a connector account was removed while a chat was open. Refresh account choices without replacing explicit selections or retrying a failed message with different credentials.
+- 84b1a18: Every subscription account now has exactly one owner: the organization, one workspace, or one person, and it is used wherever it reaches and nowhere else. The per-workspace split between a workspace's own copy of an account and the organization's copy, the preference that chose between them, and "Set aside" are gone; each account has one on/off switch. A migration keeps everyone's access exactly as it was.
+
+  The organization's account lists now include `reach` (who each account reaches), and the organization's Models page lists every account once, grouped by provider, with its owner and a summary of how many are on and how many need reconnecting. Accounts that are turned off fold away when a provider has several, and the page no longer reads every workspace's accounts or each account's access one by one.
+
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84c8b32]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/connect@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

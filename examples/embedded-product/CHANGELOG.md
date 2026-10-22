@@ -1,5 +1,52 @@
 # @opengeni/example-embedded-product
 
+## 0.0.47
+
+### Patch Changes
+
+- Updated dependencies [dd61c8d]
+- Updated dependencies [efd4df0]
+- Updated dependencies [4ff99bd]
+- Updated dependencies [23dfcb2]
+- Updated dependencies [b800b7f]
+- Updated dependencies [e697879]
+- Updated dependencies [a506901]
+- Updated dependencies [dfa5df0]
+- Updated dependencies [565253c]
+- Updated dependencies [11e56da]
+- Updated dependencies [2a2acb2]
+- Updated dependencies [343c1aa]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [e3c07bc]
+- Updated dependencies [182eff6]
+- Updated dependencies [926e0b8]
+- Updated dependencies [73132c4]
+- Updated dependencies [85c0948]
+- Updated dependencies [67ce6ff]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [b81d318]
+- Updated dependencies [7157f58]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [201c380]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [486abe4]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [67882a3]
+- Updated dependencies [84c8b32]
+- Updated dependencies [b7943f4]
+- Updated dependencies [886dc39]
+- Updated dependencies [f7f7987]
+- Updated dependencies [84b1a18]
+  - @opengeni/react@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/connect@4.4.0
+
 ## 0.0.46
 
 ### Patch Changes
