@@ -9,6 +9,7 @@ import {
   createCodexRealtimeV3Bridge,
   type CodexRealtimeV3BridgeFatal,
   type CodexRealtimeV3BridgeOptions,
+  type CodexRealtimeV3UndelegatedTranscript,
 } from "../src/codex-realtime-v3";
 import * as sdkWire from "../src/codex-realtime-v3-wire";
 import type {
@@ -651,6 +652,101 @@ describe("Codex realtime V3 bridge", () => {
       kind: "user_transcript",
       payload: { turnId: "turn-1", coveredByDelegationItemId: "delegation-1" },
     });
+    bridge.close();
+  });
+
+  test("a reconnect keeps what was said since the last delegation for the next one", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const sync = async (request: SyncSessionRealtimeLedgerRequest) => {
+      requests.push(request);
+      return { accepted: [], outbound: [] };
+    };
+    const undelegatedTranscript: CodexRealtimeV3UndelegatedTranscript = [];
+    const persisted: string[][] = [];
+    const shared = {
+      undelegatedTranscript,
+      onUndelegatedTranscriptChange: (entries: readonly { text: string }[]) =>
+        persisted.push(entries.map((entry) => entry.text)),
+    };
+    const first = createCodexRealtimeV3Bridge({ ...bridgeOptions({ sync }), ...shared });
+    await first.ingest(transcript(1, "No point spawning agents, do it yourself"));
+    await first.sealAndFlush();
+    first.close();
+
+    const second = createCodexRealtimeV3Bridge({
+      ...bridgeOptions({ sync, randomUUID: uuidSource() }),
+      connectionEpoch: 2,
+      ...shared,
+    });
+    await second.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-2",
+        item: {
+          id: "delegation-2",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "Restyle the page" }],
+        },
+      }),
+    );
+    const call = requests.flatMap((request) => request.entries ?? []).at(-1)!;
+    expect(call.kind).toBe("delegation_call");
+    expect(call.text).toContain("user: No point spawning agents, do it yourself");
+    expect(undelegatedTranscript).toEqual([]);
+    expect(persisted).toEqual([["No point spawning agents, do it yourself"], []]);
+    second.close();
+  });
+
+  test("updates for a delegation from an earlier connection arrive as session context", async () => {
+    const sent: string[] = [];
+    let pending: SessionRealtimeLedgerEntry[] = [];
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        events: dataChannel((value) => sent.push(value)),
+        sync: async () => ({ accepted: [], outbound: pending }),
+      }),
+    );
+    pending = [
+      outbound({
+        id: "44444444-4444-4444-8444-444444444441",
+        operationId: "55555555-5555-4555-8555-555555555551",
+        sequence: 8,
+        kind: "delegation_progress",
+        delegationItemId: "earlier-delegation",
+        text: "Restyling the page.",
+      }),
+      outbound({
+        id: "44444444-4444-4444-8444-444444444442",
+        operationId: "55555555-5555-4555-8555-555555555552",
+        sequence: 9,
+        delegationItemId: "earlier-delegation",
+        text: "The restyle is live.",
+      }),
+    ];
+    await bridge.flush();
+    expect(sent.map((value) => JSON.parse(value))).toEqual([
+      {
+        type: "session.context.append",
+        channel: "commentary",
+        content: [
+          {
+            type: "input_text",
+            text: "Progress on work requested earlier in this call:\nRestyling the page.",
+          },
+        ],
+      },
+      {
+        type: "session.context.append",
+        channel: "speakable",
+        content: [
+          {
+            type: "input_text",
+            text: "Result of work requested earlier in this call:\nThe restyle is live.",
+          },
+        ],
+      },
+    ]);
     bridge.close();
   });
 

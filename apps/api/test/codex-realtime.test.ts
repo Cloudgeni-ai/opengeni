@@ -245,6 +245,12 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "or when the answer is already in the session context or this conversation",
     );
+    expect(captured?.instructions).toContain(
+      'Never answer it with a promise such as "I\'ll do that" or "I\'ll stop that" without passing it on.',
+    );
+    expect(captured?.instructions).toContain(
+      "Never state a result, status, change, name, number, time, or identifier the backend has not reported.",
+    );
     expect(captured?.instructions).not.toContain("complete standalone task");
     expect(captured?.instructions).not.toContain("make a reasonable assumption");
     expect(captured?.instructions).not.toContain("Opengeni");
