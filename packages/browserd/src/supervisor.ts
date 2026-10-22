@@ -396,7 +396,19 @@ export type BrowserSupervisorOptions = {
     operation: "end" | "launch",
     browserSessionId: string,
   ) => Promise<void>;
+  /** Close a managed browser nobody used for this long, keeping its profile
+   * on disk; its next request relaunches it with the same tabs (default 10
+   * minutes, 0 disables). */
+  idleReleaseMs?: number;
+  /** Clock for idle release; tests advance it. */
+  now?: () => number;
 };
+
+/** Managed browsers stop after this long unused. The profile, tabs and
+ * downloads stay on disk, and the next request relaunches the browser on them,
+ * so an idle browser costs no memory or CPU while waiting. */
+export const BROWSER_IDLE_RELEASE_MS = 10 * 60_000;
+const IDLE_RELEASE_SWEEP_MS = 60_000;
 
 type Runtime = {
   options: BrowserRuntimeOptions;
@@ -423,6 +435,8 @@ type Runtime = {
   presence: Set<PresenceHold>;
   /** The session's current or last recording; one at a time. */
   recording: BrowserRecording | null;
+  /** When a request last reached this browser (supervisor clock). */
+  lastUsedAt: number;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
@@ -488,6 +502,9 @@ export class BrowserSupervisor {
   private cleanupUncertain = false;
   /** Browsers whose failed reattach could not prove its transport detached. */
   private readonly recoveryTransportsUncertain = new Set<string>();
+  private readonly idleReleaseMs: number;
+  private readonly now: () => number;
+  private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -515,6 +532,55 @@ export class BrowserSupervisor {
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
     this.afterAdoptionPhase = options.afterAdoptionPhase;
     this.afterWorkingDirectoryClaim = options.afterWorkingDirectoryClaim;
+    this.now = options.now ?? Date.now;
+    this.idleReleaseMs = options.idleReleaseMs ?? BROWSER_IDLE_RELEASE_MS;
+    if (this.idleReleaseMs > 0) {
+      this.idleReleaseTimer = setInterval(
+        () => void this.releaseIdleBrowsers(),
+        Math.min(IDLE_RELEASE_SWEEP_MS, this.idleReleaseMs),
+      );
+      this.idleReleaseTimer.unref?.();
+    }
+  }
+
+  /**
+   * Closes every managed browser nobody used for the idle release time.
+   * Each keeps its working directory and a recoverable working-runtime
+   * receipt, exactly as a controller shutdown leaves it, except that its
+   * browser process stops instead of running on. The session leaves this
+   * controller; its next request finds it missing, and the control plane
+   * recovers it from that directory: the same profile, relaunched with its
+   * last tabs. Returns the released browser session ids.
+   */
+  async releaseIdleBrowsers(): Promise<string[]> {
+    if (this.closed || this.idleReleaseMs <= 0) return [];
+    const idleBefore = this.now() - this.idleReleaseMs;
+    const released: string[] = [];
+    for (const runtime of [...this.sessions.values()]) {
+      if (!idleReleasable(runtime, idleBefore)) continue;
+      const browserSessionId = runtime.options.browserSessionId;
+      if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
+        continue;
+      runtime.lifecycle = "ending";
+      const ending = (async () => {
+        await runtime.controller.waitForIdle();
+        await this.disposeRuntime(runtime, false, false, true, true);
+      })();
+      this.ending.set(browserSessionId, ending);
+      try {
+        await ending;
+        if (this.sessions.get(browserSessionId) === runtime) this.sessions.delete(browserSessionId);
+        released.push(browserSessionId);
+      } catch (error) {
+        console.warn("browserd.idle_release_failed", {
+          browserSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (this.ending.get(browserSessionId) === ending) this.ending.delete(browserSessionId);
+      }
+    }
+    return released;
   }
 
   private async createEphemeralDriver(
@@ -1591,6 +1657,8 @@ export class BrowserSupervisor {
   async close(): Promise<void> {
     if (this.closePromise) return await this.closePromise;
     this.closed = true;
+    if (this.idleReleaseTimer) clearInterval(this.idleReleaseTimer);
+    this.idleReleaseTimer = null;
     this.closePromise = this.performClose();
     return await this.closePromise;
   }
@@ -1979,6 +2047,7 @@ export class BrowserSupervisor {
         recovery: null,
         presence: new Set(),
         recording: null,
+        lastUsedAt: this.now(),
       };
       runtime.controller = this.createController(runtime, driver);
       // Startup and tab restoration are a use of the browser: nothing may park
@@ -2438,6 +2507,7 @@ export class BrowserSupervisor {
     await this.bindPresence(runtime, hold);
     return () => {
       if (!runtime.presence.delete(hold)) return;
+      runtime.lastUsedAt = this.now();
       hold.driver = null;
       hold.release();
     };
@@ -2850,6 +2920,7 @@ export class BrowserSupervisor {
         "browser request targets a stale controller generation",
       );
     }
+    runtime.lastUsedAt = this.now();
     return runtime;
   }
 
@@ -2858,6 +2929,8 @@ export class BrowserSupervisor {
     removeState: boolean,
     driverAlreadyClosed = false,
     suspendForShutdown = false,
+    /** Suspend recoverably but stop the browser too (idle release). */
+    stopSuspendedBrowser = false,
   ): Promise<void> {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
@@ -2884,7 +2957,7 @@ export class BrowserSupervisor {
       // A controller restart (upgrade, crash recovery) must not cost the page
       // state an agent is working in. Release only this controller's transport;
       // the successor adopts the same live browser from the suspended receipt.
-      keepBrowserRunning = runtime.driver.detach !== undefined;
+      keepBrowserRunning = !stopSuspendedBrowser && runtime.driver.detach !== undefined;
     } else {
       this.retireWorkingRuntime(runtime);
     }
@@ -3233,6 +3306,21 @@ function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
     runtime.workingReceipt.state === "completed" &&
     runtime.workingReceipt.process !== null &&
     runtime.workingReceipt.directoryLaunchAllowed
+  );
+}
+
+/** A managed browser nobody is using, whose stopped profile its next request
+ * can relaunch: no request, live view, recording or recovery in progress. */
+function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
+  return (
+    runtime.options.transport.kind === "managed" &&
+    runtime.lastUsedAt <= idleBefore &&
+    runtime.presence.size === 0 &&
+    runtime.recording?.summary().state !== "recording" &&
+    runtime.recovery === null &&
+    runtime.externalAuthTail === null &&
+    runtime.controller.isIdle() &&
+    hasPreservableWorkingRuntime(runtime)
   );
 }
 
