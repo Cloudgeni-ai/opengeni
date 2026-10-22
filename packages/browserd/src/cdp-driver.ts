@@ -392,6 +392,9 @@ type TargetState = {
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
+  /** Chrome's buffered console messages and exceptions already reported for
+   * this tab, so each on-demand replay appends only what is new. */
+  runtimeDiagnosticKeys: Set<string>;
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
@@ -1344,6 +1347,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "diagnostic limit",
     );
     return await this.withTarget(targetId, async (state) => {
+      if (!kinds || kinds.has("console") || kinds.has("page_error")) {
+        await this.harvestRuntimeDiagnostics(state);
+      }
       const available = state.diagnosticEntries.filter(
         (entry) => entry.sequence > afterSequence && (!kinds || kinds.has(entry.kind)),
       );
@@ -2559,8 +2565,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     try {
       const initialized = (async () => {
         await Promise.all([
+          // Runtime stays disabled: a page can detect an enabled Runtime
+          // domain (it serializes every console argument), the common
+          // automation tell. Console messages and exceptions are read on
+          // demand instead (harvestRuntimeDiagnostics).
           connection.send("Page.enable", {}, { sessionId }),
-          connection.send("Runtime.enable", {}, { sessionId }),
           connection.send("DOM.enable", {}, { sessionId }),
           connection.send("Accessibility.enable", {}, { sessionId }),
           connection.send("Network.enable", {}, { sessionId }),
@@ -2632,6 +2641,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       },
       diagnosticEntries: [],
       diagnosticSequence: 0,
+      runtimeDiagnosticKeys: new Set(),
       inflightRequests: new Set(),
       networkTrackingOverflow: false,
       failedRequests: new Set(),
@@ -2685,42 +2695,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "Page.frameStoppedLoading",
         (event) => {
           if (event.params.frameId === state.frame.id) state.navigationPending = false;
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Runtime.consoleAPICalled",
-        (event) => {
-          const level = consoleLevel(event.params.type);
-          if (level === "error") state.diagnostics.consoleErrorCount += 1;
-          this.appendDiagnostic(state, {
-            kind: "console",
-            level,
-            message: consoleMessage(event.params.args, (text) => this.typedSecrets.redact(text)),
-            url: null,
-            method: null,
-            status: null,
-            filename: null,
-          });
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Runtime.exceptionThrown",
-        (event) => {
-          state.diagnostics.pageErrorCount += 1;
-          const details = isRecord(event.params.exceptionDetails)
-            ? event.params.exceptionDetails
-            : {};
-          this.appendDiagnostic(state, {
-            kind: "page_error",
-            level: "error",
-            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
-            url: boundedUrlField(details.url),
-            method: null,
-            status: null,
-            filename: null,
-          });
         },
         sessionId,
       ),
@@ -3333,10 +3307,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof attached.sessionId !== "string") {
         throw new Error("browser could not attach its hidden metadata target");
       }
-      await Promise.all([
-        connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
-        connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
-      ]);
+      await connection.send("Page.enable", {}, { sessionId: attached.sessionId });
       if (this.userAgentMetadataSource === "intercepted_local") {
         await navigateToInterceptedMetadataDocument(connection, attached.sessionId);
       } else {
@@ -6408,14 +6379,110 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /**
+   * Append the tab's console messages and uncaught exceptions that were not
+   * reported yet. The page session never keeps Runtime enabled, because a page
+   * can detect that. Chrome buffers these messages per document and replays
+   * them all, before answering, when Runtime is enabled; a brief enable, then
+   * disable, reads them only when the caller asks for diagnostics.
+   */
+  private async harvestRuntimeDiagnostics(state: TargetState): Promise<void> {
+    const connection = await this.ensureConnection();
+    const sessionId = state.sessionId;
+    const replayed: Array<
+      | { kind: "console"; key: string; params: Record<string, unknown> }
+      | { kind: "page_error"; key: string; params: Record<string, unknown> }
+    > = [];
+    const stops = [
+      connection.on(
+        "Runtime.consoleAPICalled",
+        (event) => {
+          const params = event.params;
+          replayed.push({
+            kind: "console",
+            key: `console:${String(params.executionContextId)}:${String(params.timestamp)}:${String(params.type)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Runtime.exceptionThrown",
+        (event) => {
+          const params = event.params;
+          const details = isRecord(params.exceptionDetails) ? params.exceptionDetails : {};
+          replayed.push({
+            kind: "page_error",
+            key: `exception:${String(details.exceptionId)}:${String(params.timestamp)}`,
+            params,
+          });
+        },
+        sessionId,
+      ),
+    ];
+    try {
+      // The replay arrives before the enable response on the same session.
+      await connection.send("Runtime.enable", {}, { sessionId });
+    } finally {
+      for (const stop of stops) stop();
+      void connection.send("Runtime.disable", {}, { sessionId }).catch(() => undefined);
+    }
+    if (this.states.get(state.targetId) !== state) return;
+    const current = new Set<string>();
+    for (const message of replayed) {
+      current.add(message.key);
+      if (state.runtimeDiagnosticKeys.has(message.key)) continue;
+      const occurredAt = runtimeTimestamp(message.params.timestamp);
+      if (message.kind === "console") {
+        const level = consoleLevel(message.params.type);
+        if (level === "error") state.diagnostics.consoleErrorCount += 1;
+        this.appendDiagnostic(
+          state,
+          {
+            kind: "console",
+            level,
+            message: consoleMessage(message.params.args, (text) => this.typedSecrets.redact(text)),
+            url: null,
+            method: null,
+            status: null,
+            filename: null,
+          },
+          occurredAt,
+        );
+      } else {
+        state.diagnostics.pageErrorCount += 1;
+        const details = isRecord(message.params.exceptionDetails)
+          ? message.params.exceptionDetails
+          : {};
+        this.appendDiagnostic(
+          state,
+          {
+            kind: "page_error",
+            level: "error",
+            message: exceptionMessage(details, (text) => this.typedSecrets.redact(text)),
+            url: boundedUrlField(details.url),
+            method: null,
+            status: null,
+            filename: null,
+          },
+          occurredAt,
+        );
+      }
+    }
+    // Chrome drops a document's messages with the document, so anything it no
+    // longer replays cannot come back; keep only the keys it still holds.
+    state.runtimeDiagnosticKeys = current;
+  }
+
   private appendDiagnostic(
     state: TargetState,
     entry: Omit<BrowserDiagnosticEntry, "sequence" | "occurredAt">,
+    occurredAt: string = this.timestamp(),
   ): void {
     const parsed = BrowserDiagnosticEntry.parse({
       ...entry,
       sequence: ++state.diagnosticSequence,
-      occurredAt: this.timestamp(),
+      occurredAt,
     });
     state.diagnosticEntries.push(parsed);
     if (state.diagnosticEntries.length > INTERACTION_MAX_DIAGNOSTIC_ENTRIES) {
@@ -7412,6 +7479,13 @@ function browserDialog(params: Record<string, unknown>, openedAt: string): Brows
     defaultPrompt: boundedTextField(params.defaultPrompt, 32_768) ?? "",
     openedAt,
   });
+}
+
+/** A CDP Runtime timestamp (milliseconds since the epoch) as an ISO time. */
+function runtimeTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function consoleLevel(value: unknown): BrowserDiagnosticEntry["level"] {

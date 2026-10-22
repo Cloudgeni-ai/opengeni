@@ -1209,16 +1209,19 @@ e2e(
           locator: { kind: "role", role: "button", name: "Log failure" },
         }),
       );
-      expect(logged.diagnostics.consoleErrorCount).toBe(1);
+      // Runtime stays disabled, so console messages are read only on request.
+      expect(logged.diagnostics.consoleErrorCount).toBe(0);
       const debug = await driver.debug(logged.target.id, { kinds: ["console"] });
       expect(debug.entries.at(-1)).toMatchObject({
         kind: "console",
         level: "error",
         message: "Fixture console failure",
       });
+      // Chrome replays its whole buffer on every read; nothing is reported twice.
       expect(
         (await driver.debug(logged.target.id, { afterSequence: debug.cursor })).entries,
       ).toEqual([]);
+      expect((await driver.observe(logged.target.id)).diagnostics.consoleErrorCount).toBe(1);
 
       const asking = await driver.dispatch(
         command(logged, {
