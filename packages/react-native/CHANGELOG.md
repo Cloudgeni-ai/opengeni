@@ -1,5 +1,57 @@
 # @opengeni/react-native
 
+## 4.4.1
+
+### Minor Changes
+
+- e3c07bc: Embedded chats can now explain why a message didn't start. When a shared chat still runs on someone else's personal computer and another participant's message is held, `SessionStartNotice` from `@opengeni/react/session-ui` says why in the reader's language, lists the machines they're allowed to use, and offers one recheck once the chat has moved. The saved message is kept and is never sent twice, and access rules are unchanged. `useSessionStart` and the matching model helpers are available from `@opengeni/react/session` for custom layouts, and all text comes from the new `sessionAdmission.*` message keys. The React Native session screen shows the same explanation and machine choices. The hosted app now uses these same components.
+- 0043cc8: Native chat Markdown can now draw the host's own links, like `renderLink` on the web. Pass `renderLink` to `createWebMarkdownRenderer` to draw links with your own scheme (`myapp:order/42`), in-app paths or web URLs yourself; return `undefined` to keep the default link. A link that is the only content of its paragraph or list item arrives with `standalone: true` and may be drawn as a block, such as a card. Inline links sit inside text, so draw them with `Text`. Opengeni object links (`artifact:`, `sandbox:`) still go to `onOpenGeniLink`.
+
+### Patch Changes
+
+- 996e6b4: On the React Native session screen, Try again on a message that couldn't start shows as busy while it rechecks again, and a second tap before the recheck finishes no longer sends a second request.
+- Updated dependencies [dd61c8d]
+- Updated dependencies [efd4df0]
+- Updated dependencies [4ff99bd]
+- Updated dependencies [23dfcb2]
+- Updated dependencies [b800b7f]
+- Updated dependencies [e697879]
+- Updated dependencies [a506901]
+- Updated dependencies [dfa5df0]
+- Updated dependencies [565253c]
+- Updated dependencies [11e56da]
+- Updated dependencies [2a2acb2]
+- Updated dependencies [343c1aa]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [e3c07bc]
+- Updated dependencies [182eff6]
+- Updated dependencies [926e0b8]
+- Updated dependencies [73132c4]
+- Updated dependencies [85c0948]
+- Updated dependencies [67ce6ff]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [b81d318]
+- Updated dependencies [7157f58]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [201c380]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [486abe4]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [67882a3]
+- Updated dependencies [84c8b32]
+- Updated dependencies [b7943f4]
+- Updated dependencies [886dc39]
+- Updated dependencies [f7f7987]
+- Updated dependencies [84b1a18]
+  - @opengeni/react@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

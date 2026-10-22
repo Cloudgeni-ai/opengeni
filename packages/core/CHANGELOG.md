@@ -1,5 +1,71 @@
 # @opengeni/core
 
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+- 926e0b8: The Excel add-in now has its own Capabilities tile, "Microsoft Excel". The tile explains the add-in, shows the three setup steps and links to the deployment's install page. It uses the deployment's own add-in name and install URL (`OPENGENI_OFFICE_ADDIN_NAME`, `OPENGENI_OFFICE_ADDIN_INSTALL_URL`).
+
+  Agents can find it with `capability_catalog_search` (excel, spreadsheet, xlsx) and post its install card with `capability_authorization_request` (`api:excel-addin`). The card reports ready when the person already has a workbook open with the add-in. `excel_run` and the spreadsheets Skill tell agents to offer the add-in when someone works on a spreadsheet and no workbook is connected. `excelAddin`, `excelAddinCatalogItem` and `EXCEL_ADDIN_CAPABILITY_ID` are exported from `@opengeni/core`.
+
+### Patch Changes
+
+- 6930cf0: An agent in a private chat can again save files to that chat's cloud workspace through the API, for example when stopping a browser recording. The write is now attributed to the person who started the chat instead of the internal worker identity, which the private-chat owner check rejected.
+- 2677b14: Read router-history presence for session response pages in one scoped transaction instead of one transaction per session. Preserve the indexed history predicate and existing effective-tool response fields.
+- 005c442: Resolve each distinct retained model once per catalog request. Session pages with repeated Claude models no longer repeat the same scoped database read for every row; catalog contents, first-seen ordering and fresh reads on later requests are unchanged.
+- 9c25110: New sessions mark Knowledge search as eager on the `docs` server only when that server actually offers `knowledge_search`. A deployment that defines its own `docs` server with other tools no longer gets an eager entry for a tool the server doesn't have.
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [d948555]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [7c8a57d]
+- Updated dependencies [9ba6486]
+- Updated dependencies [926e0b8]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [a9a54f4]
+- Updated dependencies [f1a619f]
+- Updated dependencies [9979e45]
+- Updated dependencies [d295544]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [81e817c]
+- Updated dependencies [2581842]
+- Updated dependencies [ea21aa0]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [9850b5b]
+- Updated dependencies [84b1a18]
+- Updated dependencies [aa280c9]
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/network@4.4.0
+
 ## 4.3.1
 
 ### Patch Changes
