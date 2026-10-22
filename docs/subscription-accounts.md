@@ -173,6 +173,15 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   their reach and their one on/off switch (SUB-OWN-01, D-50). Verification:
   `packages/db/test/subscription-core-m2-postgres.test.ts` (provider switch
   overrides and SQL/TypeScript parity).
+- **SUB-SET-07** The organization's account lists say who each shared
+  connection reaches (`reach`: its owning workspace, every workspace, a list
+  of workspaces, Personal workspaces, or a number of chosen people), so an
+  administrator's overview shows every account once, with its owner, without
+  a read per account or per workspace. Verification:
+  `packages/db/test/helpers/subscription-core-conformance.ts` and
+  `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts` (reach of
+  organization and workspace connections) and
+  `apps/web/src/components/models/workspace-models-page.test.tsx`.
 
 ### Eligibility
 

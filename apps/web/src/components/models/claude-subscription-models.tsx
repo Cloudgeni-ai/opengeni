@@ -169,10 +169,7 @@ export function ClaudeAccountRows({
       pool={claude}
       organization={organization}
       places={places}
-      provider="claude_subscription"
-      kind="claude_subscription"
       providerName="Claude"
-      plan={claudePlan}
       renderRow={(account, onOpen, scopeLabel) => (
         <ClaudeRow
           claude={claude}

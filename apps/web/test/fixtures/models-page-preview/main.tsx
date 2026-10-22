@@ -43,7 +43,10 @@ const navigate = async (options: { search?: unknown }) => {
   for (const listener of listeners) listener();
 };
 const location = () => current;
-const workspaces = [{ id: "design", name: "Design", kind: "shared" } as never];
+const workspaces = [
+  { id: "design", name: "Design", kind: "shared" } as never,
+  ...(params.get("many") === "1" ? [{ id: "research", name: "Research", kind: "shared" } as never] : []),
+];
 const navigation: NavigationHost = {
   useNavigate: () => navigate,
   useLocation: () => location(),

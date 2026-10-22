@@ -12726,6 +12726,7 @@
         "$.lastError": "string! null",
         "$.lastRefreshAt": "string! null",
         "$.plan": "string! null",
+        "$.reach": "ref(SubscriptionAccountReach)?",
         "$.scope": "ref(VariableSetScope)!",
         "$.status": "enum!=[\"\\\"active\\\"\",\"\\\"disabled\\\"\",\"\\\"error\\\"\",\"\\\"needs_relogin\\\"\"]",
         "$.subject": "string!",
@@ -26576,6 +26577,20 @@
         "$.turn": "ref(SessionTurn)!"
       }
     },
+    "SubscriptionAccountReach": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.everyWorkspace": "boolean!",
+        "$.ownerWorkspaceId": "string! null",
+        "$.people": "integer! null",
+        "$.personalWorkspaces": "boolean!",
+        "$.workspaceIds": "array!",
+        "$.workspaceIds[]": "string"
+      }
+    },
     "SubscriptionPoolSettings": {
       "io": [
         "output"
@@ -32394,6 +32409,7 @@
       "SubmitComposerDraftResponse": "type",
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
+      "SubscriptionAccountReach": "type",
       "SubscriptionAccountSummary": "type",
       "SubscriptionPlan": "type",
       "SubscriptionPlanCatalog": "type",

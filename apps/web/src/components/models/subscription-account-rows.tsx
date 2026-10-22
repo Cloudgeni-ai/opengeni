@@ -1,19 +1,13 @@
 import { Fragment, type ReactNode } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useConnectionAccess } from "@/components/connection-access-settings";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRowSkeleton } from "@opengeni/react/ui/list-row";
 import { RowButton } from "@opengeni/react/ui/page-actions";
-import {
-  NOT_IN_USE,
-  organizationReachLabel,
-} from "@opengeni/react/app/components/models/models-ui";
-import { reachesWorkspace } from "./organization-codex-models";
-import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
+import { accountReachLabel } from "@opengeni/react/app/components/models/models-ui";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 import type { SubscriptionAccountPlaces } from "./subscription-account-detail";
 import {
   splitSubscriptionPool,
-  subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
 
@@ -32,49 +26,35 @@ export type SubscriptionRowsPool<T extends Account> = {
 export type OrganizationSubscriptionRows<T extends Account> = {
   pool: SubscriptionRowsPool<T>;
   workspace: { id: string; personal: boolean };
+  /** A workspace's name in the organization, for an account's tag. */
+  workspaceName: (workspaceId: string) => string | undefined;
   openAccount: (id: string) => void;
 };
-export function subscriptionListedCount<T extends Account>(
-  pool: SubscriptionRowsPool<T>,
-  organization: OrganizationSubscriptionRows<T> | null = null,
-) {
+export function subscriptionListedCount<T extends Account>(pool: SubscriptionRowsPool<T>) {
   if (pool.unavailable || pool.loading) return 0;
   if (pool.loadError || pool.pending) return 1;
   const { shared, own } = splitSubscriptionPool(pool);
-  return (
-    own.length +
-    (organization
-      ? organization.pool.loadError
-        ? 1
-        : organization.pool.accounts.length
-      : shared.length)
-  );
+  return own.length + shared.length;
 }
 
-/** The same own/inherited/set-aside account rows at workspace and organization scope. */
+/** The same own and organization account rows at workspace and organization scope. */
 export function SubscriptionAccountPoolRows<T extends Account>({
   pool,
   organization = null,
   places,
-  provider,
-  kind,
   providerName,
-  plan,
   renderRow,
   pendingRow,
 }: {
   pool: SubscriptionRowsPool<T>;
   organization?: OrganizationSubscriptionRows<T> | null;
   places: SubscriptionAccountPlaces;
-  provider: "supergrok" | "claude_subscription";
-  kind: "supergrok" | "claude_subscription";
   providerName: string;
-  plan: (account: T) => string;
   renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
   pendingRow?: ReactNode;
 }) {
   if (pool.unavailable) return null;
-  if (pool.loading || organization?.pool.loading) return <ListRowSkeleton count={1} />;
+  if (pool.loading) return <ListRowSkeleton count={1} />;
   if (pool.loadError)
     return (
       <li className="col-span-full list-none px-3 py-3">
@@ -90,45 +70,36 @@ export function SubscriptionAccountPoolRows<T extends Account>({
   // The organization's accounts serving here are listed once, as the
   // organization's (in use), never again as this workspace's own.
   const { shared, own } = splitSubscriptionPool(pool);
+  // Every account that reaches this workspace, each once. For people who
+  // manage the organization's accounts, an organization account's tag says who
+  // else it reaches (once the organization's list is read; until then it waits
+  // in place), and the row opens its organization page.
+  const listed =
+    organization && !organization.pool.loading && !organization.pool.loadError
+      ? new Map(organization.pool.accounts.map((account) => [account.id, account]))
+      : null;
   return (
     <>
-      {organization?.pool.loadError ? (
-        <li className="col-span-full list-none px-3 py-3">
-          <ErrorMessage
-            variant="inline"
-            title={`Couldn't load shared ${providerName} accounts.`}
-            action={
-              <RowButton onClick={() => void organization.pool.refresh()}>Try again</RowButton>
-            }
-          >
-            {organization.pool.loadError}
-          </ErrorMessage>
-        </li>
-      ) : organization ? (
-        organization.pool.accounts.map((account) => {
-          const live = shared.find((candidate) => candidate.id === account.id);
-          return (
-            <SharedRow
-              key={account.id}
-              account={live ?? account}
-              inUse={!!live}
-              ownInUse={own.length > 0}
-              organization={organization}
-              places={places}
-              provider={provider}
-              kind={kind}
-              plan={plan}
-              renderRow={renderRow}
-            />
-          );
-        })
-      ) : (
-        shared.map((account) => (
+      {shared.map((account) => {
+        const organizationAccount = listed?.get(account.id);
+        const scopeLabel = !organization ? undefined : organizationAccount?.reach ? (
+          accountReachLabel(places.scope, organizationAccount.reach, organization.workspaceName)
+        ) : organization.pool.loading ? (
+          <ModelSettingsPlaceholder />
+        ) : undefined;
+        return (
           <Fragment key={account.id}>
-            {renderRow(account, () => places.openAccount(account.id))}
+            {renderRow(
+              account,
+              () =>
+                organization && organizationAccount
+                  ? organization.openAccount(account.id)
+                  : places.openAccount(account.id),
+              scopeLabel,
+            )}
           </Fragment>
-        ))
-      )}
+        );
+      })}
       {own.map((account) => (
         <Fragment key={account.id}>
           {renderRow(account, () => places.openAccount(account.id))}
@@ -136,73 +107,5 @@ export function SubscriptionAccountPoolRows<T extends Account>({
       ))}
       {pendingRow}
     </>
-  );
-}
-function SharedRow<T extends Account>({
-  account,
-  inUse,
-  ownInUse,
-  organization,
-  places,
-  provider,
-  kind,
-  plan,
-  renderRow,
-}: {
-  account: T;
-  inUse: boolean;
-  ownInUse: boolean;
-  organization: OrganizationSubscriptionRows<T>;
-  places: SubscriptionAccountPlaces;
-  provider: "supergrok" | "claude_subscription";
-  kind: "supergrok" | "claude_subscription";
-  plan: (account: T) => string;
-  renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
-}) {
-  const access = useConnectionAccess({
-    client: organization.pool.client,
-    organizationId: organization.pool.organizationId,
-    kind,
-    connectionId: account.id,
-  });
-  const scopeLabel = organizationReachLabel(places.scope, access.data);
-  if (inUse) return renderRow(account, () => organization.openAccount(account.id), scopeLabel);
-  const reaches = reachesWorkspace(access.data, organization.workspace);
-  // Unread, its reach and use here are unknown: no guessed tag or usage, and a
-  // failed read says so in the tag's place, with the way to read it again.
-  const failed = Boolean(access.error) && !access.data;
-  return (
-    <SubscriptionAccountRow
-      provider={provider}
-      title={subscriptionAccountName(account)}
-      email={account.email}
-      meta={
-        failed
-          ? ["Couldn't check who can use it", plan(account)]
-          : !access.data
-            ? [plan(account)]
-            : [
-                scopeLabel,
-                // Before the plan, so it stays readable on a phone.
-                reaches === false ? "Not available here" : ownInUse ? "Set aside" : null,
-                plan(account),
-              ]
-      }
-      cells={access.data ? { usage: NOT_IN_USE } : undefined}
-      control={
-        failed ? (
-          <RowButton
-            aria-label={`Try again for ${subscriptionAccountName(account)}`}
-            onClick={() => void access.reload()}
-          >
-            Try again
-          </RowButton>
-        ) : undefined
-      }
-      indicator={
-        account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-      }
-      onOpen={() => organization.openAccount(account.id)}
-    />
   );
 }

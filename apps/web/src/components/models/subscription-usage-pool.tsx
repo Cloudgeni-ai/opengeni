@@ -1,7 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { RelativeTime, formatShortTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
-import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { UsageMeter, UsageReadout } from "@opengeni/react/ui/usage-meter";
 import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;
@@ -117,6 +117,94 @@ export function SubscriptionUsagePoolView({
 }
 
 /** Shares one retained, caller-scoped read across all provider sections. */
+/** One provider's pooled limits for an organization or workspace, from the one shared read. */
+export function useSubscriptionUsagePool(
+  client: OpenGeniBrowserClient,
+  scope: "organization" | "workspace",
+  id: string | undefined,
+  provider: SubscriptionUsagePool["provider"],
+): { pool: SubscriptionUsagePool | null; loading: boolean; error: boolean } {
+  const query = useSharedQuery(
+    client,
+    [...SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX, scope, id ?? ""],
+    () =>
+      scope === "organization"
+        ? client.getOrganizationSubscriptionUsagePools(id!)
+        : client.getWorkspaceSubscriptionUsagePools(id!),
+    { staleTimeMs: 60_000, enabled: Boolean(id) },
+  );
+  return {
+    pool: query.data?.pools.find((item) => item.provider === provider) ?? null,
+    loading: Boolean(id) && query.loading,
+    error: Boolean(query.error),
+  };
+}
+
+/**
+ * A provider's heading in an accounts list, with everything worth a glance:
+ * how many accounts, how many are on or need reconnecting, and what is left
+ * of the pooled weekly limit with the forecast. Its height is fixed while
+ * anything loads, so the rows below never move.
+ */
+export function ProviderGroupHeading({
+  title,
+  facts,
+  pool,
+}: {
+  title: string;
+  /** "12 accounts", "9 on", "1 needs reconnecting"; null while unknown. */
+  facts: readonly (string | null)[] | null;
+  /** The pooled limits, when this provider reports them. */
+  pool?: { pool: SubscriptionUsagePool | null; loading: boolean } | undefined;
+}) {
+  const minuteNow = useMinuteNow();
+  const weekly = pool?.pool?.windows.find((item) => item.id === "weekly") ?? null;
+  const shown = weekly && weekly.accounts.length > 0 ? weekly : null;
+  const forecast =
+    shown && shown.remainingPercent !== null
+      ? poolForecastSentence(shown.forecast, minuteNow)
+      : null;
+  const words = facts?.filter((fact): fact is string => Boolean(fact)) ?? null;
+  return (
+    <li className="col-span-full list-none px-3 pt-6 pb-3 first:pt-2">
+      <div className="flex min-h-10 items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h3 className="m-0 text-sm font-semibold text-fg">{title}</h3>
+          <p className="m-0 mt-0.5 min-h-4 text-xs leading-4 text-fg-muted">
+            {words === null ? (
+              <span
+                aria-hidden="true"
+                className="inline-block h-3 w-40 rounded bg-surface-3 align-middle motion-safe:animate-pulse"
+              />
+            ) : (
+              words.join(" · ")
+            )}
+          </p>
+          {forecast ? (
+            <p className="m-0 mt-0.5 text-xs leading-4 text-fg-subtle">{forecast}</p>
+          ) : pool?.loading ? (
+            // The forecast's lines are held while the limits load, so rows stay
+            // put: two on a phone, where the sentence wraps, one on wider screens.
+            <p aria-hidden="true" className="m-0 mt-0.5 flex h-8 flex-col justify-around sm:h-4">
+              <span className="block h-3 w-56 max-w-full rounded bg-surface-3 motion-safe:animate-pulse" />
+              <span className="block h-3 w-32 rounded bg-surface-3 motion-safe:animate-pulse sm:hidden" />
+            </p>
+          ) : null}
+        </div>
+        {pool && (pool.loading || shown) ? (
+          <UsageReadout
+            className="shrink-0 pt-0.5"
+            percent={shown?.remainingPercent ?? null}
+            loading={pool.loading}
+            window="this week"
+            fallback="No limits reported yet"
+          />
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
 export function ConnectedSubscriptionUsagePool({
   client,
   scope,

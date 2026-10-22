@@ -1,7 +1,10 @@
 // Synthetic organization "Acme" with one shared workspace, "Design", seen by
 // an organization owner. `openai=1` and `azure=1` start those organization keys
-// connected. Every write lands in `window.modelsReceipts` with keys redacted.
+// connected. `many=1` gives the organization twelve Codex and eleven Claude
+// accounts with mixed owners, reach and status, and a second workspace,
+// "Research". Every write lands in `window.modelsReceipts` with keys redacted.
 const params = new URLSearchParams(window.location.search);
+const many = params.get("many") === "1";
 const receipts: unknown[] = [];
 (window as unknown as { modelsReceipts: unknown[] }).modelsReceipts = receipts;
 
@@ -61,6 +64,116 @@ const openPolicy = {
   version: 1,
 };
 
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const everyone = {
+  ownerWorkspaceId: null,
+  everyWorkspace: true,
+  workspaceIds: [],
+  personalWorkspaces: true,
+  people: null,
+};
+const reaches = [
+  everyone,
+  everyone,
+  { ...everyone, everyWorkspace: false, personalWorkspaces: false, workspaceIds: ["design"] },
+  { ...everyone, ownerWorkspaceId: "research", everyWorkspace: false, workspaceIds: ["research"] },
+  { ...everyone, everyWorkspace: false, people: 3 },
+  { ...everyone, personalWorkspaces: false },
+];
+const names = ["Ada", "Bo", "Cleo", "Dag", "Eli", "Frida", "Gus", "Hedda", "Ivar", "Juno", "Kai", "Liv"];
+const manyCodex = names.map((name, index) => ({
+  id: id(index + 1),
+  source: "organization",
+  label: `${name}'s plan`,
+  email: `${name.toLowerCase()}@acme.example`,
+  plan: index % 3 === 0 ? "pro" : "plus",
+  status: index === 4 ? "needs_relogin" : "active",
+  active: index === 0,
+  allocatorEnabled: index < 8,
+  allocatorVersion: 1,
+  appsDesignated: false,
+  canEnableApps: false,
+  reach: reaches[index % reaches.length],
+  weekly: { used: 10 + index * 7, limit: 100, remaining: 90 - index * 7, percent: 10 + index * 7, resetAt: null, resetAfterSeconds: 86_400 * 3, limitWindowSeconds: 604_800 },
+}));
+const manyClaude = names.slice(0, 11).map((name, index) => ({
+  id: id(100 + index),
+  scope: "organization",
+  subject: "acme",
+  email: `${name.toLowerCase()}.claude@acme.example`,
+  label: `${name} Max`,
+  plan: index % 2 === 0 ? "claude_max" : "claude_pro",
+  status: index === 6 ? "needs_relogin" : "active",
+  active: index === 0,
+  expiresAt: null,
+  lastRefreshAt: now,
+  lastError: null,
+  allocatorEnabled: index < 7,
+  allocatorVersion: 1,
+  allocatorUpdatedAt: null,
+  version: 1,
+  reach: reaches[(index + 2) % reaches.length],
+}));
+const pool = (provider: "codex" | "claude", accounts: { id: string; label: string }[]) => ({
+  provider,
+  observedAt: now,
+  windows: [
+    {
+      id: "weekly",
+      remainingPercent: provider === "codex" ? 58 : 71,
+      accounts: accounts.map((account, index) => ({
+        id: account.id,
+        label: account.label,
+        remainingPercent: 90 - index * 6,
+        resetsAt: null,
+        weight: 1,
+        weightBasis: "plan_estimate",
+        observedAt: now,
+      })),
+      forecast: {
+        kind: "unused",
+        basis: "last 14 days",
+        runsOutAt: null,
+        nextResetAt: "2026-10-24T12:00:00.000Z",
+        unusedPercent: 22,
+        lowestPercent: 40,
+        historyDays: 14,
+      },
+    },
+  ],
+});
+const organizationPools = many
+  ? {
+      pools: [
+        pool("codex", manyCodex.slice(0, 8).map((account) => ({ id: account.id, label: account.label }))),
+        pool("claude", manyClaude.slice(0, 7).map((account) => ({ id: account.id, label: account.label ?? "" }))),
+      ],
+      checkedAt: now,
+    }
+  : { pools: [] };
+const codexOverview = (index: number) => ({
+  accountId: id(index + 1),
+  usage: {
+    source: "provider",
+    fetchedAt: now,
+    stale: false,
+    error: null,
+    value: {
+      status: "ok",
+      planType: null,
+      fiveHour: null,
+      weekly: manyCodex[index]!.weekly,
+      limitReached: false,
+      fetchedAt: now,
+    },
+  },
+  resetCredits: { source: "none", fetchedAt: null, stale: false, error: null, detailState: "unknown", detailsComplete: false, availableCount: null, credits: [] },
+  canRedeem: false,
+  canResumeRedemption: false,
+  redemptions: [],
+  redemptionAccess: { ownership: "unowned", canClaimUnownedViaReconnect: false },
+});
+
 const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   listCodexAccounts: async () => ({
     ...emptyPool,
@@ -75,7 +188,20 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
     },
   }),
   codexOverview: async () => ({ accounts: {} }),
-  requestJson: async (method: string) => (method === "GET" ? emptyPool : {}),
+  requestJson: async (method: string, path: string) => {
+    if (method !== "GET") return {};
+    if (!many) return emptyPool;
+    if (path.endsWith("/codex/accounts")) {
+      return { ...emptyPool, accounts: manyCodex, activeAccountId: manyCodex[0]!.id };
+    }
+    const overview = /\/codex\/accounts\/([^/]+)\/overview$/.exec(path);
+    if (overview) {
+      // Live usage arrives a little after the list, as it does for real.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return codexOverview(manyCodex.findIndex((account) => account.id === overview[1]));
+    }
+    return emptyPool;
+  },
   getModelConnectionAccess: async () => ({
     policy: openPolicy,
     workspaces: [{ id: "design", name: "Design" }],
@@ -87,7 +213,10 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   listOrganizationSuperGrokAccounts: async () => emptyPool,
   listConnections: async () => [],
   listClaudeSubscriptionAccounts: async () => ({ ...emptyPool, source: "workspace" }),
-  listOrganizationClaudeSubscriptionAccounts: async () => ({ ...emptyPool, source: "organization" }),
+  listOrganizationClaudeSubscriptionAccounts: async () =>
+    many
+      ? { ...emptyPool, accounts: manyClaude, activeAccountId: manyClaude[0]!.id, source: "organization" }
+      : { ...emptyPool, source: "organization" },
   listWorkspaceGatewayCustomModels: async () => ({ models: [] }),
   listWorkspaceOpenRouterCustomModels: async () => ({ models: [] }),
   listWorkspaceOpperCustomModels: async () => ({ models: [] }),
@@ -119,10 +248,16 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   getOrganizationAdministrationOverview: async () => ({
     organization: { id: "acme", name: "Acme" },
     roles: [],
-    workspaces: [{ id: "design", name: "Design" }],
+    workspaces: [
+      { id: "design", name: "Design" },
+      ...(many ? [{ id: "research", name: "Research" }] : []),
+    ],
   }),
   getWorkspaceSubscriptionUsagePools: async () => ({ pools: [] }),
-  getOrganizationSubscriptionUsagePools: async () => ({ pools: [] }),
+  getOrganizationSubscriptionUsagePools: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return organizationPools;
+  },
   getBilling: async () => ({ mode: "disabled" }),
   getOrganizationModelProviderConnection: async (_org: string, kind: string) =>
     connections[kind] ?? null,
@@ -192,9 +327,13 @@ const appContext = {
       models: [],
       defaultModel: "codex/sol",
       defaultReasoningEffort: "medium",
+      ...(many ? { claudeSubscriptionEnabled: true } : {}),
     },
     accessContext: null,
-    workspaces: [{ id: "design", name: "Design", settings: {} }],
+    workspaces: [
+      { id: "design", name: "Design", settings: {} },
+      ...(many ? [{ id: "research", name: "Research", settings: {} }] : []),
+    ],
     captureWorkspaceInvocation: () => "preview-transition",
     ownsWorkspaceInvocation: () => true,
     updateWorkspaceSettings: async () => null,
