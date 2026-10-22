@@ -244,7 +244,11 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { consoleLinkResolver } from "../lib/session-artifact-navigation";
+import {
+  consoleLinkResolver,
+  useSessionReferenceResolver,
+} from "../lib/session-artifact-navigation";
+import { OpenGeniLinkProvider } from "../../components/open-geni-links";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -1529,6 +1533,7 @@ function SessionDock(props: SessionDockProps) {
 
 function SessionDockPanel(props: SessionDockProps) {
   const context = useAppContext();
+  const sessionReferences = useSessionReferenceResolver(props.workspaceId);
   // One request sequence for every tab the host opens (an artifact, the Agent
   // tab): the dock ignores a requestId it has already handled.
   const tabRequestSeq = useRef(0);
@@ -1769,7 +1774,9 @@ function SessionDockPanel(props: SessionDockProps) {
             return true;
           }}
         >
-          {props.primary}
+          <OpenGeniLinkProvider resolveLink={sessionReferences}>
+            {props.primary}
+          </OpenGeniLinkProvider>
         </ArtifactLinkBoundary>
       }
       openTabRequest={currentTabRequest}
