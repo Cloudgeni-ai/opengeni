@@ -13,7 +13,7 @@ import {
   type SessionEvent,
   type SubmitComposerDraftResponse,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
@@ -2604,7 +2604,7 @@ export function useComposer(
           policy: policyRef.current ?? undefined,
         },
       );
-      setOptimisticDraftShadow({
+      const shadow = {
         text: next,
         resources: mergeResources(
           restoredResourcesRef.current,
@@ -2612,8 +2612,14 @@ export function useComposer(
         ),
         annotations: annotationsRef.current,
         policy: policyRef.current ?? undefined,
+      };
+      // The text box draws each keystroke from its own state. Whatever hosts
+      // this hook (often the whole conversation) catches up in a transition a
+      // newer keystroke can interrupt, so typing never waits for it to render.
+      startTransition(() => {
+        setOptimisticDraftShadow(shadow);
+        setValue(next);
       });
-      setValue(next);
     },
     [pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
