@@ -813,21 +813,28 @@ const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 /** "operate-smart-home" → "Operate smart home"; "builtin:documents" → "Documents". */
 function readableSkillName(name: string): string | null {
-  const plain = name
-    .trim()
-    .replace(/^builtin:/, "")
-    .replace(/[-_]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!plain || UUID_LIKE.test(name.trim())) return null;
+  const bare = name.trim().replace(/^builtin:/, "");
+  if (!bare || UUID_LIKE.test(bare)) return null;
+  const plain = bare.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!plain) return null;
   return plain.charAt(0).toUpperCase() + plain.slice(1);
 }
 
 /** The `name:` in a returned SKILL.md's front matter, read from raw or JSON-escaped text. */
 function skillNameInOutput(output: unknown): string | null {
   const { text } = unwrapMcpOutput(output);
-  const head = text.slice(0, 4_000).replace(/\\n/g, "\n");
-  const match = /(?:^|\n|")---\s*\n(?:[^\n]*\n)*?name:\s*["']?([^"'\n\\]+?)["']?\s*\n/.exec(head);
+  const head = text
+    .slice(0, 4_000)
+    .replace(/\\r/g, "")
+    .replace(/\r/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"');
+  const start = /(?:^|\n|")---[ \t]*\n/.exec(head);
+  if (!start) return null;
+  const rest = head.slice(start.index + start[0].length);
+  const end = /\n---[ \t]*(?:\n|$)/.exec(rest);
+  const frontMatter = end ? rest.slice(0, end.index + 1) : rest;
+  const match = /(?:^|\n)name:[ \t]*["']?([^"'\n\\]+?)["']?[ \t]*(?:\n|$)/.exec(frontMatter);
   return match?.[1]?.trim() || null;
 }
 

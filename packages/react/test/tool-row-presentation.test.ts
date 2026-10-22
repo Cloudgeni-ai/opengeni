@@ -70,6 +70,28 @@ describe("shared tool row presentation", () => {
     );
     expect(search.title).toBe("Searched skills");
     expect(search.preview).toEqual({ kind: "text", text: "excel" });
+    const preview = (skill: string, content: string) =>
+      toolRowPresentation(
+        englishText,
+        call({
+          name: "skill_read",
+          arguments: { skill },
+          output: {
+            content: [
+              { type: "text", text: JSON.stringify({ files: [{ path: "SKILL.md", content }] }) },
+            ],
+          },
+        }),
+      ).preview;
+    const id = "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53";
+    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\n# Body')).toMatchObject({
+      text: "Quoted name",
+    });
+    expect(preview(id, "---\ndescription: none\n---\nname: body-line\n")).toEqual({
+      kind: "text",
+      text: "Done",
+    });
+    expect(preview(`builtin:${id}`, "no front matter")).toEqual({ kind: "text", text: "Done" });
   });
 
   test("tool_search reads as a lookup with the disclosed tools", () => {
