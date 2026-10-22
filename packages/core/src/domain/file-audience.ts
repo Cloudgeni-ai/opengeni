@@ -101,7 +101,9 @@ export async function fileSourceVisibleToHost(
   if (source.audienceExplicit) return true;
   if (!source.sessionId) return !grantHasAgentAttemptAuthority(grant) || !source.provenanceMissing;
   const live = await getSessionAuthorityProjection(deps.db, fileWorkspaceId, source.sessionId);
-  if (!live) return !grantHasAgentAttemptAuthority(grant); // Humans retain the deletion snapshot.
+  // A host decision cannot be reconstructed after its source chat is deleted.
+  // Without a host policy, humans may still use the stored deletion snapshot.
+  if (!live) return !deps.sessionAuthorization && !grantHasAgentAttemptAuthority(grant);
   try {
     await requireSessionAuthorization(
       deps,

@@ -737,6 +737,16 @@ test("a generated file follows its source chat when the chat becomes private", a
   const [legacySnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${legacyOwnerlessId}`;
   expect(legacySnapshot?.owner).toBe(f.owner.subjectId);
+  const personalPage = await f.call(f.owner, "GET", "/files?scope=personal");
+  expect(personalPage.status).toBe(200);
+  expect(
+    ((await personalPage.json()) as { files: Array<{ id: string; scope: string }> }).files,
+  ).toContainEqual(expect.objectContaining({ id: fileId, scope: "personal" }));
+  const workspacePage = await f.call(f.owner, "GET", "/files?scope=workspace");
+  expect(workspacePage.status).toBe(200);
+  expect(
+    ((await workspacePage.json()) as { files: Array<{ id: string }> }).files.map((file) => file.id),
+  ).not.toContain(fileId);
   const serviceFiles = await getFilesForSubject(db.db, {
     accountId: f.workspace.accountId,
     workspaceId: f.workspace.id,
@@ -819,6 +829,11 @@ test("a generated file follows its source chat when the chat becomes private", a
   expect(explicitSource).toBeDefined();
   expect(await fileMayBeCopiedToWorkspace({ db: db.db }, ownerGrant, explicitSource!)).toBe(true);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
+  const resharedPage = await f.call(f.owner, "GET", "/files?scope=workspace");
+  expect(resharedPage.status).toBe(200);
+  expect(
+    ((await resharedPage.json()) as { files: Array<{ id: string; scope: string }> }).files,
+  ).toContainEqual(expect.objectContaining({ id: fileId, scope: "workspace" }));
   await shared.admin`delete from sessions where id = ${sessionId}`;
   expect((await f.call(f.other, "GET", `/files/${otherOwnedFileId}`)).status).toBe(404);
   expect((await f.call(f.owner, "GET", `/files/${unsharedFileId}`)).status).toBe(200);
@@ -1085,6 +1100,22 @@ test("a host denial also hides a shared source File ID and listing", async () =>
   expect((await secondPage.json()) as { files: Array<{ id: string }> }).toMatchObject({
     files: [{ id: secondVisible }],
   });
+  await shared.admin`delete from sessions where id = ${session.id}`;
+  expect(
+    await fileSourceVisibleToHost(
+      { db: db.db, sessionAuthorization: surfacePort },
+      fileGrant,
+      fileId,
+      f.workspace.id,
+      true,
+      f.other.subjectId,
+      authorizedFile,
+      "http",
+    ),
+  ).toBe(false);
+  expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  expect((await f.call(f.other, "POST", `/files/${fileId}/download-url`)).status).toBe(404);
+  expect((await f.callWithoutHost(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
 });
 
 test("HTTP File attachment reads honor an HTTP-specific host denial", async () => {
@@ -1540,7 +1571,7 @@ test("migration refuses a source whose historical Slack audience was erased", as
   }
 }, 180_000);
 
-test("a shared chat's retained file remains shared after chat deletion", async () => {
+test("a shared chat's inherited File fails closed after chat deletion", async () => {
   const f = await fixture();
   const session = await createSession(db.db, {
     accountId: f.workspace.accountId,
@@ -1577,7 +1608,8 @@ test("a shared chat's retained file remains shared after chat deletion", async (
   expect(source?.file_owner).toBeNull();
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
   await shared.admin`delete from sessions where id = ${session.id}`;
-  expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
+  expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(404);
   const unrelatedAgent = await withSessionRlsActorContext(
     {
       subjectId: "agent:example",

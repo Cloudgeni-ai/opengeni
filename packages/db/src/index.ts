@@ -8162,6 +8162,15 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
+  // Match mapFile's effective scope, including a live source chat that became
+  // private after the File row was created.
+  const personalScope = sql<boolean>`(
+    ${schema.files.privateOwnerSubjectIds} IS NOT NULL OR
+    (NOT ${schema.files.sourceSessionAudienceExplicit} AND
+      ((${schema.files.sourceSessionId} IS NOT NULL AND
+        ${schema.files.sourceSessionOwnerSubjectId} IS NOT NULL)
+        OR ${schema.files.sourceSessionProvenanceMissing}))
+  )`;
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8182,9 +8191,9 @@ export async function listFilesForSubject(
               isNotNull(schema.files.privateOwnerSubjectIds),
             ),
             input.scope === "workspace"
-              ? isNull(schema.files.privateOwnerSubjectIds)
+              ? sql`NOT ${personalScope}`
               : input.scope === "personal"
-                ? isNotNull(schema.files.privateOwnerSubjectIds)
+                ? personalScope
                 : undefined,
             sql`google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, ${schema.files.id})`,
             after

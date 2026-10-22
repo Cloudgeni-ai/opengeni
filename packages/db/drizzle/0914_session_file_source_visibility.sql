@@ -717,15 +717,8 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND (source_session_id IS NULL OR NOT file_source_session_exists_0913(
       account_id, workspace_id, source_session_id)))
-  -- A private File row can be invisible to the session-update trigger's
-  -- invoker. After deletion, never trust its stale shared snapshot.
-  OR (source_session_id IS NOT NULL AND source_session_shared_unrestricted
-    AND (private_owner_subject_ids IS NULL
-      OR (cardinality(private_owner_subject_ids) = 1
-        AND private_owner_subject_ids[1] =
-          nullif(current_setting('opengeni.private_file_owner', true), '')))
-    AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
-    AND NOT file_source_session_exists_0913(account_id, workspace_id, source_session_id))
+  -- A deleted shared source has no live host audience to check. Its inherited
+  -- Files fail closed; a human can explicitly share a File before deletion.
 );
 -- Previous application binaries never set this marker. A maintenance cutover
 -- must not let their unguarded File readers disclose any rows after restart.
