@@ -63,6 +63,7 @@ mock.module("@opengeni/db", () => ({
     allowedModels: null,
     modelCompactionThresholds: {},
     realtimeVoice: {},
+    realtimeDefaultModel: null,
     updatedAt: null,
   }),
   getActiveSessionHistoryItems: async () => [],

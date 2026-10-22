@@ -4,7 +4,7 @@ import type {
   WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/sdk";
 import { RotateCcwIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -32,16 +32,30 @@ import {
    The organization sets defaults on its Models page; a workspace uses them
    for a model until it saves its own for that model. Voice sessions use these
    unless the app embedding Opengeni sets its own.
+
+   The default voice model is the model a new voice conversation starts with
+   until the person picks another one in the voice menu. A workspace's choice
+   wins over its organization's; with neither, voice starts automatically with
+   Codex Live when the person has it, else the first model they can use.
    -------------------------------------------------------------------------- */
 
 const DEFAULT = "__default";
 const PERSON_LANGUAGE = "__person";
 const CUSTOM_VOICE = "__custom";
+const AUTOMATIC = "__automatic";
+const AUTOMATIC_DESCRIPTION =
+  "Codex Live for people who have it connected, otherwise the first voice model they can use.";
 
 const EAGERNESS_LABELS: Record<RealtimeTurnEagerness, { label: string; description: string }> = {
-  low: { label: "Patient", description: "Waits longer before answering, for slower speakers." },
+  low: {
+    label: "Patient",
+    description: "Waits longer before answering, for slower speakers.",
+  },
   medium: { label: "Balanced", description: "Answers after a natural pause." },
-  high: { label: "Quick", description: "Answers as soon as you finish speaking." },
+  high: {
+    label: "Quick",
+    description: "Answers as soon as you finish speaking.",
+  },
 };
 
 type VoiceModel = WorkspaceRealtimeModelCatalogItem;
@@ -102,7 +116,7 @@ function summary(model: VoiceModel, values: VoiceValues, inheritedFrom: string |
   return parts.join(" · ");
 }
 
-function useVoiceModels(workspaceId: string) {
+function useVoiceCatalog(workspaceId: string): VoiceModel[] {
   const { client } = useAppContext();
   const query = useSharedQuery(
     client,
@@ -110,8 +124,87 @@ function useVoiceModels(workspaceId: string) {
     () => client.getWorkspaceRealtimeModelCatalog(workspaceId),
     { staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
   );
-  return (query.data?.models ?? []).filter(
-    (model) => model.available && offersVoiceSettings(model),
+  return query.data?.models ?? [];
+}
+
+function voiceSettingsModels(catalog: VoiceModel[]): VoiceModel[] {
+  return catalog.filter((model) => model.available && offersVoiceSettings(model));
+}
+
+/**
+ * The voice model new voice conversations start with. Lists the models the
+ * viewer can use, and keeps a saved choice visible even when it isn't usable
+ * right now (for example after its key was removed).
+ */
+function DefaultVoiceModelRow({
+  catalog,
+  saved,
+  automatic,
+  description,
+  canManage,
+  onSave,
+}: {
+  catalog: VoiceModel[];
+  /** The scope's own choice; null follows `automatic`. */
+  saved: VoiceModel | null;
+  /** The option that clears the scope's own choice, and what saving it says. */
+  automatic: { label: string; description: string; saved: string };
+  description: string;
+  canManage: boolean;
+  onSave: (model: VoiceModel | null) => Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const choices = catalog.filter((model) => model.available || model.id === saved?.id);
+  if (!choices.some((model) => model.available)) return null;
+  const options: SelectOption[] = [
+    {
+      value: AUTOMATIC,
+      label: automatic.label,
+      description: automatic.description,
+    },
+    ...choices.map((model) => ({
+      value: model.id,
+      label: model.label,
+      description: model.available
+        ? model.provider
+        : (model.unavailableReason ?? "Not available right now"),
+    })),
+  ];
+  return (
+    <SettingRow
+      label="Default voice model"
+      description={description}
+      controlWidth="select"
+      control={
+        <SelectMenu
+          size="sm"
+          align="end"
+          aria-label="Default voice model"
+          options={options}
+          value={saved?.id ?? AUTOMATIC}
+          showMetaInTrigger={false}
+          disabled={!canManage || saving}
+          disabledReason={canManage ? undefined : "Only admins can change this."}
+          className="w-full"
+          onValueChange={(value) => {
+            if (value === (saved?.id ?? AUTOMATIC)) return;
+            const model = value === AUTOMATIC ? null : catalog.find((item) => item.id === value);
+            if (model === undefined) return;
+            setSaving(true);
+            void onSave(model)
+              .then(
+                () =>
+                  toast.success(
+                    model ? `New voice conversations start with ${model.label}` : automatic.saved,
+                  ),
+                (error: unknown) =>
+                  toast.error(error instanceof Error ? error.message : String(error)),
+              )
+              .finally(() => setSaving(false));
+          }}
+        />
+      }
+    />
   );
 }
 
@@ -127,13 +220,49 @@ export function RealtimeVoiceSettingsRows({
   organizationName?: string | null | undefined;
 }) {
   const { client } = useAppContext();
-  const models = useVoiceModels(workspaceId);
+  const catalog = useVoiceCatalog(workspaceId);
   const fromOrganization = organizationName
     ? `${possessive(organizationName)} default`
     : "Organization default";
+  const organizationChoice = catalog.find((model) => model.organizationDefault) ?? null;
   return (
     <VoiceSettingsRows
-      models={models}
+      models={voiceSettingsModels(catalog)}
+      leadingRow={
+        <DefaultVoiceModelRow
+          catalog={catalog}
+          saved={catalog.find((model) => model.workspaceDefault) ?? null}
+          automatic={
+            organizationName
+              ? {
+                  label: `${fromOrganization}: ${organizationChoice?.label ?? "Automatic"}`,
+                  description: organizationChoice
+                    ? `Follows ${organizationName}.`
+                    : `Follows ${organizationName}. ${AUTOMATIC_DESCRIPTION}`,
+                  saved: `Voice conversations follow ${fromOrganization} again`,
+                }
+              : {
+                  label: "Automatic",
+                  description: AUTOMATIC_DESCRIPTION,
+                  saved: "Voice conversations choose their model automatically again",
+                }
+          }
+          description="The model a new voice conversation in this workspace starts with. People can still pick another one when they talk."
+          canManage={canManage}
+          onSave={async (model) => {
+            try {
+              await client.updateWorkspaceSettings(workspaceId, {
+                realtimeDefaultModel: model?.id ?? null,
+              });
+            } catch (error) {
+              throw new Error("Could not save the default voice model. Try again.", {
+                cause: error,
+              });
+            }
+            await invalidateModelSettingsQueries(client, false);
+          }}
+        />
+      }
       values={(model) => ({
         own: model.workspaceVoiceSettings ?? null,
         inherited: model.organizationVoiceSettings ?? null,
@@ -152,7 +281,9 @@ export function RealtimeVoiceSettingsRows({
             },
           });
         } catch (error) {
-          throw new Error("Could not save the voice settings. Try again.", { cause: error });
+          throw new Error("Could not save the voice settings. Try again.", {
+            cause: error,
+          });
         }
         await invalidateModelSettingsQueries(client, false);
       }}
@@ -173,11 +304,37 @@ export function OrganizationRealtimeVoiceSettingsRows({
   defaults: OrganizationModelDefaultsState;
 }) {
   const { client } = useAppContext();
-  const models = useVoiceModels(anchorWorkspaceId);
+  const catalog = useVoiceCatalog(anchorWorkspaceId);
   const saved = defaults.defaults?.realtimeVoice ?? {};
+  const savedDefault = defaults.defaults?.realtimeDefaultModel ?? null;
   return (
     <VoiceSettingsRows
-      models={models}
+      models={voiceSettingsModels(catalog)}
+      leadingRow={
+        <DefaultVoiceModelRow
+          catalog={catalog}
+          saved={catalog.find((model) => model.id === savedDefault) ?? null}
+          automatic={{
+            label: "Automatic",
+            description: AUTOMATIC_DESCRIPTION,
+            saved: "Voice conversations choose their model automatically again",
+          }}
+          description="The model a new voice conversation starts with in every workspace that hasn't chosen its own. People can still pick another one when they talk."
+          canManage
+          onSave={async (model) => {
+            try {
+              await defaults.update({
+                realtimeDefaultModel: model?.id ?? null,
+              });
+            } catch (error) {
+              throw new Error("Could not save the default voice model. Try again.", {
+                cause: error,
+              });
+            }
+            await invalidateModelSettingsQueries(client, false);
+          }}
+        />
+      }
       values={(model) => ({ own: saved[model.id] ?? null, inherited: null })}
       inheritedFrom={null}
       canManage
@@ -191,7 +348,9 @@ export function OrganizationRealtimeVoiceSettingsRows({
             },
           });
         } catch (error) {
-          throw new Error("Could not save the voice settings. Try again.", { cause: error });
+          throw new Error("Could not save the voice settings. Try again.", {
+            cause: error,
+          });
         }
         await invalidateModelSettingsQueries(client, false);
       }}
@@ -201,6 +360,7 @@ export function OrganizationRealtimeVoiceSettingsRows({
 
 function VoiceSettingsRows({
   models,
+  leadingRow,
   values,
   inheritedFrom,
   canManage,
@@ -209,6 +369,8 @@ function VoiceSettingsRows({
   onSave,
 }: {
   models: VoiceModel[];
+  /** A row shown before the per-model rows, such as the default voice model. */
+  leadingRow?: ReactNode;
   values: (model: VoiceModel) => VoiceValues;
   inheritedFrom: string | null;
   canManage: boolean;
@@ -218,10 +380,11 @@ function VoiceSettingsRows({
 }) {
   const [editing, setEditing] = useState<VoiceModel | null>(null);
 
-  if (models.length === 0) return null;
+  if (models.length === 0 && !leadingRow) return null;
   return (
     <>
       <SettingRowGroup>
+        {leadingRow}
         {models.map((model) => {
           const modelValues = values(model);
           return (
@@ -336,7 +499,11 @@ function VoiceSettingsDialog({
       description: "Follows the app or browser language of whoever is talking.",
     },
     ...(model.languages ?? [])
-      .map((code) => ({ value: code, label: languageName(code), keywords: [code] }))
+      .map((code) => ({
+        value: code,
+        label: languageName(code),
+        keywords: [code],
+      }))
       .sort((a, b) => a.label.localeCompare(b.label)),
   ];
   const defaultEagerness = defaults.turnEagerness;

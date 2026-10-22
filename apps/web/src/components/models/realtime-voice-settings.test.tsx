@@ -20,7 +20,9 @@ const context = {
     updateWorkspaceSettings,
   },
 };
-mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => context,
+}));
 
 const { OrganizationRealtimeVoiceSettingsRows, RealtimeVoiceSettingsRows } =
   await import("./realtime-voice-settings");
@@ -124,7 +126,9 @@ test("lists the voice settings of each available model that offers some, and sav
   expect(updateWorkspaceSettings).toHaveBeenCalledTimes(1);
   expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
     WORKSPACE_ID,
-    { realtimeVoice: { [ELEVEN]: { voice: "other-voices-id", language: "no" } } },
+    {
+      realtimeVoice: { [ELEVEN]: { voice: "other-voices-id", language: "no" } },
+    },
   ]);
 });
 
@@ -205,6 +209,7 @@ test("the organization's defaults save through the organization, not a workspace
       allowedModels: null,
       modelCompactionThresholds: {},
       realtimeVoice: { [ELEVEN]: { language: "no" } },
+      realtimeDefaultModel: null,
       updatedAt: null,
     },
     loading: false,
@@ -235,5 +240,113 @@ test("the organization's defaults save through the organization, not a workspace
   await act(async () => save.click());
   await settle();
   expect(update.mock.calls[0]).toEqual([{ realtimeVoice: { [ELEVEN]: { language: "no" } } }]);
+  expect(updateWorkspaceSettings).not.toHaveBeenCalled();
+});
+
+test("a workspace shows its organization's default voice model and can choose its own", async () => {
+  const MINI = "workspace-elevenlabs/eleven_realtime_v1_mini";
+  models = [
+    catalogModel({
+      id: "gpt-live-1-boulder-alpha",
+      label: "Codex Live",
+      provider: "Connected Codex",
+    }),
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      provider: "Your ElevenLabs",
+      organizationDefault: true,
+    }),
+    catalogModel({
+      id: MINI,
+      label: "Eleven Realtime v1 mini",
+      provider: "Your ElevenLabs",
+    }),
+  ];
+  await act(async () =>
+    root.render(
+      <RealtimeVoiceSettingsRows
+        workspaceId={`${WORKSPACE_ID}-5`}
+        canManage
+        organizationName="Acme"
+      />,
+    ),
+  );
+  await settle();
+  expect(container.textContent).toContain("Default voice model");
+  const trigger = container.querySelector<HTMLButtonElement>(
+    '[role="combobox"][aria-label="Default voice model"]',
+  );
+  expect(trigger).not.toBeNull();
+  // Following the organization: its choice is named on the trigger.
+  expect(trigger!.textContent).toContain("Acme's default");
+  await act(async () => {
+    trigger!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    trigger!.click();
+  });
+  await settle();
+  expect(document.body.textContent).toContain("Eleven Realtime v1 max");
+  const mini = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) =>
+    item.textContent?.includes("Eleven Realtime v1 mini"),
+  );
+  expect(mini).not.toBeUndefined();
+  await act(async () => mini!.click());
+  await settle();
+  expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
+    `${WORKSPACE_ID}-5`,
+    { realtimeDefaultModel: MINI },
+  ]);
+});
+
+test("the organization's default voice model saves through the organization", async () => {
+  models = [
+    catalogModel({ id: "gpt-live-1-boulder-alpha", label: "Codex Live" }),
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      organizationDefault: true,
+    }),
+  ];
+  const update = mock(async (_request: unknown) => ({}) as never);
+  const defaults = {
+    defaults: {
+      sessionDefaults: null,
+      allowedProviders: null,
+      allowedModels: null,
+      modelCompactionThresholds: {},
+      realtimeVoice: {},
+      realtimeDefaultModel: ELEVEN,
+      updatedAt: null,
+    },
+    loading: false,
+    error: null,
+    reload: async () => undefined,
+    update,
+  };
+  await act(async () =>
+    root.render(
+      <OrganizationRealtimeVoiceSettingsRows
+        anchorWorkspaceId={`${WORKSPACE_ID}-6`}
+        defaults={defaults}
+      />,
+    ),
+  );
+  await settle();
+  const trigger = container.querySelector<HTMLButtonElement>(
+    '[role="combobox"][aria-label="Default voice model"]',
+  );
+  expect(trigger!.textContent).toContain("Eleven Realtime v1 max");
+  await act(async () => {
+    trigger!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+    trigger!.click();
+  });
+  await settle();
+  const automatic = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((item) =>
+    item.textContent?.startsWith("Automatic"),
+  );
+  expect(automatic).not.toBeUndefined();
+  await act(async () => automatic!.click());
+  await settle();
+  expect(update.mock.calls[0]).toEqual([{ realtimeDefaultModel: null }]);
   expect(updateWorkspaceSettings).not.toHaveBeenCalled();
 });

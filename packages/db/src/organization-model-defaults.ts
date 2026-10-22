@@ -3,6 +3,7 @@ import {
   ModelCompactionTokenThreshold,
   type OrganizationModelDefaults,
   RealtimeVoiceSettings,
+  SessionRealtimeModel,
   WorkspaceModelCompactionThresholdsPatch,
   WorkspaceRealtimeVoicePatch,
   WorkspaceSessionDefaults,
@@ -42,6 +43,10 @@ function mapRow(row: Row | undefined): OrganizationModelDefaults {
     allowedModels: row.allowedModels ?? null,
     modelCompactionThresholds: thresholds,
     realtimeVoice,
+    realtimeDefaultModel:
+      typeof row.realtimeDefaultModel === "string" && row.realtimeDefaultModel.length > 0
+        ? row.realtimeDefaultModel
+        : null,
     updatedAt: row.updatedAt.toISOString(),
   };
 }
@@ -116,6 +121,8 @@ export type OrganizationModelDefaultsPatch = {
   modelCompactionThresholds?: unknown;
   /** Voice settings merged by realtime model id; null or `{}` resets just that model. */
   realtimeVoice?: unknown;
+  /** Undefined keeps it; null makes the voice model automatic again. */
+  realtimeDefaultModel?: unknown;
 };
 
 /**
@@ -139,6 +146,10 @@ export async function updateOrganizationModelDefaults(
     input.patch.realtimeVoice === undefined
       ? undefined
       : WorkspaceRealtimeVoicePatch.parse(input.patch.realtimeVoice);
+  const realtimeDefaultModel =
+    input.patch.realtimeDefaultModel === undefined
+      ? undefined
+      : SessionRealtimeModel.nullable().parse(input.patch.realtimeDefaultModel);
   return await withOrganizationAdministrator(db, input, async (scopedDb) => {
     await scopedDb
       .insert(schema.organizationModelDefaults)
@@ -179,6 +190,8 @@ export async function updateOrganizationModelDefaults(
         allowedModels: policy.allowedModels,
         modelCompactionThresholds: thresholds,
         realtimeVoice,
+        realtimeDefaultModel:
+          realtimeDefaultModel === undefined ? current.realtimeDefaultModel : realtimeDefaultModel,
         updatedBySubjectId: input.actorSubjectId,
         updatedAt: new Date(),
       })
