@@ -204,7 +204,11 @@ export function writeHumanInputDraft(
   try {
     const serialized = JSON.stringify(entry);
     if (serialized.length > MAX_SERIALIZED_LENGTH) storage.removeItem(key);
-    else storage.setItem(key, serialized);
+    else {
+      // The tab records whose drafts these are only once it holds one.
+      if (memoryOwner !== null) storage.setItem(OWNER_STORAGE_KEY, memoryOwner);
+      storage.setItem(key, serialized);
+    }
   } catch {
     // Quota or privacy mode: the in-memory copy still survives navigation.
   }
@@ -241,7 +245,8 @@ export function forgetAllHumanInputDrafts(): void {
  * Record who is signed in to this tab. When a different person than the one
  * the drafts belong to signs in, every unsent answer is forgotten first; the
  * same person (a reload, a re-authentication, an interrupted account switch)
- * keeps them.
+ * keeps them. The owner is persisted only while the tab holds drafts, so a tab
+ * without unsent answers stores nothing.
  */
 export function claimHumanInputDraftOwner(ownerId: string): void {
   const storage = browserStorage();
@@ -260,7 +265,11 @@ export function claimHumanInputDraftOwner(ownerId: string): void {
   if (unowned || (previous !== null && previous !== ownerId)) forgetAllHumanInputDrafts();
   memoryOwner = ownerId;
   try {
-    storage?.setItem(OWNER_STORAGE_KEY, ownerId);
+    if (storage !== null && storageKeys(storage).length > 0) {
+      storage.setItem(OWNER_STORAGE_KEY, ownerId);
+    } else {
+      storage?.removeItem(OWNER_STORAGE_KEY);
+    }
   } catch {
     // The in-memory owner still guards in-app account switches.
   }
