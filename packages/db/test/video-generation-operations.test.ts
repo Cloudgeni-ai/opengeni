@@ -271,6 +271,51 @@ describe("durable video generation operation", () => {
       expect(first.created).toBe(true);
       expect(replay.created).toBe(false);
       expect(replay.operation.id).toBe(operationId);
+      if (!personal) {
+        const withOther = <T>(fn: () => Promise<T>) =>
+          withSessionRlsActorContext({ subjectId: `other-${grant.subjectId}` }, fn);
+        const membershipId = crypto.randomUUID();
+        const [personalWorkspace] = await shared!.admin`
+          insert into workspaces(account_id, name)
+          values(${grant.accountId}, 'Video source owner Personal') returning id`;
+        expect(
+          (await withOther(() =>
+            getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          ))?.status,
+        ).toBe("prepared");
+        await shared!.admin.begin(async (tx) => {
+          await tx`set local session_replication_role = replica`;
+          await tx`insert into organization_memberships(
+            id, account_id, subject_id, role, status, personal_workspace_id)
+            values(${membershipId}, ${grant.accountId}, ${grant.subjectId},
+              'owner', 'active', ${personalWorkspace!.id})`;
+          await tx`update sessions set visibility = 'user_private',
+            owner_subject_id = ${grant.subjectId},
+            owner_organization_membership_id = ${membershipId} where id = ${session.id}`;
+          await tx`update video_generation_operations
+            set source_session_owner_subject_id = ${grant.subjectId},
+              source_session_shared_unrestricted = false where id = ${operationId}`;
+        });
+        expect(
+          await withOther(() =>
+            getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          ),
+        ).toBeNull();
+        expect(
+          (await withOwner(() =>
+            getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          ))?.status,
+        ).toBe("prepared");
+        await shared!.admin.begin(async (tx) => {
+          await tx`set local session_replication_role = replica`;
+          await tx`update sessions set visibility = 'workspace_shared',
+            owner_subject_id = null, owner_organization_membership_id = null
+            where id = ${session.id}`;
+          await tx`update video_generation_operations
+            set source_session_owner_subject_id = null,
+              source_session_shared_unrestricted = true where id = ${operationId}`;
+        });
+      }
 
       expect(
         await registerPendingSessionToolCall(client.db, {

@@ -726,62 +726,113 @@ CREATE POLICY files_source_reader_upgrade_0914 ON files AS RESTRICTIVE FOR SELEC
   current_setting('opengeni.file_provenance_reader_v1', true) = '1'
 );
 
--- Maintenance owns a random claim and deletes its File only after the object
--- was erased. Keep this exact cleanup transaction separate from user File RLS.
-CREATE FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(
-  p_account uuid, p_workspace uuid, p_artifact uuid, p_claim uuid
-) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+-- Keep the existing, already admitted SECURITY DEFINER signature. Positive
+-- limits retain the original claim behavior. Limit -1 completes one exact
+-- claim after its object has been erased, without exposing deleted Files to
+-- generic readers or introducing a new callable definer into old binaries.
+DO $migration$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION opengeni_private.claim_retained_screenshot_maintenance(
+  p_pending_grace_ms bigint, p_claim_timeout_ms bigint, p_limit integer
+) RETURNS TABLE (
+  action text, claim_id uuid, artifact_id uuid, account_id uuid,
+  workspace_id uuid, session_id uuid, object_key text, media_type text,
+  size_bytes bigint, sha256 text, width integer, height integer,
+  retention_expires_at timestamptz, cleanup_reason text
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
 DECLARE held record;
 DECLARE quota record;
+DECLARE cleanup_account uuid;
+DECLARE cleanup_workspace uuid;
+DECLARE cleanup_artifact uuid;
+DECLARE cleanup_claim uuid;
 DECLARE deleted_count integer;
 BEGIN
-  IF opengeni_private.workspace_rls_visible(p_account, p_workspace) IS NOT TRUE THEN
-    RETURN false;
+  IF p_limit = -1 THEN
+    cleanup_account := nullif(current_setting('opengeni.account_id', true), '')::uuid;
+    cleanup_workspace := nullif(current_setting('opengeni.workspace_id', true), '')::uuid;
+    cleanup_artifact := nullif(current_setting('opengeni.screenshot_cleanup_artifact_id', true), '')::uuid;
+    cleanup_claim := nullif(current_setting('opengeni.screenshot_cleanup_claim_id', true), '')::uuid;
+    IF cleanup_account IS NULL OR cleanup_workspace IS NULL
+      OR cleanup_artifact IS NULL OR cleanup_claim IS NULL
+      OR opengeni_private.workspace_rls_visible(cleanup_account, cleanup_workspace) IS NOT TRUE
+    THEN RETURN; END IF;
+    SELECT A.status, A.quota_state, A.size_bytes, A.maintenance_claim_id INTO held
+      FROM %1$I.retained_screenshot_artifacts A
+      WHERE A.account_id = cleanup_account AND A.workspace_id = cleanup_workspace
+        AND A.artifact_id = cleanup_artifact FOR UPDATE;
+    IF NOT FOUND THEN
+      RETURN QUERY SELECT 'completed'::text, cleanup_claim, cleanup_artifact,
+        cleanup_account, cleanup_workspace, NULL::uuid, NULL::text, NULL::text,
+        NULL::bigint, NULL::text, NULL::integer, NULL::integer,
+        NULL::timestamptz, NULL::text;
+      RETURN;
+    END IF;
+    IF held.status <> 'cleanup_pending'
+      OR held.maintenance_claim_id IS DISTINCT FROM cleanup_claim
+    THEN RETURN; END IF;
+    SELECT Q.reserved_bytes, Q.ready_bytes INTO quota FROM %1$I.workspace_screenshot_quotas Q
+      WHERE Q.account_id = cleanup_account AND Q.workspace_id = cleanup_workspace FOR UPDATE;
+    IF NOT FOUND THEN RETURN; END IF;
+    PERFORM 1 FROM %1$I.files F WHERE F.account_id = cleanup_account
+      AND F.workspace_id = cleanup_workspace AND F.id = cleanup_artifact FOR UPDATE;
+    IF NOT FOUND THEN RETURN; END IF;
+    IF (held.quota_state = 'ready' AND quota.ready_bytes < held.size_bytes)
+      OR (held.quota_state = 'reserved' AND quota.reserved_bytes < held.size_bytes)
+    THEN RAISE EXCEPTION 'Retained screenshot quota invariant failed' USING ERRCODE='55000'; END IF;
+    UPDATE %1$I.workspace_screenshot_quotas Q SET
+      ready_bytes = Q.ready_bytes - CASE WHEN held.quota_state = 'ready' THEN held.size_bytes ELSE 0 END,
+      reserved_bytes = Q.reserved_bytes - CASE WHEN held.quota_state = 'reserved' THEN held.size_bytes ELSE 0 END,
+      updated_at = clock_timestamp()
+      WHERE Q.account_id = cleanup_account AND Q.workspace_id = cleanup_workspace;
+    DELETE FROM %1$I.retained_screenshot_artifacts A WHERE A.account_id = cleanup_account
+      AND A.workspace_id = cleanup_workspace AND A.artifact_id = cleanup_artifact;
+    DELETE FROM %1$I.files F WHERE F.account_id = cleanup_account
+      AND F.workspace_id = cleanup_workspace AND F.id = cleanup_artifact;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    IF deleted_count <> 1 THEN
+      RAISE EXCEPTION 'Claimed screenshot File disappeared during cleanup' USING ERRCODE='55000';
+    END IF;
+    RETURN QUERY SELECT 'completed'::text, cleanup_claim, cleanup_artifact,
+      cleanup_account, cleanup_workspace, NULL::uuid, NULL::text, NULL::text,
+      NULL::bigint, NULL::text, NULL::integer, NULL::integer,
+      NULL::timestamptz, NULL::text;
+    RETURN;
   END IF;
-  SELECT status, quota_state, size_bytes, maintenance_claim_id INTO held
-    FROM retained_screenshot_artifacts
-    WHERE account_id = p_account AND workspace_id = p_workspace
-      AND artifact_id = p_artifact FOR UPDATE;
-  IF NOT FOUND THEN RETURN true; END IF;
-  IF held.status <> 'cleanup_pending' OR held.maintenance_claim_id IS DISTINCT FROM p_claim
-  THEN RETURN false; END IF;
-  SELECT reserved_bytes, ready_bytes INTO quota FROM workspace_screenshot_quotas
-    WHERE account_id = p_account AND workspace_id = p_workspace FOR UPDATE;
-  IF NOT FOUND THEN RETURN false; END IF;
-  PERFORM 1 FROM files WHERE account_id = p_account
-    AND workspace_id = p_workspace AND id = p_artifact FOR UPDATE;
-  IF NOT FOUND THEN RETURN false; END IF;
-  IF (held.quota_state = 'ready' AND quota.ready_bytes < held.size_bytes)
-    OR (held.quota_state = 'reserved' AND quota.reserved_bytes < held.size_bytes)
-  THEN RAISE EXCEPTION 'Retained screenshot quota invariant failed' USING ERRCODE='55000'; END IF;
-  UPDATE workspace_screenshot_quotas SET
-    ready_bytes = ready_bytes - CASE WHEN held.quota_state = 'ready' THEN held.size_bytes ELSE 0 END,
-    reserved_bytes = reserved_bytes - CASE WHEN held.quota_state = 'reserved' THEN held.size_bytes ELSE 0 END,
-    updated_at = clock_timestamp()
-    WHERE account_id = p_account AND workspace_id = p_workspace;
-  DELETE FROM retained_screenshot_artifacts WHERE account_id = p_account
-    AND workspace_id = p_workspace AND artifact_id = p_artifact;
-  DELETE FROM files WHERE account_id = p_account AND workspace_id = p_workspace
-    AND id = p_artifact;
-  GET DIAGNOSTICS deleted_count = ROW_COUNT;
-  IF deleted_count <> 1 THEN
-    RAISE EXCEPTION 'Claimed screenshot File disappeared during cleanup' USING ERRCODE='55000';
-  END IF;
-  RETURN true;
+  RETURN QUERY WITH candidates AS (
+    SELECT A.artifact_id, gen_random_uuid() AS claim_id,
+      CASE WHEN A.status IN ('pending', 'reconciling') THEN 'reconcile' ELSE 'delete' END AS action,
+      CASE WHEN A.status = 'ready' THEN 'expired'
+        WHEN A.status IN ('cleanup_queued', 'cleanup_pending')
+          THEN coalesce(A.cleanup_reason, 'orphaned') ELSE NULL END AS cleanup_reason
+    FROM %1$I.retained_screenshot_artifacts A
+    WHERE (A.status = 'ready' AND A.retention_expires_at <= clock_timestamp())
+      OR A.status = 'cleanup_queued'
+      OR (A.status = 'pending' AND A.updated_at <= clock_timestamp() -
+        (greatest(p_pending_grace_ms, 0)::double precision * interval '1 millisecond'))
+      OR (A.status IN ('reconciling', 'cleanup_pending')
+        AND A.maintenance_claimed_at <= clock_timestamp() -
+          (greatest(p_claim_timeout_ms, 0)::double precision * interval '1 millisecond'))
+    ORDER BY A.maintenance_claimed_at NULLS FIRST, A.retention_expires_at, A.artifact_id
+    LIMIT least(greatest(p_limit, 0), 1000) FOR UPDATE SKIP LOCKED
+  ), claimed AS (
+    UPDATE %1$I.retained_screenshot_artifacts A SET
+      status = CASE WHEN C.action = 'reconcile' THEN 'reconciling' ELSE 'cleanup_pending' END,
+      cleanup_reason = C.cleanup_reason,
+      maintenance_claim_id = C.claim_id,
+      maintenance_claimed_at = clock_timestamp(), updated_at = clock_timestamp()
+    FROM candidates C WHERE A.artifact_id = C.artifact_id
+    RETURNING A.*, C.action, C.claim_id
+  ) SELECT C.action, C.claim_id, C.artifact_id, C.account_id, C.workspace_id, C.session_id,
+      F.object_key, C.media_type, C.size_bytes, C.sha256, C.width, C.height,
+      C.retention_expires_at, C.cleanup_reason
+    FROM claimed C JOIN %1$I.files F ON F.workspace_id = C.workspace_id
+      AND F.id = C.artifact_id;
 END $body$;
-DO $search_path$
-BEGIN
-  EXECUTE format('ALTER FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp', current_schema());
-END $search_path$;
-REVOKE ALL ON FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid)
-  FROM PUBLIC;
-DO $screenshot_cleanup_grant$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid)
-      TO opengeni_app;
-  END IF;
-END $screenshot_cleanup_grant$;
+  $create$, target_schema);
+END $migration$;
 
 CREATE POLICY documents_file_source_visible ON documents AS RESTRICTIVE FOR SELECT USING (
   NOT source_file_has_inherited_audience OR EXISTS (

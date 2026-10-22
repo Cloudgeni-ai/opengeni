@@ -9146,14 +9146,26 @@ async function completeRetainedScreenshotMaintenanceInOwnerScope(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        const [result] = await rawRows<{ completed: boolean }>(
+        await rawRows(
           tx,
-          sql`select opengeni_private.complete_claimed_screenshot_delete_0914(
-            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-            ${input.artifactId}::uuid, ${input.claimId}::uuid
-          ) as completed`,
+          sql`select
+            set_config('opengeni.screenshot_cleanup_artifact_id', ${input.artifactId}, true),
+            set_config('opengeni.screenshot_cleanup_claim_id', ${input.claimId}, true)`,
         );
-        return result?.completed === true;
+        const [result] = await rawRows<{
+          action: string;
+          claimId: string;
+          artifactId: string;
+        }>(
+          tx,
+          sql`select action, claim_id as "claimId", artifact_id as "artifactId"
+            from opengeni_private.claim_retained_screenshot_maintenance(0, 0, -1)`,
+        );
+        return (
+          result?.action === "completed" &&
+          result.claimId === input.claimId &&
+          result.artifactId === input.artifactId
+        );
       },
     );
   }

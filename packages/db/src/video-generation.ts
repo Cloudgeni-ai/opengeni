@@ -1327,6 +1327,38 @@ export async function getVideoGenerationOperationSummary(
   ) {
     terminal = mediaGenerationResultForOperation({ operation });
   }
+  // Pending and failed operations have no retained File to apply the File
+  // source policy. Recheck the source audience before returning their status.
+  const [source] = await withWorkspaceRls(db, workspaceId, (tx) =>
+    rawRows<{ visible: boolean }>(
+      tx,
+      sql`SELECT EXISTS (
+        SELECT 1 FROM video_generation_operations op
+        WHERE op.workspace_id = ${workspaceId}::uuid AND op.id = ${operationId}::uuid
+          AND op.source_session_id_snapshot IS NOT NULL
+          AND (
+            (op.source_session_shared_unrestricted AND EXISTS (
+              SELECT 1 FROM sessions source_session
+              WHERE source_session.account_id = op.account_id
+                AND source_session.workspace_id = op.workspace_id
+                AND source_session.id = op.source_session_id_snapshot
+                AND source_session.visibility = 'workspace_shared'
+                AND source_session.memory_scope <> 'user'
+                AND source_session.site_access_root_id IS NULL
+                AND NOT EXISTS (SELECT 1 FROM slack_interactions slack
+                  WHERE slack.account_id = op.account_id
+                    AND slack.workspace_id = op.workspace_id
+                    AND slack.session_reservation_id = source_session.root_session_id
+                    AND slack.visibility = 'private')
+            ))
+            OR (NOT op.source_session_shared_unrestricted
+              AND op.source_session_owner_subject_id =
+                nullif(current_setting('opengeni.subject_id', true), ''))
+          )
+      ) AS visible`,
+    ),
+  );
+  if (source?.visible !== true) return null;
   return VideoGenerationOperationSummary.parse({
     schemaVersion: 1,
     operationId: operation.id,

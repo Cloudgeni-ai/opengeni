@@ -479,12 +479,11 @@ describe("retained screenshot lifecycle fences", () => {
       const wrongClaim = await appSql.begin(async (sql) => {
         await sql`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
         await sql`select set_config('opengeni.workspace_id', ${fixture.workspaceId}, true)`;
-        const [result] = await sql<{ completed: boolean }[]>`
-          select opengeni_private.complete_claimed_screenshot_delete_0914(
-            ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid,
-            ${prepared.artifactId}::uuid, ${crypto.randomUUID()}::uuid
-          ) as completed`;
-        return result?.completed;
+        await sql`select set_config('opengeni.screenshot_cleanup_artifact_id', ${prepared.artifactId}, true)`;
+        await sql`select set_config('opengeni.screenshot_cleanup_claim_id', ${crypto.randomUUID()}, true)`;
+        const results = await sql`
+          select action from opengeni_private.claim_retained_screenshot_maintenance(0, 0, -1)`;
+        return results.length > 0;
       });
       expect(wrongClaim).toBe(false);
       expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(1);
