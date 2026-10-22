@@ -289,8 +289,8 @@ export function CodexSettingRows({
         {organizationSharing}
         {showPick ? (
           <SettingRow
-            label="Sharing work between this workspace's accounts"
-            description="Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them."
+            label="Spreading work across this workspace's accounts"
+            description="Spread work starts new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them."
             controlWidth="auto"
             control={
               <SegmentedControl<"spread" | "primary">
@@ -685,7 +685,7 @@ function CodexAccountDetail({
               {codex.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description="Used for new work when sharing is off."
+                  description="New chats start here when work isn’t spread across accounts."
                   control={
                     account.id === codex.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">

@@ -233,7 +233,7 @@ function OrgCodexAccountDetail({
             {codex.accounts.length > 1 && !access.data?.managedByWorkspaceId ? (
               <SettingRow
                 label="Primary account"
-                description="Used for new work when sharing is off."
+                description="New chats start here when work isn’t spread across accounts."
                 control={
                   !access.data ? (
                     <ModelSettingsPlaceholder />

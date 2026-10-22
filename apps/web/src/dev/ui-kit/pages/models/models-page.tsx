@@ -73,7 +73,7 @@ const COLUMNS: RowListColumn[] = [
 const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "opper", "vercel"];
 
 const PICK_HELP =
-  "Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them.";
+  "Spread work starts new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them.";
 
 /** Where the account detail shows: its own page, or in place under its row. */
 function useDetailLayout(): "page" | "inline" {
@@ -675,7 +675,7 @@ function RotationRow({
     <SettingRow
       variant={picks.settingRow}
       controlWidth="auto"
-      label="Sharing work between accounts"
+      label="Spreading work across accounts"
       description={PICK_HELP}
       control={
         <SegmentedControl<Rotation>
