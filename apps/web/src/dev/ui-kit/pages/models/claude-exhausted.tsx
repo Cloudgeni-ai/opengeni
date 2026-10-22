@@ -11,11 +11,11 @@ export function exhaustedClaudeFixture(now: number, mixed = false): Subscription
   const at = (hours: number) => new Date(now + hours * 3_600_000).toISOString();
   const labels = [
     "Claude subscription",
-    "bjarte327@gmail.com",
-    "bendik@cloudgeni.ai",
-    "bendik1@cloudgeni.ai",
-    "jorgen.sandhaug@gmail.com",
-    "yorgen0103@gmail.com",
+    "max-a@example.com",
+    "max-b@example.com",
+    "max-c@example.com",
+    "max-d@example.com",
+    "max-e@example.com",
   ];
   const weekly = labels.map((label, index) => ({
     id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
