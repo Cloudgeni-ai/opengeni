@@ -358,9 +358,14 @@ cancels or lands, and no base-purpose run exists until the controller publishes 
   recipe as well: the `<project>/tsconfig.json` the typecheck step compiles for
   every harness typecheck root (`HARNESS_TYPECHECK_PROJECTS`, the list project
   discovery uses), each `tsconfig.json`/`jsconfig.json` Bun's runtime consults
-  walking up from a harness source to the nearest one, and the relative `extends`
-  chain of every bound config. Product package configs are compiled as code under
-  comparison and stay unbound. An executed script, named policy input or
+  walking up from a bound source to the nearest one (including the test database
+  helper in `packages/testing`), and the relative `extends` chain of every bound
+  config. Lint and format policy the pinned oxlint and oxfmt find by name in any
+  directory is recipe too: every `.gitignore`, `.eslintignore`, `.prettierignore`,
+  `.editorconfig`, nested or alternative oxlint/oxfmt config, and the local
+  `jsPlugins` an oxlint config loads (executed, with their harness imports).
+  Configs of product packages the harness does not execute are compiled as code
+  under comparison and stay unbound. An executed script, named policy input or
   consulted config that is not tracked is bound as absent. Plan and ready jobs are
   excluded. Missing or disagreeing evidence leaves the recipe unknown and the run
   not comparable.

@@ -82,6 +82,17 @@ const SOURCE = /\.(?:ts|tsx|js|mjs)$/;
 /** The configs Bun's runtime consults for a source, nearest directory first. */
 const RUNTIME_CONFIGS = ["tsconfig.json", "jsconfig.json"] as const;
 const CONFIG = /(?:^|\/)[tj]sconfig[^/]*\.json$/;
+/**
+ * Lint and format policy the pinned oxlint and oxfmt discover by file name in
+ * any directory of the checkout: ignore files (`.gitignore` at every depth,
+ * `.eslintignore` for oxlint, `.prettierignore` for oxfmt), `.editorconfig`,
+ * and nested or alternative lint and format configs. A tracked file listed in
+ * one of them is skipped, so it decides the `lint` and `format` verdicts as
+ * much as the root configs do. Matched by name over the whole tree, a file of
+ * one of these names added anywhere is a new recipe path.
+ */
+const TOOL_POLICY =
+  /(?:^|\/)(?:\.gitignore|\.eslintignore|\.prettierignore|\.editorconfig|\.oxlintrc\.jsonc?|\.oxfmtrc\.jsonc?|(?:oxlint|oxfmt)\.config\.[cm]?[jt]s)$/;
 
 /**
  * Harness scripts reached by execution rather than import: subprocesses the
@@ -149,11 +160,12 @@ export function policyInputs(
  * Harness configuration a tool finds by composing a path rather than reading a
  * named one: the project config `scripts/typecheck.ts` compiles for every
  * harness typecheck root (`typecheckConfig`; a root without one is no project,
- * so its absence is bound too), and, for every harness source, each config
- * Bun's runtime consults walking up to the nearest `tsconfig.json` or
- * `jsconfig.json`, whose paths, jsx and module settings decide how the source
- * runs. Product package configs are compiled as code under comparison and are
- * never listed here.
+ * so its absence is bound too), and, for every given source, each config Bun's
+ * runtime consults walking up to the nearest `tsconfig.json` or `jsconfig.json`,
+ * whose paths, jsx and module settings decide how the source runs. The caller
+ * passes the bound (executed) sources only, so a product helper the harness
+ * imports binds its package config while the configs of product code under
+ * comparison stay unbound.
  */
 export function harnessConfigs(
   sources: Iterable<string>,
@@ -161,7 +173,6 @@ export function harnessConfigs(
 ): string[] {
   const configs = new Set<string>(HARNESS_TYPECHECK_PROJECTS.map(typecheckConfig));
   for (const source of sources) {
-    if (!source.startsWith(HARNESS_ROOT)) continue;
     let directory = posix.dirname(source);
     nearest: for (;;) {
       for (const name of RUNTIME_CONFIGS) {
@@ -177,10 +188,10 @@ export function harnessConfigs(
 }
 
 /**
- * The relative `extends` targets of a TypeScript config, in string or array
- * form, resolved as the compiler does (`.json` is implied). Package targets
- * resolve through the bound lockfile and manifests. An unreadable config has
- * none: it is bound itself, and the compiler reports it.
+ * The relative `extends` targets of a TypeScript, oxlint or oxfmt config, in
+ * string or array form, resolved as the compiler does (`.json` is implied).
+ * Package targets resolve through the bound lockfile and manifests. An
+ * unreadable config has none: it is bound itself, and the tool reports it.
  */
 export function configExtends(
   path: string,
@@ -203,6 +214,30 @@ export function configExtends(
       const target = posix.normalize(posix.join(posix.dirname(path), item));
       return blobs.has(target) || target.endsWith(".json") ? target : `${target}.json`;
     });
+}
+
+/**
+ * The local JavaScript plugins an oxlint config loads (`jsPlugins`, as a path
+ * or `{ specifier }`), resolved beside the config. They run as part of `lint`,
+ * so they are executed harness code; package plugins resolve through the lockfile.
+ */
+export function lintPlugins(path: string, text: string): string[] {
+  let config: unknown;
+  try {
+    config = Bun.JSONC.parse(text);
+  } catch {
+    return [];
+  }
+  const value = (config as { jsPlugins?: unknown } | null)?.jsPlugins;
+  return (Array.isArray(value) ? value : [])
+    .map((item: unknown) =>
+      typeof item === "string" ? item : (item as { specifier?: unknown } | null)?.specifier,
+    )
+    .filter(
+      (item): item is string =>
+        typeof item === "string" && (item.startsWith("./") || item.startsWith("../")),
+    )
+    .map((item) => posix.normalize(posix.join(posix.dirname(path), item)));
 }
 
 /** Exact tracked blobs of a commit: path -> object id. */
@@ -234,10 +269,12 @@ function resolveLocalImport(from: string, specifier: string, blobs: Map<string, 
  * Recipe identity: the transitive local import closure of every harness entry,
  * every harness script those files execute (subprocesses and root package
  * scripts, with their own imports and executions inside the harness tree), the
- * harness-owned policy inputs those sources read (`policyInputs`), the harness
- * configuration tools find by composed path (`harnessConfigs`) with the
- * `extends` chain of every bound config, the workflow, tool configuration,
- * toolchain pins, lockfile and every package manifest.
+ * harness-owned policy inputs those sources read (`policyInputs`), the
+ * configuration tools find by composed path (`harnessConfigs`), the lint and
+ * format policy the tools find by name anywhere (`TOOL_POLICY`, with the local
+ * plugins an oxlint config loads), the `extends` chain of every bound config,
+ * the workflow, tool configuration, toolchain pins, lockfile and every package
+ * manifest.
  * Package imports resolve through the lockfile and manifests, which are bound
  * here. An executed harness script, named policy input or consulted config that
  * is not tracked is bound as absent (null), so adding it later changes the recipe.
@@ -274,6 +311,11 @@ export function recipePaths(
     manifest && typeof manifest === "object" ? (manifest as Record<string, string>) : {};
   const absent = new Set<string>();
   const executed: string[] = [];
+  // Lint and format policy found by name anywhere; local oxlint plugins it
+  // loads are executed like spawned scripts.
+  const policy = [...blobs.keys()].filter((path) => TOOL_POLICY.test(path));
+  for (const path of policy)
+    if (/\/?\.oxlintrc\.jsonc?$/.test(path)) executed.push(...lintPlugins(path, read(path)));
   const execute = (from: string, shell: boolean) => {
     for (const path of executedScripts(read(from), shell, scripts))
       if (path.startsWith(HARNESS_ROOT)) executed.push(path);
@@ -304,13 +346,15 @@ export function recipePaths(
     for (const input of inputs.tracked) closure.add(input);
     for (const input of inputs.absent) absent.add(input);
   }
-  // Phase 4: harness configuration found by composed path, and the extends
-  // chain of every bound config wherever it leads (a base config is harness
-  // configuration too).
+  // Phase 4: configuration found by composed path for the bound sources, and
+  // the extends chain of every bound config wherever it leads (a base config
+  // is harness configuration too).
   const sources = [...closure].filter((source) => SOURCE.test(source));
   for (const path of harnessConfigs(sources, blobs)) (blobs.has(path) ? closure : absent).add(path);
+  for (const path of policy) closure.add(path);
   const configs = [...closure, ...RECIPE_FILES].filter(
-    (path) => CONFIG.test(path) && blobs.has(path),
+    (path) =>
+      (CONFIG.test(path) || /\.(?:oxlintrc|oxfmtrc)\.jsonc?$/.test(path)) && blobs.has(path),
   );
   while (configs.length) {
     const path = configs.pop()!;

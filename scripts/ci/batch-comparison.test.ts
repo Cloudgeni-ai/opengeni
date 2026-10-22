@@ -17,6 +17,7 @@ import {
   executionStatus,
   expectedUnits,
   harnessConfigs,
+  lintPlugins,
   policyInputs,
   RECIPE_ENTRIES,
   recipePaths,
@@ -365,10 +366,12 @@ describe("recipe identity", () => {
     // the config it composes, and each discovered one exists on this tree.
     const harnessProjects = typecheckProjects().filter((project) => project.startsWith("scripts/"));
     expect(harnessProjects).toEqual([...HARNESS_TYPECHECK_PROJECTS]);
-    // The runtime config of the batch controller, found by walking up.
+    // The runtime configs of the batch controller and of the executed test
+    // database helper outside scripts/, found by walking up.
     for (const path of [
       ...HARNESS_TYPECHECK_PROJECTS.map(typecheckConfig),
       "scripts/merge-batcher/tsconfig.json",
+      "packages/testing/tsconfig.json",
       "tsconfig.base.json",
     ]) {
       expect(bound.get(path)).toBe(blobs.get(path)!);
@@ -412,13 +415,135 @@ describe("recipe identity", () => {
     ).not.toBe(digest(recipePaths(chained, overlay)));
   });
 
+  test("an executed product helper's runtime config is recipe; other product configs are not", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const before = recipePaths(blobs, read);
+    // Bun resolves the helper's imports through its package config: a `paths`
+    // entry redirects an import while the helper's bytes are unchanged.
+    const path = "packages/testing/tsconfig.json";
+    const config = Bun.JSONC.parse(read(path)) as { compilerOptions: Record<string, unknown> };
+    config.compilerOptions.paths = { postgres: ["../../scripts/ci/resource-budget.ts"] };
+    const text = `${JSON.stringify(config, null, 2)}\n`;
+    const after = recipePaths(new Map(blobs).set(path, blobId(text)), (file) =>
+      file === path ? text : read(file),
+    );
+    expect(new Map(before).get(path)).toBe(blobs.get(path)!);
+    expect(new Map(after).get(path)).toBe(blobId(text));
+    expect(digest(after)).not.toBe(digest(before));
+    // Configs of packages the harness does not execute stay compared.
+    for (const product of ["packages/db/tsconfig.json", "apps/web/tsconfig.json"]) {
+      expect(blobs.has(product)).toBe(true);
+      expect(new Map(before).has(product)).toBe(false);
+    }
+  });
+
+  test("lint and format policy found by name anywhere is recipe", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const before = recipePaths(blobs, read);
+    const bound = new Map(before);
+    const changes = (changed: Map<string, string>, reader = read) =>
+      digest(recipePaths(changed, reader)) !== digest(before);
+    // Every tracked ignore file, root and nested: oxlint and oxfmt skip a
+    // tracked file it lists.
+    const ignores = [...blobs.keys()].filter((path) => /(^|\/)\.gitignore$/.test(path));
+    expect(ignores).toContain(".gitignore");
+    expect(ignores).toContain("apps/web/.gitignore");
+    for (const path of ignores) {
+      expect(bound.get(path)).toBe(blobs.get(path)!);
+      expect(changes(new Map(blobs).set(path, "0".repeat(40)))).toBe(true);
+    }
+    // Adding a policy file the pinned tools honour, in any directory, adds a path.
+    for (const path of [
+      "apps/web/src/.gitignore",
+      ".eslintignore",
+      "packages/sdk/.eslintignore",
+      ".prettierignore",
+      ".editorconfig",
+      ".oxlintrc.jsonc",
+      "apps/web/.oxlintrc.json",
+      "packages/sdk/.oxfmtrc.json",
+      "oxfmt.config.ts",
+      "oxlint.config.mjs",
+    ]) {
+      expect(blobs.has(path)).toBe(false);
+      const added = recipePaths(new Map(blobs).set(path, "1".repeat(40)), (file) =>
+        file === path ? "{}" : read(file),
+      );
+      expect(new Map(added).get(path)).toBe("1".repeat(40));
+      expect(digest(added)).not.toBe(digest(before));
+    }
+    // Files the pinned tools do not consult stay compared.
+    for (const path of [".gitattributes", "agent/.gitattributes"]) {
+      expect(blobs.has(path)).toBe(true);
+      expect(bound.has(path)).toBe(false);
+    }
+    for (const path of [".oxlintignore", ".oxfmtignore", ".ignore", ".prettierrc"])
+      expect(changes(new Map(blobs).set(path, "1".repeat(40)))).toBe(false);
+    // An oxlint config's extends chain and local plugins are followed; plugins
+    // are executed code with their own harness imports, and an untracked one is absent.
+    const extra: Record<string, string> = {
+      ".oxlintrc.json": JSON.stringify({
+        ...(Bun.JSONC.parse(read(".oxlintrc.json")) as object),
+        extends: ["./scripts/lint/base.json"],
+        jsPlugins: ["./scripts/lint/plugin.ts", { specifier: "./scripts/lint/obj.ts" }, "pkg"],
+      }),
+      "scripts/lint/base.json": "{}",
+      "scripts/lint/plugin.ts": 'import "./helper";\n',
+      "scripts/lint/helper.ts": "",
+    };
+    const overlay = (path: string) => extra[path] ?? read(path);
+    const tracked = new Map(blobs);
+    for (const path of [
+      "scripts/lint/base.json",
+      "scripts/lint/plugin.ts",
+      "scripts/lint/helper.ts",
+    ])
+      tracked.set(path, "2".repeat(40));
+    const linked = new Map(recipePaths(tracked, overlay));
+    for (const path of [
+      "scripts/lint/base.json",
+      "scripts/lint/plugin.ts",
+      "scripts/lint/helper.ts",
+    ])
+      expect(linked.get(path)).toBe("2".repeat(40));
+    expect(linked.has("scripts/lint/obj.ts")).toBe(true);
+    expect(linked.get("scripts/lint/obj.ts")).toBeNull();
+    expect(lintPlugins(".oxlintrc.json", "{ not json")).toEqual([]);
+    expect(lintPlugins("a/.oxlintrc.json", '{"jsPlugins":"./x.js"}')).toEqual([]);
+  });
+
+  test("an ignore policy change is a recipe change, so the comparison holds", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    // Unlisting a tracked file from a nested ignore file makes lint and format
+    // check it (exit 0 -> 1 and 2 with the pinned tools) with every file it
+    // checks unchanged.
+    const path = "apps/web/.gitignore";
+    const text = read(path).replace(/\n[^\n]*\n?$/, "\n");
+    expect(text).not.toBe(read(path));
+    const baseRecipe = recipePaths(blobs, read);
+    const candidateRecipe = recipePaths(new Map(blobs).set(path, blobId(text)), (file) =>
+      file === path ? text : read(file),
+    );
+    expect(digest(candidateRecipe)).not.toBe(digest(baseRecipe));
+    expect(sourceStepComparison("guards", baseRecipe, candidateRecipe)).toMatchObject({
+      verdict: "not-comparable",
+    });
+  });
+
   test("composed configs: typecheck roots, nearest runtime config walking up, extends", () => {
     const oid = "1".repeat(40);
     const blobs = new Map(
-      ["scripts/a/tsconfig.json", "scripts/j/jsconfig.json"].map((path) => [path, oid]),
+      ["scripts/a/tsconfig.json", "scripts/j/jsconfig.json", "packages/t/tsconfig.json"].map(
+        (path) => [path, oid],
+      ),
     );
+    // Every given (bound, executed) source walks, including a product helper
+    // the harness imports; nothing else is consulted.
     const configs = harnessConfigs(
-      ["scripts/a/b/x.ts", "scripts/a/y.ts", "scripts/j/z.ts", "apps/api/src/app.ts"],
+      ["scripts/a/b/x.ts", "scripts/a/y.ts", "scripts/j/z.ts", "packages/t/src/helper.ts"],
       blobs,
     );
     expect(configs.sort()).toEqual(
@@ -429,6 +554,9 @@ describe("recipe identity", () => {
         "scripts/a/tsconfig.json",
         "scripts/j/tsconfig.json",
         "scripts/j/jsconfig.json",
+        "packages/t/src/tsconfig.json",
+        "packages/t/src/jsconfig.json",
+        "packages/t/tsconfig.json",
       ].sort(),
     );
     // A root-level harness source walks to the repository root.
