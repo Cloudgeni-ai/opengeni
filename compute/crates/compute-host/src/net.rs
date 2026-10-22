@@ -31,9 +31,12 @@
 //! the namespace ([`dns`]): names the host lists, with their addresses, and
 //! the rest through public name servers, never through the host's own.
 //!
-//! Setting up a namespace takes two `ip` runs and one `nft` run, a few
+//! Setting up a namespace takes a few `ip` runs and one `nft` run, a few
 //! milliseconds each, when a sandbox is created; when the agent restarts,
-//! re-checking it takes one `nft` run. Neither happens on a wake.
+//! re-checking it takes the same runs, which change nothing that is already
+//! right. Neither happens on a wake. Nothing asks the host's user database
+//! about a namespace's tap: inside a namespace a lookup can block on a name
+//! service the namespace cannot reach ([`netlink`]).
 
 use std::fmt::{self, Write as _};
 use std::fs::File;
@@ -50,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::Id;
 
 mod dns;
+mod netlink;
 pub mod reach;
 
 use reach::Allowed;
@@ -549,31 +553,16 @@ enum Tap {
 impl Tap {
     /// Looks at the tap of the namespace the calling thread is in.
     fn find(uid: u32, gid: u32) -> Result<Self, NetError> {
-        if !has_interface(TAP)? {
-            return Ok(Self::Missing);
-        }
-        let details = output("ip", &["-details", "-oneline", "link", "show", "dev", TAP])?;
-        Ok(if tap_owner(&details) == (Some(uid), Some(gid)) {
-            Self::Fits
-        } else {
-            Self::Foreign
+        let fits = netlink::Owner {
+            user: Some(uid),
+            group: Some(gid),
+        };
+        Ok(match netlink::tun_owner(TAP)? {
+            None => Self::Missing,
+            Some(owner) if owner == fits => Self::Fits,
+            Some(_) => Self::Foreign,
         })
     }
-}
-
-/// The owner a tap's `ip -details link show` names, from its tun details
-/// (`... persist on user U group G ...`); the line also holds an unrelated
-/// `group default`.
-fn tap_owner(details: &str) -> (Option<u32>, Option<u32>) {
-    let words: Vec<&str> = details.split_whitespace().collect();
-    let Some(user) = words.iter().position(|word| *word == "user") else {
-        return (None, None);
-    };
-    let number = |at: usize| words.get(at).and_then(|word| word.parse().ok());
-    let group = (words.get(user + 2) == Some(&"group"))
-        .then(|| number(user + 3))
-        .flatten();
-    (number(user + 1), group)
 }
 
 /// The namespace name of sandbox `id`.
