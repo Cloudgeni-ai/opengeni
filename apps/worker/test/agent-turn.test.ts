@@ -15,6 +15,7 @@ import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -5318,7 +5319,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+  test("a null accepted Codex stream settles terminally; only a checkpoint retries it", async () => {
     const observed = await actualCodexNullBodyFailure();
     expect(observed.calls).toBe(1);
     expect(agentRunFailurePayload(observed.error)).toEqual({
@@ -5327,16 +5328,18 @@ describe("transient provider error classifier", () => {
       retryable: false,
     });
 
+    // A checkpoint request has no tool or output effects to repeat.
     const wrapped = new CompactionProviderResponseError(
       { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
       observed.error,
     );
     expect(agentRunFailurePayload(wrapped)).toEqual({
-      error: "The Codex response stream ended without a terminal response",
-      code: "invalid_sse_terminal",
-      retryable: false,
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      providerCondition: "unavailable",
     });
-    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
   });
 
   test("an actual streamed Codex server failure preserves exact detail during same-turn recovery", async () => {
@@ -6117,6 +6120,33 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a checkpoint stream that ends early or times out retries the same turn", () => {
+    // Ordinary requests keep these terminal because replay could repeat model
+    // or tool effects. A checkpoint request only summarizes, so it is safe to
+    // send again on the same logical turn.
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    for (const cause of [truncated, timedOut]) {
+      const wrapped = new CompactionProviderResponseError(
+        compactionProviderFailureDiagnostics(cause),
+        cause,
+      );
+      expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+      expect(agentRunFailurePayload(wrapped)).toMatchObject({
+        code: "provider_unavailable",
+        retryable: true,
+      });
+      // The same failures on an ordinary model request stay terminal.
+      expect(agentRunFailurePayload(cause, { isCodexTurn: true }).retryable).toBe(false);
+    }
   });
 
   test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {
