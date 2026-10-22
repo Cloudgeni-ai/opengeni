@@ -1,71 +1,47 @@
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
+  HumanInputSecretAnswer,
+  HumanInputSecretSaveTo,
+  HumanInputSecretSpec,
   SkillRecord,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
+import {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  emptyDraft,
+  initialDrafts,
+  secretAnswerFromReading,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
+} from "../human-input-model";
+import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
+import { linkifyText } from "./linkified-text";
+import { useOpenGeniText } from "../messages/runtime";
 
-export type HumanInputAnswerDraft = {
-  values: string[];
-  other: string;
-  otherSelected: boolean;
+export {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
 };
 
 class SkillReviewVerificationError extends Error {}
-
-export type HumanInputFormMessages = {
-  title: string;
-  description: string;
-  submit: string;
-  skip: string;
-  submitting: string;
-  other: string;
-  deadlineLabel: string;
-  formatDeadline: (value: string) => string;
-  required: string;
-  otherRequired: string;
-  minSelections: (count: number) => string;
-  maxSelections: (count: number) => string;
-  optional: string;
-  /** Shown when the question list overflows the card and more content is below. */
-  moreBelow: string;
-  questionCount: (count: number) => string;
-  collapse: string;
-  expand: string;
-  selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
-};
-
-export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Input required",
-  /** Multi-question chrome has no default subtitle; hosts may still override. */
-  description: "",
-  submit: "Send answers",
-  skip: "Skip",
-  submitting: "Submitting…",
-  other: "Other",
-  deadlineLabel: "Expires",
-  formatDeadline,
-  required: "This question is required.",
-  otherRequired: "Enter a value for Other.",
-  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
-  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
-  optional: "Optional",
-  moreBelow: "More below",
-  questionCount: (count) => `${count} questions`,
-  collapse: "Collapse",
-  expand: "Expand",
-  selectionHint: (min, max) => {
-    if (min != null && max != null) return `Choose ${min}–${max}.`;
-    if (min != null) return `Choose at least ${min}.`;
-    if (max != null) return `Choose up to ${max}.`;
-    return null;
-  },
-};
 
 export type HumanInputFormProps = {
   /** Scoped immutable revision reader. Saving a Skill fails closed without its full preview. */
@@ -92,6 +68,12 @@ export type HumanInputFormProps = {
    * Off by default; embedded conversations turn it on.
    */
   decisionButtons?: boolean | undefined;
+  /**
+   * Where this person may save an answer to a secret question. A request for
+   * a target outside this list falls back to the most private allowed one,
+   * with a note. Defaults to Only me, This task and This workspace.
+   */
+  allowedSaveTo?: readonly HumanInputSecretSaveTo[] | undefined;
   className?: string | undefined;
 };
 
@@ -124,10 +106,12 @@ function HumanInputRequestForm({
   autoFocus = true,
   defaultCollapsed = false,
   decisionButtons = false,
+  allowedSaveTo,
   className,
 }: HumanInputFormProps) {
+  const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   const decision = decisionButtons ? binaryDecision(request.questions) : null;
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
@@ -160,6 +144,26 @@ function HumanInputRequestForm({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
+  // Secret answers stay in their uncontrolled inputs until submit.
+  const secretHandles = useRef(new Map<string, SecretFieldHandle>());
+  const secretRegistrars = useMemo(
+    () => new Map<string, (handle: SecretFieldHandle | null) => void>(),
+    [],
+  );
+  const registerSecret = useCallback(
+    (questionId: string) => {
+      let registrar = secretRegistrars.get(questionId);
+      if (!registrar) {
+        registrar = (handle) => {
+          if (handle) secretHandles.current.set(questionId, handle);
+          else secretHandles.current.delete(questionId);
+        };
+        secretRegistrars.set(questionId, registrar);
+      }
+      return registrar;
+    },
+    [secretRegistrars],
+  );
   const busy = submitting || submittingInternally;
   const reviewIdentity = JSON.stringify(
     request.questions
@@ -195,10 +199,7 @@ function HumanInputRequestForm({
     setReviews(null);
     void Promise.all(
       questions.map(async (question) => {
-        if (!loadSkillReview)
-          throw new Error(
-            "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
-          );
+        if (!loadSkillReview) throw new Error(t("humanInputForm.thisClientCannotPreviewSkill"));
         const reference = question.reference;
         const record = await loadSkillReview(reference);
         if (
@@ -208,7 +209,7 @@ function HumanInputRequestForm({
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
           throw new SkillReviewVerificationError(
-            "The requested Skill revision could not be verified.",
+            t("humanInputForm.theRequestedSkillRevisionCould"),
           );
         }
         return [question.id, record] as const;
@@ -234,7 +235,7 @@ function HumanInputRequestForm({
               cause instanceof SkillReviewVerificationError
                 ? cause.message
                 : !loadSkillReview
-                  ? "This client cannot preview Skill files. Ask your administrator for a review-capable client."
+                  ? t("humanInputForm.thisClientCannotPreviewSkill")
                   : undefined,
             ),
           });
@@ -242,7 +243,7 @@ function HumanInputRequestForm({
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload, formatError]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError, t]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -253,12 +254,16 @@ function HumanInputRequestForm({
         {record ? (
           <>
             <p className="text-og-sm">
-              {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
+              {record.title ?? t("humanInputForm.skill")}{" "}
+              {t("humanInputForm.scopeLengthFiles", {
+                scope: record.scope,
+                length: record.files.length,
+              })}
             </p>
             <p className="text-og-xs text-og-fg-muted">
               {question.skillReview.removalOperationId
-                ? "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged."
-                : "Saving activates these exact files. No additional review is required."}
+                ? t("humanInputForm.permanentlyDeletesThisSkillAnd")
+                : t("humanInputForm.savingActivatesTheseExactFiles")}
             </p>
             {record.files.map((file) => (
               <details key={file.path} open={file.path === "SKILL.md"}>
@@ -275,12 +280,12 @@ function HumanInputRequestForm({
               {visibleReviews.error}
             </p>
             <button type="button" onClick={() => setReviewReload((value) => value + 1)}>
-              Retry preview
+              {t("humanInputForm.retryPreview")}
             </button>
           </>
         ) : (
           <p role="status" className="text-og-sm">
-            Loading the exact Skill files…
+            {t("humanInputForm.loadingTheExactSkillFiles")}
           </p>
         )}
       </div>
@@ -331,18 +336,29 @@ function HumanInputRequestForm({
     });
   };
 
-  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<void> => {
-    if (busy || submissionInFlight.current) return;
+  const clearValidationError = (questionId: string): void =>
+    setValidationErrors((current) => {
+      if (!(questionId in current)) return current;
+      const next = { ...current };
+      delete next[questionId];
+      return next;
+    });
+
+  /** Resolves true when the host accepted the response. */
+  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<boolean> => {
+    if (busy || submissionInFlight.current) return false;
     const generation = submissionGeneration.current;
     submissionInFlight.current = true;
     setSubmissionError(null);
     setSubmittingInternally(true);
     try {
       await onSubmit(response);
+      return true;
     } catch (cause) {
       if (generation === submissionGeneration.current) {
         setSubmissionError(formatError(cause));
       }
+      return false;
     } finally {
       if (generation === submissionGeneration.current) {
         submissionInFlight.current = false;
@@ -366,7 +382,22 @@ function HumanInputRequestForm({
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const result = answersFromDrafts(request.questions, drafts, messages);
+    const result = answersFromDrafts(t, request.questions, drafts, messages);
+    const secretAnswers: HumanInputSecretAnswer[] = [];
+    const secretPublicAnswers = new Map<string, HumanInputAnswer>();
+    for (const question of request.questions) {
+      if (question.kind !== "secret") continue;
+      const handle = secretHandles.current.get(question.id);
+      if (!handle) continue;
+      const secret = secretAnswerFromReading(t, question, handle.read(), messages);
+      if (!secret) continue;
+      if ("error" in secret) {
+        result.errors[question.id] = secret.error;
+        continue;
+      }
+      secretAnswers.push(secret.secretAnswer);
+      secretPublicAnswers.set(question.id, secret.answer);
+    }
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
       const firstInvalid = request.questions.find((question) => question.id in result.errors);
@@ -387,12 +418,23 @@ function HumanInputRequestForm({
     if (unreviewedSave) {
       setValidationErrors({
         [unreviewedSave.id]: unreviewedSave.skillReview?.removalOperationId
-          ? "Load the exact Skill proposal before approving permanent deletion."
-          : "Load the exact Skill files before saving.",
+          ? t("humanInputForm.loadTheExactSkillProposal")
+          : t("humanInputForm.loadTheExactSkillFiles"),
       });
       return;
     }
-    await submitResponse({ outcome: "answered", answers: result.answers });
+    // Keep the request's question order across drafted and secret answers.
+    const drafted = new Map(result.answers.map((answer) => [answer.questionId, answer]));
+    const answers = request.questions.flatMap((question) => {
+      const answer = drafted.get(question.id) ?? secretPublicAnswers.get(question.id);
+      return answer ? [answer] : [];
+    });
+    const accepted = await submitResponse({
+      outcome: "answered",
+      answers,
+      ...(secretAnswers.length > 0 ? { secretAnswers } : {}),
+    });
+    if (accepted) for (const handle of secretHandles.current.values()) handle.clear();
   };
 
   const metaBits = [
@@ -401,7 +443,10 @@ function HumanInputRequestForm({
     request.expiresAt ? (
       <>
         {messages.deadlineLabel}{" "}
-        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+        <time
+          dateTime={request.expiresAt}
+          title={new Date(request.expiresAt).toLocaleString(t.locale)}
+        >
           {messages.formatDeadline(request.expiresAt)}
         </time>
       </>
@@ -465,8 +510,11 @@ function HumanInputRequestForm({
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
-                {resolvedTitle}
+              <h2
+                id={titleId}
+                className="min-w-0 text-og-md font-semibold text-og-fg [overflow-wrap:anywhere]"
+              >
+                {linkifyText(resolvedTitle)}
                 {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
@@ -485,21 +533,25 @@ function HumanInputRequestForm({
               ) : null}
             </div>
             {resolvedDescription ? (
-              <div className="mt-0.5 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
+              <div className="mt-0.5 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+                {linkifyText(resolvedDescription)}
+              </div>
             ) : null}
             {request.expiresAt ? (
               <p className="mt-1 text-og-xs text-og-fg-subtle">
                 {messages.deadlineLabel}{" "}
                 <time
                   dateTime={request.expiresAt}
-                  title={new Date(request.expiresAt).toLocaleString()}
+                  title={new Date(request.expiresAt).toLocaleString(t.locale)}
                 >
                   {messages.formatDeadline(request.expiresAt)}
                 </time>
               </p>
             ) : null}
             {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
+              <p className="mt-1 text-og-xs text-og-fg-subtle">
+                {t("humanInputForm.orSkipAndLetThe")}
+              </p>
             ) : null}
           </div>
           <button
@@ -519,16 +571,16 @@ function HumanInputRequestForm({
           {decision.question.helpText ||
           decision.accept.description ||
           decision.decline.description ? (
-            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted">
+            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
               {decision.question.label && decision.question.helpText ? (
-                <p>{decision.question.helpText}</p>
+                <p>{linkifyText(decision.question.helpText)}</p>
               ) : null}
               {[decision.accept, decision.decline].map((option) =>
                 option.description ? (
                   <p key={option.id}>
                     <span className="font-medium text-og-fg">{option.label}</span>
                     {" · "}
-                    {option.description}
+                    {linkifyText(option.description)}
                   </p>
                 ) : null,
               )}
@@ -618,6 +670,9 @@ function HumanInputRequestForm({
                           showPromptChrome={false}
                           allowSkip={request.allowSkip}
                           busy={busy}
+                          allowedSaveTo={allowedSaveTo}
+                          registerSecret={registerSecret(question.id)}
+                          onSecretEdited={() => clearValidationError(question.id)}
                           onUpdate={(apply) => update(question.id, apply)}
                         />
                       </div>
@@ -643,6 +698,9 @@ function HumanInputRequestForm({
                         showPromptChrome
                         allowSkip={request.allowSkip}
                         busy={busy}
+                        allowedSaveTo={allowedSaveTo}
+                        registerSecret={registerSecret(question.id)}
+                        onSecretEdited={() => clearValidationError(question.id)}
                         onUpdate={(apply) => update(question.id, apply)}
                       />
                     </div>
@@ -762,6 +820,9 @@ function QuestionControls({
   showPromptChrome,
   allowSkip,
   busy,
+  allowedSaveTo,
+  registerSecret,
+  onSecretEdited,
   onUpdate,
 }: {
   question: HumanInputQuestion;
@@ -776,8 +837,12 @@ function QuestionControls({
   showPromptChrome: boolean;
   allowSkip: boolean;
   busy: boolean;
+  allowedSaveTo: readonly HumanInputSecretSaveTo[] | undefined;
+  registerSecret: (handle: SecretFieldHandle | null) => void;
+  onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
+  const t = useOpenGeniText();
   const errorId = `${fieldId}-error`;
   const helpId = `${fieldId}-help`;
   const labelId = `${fieldId}-label`;
@@ -816,13 +881,13 @@ function QuestionControls({
             <label
               id={labelId}
               htmlFor={question.kind === "text" ? fieldId : undefined}
-              className="text-og-sm font-medium text-og-fg"
+              className="min-w-0 text-og-sm font-medium text-og-fg [overflow-wrap:anywhere]"
             >
               {questionNumber === null ? null : (
                 <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
               )}
               {questionNumber === null ? null : " "}
-              {visibleLabel}
+              {linkifyText(visibleLabel)}
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -835,13 +900,13 @@ function QuestionControls({
             </label>
           </div>
           {question.label ? (
-            <p id={promptId} className="text-og-sm text-og-fg-muted">
-              {question.prompt}
+            <p id={promptId} className="text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+              {linkifyText(question.prompt)}
             </p>
           ) : null}
           {question.helpText ? (
-            <p id={helpId} className="text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (
@@ -856,8 +921,8 @@ function QuestionControls({
             <p className="text-og-xs text-og-fg-subtle">{messages.optional}</p>
           ) : null}
           {question.helpText && question.label ? (
-            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (
@@ -868,7 +933,30 @@ function QuestionControls({
         </>
       )}
 
-      {question.kind === "text" ? (
+      {question.kind === "secret" ? (
+        question.secret ? (
+          <SecretQuestionField
+            question={question as HumanInputQuestion & { secret: HumanInputSecretSpec }}
+            fieldId={fieldId}
+            messages={messages}
+            autoFocus={autoFocus}
+            allowedSaveTo={allowedSaveTo}
+            error={error}
+            describedBy={
+              [
+                question.label && showPromptChrome ? promptId : null,
+                question.helpText && showPromptChrome ? helpId : null,
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
+            register={registerSecret}
+            onEdited={onSecretEdited}
+          />
+        ) : (
+          <p className="text-og-sm text-og-fg-muted">{t("humanInputForm.thisQuestionCanTBe")}</p>
+        )
+      ) : question.kind === "text" ? (
         <textarea
           id={fieldId}
           value={draft.values[0] ?? ""}
@@ -931,7 +1019,7 @@ function QuestionControls({
                   <span className="block text-og-sm font-medium">{option.label}</span>
                   {option.description ? (
                     <span className="mt-0.5 block text-og-xs text-og-fg-muted">
-                      {option.description}
+                      {linkifyText(option.description)}
                     </span>
                   ) : null}
                 </span>
@@ -974,14 +1062,17 @@ function QuestionControls({
                   {messages.other}
                 </label>
                 <label htmlFor={otherTextId} className="sr-only">
-                  {messages.other} answer for {visibleLabel}
+                  {t("humanInputForm.otherAnswerForVisiblelabel", {
+                    other: messages.other,
+                    visibleLabel,
+                  })}
                 </label>
                 <input
                   id={otherTextId}
                   type="text"
                   value={draft.other}
                   disabled={busy}
-                  placeholder="Type a value…"
+                  placeholder={t("humanInputForm.typeAValue")}
                   onClick={() => onUpdate(selectOtherDraft)}
                   onFocus={() => onUpdate(selectOtherDraft)}
                   onChange={(event) => {
@@ -998,81 +1089,12 @@ function QuestionControls({
           ) : null}
         </div>
       )}
-      {error ? (
+      {/* A secret field shows its error under the input, above Save to. */}
+      {error && !(question.kind === "secret" && question.secret) ? (
         <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
           {error}
         </p>
       ) : null}
     </>
   );
-}
-
-export function answersFromDrafts(
-  questions: HumanInputQuestion[],
-  drafts: Record<string, HumanInputAnswerDraft>,
-  messageOverrides: Partial<HumanInputFormMessages> = {},
-): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const answers: HumanInputAnswer[] = [];
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const draft = drafts[question.id] ?? emptyDraft();
-    const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other : "";
-    const hasOther = Boolean(other.trim());
-    const supplied = values.length + (hasOther ? 1 : 0);
-
-    // Other-selected-but-empty must win over generic "required" — otherwise the
-    // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
-      errors[question.id] = messages.otherRequired;
-      continue;
-    }
-
-    if (question.required && supplied === 0) {
-      errors[question.id] = messages.required;
-      continue;
-    }
-    if (question.kind !== "text") {
-      const min = question.validation?.minSelections;
-      const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
-      if (min != null && supplied < min) {
-        errors[question.id] = messages.minSelections(min);
-        continue;
-      }
-      if (max != null && supplied > max) {
-        errors[question.id] = messages.maxSelections(max);
-        continue;
-      }
-    }
-    if (supplied > 0) {
-      answers.push({
-        questionId: question.id,
-        values,
-        ...(hasOther ? { other } : {}),
-      });
-    }
-  }
-  return { answers, errors };
-}
-
-function initialDrafts(questions: HumanInputQuestion[]): Record<string, HumanInputAnswerDraft> {
-  return Object.fromEntries(questions.map((question) => [question.id, emptyDraft()]));
-}
-
-function emptyDraft(): HumanInputAnswerDraft {
-  return { values: [], other: "", otherSelected: false };
-}
-
-function formatDeadline(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const ms = date.getTime() - Date.now();
-  if (ms <= 0) return "deadline passed";
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours}h`;
-  return date.toLocaleString();
 }

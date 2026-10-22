@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -17,9 +17,7 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
     expect(guidance).toContain("Use available integration tools directly");
-    expect(guidance).toContain(
-      "If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.",
-    );
+    expect(guidance).toContain("If access is missing, search `capability_catalog_search`.");
     expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
@@ -35,7 +33,9 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain(
+      "check whether the workspace already provides the capability natively",
+    );
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );
@@ -92,6 +92,16 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("limits programmatic coverage to the Codemode catalog, not sandbox built-ins", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).not.toContain("Every tool available to you");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Every tool in the Codemode catalog (what `ogtool list` shows)",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -103,7 +113,7 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("/abs/path");
   });
 
-  test("teaches OpenGeni sandbox file links with optional line numbers", () => {
+  test("teaches Opengeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",
@@ -137,7 +147,7 @@ describe("provider-neutral operational instructions", () => {
 
   test("answers in chat by default and routes document deliverables before local-file guidance", () => {
     const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
-      "Answer in chat by default, including summaries and reports",
+      "Answer in chat by default, including summaries, reports, briefs, letters and plans",
     );
     const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "When referencing a real local source file",
@@ -151,13 +161,16 @@ describe("provider-neutral operational instructions", () => {
       "including audit or summary reports produced while doing another task",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when the user asks for a document or file, or when the deliverable is large (multi-page) or clearly meant to be kept or shared",
+      "only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages)",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox with ordinary tools",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "give a short summary and the artifact link in chat, not a full restatement",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Read the opengeni-documents Skill and create the native document artifact before authoring",
+      "Read the documents Skill and create the native document artifact before authoring",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "including ones discovered after the goal was created",
@@ -212,12 +225,8 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable.",
     );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A session cannot gain a Variable Set while it works",
-    );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
-    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variable_set_list");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variableSetIds");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",
@@ -506,12 +515,12 @@ describe("proportional effort", () => {
       videoGeneration: true,
     });
     const descriptions = new Map(index.map((entry) => [entry.name, entry.description]));
-    expect(descriptions.get("opengeni-sites")).toBeDefined();
-    expect(descriptions.get("opengeni-visualize")).toBeDefined();
+    expect(descriptions.get("sites")).toBeDefined();
+    expect(descriptions.get("visualize")).toBeDefined();
     for (const [name, description] of descriptions) {
       expect(description, name).not.toMatch(/proactively|even when the user doesn't name/i);
     }
-    expect(descriptions.get("opengeni-sites")).toContain("Use when the user asks");
-    expect(descriptions.get("opengeni-visualize")).toContain("Use when the user asks");
+    expect(descriptions.get("sites")).toContain("Use when the user asks");
+    expect(descriptions.get("visualize")).toContain("Use when the user asks");
   });
 });

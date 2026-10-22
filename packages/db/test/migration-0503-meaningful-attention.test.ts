@@ -4,7 +4,7 @@ import postgres from "postgres";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { appendSessionEvents, bootstrapWorkspace, createDb, createSession } from "../src/index";
 import { migrate } from "../src/migrate";
 
@@ -74,14 +74,30 @@ test("non-bypass owner protects meaningful unread intent but not a read final fo
     new URL("../drizzle/0503_session_meaningful_attention.sql", import.meta.url),
     "utf8",
   );
-  // Reconstruct only this isolated fixture's pre-0502 shape, then execute the
+  const [listTrigger] = await owner<{ definition: string }[]>`
+    select pg_get_triggerdef(oid) as definition from pg_trigger
+    where tgrelid = 'session_pins'::regclass and tgname = 'session_pins_list_update'`;
+  expect(listTrigger?.definition).toContain("manually_unread_through");
+  // Reconstruct only this isolated fixture's pre-0503 shape, then execute the
   // exact shipped migration as its NOSUPERUSER NOBYPASSRLS owner.
   await owner.begin(async (tx) => {
+    // 0888 depends on this column. Remove only that later trigger while
+    // replaying its prerequisite, then restore its exact installed definition.
+    await tx`drop trigger session_pins_list_update on session_pins`;
     await tx`alter table session_pins drop column manually_unread_through`;
     await tx`drop index session_events_meaningful_attention_idx`;
     await tx`select set_config('opengeni.migration_application_roles', ${JSON.stringify([applicationRole])}, true)`;
     await tx.unsafe(migration);
+    await tx.unsafe(listTrigger!.definition);
   });
+  const [restoredTrigger] = await owner<{ definition: string }[]>`
+    select pg_get_triggerdef(oid) as definition from pg_trigger
+    where tgrelid = 'session_pins'::regclass and tgname = 'session_pins_list_update'`;
+  // PostgreSQL may flatten the OR expression when it reparses pg_get_triggerdef.
+  // Verify the restored prerequisite-dependent predicate rather than its layout.
+  expect(restoredTrigger?.definition).toContain(
+    "old.manually_unread_through IS DISTINCT FROM new.manually_unread_through",
+  );
   const rows = await shared.admin`select subject_id, acknowledged_sequence, manually_unread_through
     from session_pins where session_id=${session.id} order by subject_id`;
   expect([...rows]).toEqual([

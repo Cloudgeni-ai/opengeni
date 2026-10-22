@@ -5,19 +5,24 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { BROWSER_STATE_ARTIFACT_CONTENT_TYPE } from "@opengeni/contracts";
+import { retainCompletedBrowserDownloads, type RetainedDownloadSource } from "@opengeni/core";
 import {
   browserDeadlineCheckpoint,
   clearSuspendedBrowserSessionController,
   commitBrowserSessionSuspension,
   dispatchBrowserSessionOperation,
   failBrowserSessionSuspension,
+  getBrowserSessionControlRecord,
   listBrowserDeadlineCheckpoints,
   readLease,
   releaseLeaseHolder,
   withRlsContext,
   type BrowserDeadlineCheckpointTarget,
 } from "@opengeni/db";
-import { deriveBrowserControllerAdminToken } from "@opengeni/interaction/browser-controller-authority";
+import {
+  deriveBrowserControllerAdminToken,
+  deriveBrowserSessionControllerTokens,
+} from "@opengeni/interaction/browser-controller-authority";
 import {
   browserStateArtifactAad,
   browserStateManifestDigest,
@@ -56,7 +61,10 @@ async function withActivityHeartbeat<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-type CheckpointController = Pick<BrowserControlClient, "captureState" | "endSession">;
+type CheckpointController = Pick<BrowserControlClient, "captureState" | "endSession"> & {
+  /** The browser's own downloads, kept as workspace files before capture. */
+  downloads?: (tokens: { controlToken: string; viewToken: string }) => RetainedDownloadSource;
+};
 type CheckpointPlacement = {
   target: BrowserDeadlineCheckpointTarget;
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>;
@@ -81,7 +89,7 @@ async function resumeCheckpointController({
     target.instanceId,
   );
   const resumed = await resumeExactSandboxSession(provider, "modal", state, target.instanceId);
-  return new BrowserControlClient(resumed.session as BrowserControlPlacementSession, {
+  const client = new BrowserControlClient(resumed.session as BrowserControlPlacementSession, {
     adminToken: deriveBrowserControllerAdminToken({
       rootSecret: controllerRoot,
       accountId: target.accountId,
@@ -90,6 +98,93 @@ async function resumeCheckpointController({
       placementInstanceId: target.instanceId,
     }),
   });
+  return {
+    captureState: client.captureState.bind(client),
+    endSession: client.endSession.bind(client),
+    downloads: (tokens) =>
+      client.sessionClient({
+        reference: {
+          browserSessionId: target.browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+        },
+        ...tokens,
+      }),
+  };
+}
+
+/** Suspension removes the browser's working directory, and with it every
+ * download: keep completed ones as workspace files first. Best effort; a
+ * failure is logged and never blocks the save. */
+async function retainDownloadsBeforeCapture(
+  services: Pick<ControlActivityServices, "db" | "settings"> & {
+    objectStorage: NonNullable<ControlActivityServices["objectStorage"]>;
+  },
+  target: BrowserDeadlineCheckpointTarget,
+  controllerRoot: string,
+  client: CheckpointController,
+): Promise<void> {
+  if (!client.downloads) return;
+  try {
+    const record = await getBrowserSessionControlRecord(services.db, target);
+    if (
+      !record.session.capabilities.downloads ||
+      record.session.controller?.controllerGeneration !== target.controllerGeneration
+    ) {
+      return;
+    }
+    const result = await retainCompletedBrowserDownloads(services, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      subjectId: null,
+      browserSessionId: target.browserSessionId,
+      sourceSessionId: record.sourceSessionId,
+      source: client.downloads(
+        deriveBrowserSessionControllerTokens({
+          rootSecret: controllerRoot,
+          accountId: target.accountId,
+          workspaceId: target.workspaceId,
+          placement: { kind: "sandbox_group", sandboxGroupId: target.sandboxGroupId },
+          placementInstanceId: target.instanceId,
+          browserSessionId: target.browserSessionId,
+          controllerGeneration: target.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        }),
+      ),
+      uploadAudience: "sandbox",
+    });
+    for (const failure of result.failed) {
+      console.warn("browser.download_retention_failed", {
+        workspaceId: target.workspaceId,
+        browserSessionId: target.browserSessionId,
+        ...failure,
+      });
+    }
+  } catch (error) {
+    console.warn("browser.download_retention_failed", {
+      workspaceId: target.workspaceId,
+      browserSessionId: target.browserSessionId,
+      downloadId: null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** Whether this worker can save browser profiles: ownership, object storage,
+ * the controller delegation secret and the environments encryption key. */
+export function browserCheckpointPrerequisites(
+  settings: Settings,
+  objectStorage: ControlActivityServices["objectStorage"],
+): boolean {
+  if (
+    !settings.sandboxOwnershipEnabled ||
+    !objectStorage ||
+    !resolveFirstPartyDelegationSecret(settings)
+  )
+    return false;
+  const root = environmentsEncryptionKeyBytes(settings);
+  if (!root) return false;
+  root.fill(0);
+  return true;
 }
 
 export function createBrowserDeadlineCheckpointActivities(
@@ -102,15 +197,7 @@ export function createBrowserDeadlineCheckpointActivities(
     async listDueBrowserCheckpoints() {
       return await withActivityHeartbeat(async () => {
         const { db, settings, objectStorage } = await services();
-        if (
-          !settings.sandboxOwnershipEnabled ||
-          !objectStorage ||
-          !resolveFirstPartyDelegationSecret(settings)
-        )
-          return [];
-        const root = environmentsEncryptionKeyBytes(settings);
-        if (!root) return [];
-        root.fill(0);
+        if (!browserCheckpointPrerequisites(settings, objectStorage)) return [];
         return await listBrowserDeadlineCheckpoints(db);
       });
     },
@@ -127,7 +214,12 @@ export function createBrowserDeadlineCheckpointActivities(
         let aad: Buffer | null = null;
         let timer: ReturnType<typeof setInterval> | null = null;
         try {
-          const claim = await browserDeadlineCheckpoint(db, target, { prepare: true, touch: true });
+          // Only the reaper's locked idle decision prepares an idle save; this
+          // activity continues it. A deadline save prepares here.
+          const claim = await browserDeadlineCheckpoint(db, target, {
+            prepare: target.reason !== "idle",
+            touch: true,
+          });
           if (!claim) return { status: "skipped" as const };
           let pulseRunning = false;
           let authorityLost = false;
@@ -162,6 +254,12 @@ export function createBrowserDeadlineCheckpointActivities(
             throw new Error("browser deadline checkpoint authority changed");
           }
           if (claim.state !== "completed") {
+            await retainDownloadsBeforeCapture(
+              { db, settings, objectStorage },
+              target,
+              controllerRoot,
+              client,
+            );
             const scope = { ...target, operationId: claim.operationId };
             const objectKey = browserStateObjectKey(target.workspaceId, claim.operationId);
             dataKey = deriveBrowserStateDataKey(rootKey, { ...scope, objectKey });
@@ -260,7 +358,10 @@ export function createBrowserDeadlineCheckpointActivities(
                 ...target,
                 kind: "interaction",
                 holderId: `browser-session:${target.browserSessionId}`,
-                idleGraceMs: settings.sandboxIdleGraceMs,
+                // The idle window already elapsed before this save began, so
+                // a box the saved browser was last to hold drains now.
+                idleGraceMs: target.reason === "idle" ? 0 : settings.sandboxIdleGraceMs,
+                preserveHoldersChangedAt: target.reason === "idle",
               });
             },
             undefined,

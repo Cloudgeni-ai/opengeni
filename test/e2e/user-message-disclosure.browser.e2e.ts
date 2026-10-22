@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

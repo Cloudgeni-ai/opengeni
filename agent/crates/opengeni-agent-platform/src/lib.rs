@@ -1,4 +1,4 @@
-//! Per-OS platform abstraction for the OpenGeni self-hosted agent.
+//! Per-OS platform abstraction for the Opengeni self-hosted agent.
 //!
 //! This crate defines the [`Platform`] trait — the single seam between the
 //! agent's transport/dispatch layer and the host operating system. Channel-A
@@ -31,12 +31,19 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+mod continuous_clock;
 mod desktop;
 mod error;
+#[cfg(unix)]
+mod exec_handover;
 mod native;
+#[cfg(unix)]
+mod process_cleanup;
 mod pty;
+pub mod run_as;
 pub mod service;
 pub mod transactional_write;
+mod work_scope;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -55,16 +62,31 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use continuous_clock::continuous_time;
+pub use opengeni_agent_engine::update_drain::WorkReservation;
+pub use work_scope::{
+    current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,
+    with_work_reservation_sync,
+};
+
 pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{
-    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
 };
 pub use error::{PlatformError, PlatformResult};
-pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
+#[cfg(unix)]
+pub use exec_handover::{
+    discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
+};
+pub use native::{
+    adopt_workspace_working_directory, assemble_git_response, resolve_workspace_root,
+    spawn_contained, ContainedExec, NativePlatform,
+};
 pub use pty::{spawn_pty, PtyProcess};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
@@ -73,7 +95,11 @@ pub use pty::{spawn_pty, PtyProcess};
 /// startup/enroll seam uses these to request display capability on a real Mac; a
 /// denied grant degrades cleanly to `display_unavailable`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-pub use macos::{desktop_grants, request_desktop_grants, DesktopGrants};
+pub use macos::{
+    desktop_grants, request_desktop_grants, request_desktop_permission, DesktopGrants,
+};
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub use opengeni_agent_macos_ffi::DesktopPermission;
 
 /// Reported OS/arch identity of the host the agent runs on, folded into the
 /// connect [`Hello`](opengeni_agent_proto::v1::Hello).
@@ -85,12 +111,18 @@ pub struct HostIdentity {
     pub arch: v1::Arch,
 }
 
+/// Largest total size of the response headers a controller request may return.
+/// The reply body budget subtracts it, so headers never push a reply past the
+/// transport's negotiated payload.
+pub const BROWSER_CONTROL_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
+
 /// Loopback endpoint of one agent-supervised browser controller sidecar.
 ///
 /// This is deliberately process-local: the control plane never receives the
 /// browserd authority or connects to this port directly. Browser control RPCs
-/// reach it through the connected-machine execution adapter, while frame bytes
-/// are copied into an authenticated relay channel by [`StreamRegistry`].
+/// reach it through the scope-resolved `browser_control_http` op (or, for an
+/// older control plane, the connected-machine execution adapter), while frame
+/// bytes are copied into an authenticated relay channel by [`StreamRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserControlEndpoint {
     /// Loopback TCP port selected by browserd.
@@ -99,16 +131,53 @@ pub struct BrowserControlEndpoint {
     pub sidecar_generation: String,
 }
 
-/// Host-owned lifecycle seam for browserd.
-///
-/// The agent binary implements this because it owns installation paths,
-/// configuration storage, and child-process shutdown. The platform and relay
-/// crates depend only on this narrow capability, never on Bun/browserd details.
+/// Content-free evidence about work that must survive or finish before update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBlocker {
+    /// Stable category; never command text, URLs or filesystem paths.
+    pub kind: String,
+    /// Opaque session/operation identity, when known.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Number of retained owners in this category.
+    pub count: u32,
+}
+
+/// One atomic controller admission proof and its retained owners.
+#[derive(Debug, Clone)]
+pub struct UpdateAdmission {
+    /// True only when restart preserves all owned work.
+    pub idle: bool,
+    /// Diagnostic evidence, not authorization to end the named work.
+    pub blockers: Vec<UpdateBlocker>,
+}
+
+/// Host-owned lifecycle seam for browserd. The agent binary owns installation,
+/// configuration and child-process shutdown; platform/relay crates depend only
+/// on this boundary, never on Bun/browserd details.
 #[async_trait]
 pub trait BrowserControlBackend: Send + Sync {
     /// Proves every owned browser/computer controller is idle before restart.
     /// Unavailable or incompatible state must fail closed, never mean idle.
     async fn is_idle(&self) -> PlatformResult<bool>;
+
+    /// Atomically fence new controller requests and prove existing work ended.
+    /// Older controllers cannot provide this proof and must fail closed.
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
+
+    /// Reopen only the fence owned by this exact failed/deferred update.
+    async fn release_update(&self, operation_id: &str) -> PlatformResult<()> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
 
     /// Ensures the exact authority scope and attached-browser generation is live.
     async fn ensure(
@@ -122,6 +191,39 @@ pub trait BrowserControlBackend: Send + Sync {
         scope_id: &str,
         scope_generation: &str,
     ) -> PlatformResult<BrowserControlEndpoint>;
+
+    /// Whether [`Self::http`] and [`Self::http_read`] are served. Advertised to
+    /// the control plane, which otherwise keeps its legacy exec transport.
+    fn http_supported(&self) -> bool {
+        false
+    }
+
+    /// Sends one loopback request to the controller of the exact scope and
+    /// generation. A body larger than `inline_limit` is returned in part and the
+    /// remainder is spooled for [`Self::http_read`]; the request is never sent
+    /// twice. `None` means the reply size is unbounded.
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let _ = (req, inline_limit);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let _ = (req, max_bytes);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
 }
 
 /// The host-facing capability surface of a connected agent.
@@ -210,6 +312,18 @@ pub trait Platform: Send + Sync {
         self.spawn_exec(req)
     }
 
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over across an in-place update. The default keeps process-group
+    /// containment only; a platform with operation cgroups re-adopts the leaf.
+    ///
+    /// # Errors
+    ///
+    /// See [`ContainedExec::adopt`].
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, None)
+    }
+
     /// Spawns the git invocation described by a `GitRequest` inside the shared
     /// containment primitive WITHOUT waiting or assembling a reply — the
     /// engine-job path for git. Same argv construction and cwd resolution as
@@ -266,6 +380,13 @@ pub trait Platform: Send + Sync {
 
     /// Whether this platform implements the transactional upload contract.
     fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform honors a request's `run_as` (Hello
+    /// `Capabilities.run_as`). Platforms that do not must refuse a non-empty
+    /// `run_as` instead of ignoring it.
+    fn run_as_supported(&self) -> bool {
         false
     }
 
@@ -348,6 +469,40 @@ pub trait Platform: Send + Sync {
             port: u32::from(endpoint.port),
             sidecar_generation: endpoint.sidecar_generation,
         })
+    }
+
+    /// Whether this runner serves in-process controller requests.
+    fn browser_control_http_supported(&self) -> bool {
+        self.browser_control_backend()
+            .is_some_and(|backend| backend.http_supported())
+    }
+
+    /// Sends one request to a placement-scoped controller without a process.
+    async fn browser_control_http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http(req, inline_limit).await
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn browser_control_http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http_read: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http_read(req, max_bytes).await
     }
 
     /// Opens a browser-native frame subscription over the existing relay plane.
@@ -456,7 +611,7 @@ pub trait Platform: Send + Sync {
         // (the desktop capture/inject calls already do the same, §10.6).
         let probed = {
             let desktop = Arc::clone(&desktop);
-            tokio::task::spawn_blocking(move || desktop.probe())
+            spawn_blocking_reserved(move || desktop.probe())
                 .await
                 .map_err(|e| PlatformError::os(format!("desktop probe task join: {e}")))?
         };

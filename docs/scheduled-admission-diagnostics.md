@@ -34,7 +34,7 @@ dropped occurrence. The run carries `admissionRefusal`
 | --- | --- | --- | --- |
 | `scheduled_authority_unavailable` | no | `failed` | The frozen owner/causal-human authority cannot be proven (owner without revision authority, user-scoped personal resource or xAI without a causal human, disagreeing humans, source schedule without its owner). |
 | `machine_target_unavailable` | no | `failed` | The Connected Machine target or its enrollment is gone, or a self-hosted task names no machine. |
-| `variable_set_unavailable` | no | `failed` | The task's (or its Sandbox Environment's default) Variable Set is not visible to the task's authority. |
+| `variable_set_unavailable` | no | `failed` | Legacy only: a task created before the vault migration still names a Variable Set that is no longer visible to its authority. Clear the task's set (vaults need no attachment). |
 | `rig_version_unavailable` | no | `failed` | The Sandbox Environment has no active version. |
 | `machine_enrollment_inactive` | yes | `skipped` | The machine's enrollment is not active right now. |
 | `insufficient_credits`, `monthly_model_cost_limit`, `monthly_agent_run_limit` | yes | `skipped` | Billing admission refused this occurrence. |
@@ -47,3 +47,49 @@ redelivered activity replays it and an occurrence never gets two runs. It
 carries no accepted execution, session, or raw exception text (the worker only
 logs the detail). A paused or deleted task still refuses without a run, since
 no occurrence is due.
+
+## Blocked schedules
+
+A schedule never stays stuck without its owner knowing. The API's scheduled-task
+lifecycle pump reviews each schedule's newest settled scheduled run once
+(migration `0792_scheduled_task_blocker_reviews.sql`, rolling; manual runs and
+runs from before the last edit or resume do not count):
+
+- When no later run can start until a person acts, the schedule pauses itself
+  in the same pass (Temporal follows through the schedule outbox) and its owner
+  gets one inbox/phone notice naming the schedule, the reason and what would
+  unblock it. That covers a pinned connected account that can no longer be used
+  (`admissionDiagnostic`), any non-retryable refusal above, a paused chat
+  (`scheduled_session_paused`), a chat that ended or no longer exists
+  (`session_cancelled` outside new-chat-per-run mode,
+  `scheduled_target_session_unavailable`) and an unavailable model.
+- When runs fail or are skipped for a reason that may clear by itself (a busy
+  chat, a paused workspace, a retryable refusal, a failed turn), the owner is
+  told once and the schedule keeps running. Only a schedule that runs at least
+  hourly waits for three such runs in a row; a daily, weekly or one-time
+  schedule, and a schedule's last run before its end, tell at the first one.
+
+Every occurrence settles. A Pause of the target chat or of the workspace
+refuses the occurrence under every overlap policy, not only `skip`: queued
+behind the Pause it could neither run nor settle, so no review would ever see
+it. A run that would start a new chat checks the workspace Pause before
+creating one. A paused chat is the schedule's own blocker (it pauses itself);
+a paused workspace (`scheduled_workspace_paused`) is not, so the schedule keeps
+its place and runs again once the workspace is resumed.
+
+Retiring an exhausted schedule waits for the review of its newest scheduled
+run, so a failed last run is still told. A notice already sent stays with the
+retired schedule and is withdrawn when a person resumes or deletes it.
+
+The notice is a `session.notification.posted` event with key
+`schedule-<task id>` on the blocked run's chat, else the chat the schedule runs
+in, else its most recent run's chat. It is withdrawn when a later run succeeds or
+a person resumes, pauses or deletes the schedule. `GET /scheduled-tasks` and
+`GET /scheduled-tasks/:id` return the current `blocker` (`state` `paused` or
+`notified`, `reason`, `message`, `runId`, `since`), and the schedule page shows it.
+
+Agents cover what the platform cannot see, a run that starts but cannot do its
+job: each new scheduled occurrence tells the agent to try to fix a blocker,
+otherwise notify the owner once under the same `schedule-<task id>` key, and
+pause the schedule when no later occurrence can succeed. Already delivered
+occurrences keep their original text.

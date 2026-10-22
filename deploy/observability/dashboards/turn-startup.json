@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-turn-startup",
-  "title": "OpenGeni · Turn Startup",
+  "title": "Opengeni · Turn Startup",
   "description": "Queue-to-first-byte SLOs and bounded worker preparation phases for one exact namespace, environment, and Helm release. Session drill-down stays in durable authenticated events; no session or turn identity is a metric label.",
   "schemaVersion": 39,
   "version": 1,

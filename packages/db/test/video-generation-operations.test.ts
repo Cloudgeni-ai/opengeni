@@ -33,11 +33,8 @@ import {
   registerPendingSessionToolCall,
   type DbClient,
 } from "../src";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -686,7 +683,7 @@ describe("durable video generation operation", () => {
         recoveryDeadlineAt: new Date(Date.now() + 60_000),
         references: [],
       }),
-    ).rejects.toThrow("insufficient Opengeni credits");
+    ).rejects.toThrow("insufficient workspace credits");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(100_000);
   }, 60_000);
 });

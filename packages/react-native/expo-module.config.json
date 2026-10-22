@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["OpenGeniCallModule", "OpenGeniPasteModule", "OpenGeniTextSelectionModule"],
+    "appDelegateSubscribers": ["OpenGeniCallAppDelegateSubscriber"]
+  },
+  "android": {
+    "modules": ["dev.opengeni.textselection.OpenGeniTextSelectionModule"]
+  }
+}

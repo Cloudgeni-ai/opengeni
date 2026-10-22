@@ -19,12 +19,9 @@ import {
   updateRigChangeStatus,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../src/activities/incident-telemetry-authority";
@@ -1553,6 +1550,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
     expect(count?.count).toBe(2);
   });
 
+  // Twelve concurrent dispatches against real PostgreSQL take about 5 to 7 s
+  // in a whole-file run, over Bun's 5 s default.
   test("an atomic multi-dispatch race creates exactly one responder root", async () => {
     if (!shared || !client || !admin) return;
     const workspace = await workspaceFixture();
@@ -1580,5 +1579,5 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       where workspace_id = ${workspace.workspaceId}
         and create_idempotency_key like 'scheduled-alert-occurrence:v1:%'`;
     expect(count?.count).toBe(1);
-  });
+  }, 60_000);
 });

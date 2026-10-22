@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { CopyField, copyText } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField, copyText } from "@opengeni/react/ui/copy-field";
 import {
   DetailBody,
   DetailFact,
@@ -23,28 +23,28 @@ import {
   DetailHeader,
   DetailSection,
   useDetailPresentation,
-} from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-sheet";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/detail-page";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup } from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
 
 import { KIT_NOW, KIT_TIME_ZONE, currentWorkspace, workspaces, you } from "../../fixtures";
 import { ProviderTile } from "./marks";
@@ -150,6 +150,8 @@ export function accountInUse(
   context: Pick<ReturnType<typeof useModels>, "data" | "questions" | "scenario">,
 ): boolean {
   if (account.scope === "organization" && context.scenario.scope === "organization") return true;
+  // Picked automatically, this workspace's accounts and the organization's are used together.
+  if (context.data.legacySource === "automatic") return true;
   return effectiveSource(context.data, context.questions, context.scenario) === account.scope;
 }
 
@@ -414,7 +416,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
       <SettingRowGroup className="-my-3">
         <SettingRow
           variant={picks.settingRow}
-          label={legacy ? "Use for new automatic turns" : "Available for new chats"}
+          label={legacy ? "Use for new automatic turns" : "Use for new work"}
           description={
             legacy
               ? "Enabled accounts can be picked for new automatic turns."
@@ -449,7 +451,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
               account.isPrimary
                 ? legacy
                   ? "Used when a session isn't pinned and Auto-rotate is off."
-                  : "New work starts here. With Primary only, it's the only account used."
+                  : "New work starts here. With Primary first, other accounts are used only when this one can't serve it."
                 : legacy
                   ? "Make this the account unpinned sessions use."
                   : "Make this the account new work starts with."
@@ -737,7 +739,7 @@ function CodexFooter({
 }
 
 /* ----------------------------------------------------------------------------
-   API-key providers (OpenRouter, Vercel AI Gateway).
+   API-key providers (OpenRouter, Opper, Vercel AI Gateway).
    -------------------------------------------------------------------------- */
 
 export function GatewayDetail({

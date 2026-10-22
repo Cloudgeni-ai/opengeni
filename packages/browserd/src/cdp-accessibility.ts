@@ -42,6 +42,8 @@ export type CdpAccessibilitySnapshot = {
   entries: CdpAccessibilityEntry[];
   entriesByRef: Map<string, CdpAccessibilityEntry>;
   entriesByNodeId: Map<string, CdpAccessibilityEntry>;
+  /** Raw parent links, including ignored nodes that have no entry. */
+  rawParentByNodeId?: ReadonlyMap<string, string>;
 };
 
 /** AX ids and their relationships are scoped to one frame tree. Prefix them
@@ -81,20 +83,25 @@ export function normalizeCdpAccessibilityTree(options: {
     if (typeof node.nodeId === "string") rawById.set(node.nodeId, node);
   }
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
+  const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
     const name = accessibleStringValue(node.name) || null;
     const states = propertyStates(node.properties);
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
-    const ref = semanticRef({
-      controllerGeneration: options.controllerGeneration,
-      targetId: options.targetId,
-      documentGeneration: options.documentGeneration,
-      frameId: typeof node.frameId === "string" ? node.frameId : null,
-      nodeId,
-      backendDOMNodeId,
-    });
+    const ref = semanticRef(
+      {
+        controllerGeneration: options.controllerGeneration,
+        targetId: options.targetId,
+        documentGeneration: options.documentGeneration,
+        frameId: typeof node.frameId === "string" ? node.frameId : null,
+        nodeId,
+        backendDOMNodeId,
+      },
+      usedRefs,
+    );
+    usedRefs.add(ref);
     entriesByNodeId.set(nodeId, {
       ref,
       nodeId,
@@ -107,6 +114,21 @@ export function normalizeCdpAccessibilityTree(options: {
       actions: actionsForRole(role, states, backendDOMNodeId !== null),
       nameSources: nameSourceTokens(node.name?.sources),
     });
+  }
+  // The spin buttons of a native date/time input edit one part each and do
+  // not take text. Fill belongs to the input, which accepts a whole value.
+  for (const entry of entriesByNodeId.values()) {
+    if (entry.role !== "spinbutton" || !entry.actions.includes("fill")) continue;
+    let parentId = entry.parentNodeId;
+    for (let depth = 0; depth < 4 && parentId; depth++) {
+      const parent = rawById.get(parentId);
+      if (!parent) break;
+      if (NATIVE_DATE_TIME_ROLES.has(roleValue(parent))) {
+        entry.actions = entry.actions.filter((action) => action !== "fill");
+        break;
+      }
+      parentId = typeof parent.parentId === "string" ? parent.parentId : null;
+    }
   }
 
   const roots: InteractionSemanticNodeValue[] = [];
@@ -124,7 +146,15 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const [nodeId, entry] of entriesByNodeId) {
     if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
-    if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
+    if (!raw) continue;
+    // A native select's options are what an agent chooses from, so a short
+    // option list stays visible under its non-editable combobox. Long lists
+    // (countries, time zones) stay collapsed; select takes the label anyway.
+    if (entry.role === "combobox" && !entry.states.some((state) => state.startsWith("editable"))) {
+      const optionCount = countOptions(rawById, nodeId, VISIBLE_SELECT_OPTIONS_MAX + 1);
+      if (optionCount > 0 && optionCount <= VISIBLE_SELECT_OPTIONS_MAX) continue;
+    }
+    for (const childId of childIds(raw)) suppressSubtree(childId);
   }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
@@ -145,11 +175,14 @@ export function normalizeCdpAccessibilityTree(options: {
     // control focused; a later ancestor must not replace that exact control.
     if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
     const description = accessibleStringValue(raw.description);
+    // Pages can compute accessible names from arbitrarily long text (a whole
+    // table cell or <pre> block). Clip to the semantic-node contract so one
+    // long node cannot make the entire observation invalid.
     const semantic: InteractionSemanticNodeValue = {
       ref: entry.ref,
       role: entry.role,
-      ...(entry.name !== null ? { name: entry.name } : {}),
-      ...(description ? { description } : {}),
+      ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
+      ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...safeValue(raw, entry.role),
       states: entry.states,
       actions: entry.actions,
@@ -173,8 +206,51 @@ export function normalizeCdpAccessibilityTree(options: {
     entries,
     entriesByRef: new Map(entries.map((entry) => [entry.ref, entry])),
     entriesByNodeId: new Map(entries.map((entry) => [entry.nodeId, entry])),
+    rawParentByNodeId: new Map(
+      [...rawById].flatMap(([nodeId, node]) =>
+        typeof node.parentId === "string" ? [[nodeId, node.parentId] as const] : [],
+      ),
+    ),
   };
 }
+
+/** Accessibility roles that frame where an element sits on the page. */
+const CONTAINER_ROLES = new Set([
+  "alertdialog",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "dialog",
+  "form",
+  "main",
+  "menu",
+  "menubar",
+  "navigation",
+  "region",
+  "search",
+  "toolbar",
+]);
+
+/** Nearest dialog, landmark, menu or toolbar ancestor of an entry. */
+export function accessibilityContainer(
+  snapshot: Pick<CdpAccessibilitySnapshot, "entriesByNodeId" | "rawParentByNodeId">,
+  nodeId: string,
+): CdpAccessibilityEntry | null {
+  const visited = new Set<string>([nodeId]);
+  let parentId =
+    snapshot.entriesByNodeId.get(nodeId)?.parentNodeId ??
+    snapshot.rawParentByNodeId?.get(nodeId) ??
+    null;
+  while (parentId !== null && !visited.has(parentId)) {
+    visited.add(parentId);
+    const ancestor = snapshot.entriesByNodeId.get(parentId);
+    if (ancestor && CONTAINER_ROLES.has(ancestor.role)) return ancestor;
+    parentId = ancestor?.parentNodeId ?? snapshot.rawParentByNodeId?.get(parentId) ?? null;
+  }
+  return null;
+}
+
+const EDITABLE_VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
 
 function safeValue(
   node: CdpAxNode,
@@ -182,23 +258,72 @@ function safeValue(
 ): { value?: string | { redacted: true; reason: "password" } } {
   const value = stringValue(node.value);
   if (!value) return {};
-  if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
-  return { value: value.slice(0, 32_768) };
+  // Chromium exposes a password field's value as one mask character per
+  // character typed. Report it as redacted rather than as dots. Other form
+  // field values are shown, as on screen: the agent needs them to read drafts
+  // and prefilled forms and to check what it typed. Secret values the
+  // controller typed are redacted from the whole observation by the driver.
+  if (EDITABLE_VALUE_ROLES.has(role) && /^[\u2022\u25CF*]+$/u.test(value)) {
+    return { value: { redacted: true, reason: "password" } };
+  }
+  return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
+
+/** Contract bounds for semantic node name/description and value. */
+const SEMANTIC_TEXT_MAX_CHARS = 8_192;
+const SEMANTIC_VALUE_MAX_CHARS = 32_768;
 
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
 }
 
-function semanticRef(options: {
-  controllerGeneration: string;
-  targetId: string;
-  documentGeneration: string;
-  frameId: string | null;
-  nodeId: string;
-  backendDOMNodeId: number | null;
-}): string {
-  const kind = options.backendDOMNodeId === null ? "ax" : "element";
+/** Most options a collapsed select may show in an observation. */
+const VISIBLE_SELECT_OPTIONS_MAX = 25;
+
+/** Counts option descendants of a node, stopping once `limit` is reached. */
+function countOptions(
+  rawById: ReadonlyMap<string, CdpAxNode>,
+  nodeId: string,
+  limit: number,
+): number {
+  let count = 0;
+  const pending = [...childIds(rawById.get(nodeId) ?? {})];
+  const seen = new Set<string>();
+  while (pending.length > 0 && count < limit) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = rawById.get(id);
+    if (!node) continue;
+    if (roleValue(node) === "option" || roleValue(node) === "MenuListOption") count += 1;
+    pending.push(...childIds(node));
+  }
+  return count;
+}
+
+/** Chromium's roles for native date, time, month, week and datetime-local inputs. */
+const NATIVE_DATE_TIME_ROLES: ReadonlySet<string> = new Set(["Date", "DateTime", "InputTime"]);
+
+/**
+ * A node's ref: `e` (DOM-backed element) or `a` (accessibility-only node)
+ * plus 8 hex digits of a digest scoped to the exact controller, tab, document
+ * and frame, so a ref from another document is never reused. Refs are what
+ * the model reads on every observed line, so they stay short. Should two
+ * nodes of one snapshot share the short form, the later one keeps the full
+ * 16-digit digest instead.
+ */
+export function semanticRef(
+  options: {
+    controllerGeneration: string;
+    targetId: string;
+    documentGeneration: string;
+    frameId: string | null;
+    nodeId: string;
+    backendDOMNodeId: number | null;
+  },
+  usedRefs: ReadonlySet<string>,
+): string {
+  const kind = options.backendDOMNodeId === null ? "a" : "e";
   const digest = createHash("sha256")
     .update(
       [
@@ -211,8 +336,9 @@ function semanticRef(options: {
       ].join("\0"),
     )
     .digest("hex")
-    .slice(0, 32);
-  return `${kind}-${digest}`;
+    .slice(0, 16);
+  const short = `${kind}${digest.slice(0, 8)}`;
+  return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
 function propertyStates(properties: unknown): string[] {
@@ -254,6 +380,7 @@ function actionsForRole(
   if (["textbox", "searchbox", "spinbutton"].includes(role)) {
     return ["focus", "fill", "type", "press"];
   }
+  if (NATIVE_DATE_TIME_ROLES.has(role)) return ["focus", "fill"];
   if (["checkbox", "radio", "switch"].includes(role)) return ["click", "check"];
   if (["combobox", "listbox"].includes(role)) return ["click", "select"];
   return [];

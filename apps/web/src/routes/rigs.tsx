@@ -1,9 +1,10 @@
 // Sandbox environments: organization-, workspace-, or user-scoped sandbox
 // definitions. An environment is a setup/check layer over the platform sandbox
-// image plus default variable sets, versioned and verified. This page lists
+// image, versioned and verified. This page lists
 // them and creates new ones (?view=new); each environment's own page owns
 // versions, changes and promotion.
-import { useOpenGeni, useVariableSets } from "@opengeni/react";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { useOpenGeni } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import { ContainerIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -12,32 +13,31 @@ import { toast } from "sonner";
 import {
   RigDefinitionFields,
   cleanRigChecks,
-  compatibleVariableSets,
   emptyRigDefinitionDraft,
   type RigDefinitionDraft,
 } from "@/components/rigs/rig-definition-fields";
 import { rigHealth } from "@/components/rigs/rig-health";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { Disclosure } from "@/components/ui/disclosure";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusDot } from "@/components/ui/status-dot";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { resourceScopeLabel, type ResourceScope } from "@/components/resource-scope-picker";
-import { userFacingError } from "@/components/variable-sets/variable-set-model";
-import { LoadFailure } from "@/components/variable-sets/variable-set-pages";
-import { useAppContext } from "@/context";
-import { orgLabel } from "@/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import type { CreateRigRequest, Rig } from "@/types";
+import { userFacingError } from "@opengeni/react/ui/api-error";
+import { LoadFailure } from "@opengeni/react/ui/load-failure";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import type { CreateRigRequest, Rig } from "@opengeni/react/app/types";
 
 export const SANDBOX_ENVIRONMENTS_DESCRIPTION =
   "Setup scripts and health checks for the sandboxes your agents work in.";
@@ -67,7 +67,7 @@ export function RigsRoute({ workspaceId, view }: { workspaceId: string; view?: "
     ),
   );
   const organizationName = workspace
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, workspace.accountId, context.accessContext.accountGrants)
     : "your organization";
   const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId = workspace?.defaultRigId ?? null;
@@ -236,7 +236,6 @@ function NewRigPage({
   /** Saves the environment and opens it. Throws a user-facing error. */
   onCreate: (request: CreateRigRequest) => Promise<void>;
 }) {
-  const variableSets = useVariableSets();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [scope, setScope] = useState<ResourceScope>("workspace");
@@ -247,11 +246,6 @@ function NewRigPage({
   const summaryParts = [
     definition.setupScript.trim() ? "Setup script" : null,
     checks.length ? `${checks.length} ${checks.length === 1 ? "check" : "checks"}` : null,
-    definition.defaultVariableSetIds.length
-      ? `${definition.defaultVariableSetIds.length} variable ${
-          definition.defaultVariableSetIds.length === 1 ? "set" : "sets"
-        }`
-      : null,
   ].filter(Boolean);
 
   const scopeHint =
@@ -278,7 +272,6 @@ function NewRigPage({
           ...(definition.setupScript.trim() ? { setupScript: definition.setupScript } : {}),
           checks,
           credentialHooks: [],
-          defaultVariableSetIds: definition.defaultVariableSetIds,
         });
         return true;
       }}
@@ -314,19 +307,7 @@ function NewRigPage({
             fullWidth
             className="max-w-[440px]"
             value={scope}
-            onValueChange={(nextScope) => {
-              setScope(nextScope);
-              // Keep only default sets an environment of the new scope may use.
-              const allowed = new Set(
-                compatibleVariableSets(variableSets.variableSets, nextScope).map((set) => set.id),
-              );
-              setDefinition((current) => ({
-                ...current,
-                defaultVariableSetIds: current.defaultVariableSetIds.filter((id) =>
-                  allowed.has(id),
-                ),
-              }));
-            }}
+            onValueChange={setScope}
             options={[
               { value: "workspace", label: "Workspace" },
               {
@@ -352,13 +333,7 @@ function NewRigPage({
               : "Optional. You can add these later as verified changes."
           }
         >
-          <RigDefinitionFields
-            value={definition}
-            onChange={setDefinition}
-            variableSets={variableSets.variableSets}
-            rigScope={scope}
-            idPrefix="create-rig"
-          />
+          <RigDefinitionFields value={definition} onChange={setDefinition} idPrefix="create-rig" />
         </Disclosure>
       </FieldStack>
     </FlushFormPage>

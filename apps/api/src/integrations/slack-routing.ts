@@ -78,7 +78,7 @@ const AUTHORED_BY_INVOKER: ReadonlySet<string> = new Set([
  * Split a leading bot mention off the message text.
  *
  * Slack delivers an `app_mention` with the mention still in the text
- * (`<@U123> do the thing`), and OpenGeni stores it verbatim. The workspace
+ * (`<@U123> do the thing`), and Opengeni stores it verbatim. The workspace
  * prefix is only an override when it is the first thing the person typed, so it
  * is parsed after the mention rather than at byte 0 of the raw text. Everything
  * split off here is put back, so the message the model sees is unchanged apart
@@ -229,7 +229,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
   //
   //    Only text the invoking human actually typed can address anything. A
   //    message shortcut and a reaction both carry SOMEONE ELSE'S message, so a
-  //    prefix found there was never an instruction to OpenGeni.
+  //    prefix found there was never an instruction to Opengeni.
   const prefix = AUTHORED_BY_INVOKER.has(input.entry.triggerKind)
     ? parseSlackWorkspacePrefix(splitSlackLeadingMention(input.entry.text, input.botUserId).rest)
     : null;

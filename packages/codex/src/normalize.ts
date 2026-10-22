@@ -110,7 +110,7 @@ export function normalizeCodexRequestBody(
   }
 
   // Drop hosted-MCP tool entries: the backend rejects them ("Unsupported tool
-  // type: mcp"). OpenGeni's MCP servers are client-connected, so their tools
+  // type: mcp"). Opengeni's MCP servers are client-connected, so their tools
   // already arrive as `function` tools — this only sheds a stray `mcp` entry.
   if (Array.isArray(body.tools)) {
     body.tools = (body.tools as unknown[]).filter(

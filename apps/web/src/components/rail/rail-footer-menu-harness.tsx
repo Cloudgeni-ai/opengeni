@@ -23,7 +23,7 @@ export async function loadRailFooterMenuHarness() {
     Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
   }));
 
-  mock.module("@/components/rail/rail-context", () => ({
+  mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
     useRail: () => ({
       workspaceId: "workspace-1",
       collapsed: false,
@@ -38,11 +38,11 @@ export async function loadRailFooterMenuHarness() {
 
   // The usage row renders only while the workspace has a limit for you; it
   // has its own coverage and would otherwise fetch usage here.
-  mock.module("@/components/usage/usage-entry", () => ({
+  mock.module("@opengeni/react/app/components/usage/usage-entry", () => ({
     AccountUsageMenuItem: () => null,
   }));
 
-  mock.module("@/context", () => ({
+  mock.module("@opengeni/react/app/app-context", () => ({
     useAppContext: () => ({
       client: {},
       clientConfig: {
@@ -86,7 +86,7 @@ export async function loadRailFooterMenuHarness() {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
   const { RailFooter } = await import("./rail-footer");
-  const { DropdownMenuItem } = await import("@/components/ui/dropdown-menu");
+  const { DropdownMenuItem } = await import("@opengeni/react/ui/dropdown-menu");
 
   async function renderOpenAccountMenu(config: RailFooterMenuConfig): Promise<() => Promise<void>> {
     footer = config;

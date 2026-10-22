@@ -1,8 +1,13 @@
 import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
+  readTurnExecutionPolicyV1,
+  readTurnServingPolicyV1,
+  renderAppShotForModel,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -14,9 +19,11 @@ import {
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  readSubscriptionHistoryProvenance,
   type Database,
 } from "@opengeni/db";
 import {
+  createModelImageSizer,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -24,6 +31,67 @@ import {
   type HistoryProviderApi,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+
+/** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
+ * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
+ * alone cannot establish provenance: different providers may share a wire API.
+ */
+export function projectServingProviderArtifacts(
+  rows: ReadonlyArray<{
+    item: Record<string, unknown>;
+    turnId?: string | null;
+    position: number;
+    providerArtifactInvalidatedAt?: Date | null;
+  }>,
+  options: {
+    enabled?: boolean;
+    servingProviderId: string;
+    turnMetadata: ReadonlyMap<string, unknown>;
+  },
+): Array<Record<string, unknown>> {
+  if (options.enabled !== true) return projectRejectedProviderArtifacts(rows);
+  const providers = new Map<string, ReturnType<typeof readTurnServingPolicyV1> | null>();
+  const acceptedProviders = new Map<string, string | null>();
+  return rows.flatMap((row) => {
+    let provider: string | null = null;
+    if (row.turnId) {
+      if (!providers.has(row.turnId)) {
+        try {
+          const metadata = options.turnMetadata.get(row.turnId);
+          const accepted = readTurnExecutionPolicyV1(metadata);
+          providers.set(row.turnId, readTurnServingPolicyV1(metadata));
+          acceptedProviders.set(
+            row.turnId,
+            accepted.kind === "valid" ? accepted.policy.providerId : null,
+          );
+        } catch {
+          // Unattributable legacy/fork history keeps today's projection. This
+          // does not authorize executing an unreadable serving policy.
+          providers.set(row.turnId, null);
+          acceptedProviders.set(row.turnId, null);
+        }
+      }
+      provider = acceptedProviders.get(row.turnId) ?? null;
+      const read = providers.get(row.turnId);
+      if (read?.kind === "valid") {
+        for (const revision of read.revisions) {
+          if (revision.historyPosition >= row.position) break;
+          provider = revision.policy.providerId;
+        }
+      }
+    }
+    if (
+      provider !== null &&
+      provider !== options.servingProviderId &&
+      hasOpaqueProviderArtifact(row.item)
+    ) {
+      if (row.item.type === "compaction") return [];
+      return [projectRejectedReasoningArtifact(row.item)];
+    }
+    return projectRejectedProviderArtifacts([row]);
+  });
+}
 
 /** Project only artifacts explicitly rejected by the provider out of its next view. */
 export function projectRejectedProviderArtifacts(
@@ -84,7 +152,9 @@ export type TurnInputOptions = {
   codemodeContinuationNote?: string;
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
+  workspaceRecoveryNote?: string;
   providerApi: HistoryProviderApi;
+  servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -153,6 +223,25 @@ export class RetainedAttachmentTransportLimitError extends Error {
   }
 }
 
+/**
+ * A retained image the conversation already sent could not be read from
+ * object storage, for example while a storage replica catches up after an
+ * outage. Its pixels are part of the accepted prompt, so the turn waits and
+ * retries rather than continuing without them. Integrity mismatches are not
+ * this error: retrying cannot repair different bytes.
+ */
+export class RetainedAttachmentUnavailableError extends Error {
+  readonly fileIds: readonly string[];
+
+  constructor(fileIds: readonly string[]) {
+    super("An image attached earlier in this conversation can't be read from storage right now.");
+    this.name = "RetainedAttachmentUnavailableError";
+    this.fileIds = [...fileIds];
+  }
+}
+
+export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch";
+
 export type ModelAttachmentContent = {
   kind: "image" | "file";
   fileId: string;
@@ -220,7 +309,11 @@ function modelAttachmentDescriptor(
 export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
-  options: { retainAll?: boolean } = {},
+  options: {
+    retainAll?: boolean;
+    /** Why a selected file produced no content; omitted files are not reported. */
+    onReadFailure?: (fileId: string, failure: ModelAttachmentReadFailure) => void;
+  } = {},
 ): Promise<ModelAttachmentContent[]> {
   const selected: Array<{
     file: FileAsset;
@@ -261,12 +354,14 @@ export async function modelAttachmentContentForFiles(
             expectedSizeBytes: file.sizeBytes,
             actualSizeBytes: bytes.byteLength,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
           console.error("model attachment checksum did not match finalized metadata", {
             fileId: file.id,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         attachments[index] = {
@@ -284,6 +379,7 @@ export async function modelAttachmentContentForFiles(
           fileId: file.id,
           errorType: safeErrorType(error),
         });
+        options.onReadFailure?.(file.id, "unavailable");
       }
     }
   };
@@ -307,8 +403,8 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 }
 
 function attachmentReceiptText(ref: FileResourceRef): string {
-  // The durable reference is immutable; live metadata/authority must not rewrite
-  // old receipt text. Pixel delivery remains subject to current file authority.
+  // The durable reference is immutable; live metadata must not rewrite old
+  // receipt text. Pixel delivery remains subject to current file authority.
   return (
     `[Attachment: fileId=${ref.fileId}; mountDirectory=${resourceMountPath(ref)}. ` +
     `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
@@ -316,10 +412,74 @@ function attachmentReceiptText(ref: FileResourceRef): string {
   );
 }
 
+/** Receipt for an active reference that this turn's file-authority lookup did
+ * not return: another participant's file, or one that is no longer available
+ * (not ready, purged, or access revoked). The lookup cannot tell these apart,
+ * so the text stays neutral. The authority boundary is unchanged: no bytes and
+ * no fetch instruction, which would fail and lead the model to report the file
+ * as deleted. */
+function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
+  return requesterUnavailableReceiptText(`Attachment: fileId=${ref.fileId}`, "file");
+}
+
+/** The image bound stamped on a message when it was accepted, if any. */
+function attachmentImageBound(item: Record<string, unknown>): number | undefined {
+  const raw = item[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 64 && raw <= 8192
+    ? raw
+    : undefined;
+}
+
+// Process-wide, so a long conversation does not re-encode the same photos on
+// every turn. The projection depends only on the image bytes and the bound.
+const boundedImageSizers = new Map<number, ReturnType<typeof createModelImageSizer>>();
+
+type BoundedAttachmentImage = { image: string; note: string };
+
+/**
+ * The model-facing rendition of one image under the bound its message was
+ * stamped with. Smaller images keep their original bytes. The file in the
+ * sandbox and in storage stays at full resolution.
+ */
+async function boundedAttachmentImage(
+  attachment: ModelAttachmentContent,
+  bound: number,
+): Promise<BoundedAttachmentImage> {
+  const original = { image: attachment.dataUrl, note: "" };
+  const comma = attachment.dataUrl.indexOf(",");
+  if (comma < 0) return original;
+  const data = attachment.dataUrl.slice(comma + 1);
+  let sizer = boundedImageSizers.get(bound);
+  if (!sizer) {
+    sizer = createModelImageSizer(bound, 10 * 1024 * 1024, { jpegQuality: 85 });
+    boundedImageSizers.set(bound, sizer);
+  }
+  try {
+    const sized = await sizer(data, attachment.contentType);
+    if (sized.data === data && sized.mediaType === attachment.contentType) return original;
+    return {
+      image: `data:${sized.mediaType};base64,${sized.data}`,
+      note:
+        ` Shown to you downscaled to ${sized.width}x${sized.height} from ` +
+        `${sized.originalWidth}x${sized.originalHeight}; the file itself is full resolution.`,
+    };
+  } catch (error) {
+    // Decoding is deterministic: an image that cannot be resized here keeps
+    // the original projection on every turn rather than being dropped.
+    console.error("model attachment image could not be resized; sending original", {
+      fileId: attachment.fileId,
+      errorType: safeErrorType(error),
+    });
+    return original;
+  }
+}
+
 /**
  * Build one turn-scoped durable-attachment projector. Resolve active refs under
  * current file authority and memoize metadata/bytes for retries and compaction.
  * A turn boundary never changes an authorized attachment's representation.
+ * Images of a message stamped with an image bound are shown downscaled to fit
+ * it; unstamped (older) messages keep their full-resolution projection.
  */
 export function createModelHistoryAttachmentProjector(
   policy: ModelAttachmentInputPolicy,
@@ -331,6 +491,7 @@ export function createModelHistoryAttachmentProjector(
   const fileById = new Map<string, FileAsset>();
   const resolvedFileIds = new Set<string>();
   const retainedByteSizes = new Map<string, number>();
+  const boundedById = new Map<string, BoundedAttachmentImage>();
 
   return async (items, options = {}) => {
     for (const file of options.inlineFiles ?? []) {
@@ -399,43 +560,91 @@ export function createModelHistoryAttachmentProjector(
           return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
         });
       for (const file of readable) attemptedContentIds.add(file.id);
+      const readFailures = new Map<string, ModelAttachmentReadFailure>();
       const content = await modelAttachmentContentForFiles(readable, readFileBytes, {
         retainAll: true,
+        onReadFailure: (fileId, failure) => readFailures.set(fileId, failure),
       });
       const loadedIds = new Set(content.map((entry) => entry.fileId));
-      for (const file of readable) {
-        if (
+      const missing = readable.filter(
+        (file) =>
           file.status === "ready" &&
           file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES &&
           /^[a-f0-9]{64}$/i.test(file.sha256 ?? "") &&
-          !loadedIds.has(file.id)
-        ) {
-          // Do not let a retry silently proceed with pixels removed.
-          for (const candidate of readable) attemptedContentIds.delete(candidate.id);
-          throw new Error(`Retained attachment bytes unavailable or invalid: ${file.id}`);
+          !loadedIds.has(file.id),
+      );
+      if (missing.length > 0) {
+        // Do not let a retry silently proceed with pixels removed.
+        for (const candidate of readable) attemptedContentIds.delete(candidate.id);
+        const corrupt = missing.find((file) => readFailures.get(file.id) === "integrity_mismatch");
+        if (corrupt) {
+          throw new Error(`Retained attachment bytes unavailable or invalid: ${corrupt.id}`);
         }
+        throw new RetainedAttachmentUnavailableError(missing.map((file) => file.id));
       }
       for (const attachment of content) contentById.set(attachment.fileId, attachment);
+    }
+
+    for (const [index, refs] of refsByIndex) {
+      const item = items[index]!;
+      if (item[MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
+      const bound = attachmentImageBound(item);
+      if (bound === undefined) continue;
+      for (const ref of refs) {
+        const attachment = fileById.has(ref.fileId) ? contentById.get(ref.fileId) : undefined;
+        const key = `${bound}:${ref.fileId}`;
+        if (!attachment || attachment.kind !== "image" || boundedById.has(key)) continue;
+        boundedById.set(key, await boundedAttachmentImage(attachment, bound));
+      }
     }
 
     const projected = [...items];
     for (const [index, refs] of refsByIndex) {
       const original = items[index]!;
+      if (original[MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD] === true) {
+        // Its complete, dated text was frozen when compaction created it.
+        const clone: Record<string, unknown> = { ...original };
+        delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+        projected[index] = clone;
+        continue;
+      }
       const existingContent = Array.isArray(original.content)
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
       const attachmentParts = refs.flatMap((ref) => {
-        const currentFile =
-          original[MODEL_ATTACHMENT_CATALOG_MARKER] === true ? undefined : fileById.get(ref.fileId);
+        const catalog = original[MODEL_ATTACHMENT_CATALOG_MARKER] === true;
+        const currentFile = catalog ? undefined : fileById.get(ref.fileId);
+        // Only an authority lookup that actually ran can exclude a reference.
+        // Legacy callers without a resolver and compacted catalogs, which never
+        // look up authority, keep the reference-only receipt.
+        const excluded =
+          !catalog &&
+          loadAuthorizedFiles !== undefined &&
+          resolvedFileIds.has(ref.fileId) &&
+          currentFile === undefined;
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
-        const receipt = {
-          type: "input_text",
-          text: attachmentReceiptText(ref),
-        };
+        // An app-shot's window text belongs to the message it was sent with
+        // and comes from the file's immutable capture, so it renders the same
+        // on every turn. It follows the file's authority like the pixels do.
+        const appShot = currentFile?.appShot
+          ? [{ type: "input_text", text: renderAppShotForModel(ref.fileId, currentFile.appShot) }]
+          : [];
         if (!attachment || attachment.kind !== "image") {
-          return [receipt];
+          return [
+            {
+              type: "input_text",
+              text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
+            },
+            ...appShot,
+          ];
         }
-        return [receipt, { type: "input_image", image: attachment.dataUrl }];
+        const bound = attachmentImageBound(original);
+        const bounded = bound === undefined ? undefined : boundedById.get(`${bound}:${ref.fileId}`);
+        return [
+          { type: "input_text", text: attachmentReceiptText(ref) + (bounded?.note ?? "") },
+          { type: "input_image", image: bounded?.image ?? attachment.dataUrl },
+          ...appShot,
+        ];
       });
       const clone: Record<string, unknown> = {
         ...original,
@@ -508,7 +717,7 @@ export async function turnInput(
   const internalContext = joinInternalContext(
     options.recovering
       ? [
-          "[OpenGeni inference recovery]",
+          "[Opengeni inference recovery]",
           "Continue the same inference from durable conversation and sandbox state. A previous execution stopped before it could finish. Do not repeat completed side effects; inspect actual state when uncertain.",
         ].join("\n")
       : undefined,
@@ -517,6 +726,7 @@ export async function turnInput(
     options.mcpAvailabilityNote,
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
+    options.workspaceRecoveryNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {
@@ -646,7 +856,7 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
-  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
+  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase" | "servingProviderId"> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [stored, envelope] = await Promise.all([
@@ -661,7 +871,28 @@ async function messageInput(
     preparationOptions,
     "canonical_projection",
     async () => {
-      const active = projectRejectedProviderArtifacts(stored);
+      const provenance = preparationOptions.servingProviderId
+        ? await readSubscriptionHistoryProvenance(
+            db,
+            trigger.workspaceId,
+            trigger.sessionId,
+            stored.map((row) => row.id),
+          )
+        : null;
+      const active =
+        provenance && preparationOptions.servingProviderId
+          ? projectServingProviderArtifacts(
+              stored.map((row) => ({
+                ...row,
+                turnId: provenance.turnByHistoryId.get(row.id) ?? null,
+              })),
+              {
+                enabled: true,
+                servingProviderId: preparationOptions.servingProviderId,
+                turnMetadata: provenance.turnMetadata,
+              },
+            )
+          : projectRejectedProviderArtifacts(stored);
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );

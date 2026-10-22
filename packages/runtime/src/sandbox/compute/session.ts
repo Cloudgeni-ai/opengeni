@@ -1,0 +1,1138 @@
+// A compute sandbox: a managed microVM run by Opengeni compute whose
+// provider session is the Connected Machine agent running inside it.
+//
+// Lifecycle is a managed sandbox's (lease, group, workspace setup, persistence
+// fallback), transport is the agent's (op-stream exec, files, Git, PTY,
+// desktop frames, browser control, ports over the relay). The agent holds no
+// credential: its host keeps one link to Opengeni's agent gateway and carries
+// the agent's NATS traffic, so a request to a sleeping sandbox reaches its host,
+// which wakes it. Only when no host serves the sandbox (its host was lost, or
+// it moved and is not yet adopted) does a request find no responder; the
+// session then asks the control service to wake the sandbox, which places and adopts
+// it, and resends the request under its replay identity until the agent
+// answers. Opengeni never tears a compute sandbox down for idleness; it is
+// deleted (and its enrollment revoked) only when its group ends.
+
+import { randomUUID } from "node:crypto";
+import { posix } from "node:path";
+import {
+  Manifest,
+  Permissions,
+  SandboxArchiveError,
+  SandboxConfigurationError,
+  SandboxProviderError,
+  SandboxUnsupportedFeatureError,
+  normalizeRelativePath,
+  normalizeSandboxClientCreateArgs,
+  resolveSandboxArchiveLimits,
+  type Entry,
+  type MaterializeEntryArgs,
+  type SandboxArchiveLimits,
+  type SandboxClientCreateArgs,
+  type SandboxClientResumeOptions,
+  type WorkspaceArchiveData,
+  type WorkspaceArchiveOptions,
+} from "@openai/agents/sandbox";
+import {
+  deserializeManifest,
+  mergeManifestDelta,
+  mergeManifestEntryDelta,
+  mergeMaterializedEnvironment,
+  rehydratePersistedEnvironmentForRuntime,
+  serializeManifestRecord,
+  serializeRuntimeEnvironmentForPersistence,
+  shellQuote,
+  toUint8Array,
+} from "@openai/agents-core/sandbox/internal";
+import { ErrorCode, type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
+import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
+import { archiveRestoreScript } from "../providers/opensandbox-adapter";
+import {
+  CONNECTION_REPLACED_DETAIL_KEY,
+  NEVER_SENT_DETAIL_KEY,
+  RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY,
+  SelfhostedControlError,
+  subjectFor,
+  type ControlRpc,
+} from "../selfhosted/control-rpc";
+import { SELFHOSTED_FILE_CHUNK_BYTES } from "../selfhosted/file-transfer";
+import {
+  SelfhostedSession,
+  type SelfhostedOperationAdmission,
+  type SelfhostedRelayConfig,
+  type SelfhostedSessionDeps,
+} from "../selfhosted/session";
+import { ComputeControlClient, isComputeSandboxGone, type ComputeCreateRequest } from "./control";
+import { COMPUTE_METADATA, UNSEEN_CREATE_SETTLE_MS } from "./orphans";
+import type { ComputeAgentConnection, ComputeAgentPlane } from "./plane";
+
+export const COMPUTE_WORKSPACE_ROOT = "/workspace";
+export const COMPUTE_STATE_VERSION = 1;
+const COMPUTE_PRIVATE_ROOT = "/tmp/opengeni-private";
+/** The least time between two control service wakes of one sandbox while a request
+ * keeps finding no responder. */
+const WAKE_INTERVAL_MS = 5_000;
+
+/** Who a compute sandbox belongs to. Required to create one: its agent's
+ * enrollment is bound to this lease. */
+export interface ComputeCreateIdentity {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+}
+
+/** The persisted provider state of one compute box. */
+export interface ComputeSessionState {
+  stateVersion: typeof COMPUTE_STATE_VERSION;
+  sandboxId: string;
+  enrollmentId: string;
+  /** Workspace the enrollment (and agent subject) lives in. */
+  workspaceId: string;
+  accountId: string;
+  sandboxGroupId: string;
+  /** The control service create request id (idempotency key and orphan GC tag). */
+  requestId: string;
+  image: string | null;
+  manifest: Manifest;
+  environment: Record<string, string>;
+  workspacePersistence: "tar";
+  workspaceReady: boolean;
+}
+
+/** The live `state` a compute session exposes: the agent session's slice
+ * (agentId = enrollment id, instanceId = compute sandbox id) plus the persisted
+ * provider state the lease serializes. */
+export type ComputeLiveState = ComputeSessionState & {
+  agentId: string;
+  instanceId: string;
+};
+
+/** Per-turn deps a worker turn binds onto an established compute session so
+ * its commands are journaled, adoptable, metered and fenced like any agent
+ * session. */
+export type ComputeTurnDeps = Pick<
+  SelfhostedSessionDeps,
+  | "terminalScopeId"
+  | "adoptBackgroundCommand"
+  | "abandonCommand"
+  | "settleBackgroundCommand"
+  | "captureBackgroundCommandOutput"
+  | "onOp"
+  | "transientExecEnvironment"
+> & {
+  opJournal?: NonNullable<SelfhostedSessionDeps["opStream"]>["journal"];
+};
+
+function agentOfflineError(message: string): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message,
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    reason: "agent_offline",
+    retryable: false,
+    agentOffline: true,
+  });
+}
+
+function isNoResponder(response: ControlResponse): boolean {
+  return (
+    response.error?.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE &&
+    response.error.detail?.[NEVER_SENT_DETAIL_KEY] === "1" &&
+    // A request whose agent connection was replaced is answered, not resent.
+    response.error.detail?.[CONNECTION_REPLACED_DETAIL_KEY] !== "1" &&
+    // The transport already woke and waited its whole window for this exact
+    // process; another round would only wait it again.
+    response.error.detail?.[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] !== "1"
+  );
+}
+
+export interface ComputeWakeGateDeps {
+  control: Pick<ComputeControlClient, "wake">;
+  sandboxId: string;
+  enrollmentId: string;
+  resolveConnection: () => Promise<ComputeAgentConnection | null>;
+  /** One raw liveness probe against an exact connection. */
+  probe: (connection: ComputeAgentConnection) => Promise<boolean>;
+  readyTimeoutMs: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Reaches a compute sandbox's agent. Normally the gateway holds the agent's
+ * session, asleep or not, and the agent's connection resolves at once. When it
+ * does not (no host serves the sandbox), the gate asks the control service to wake the
+ * sandbox, which places and adopts it, and waits until the new host's session
+ * opens and the agent answers. Single flight: concurrent operations share one
+ * recovery.
+ */
+export class ComputeWakeGate {
+  private inflight: Promise<ComputeAgentConnection> | null = null;
+  private lastWakeAtMs = Number.NEGATIVE_INFINITY;
+  private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+
+  constructor(private readonly deps: ComputeWakeGateDeps) {
+    this.now = deps.now ?? Date.now;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  get readyTimeoutMs(): number {
+    return this.deps.readyTimeoutMs;
+  }
+
+  /** The agent's live connection as recorded now, or null; never wakes. */
+  async current(): Promise<ComputeAgentConnection | null> {
+    return await this.deps.resolveConnection();
+  }
+
+  /** The agent's live connection, recovering the sandbox when none is open. */
+  async admit(): Promise<ComputeAgentConnection> {
+    const connection = await this.deps.resolveConnection();
+    if (connection) return connection;
+    return await this.recover();
+  }
+
+  /** Wake the sandbox through the control service and wait until its agent answers. */
+  async recover(): Promise<ComputeAgentConnection> {
+    this.inflight ??= this.wakeAndWait().finally(() => {
+      this.inflight = null;
+    });
+    return await this.inflight;
+  }
+
+  /** Ask the control service to wake the sandbox, at most once per interval. */
+  async wake(): Promise<void> {
+    if (this.now() - this.lastWakeAtMs < WAKE_INTERVAL_MS) return;
+    this.lastWakeAtMs = this.now();
+    try {
+      await this.deps.control.wake(this.deps.sandboxId);
+    } catch (error) {
+      if (isComputeSandboxGone(error)) {
+        throw new SandboxExactResumeInstanceUnavailableError("compute", this.deps.sandboxId);
+      }
+      throw error;
+    }
+  }
+
+  /** Wait until the agent answers on its current connection, without waking. */
+  async waitForAgent(deadline: number): Promise<ComputeAgentConnection> {
+    let delayMs = 100;
+    for (;;) {
+      const connection = await this.deps.resolveConnection();
+      if (connection && (await this.deps.probe(connection).catch(() => false))) {
+        return connection;
+      }
+      if (this.now() >= deadline) {
+        throw agentOfflineError(
+          `The agent of compute sandbox ${this.deps.sandboxId} did not answer within ${Math.round(this.deps.readyTimeoutMs / 1000)}s.`,
+        );
+      }
+      await this.sleep(Math.min(delayMs, Math.max(0, deadline - this.now())));
+      delayMs = Math.min(2_000, delayMs * 2);
+    }
+  }
+
+  private async wakeAndWait(): Promise<ComputeAgentConnection> {
+    const deadline = this.now() + this.deps.readyTimeoutMs;
+    this.lastWakeAtMs = Number.NEGATIVE_INFINITY;
+    await this.wake();
+    return await this.waitForAgent(deadline);
+  }
+}
+
+/**
+ * The control transport of one compute sandbox. A request nobody received
+ * means no host serves the sandbox; it wakes the sandbox through the control service
+ * and resends the identical request, under the same request id (its replay
+ * identity), until the agent answers or the ready deadline passes. When the
+ * agent comes back on another connection the original no-responder answer is
+ * returned, so the session re-admits the operation on the new connection.
+ */
+export class ComputeWakingControlRpc implements ControlRpc {
+  constructor(
+    private readonly inner: ControlRpc,
+    private readonly gate: ComputeWakeGate,
+    private readonly enrollmentId: string,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
+  ) {}
+
+  async request(
+    subject: string,
+    req: ControlRequest,
+    opts: { timeoutMs: number },
+  ): Promise<ControlResponse> {
+    let response = await this.inner.request(subject, req, opts);
+    if (!isNoResponder(response)) return response;
+    const deadline = this.now() + this.gate.readyTimeoutMs;
+    let delayMs = 200;
+    while (isNoResponder(response) && this.now() < deadline) {
+      // A request bound to a connection that is no longer the agent's live one
+      // never wakes the sandbox: its agent is gone, and the session admits the
+      // operation again on the live connection.
+      const live = await this.gate.current().catch(() => null);
+      if (
+        live &&
+        subjectFor(live.workspaceId, this.enrollmentId, live.connectionInstanceId) !== subject
+      ) {
+        return response;
+      }
+      // Never delivered: safe to resend once a host serves the sandbox again.
+      await this.gate.wake();
+      const connection = await this.gate.admit().catch(() => null);
+      if (connection) {
+        const current = subjectFor(
+          connection.workspaceId,
+          this.enrollmentId,
+          connection.connectionInstanceId,
+        );
+        if (current !== subject) return response;
+      }
+      await this.sleep(Math.min(delayMs, Math.max(0, deadline - this.now())));
+      delayMs = Math.min(2_000, delayMs * 2);
+      response = await this.inner.request(subject, req, opts);
+    }
+    return response;
+  }
+}
+
+const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.[^.]+\.rpc$/u;
+
+/**
+ * The no-responders handler of a transport that addresses an adopted
+ * operation at its exact locator (its stop, its query), which may be in a
+ * compute sandbox. A request no host received means no host serves the
+ * sandbox: ask the control service to wake it (at most once per interval) and let the
+ * transport retry the same delivery at the same subject, never at a successor
+ * connection. An enrollment that is not a sandbox's (a Connected Machine)
+ * keeps its ordinary offline retry. A deleted sandbox ends the retries. A
+ * request bound to a connection that is no longer its enrollment's live one
+ * never wakes anything and stops retrying: that agent is gone, and its
+ * commands are settled by runner retirement instead.
+ */
+export function wakeComputeSandboxOnNoResponders(input: {
+  control: Pick<ComputeControlClient, "wake">;
+  /** The sandbox an enrollment runs in, or null for any other enrollment. */
+  sandboxOf: (agent: { workspaceId: string; enrollmentId: string }) => Promise<string | null>;
+  /** Whether the connection a subject names is still its enrollment's live
+   * one, read from the record of truth on every call. An unknown answer
+   * counts as current. */
+  connectionCurrent: (subject: string) => Promise<boolean>;
+  now?: () => number;
+}): (subject: string) => Promise<boolean> {
+  const now = input.now ?? Date.now;
+  const sandboxes = new Map<string, Promise<string | null>>();
+  const lastWakeAtMs = new Map<string, number>();
+  return async (subject) => {
+    const match = AGENT_RPC_SUBJECT.exec(subject);
+    if (!match) return true;
+    if (!(await input.connectionCurrent(subject).catch(() => true))) return false;
+    const agent = { workspaceId: match[1]!, enrollmentId: match[2]! };
+    const key = `${agent.workspaceId}.${agent.enrollmentId}`;
+    let lookup = sandboxes.get(key);
+    if (!lookup) {
+      lookup = input.sandboxOf(agent);
+      sandboxes.set(key, lookup);
+      // Only an answer is kept; a failed lookup is asked again next time.
+      const settled = lookup;
+      void settled.catch(() => {
+        if (sandboxes.get(key) === settled) sandboxes.delete(key);
+      });
+    }
+    const sandboxId = await lookup.catch(() => null);
+    if (!sandboxId) return true;
+    const atMs = now();
+    if (atMs - (lastWakeAtMs.get(sandboxId) ?? Number.NEGATIVE_INFINITY) < WAKE_INTERVAL_MS) {
+      return true;
+    }
+    lastWakeAtMs.set(sandboxId, atMs);
+    try {
+      await input.control.wake(sandboxId);
+    } catch (error) {
+      // Its operations went with it; anything else is retried until the deadline.
+      if (isComputeSandboxGone(error)) return false;
+    }
+    return true;
+  };
+}
+
+export interface ComputeSessionDeps {
+  state: ComputeLiveState;
+  control: ComputeControlClient;
+  plane: ComputeAgentPlane;
+  relay: SelfhostedRelayConfig;
+  readyTimeoutMs: number;
+  controlTimeoutMs?: number;
+  execTimeoutMs?: number;
+  /** Shared by every session bound to the same box in this process. */
+  gate?: ComputeWakeGate;
+  turn?: ComputeTurnDeps;
+  archiveLimits?: SandboxArchiveLimits | null;
+}
+
+function pingRequest(): ControlRequest {
+  return {
+    requestId: randomUUID(),
+    epoch: 0,
+    resourcePolicy: undefined,
+    op: {
+      $case: "ping",
+      ping: {
+        nonce: String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)),
+        controlReplayWindowMs: "0",
+      },
+    },
+  };
+}
+
+function workspacePath(path: string): string {
+  const absolute = path.startsWith("/")
+    ? posix.normalize(path)
+    : posix.join(COMPUTE_WORKSPACE_ROOT, normalizeRelativePath(path));
+  if (absolute !== COMPUTE_WORKSPACE_ROOT && !absolute.startsWith(`${COMPUTE_WORKSPACE_ROOT}/`)) {
+    throw new SandboxConfigurationError(`compute manifest path escapes /workspace: ${path}`);
+  }
+  return absolute;
+}
+
+function assertSupportedManifest(manifest: Manifest): void {
+  if (manifest.root !== COMPUTE_WORKSPACE_ROOT) {
+    throw new SandboxConfigurationError(`Compute manifest root must be ${COMPUTE_WORKSPACE_ROOT}.`);
+  }
+  if (
+    manifest.users.length > 0 ||
+    manifest.groups.length > 0 ||
+    manifest.extraPathGrants.length > 0
+  ) {
+    throw new SandboxUnsupportedFeatureError(
+      "Compute sandboxes do not support manifest users, groups, or host path grants.",
+    );
+  }
+}
+
+export class ComputeSandboxSession extends SelfhostedSession {
+  override readonly backendId = "compute" as const;
+  declare readonly state: SelfhostedSession["state"] & ComputeLiveState;
+  private readonly computeDeps: ComputeSessionDeps;
+  readonly gate: ComputeWakeGate;
+  private readonly archiveLimits: SandboxArchiveLimits | null | undefined;
+
+  constructor(deps: ComputeSessionDeps) {
+    const { state, plane, control } = deps;
+    const resolveConnection = () =>
+      plane.resolveConnection({ workspaceId: state.workspaceId, enrollmentId: state.enrollmentId });
+    const rawRpc = plane.controlRpc({
+      // Nobody received the request: no host serves the sandbox. Wake it at
+      // once (the gate throttles the control service calls) and let the transport retry
+      // the same delivery, keeping its replay identity, until the agent is
+      // back. A request bound to a connection that is no longer the live one
+      // stops without waking anything: its agent is gone, and the operation is
+      // admitted again on the live connection.
+      onNoResponders: async (subject) => {
+        const connection = await resolveConnection().catch(() => null);
+        if (
+          connection &&
+          subjectFor(
+            connection.workspaceId,
+            state.enrollmentId,
+            connection.connectionInstanceId,
+          ) !== subject
+        ) {
+          return false;
+        }
+        await gate.wake();
+        return true;
+      },
+    });
+    const gate =
+      deps.gate ??
+      new ComputeWakeGate({
+        control,
+        sandboxId: state.sandboxId,
+        enrollmentId: state.enrollmentId,
+        resolveConnection,
+        probe: async (connection) => {
+          const res = await rawRpc.request(
+            subjectFor(connection.workspaceId, state.enrollmentId, connection.connectionInstanceId),
+            pingRequest(),
+            { timeoutMs: 5_000 },
+          );
+          return !res.error && res.result?.$case === "ping";
+        },
+        readyTimeoutMs: deps.readyTimeoutMs,
+      });
+    const transport = plane.opStreamTransport();
+    const turn = deps.turn ?? {};
+    const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission> => {
+      const connection = await gate.admit();
+      return {
+        workspaceId: connection.workspaceId,
+        connectionInstanceId: connection.connectionInstanceId,
+        workspaceRoot: connection.workspaceRoot ?? COMPUTE_WORKSPACE_ROOT,
+        ...(connection.opStream && transport
+          ? {
+              opStream: {
+                transport,
+                ...(turn.opJournal !== undefined ? { journal: turn.opJournal } : {}),
+                // Every compute agent serves OpRelease and reports its
+                // operation inventory; one that does not is refused when its
+                // connection resolves.
+                outputReleaseSupported: true,
+                connectionGeneration: connection.connectionGeneration,
+              },
+            }
+          : {}),
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+        transactionalFsWriteSupported: connection.transactionalFsWriteSupported,
+        transactionalFsWriteMachineSupported: connection.transactionalFsWriteMachineSupported,
+        browserControlHttpSupported: connection.browserControlHttpSupported,
+        runAsSupported: connection.runAsSupported,
+      };
+    };
+    super({
+      workspaceId: state.workspaceId,
+      agentId: state.enrollmentId,
+      // Every operation re-resolves the live connection (resolveOperationAdmission);
+      // this placeholder only satisfies the static subject shape.
+      connectionInstanceId: "unresolved",
+      controlRpc: new ComputeWakingControlRpc(rawRpc, gate, state.enrollmentId),
+      relay: deps.relay,
+      workspaceRoot: COMPUTE_WORKSPACE_ROOT,
+      environment: state.environment,
+      resolveOperationAdmission,
+      // Without waking anything: while a request waits and after a failed
+      // one, to tell a replaced connection (a new instance) from an unreachable
+      // one.
+      liveConnectionInstance: async () => (await resolveConnection())?.connectionInstanceId ?? null,
+      ...(deps.controlTimeoutMs !== undefined ? { timeoutMs: deps.controlTimeoutMs } : {}),
+      ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
+      // Machine-addressed (epoch 0): the sandbox's agent holds no session
+      // route epoch, so a nonzero one would be invented and fence nothing.
+      // Ownership is checked before each request is sent (see
+      // docs/compute-backend.md, "Request epoch").
+      ...(turn.terminalScopeId !== undefined ? { terminalScopeId: turn.terminalScopeId } : {}),
+      ...(turn.adoptBackgroundCommand
+        ? { adoptBackgroundCommand: turn.adoptBackgroundCommand }
+        : {}),
+      ...(turn.abandonCommand ? { abandonCommand: turn.abandonCommand } : {}),
+      ...(turn.settleBackgroundCommand
+        ? { settleBackgroundCommand: turn.settleBackgroundCommand }
+        : {}),
+      ...(turn.captureBackgroundCommandOutput
+        ? { captureBackgroundCommandOutput: turn.captureBackgroundCommandOutput }
+        : {}),
+      ...(turn.onOp ? { onOp: turn.onOp } : {}),
+      ...(turn.transientExecEnvironment
+        ? { transientExecEnvironment: turn.transientExecEnvironment }
+        : {}),
+    });
+    // The SDK reads and writes `state` by reference; every session bound to
+    // this box shares the one live state object.
+    (this as unknown as { state: ComputeLiveState }).state = state;
+    this.computeDeps = deps;
+    this.gate = gate;
+    this.archiveLimits = deps.archiveLimits;
+  }
+
+  get sandboxId(): string {
+    return this.state.sandboxId;
+  }
+
+  /** The same box, bound with one turn's journal, adoption, metering and fence. */
+  bindTurn(turn: ComputeTurnDeps): ComputeSandboxSession {
+    return new ComputeSandboxSession({ ...this.computeDeps, gate: this.gate, turn });
+  }
+
+  /** Wait until the sandbox's agent answers, waking the sandbox through the
+   * control service only if no host serves it. */
+  async waitForAgent(): Promise<void> {
+    await this.gate.admit();
+  }
+
+  /** Nothing to start: a request to a sleeping sandbox wakes it. */
+  async start(): Promise<void> {}
+
+  async running(): Promise<boolean> {
+    try {
+      await this.computeDeps.control.get(this.state.sandboxId);
+      return true;
+    } catch (error) {
+      if (isComputeSandboxGone(error)) return false;
+      throw error;
+    }
+  }
+
+  /** Delete the box and revoke its enrollment. Only the end of the box's group
+   * calls this; idleness never does. */
+  async delete(): Promise<void> {
+    await deleteComputeBox(this.computeDeps.control, this.computeDeps.plane, this.state);
+  }
+
+  /** The box keeps running (and sleeping) after a session is dropped. */
+  async close(): Promise<void> {}
+
+  /** A compute sandbox's agent runs as root, so acting as its own account in
+   * place of a requested user would silently elevate: refuse instead. */
+  protected override get runAsRequired(): boolean {
+    return true;
+  }
+
+  /** A manifest applied as another user needs the live agent's `run_as`. */
+  private async assertRunAsAvailable(runAs: string | undefined): Promise<void> {
+    if (runAs && !(await this.liveRunAsSupported())) {
+      throw new SandboxUnsupportedFeatureError(
+        "This compute sandbox's agent does not support runAs.",
+      );
+    }
+  }
+
+  private async run(cmd: string, label: string, runAs?: string) {
+    const result = await this.exec({ cmd, maxOutputTokens: 2_000, ...(runAs ? { runAs } : {}) });
+    if (result.exitCode !== 0) {
+      throw new SandboxProviderError(`Compute ${label} failed`, {
+        sandboxId: this.state.sandboxId,
+        exitCode: result.exitCode ?? null,
+        stderr: result.stderr.slice(-1_000),
+      });
+    }
+    return result;
+  }
+
+  private async writeChunked(path: string, bytes: Uint8Array, runAs?: string): Promise<void> {
+    const asUser = runAs ? { runAs } : {};
+    await this.writeFile({
+      path,
+      content: bytes.subarray(0, SELFHOSTED_FILE_CHUNK_BYTES),
+      ...asUser,
+    });
+    for (
+      let offset = SELFHOSTED_FILE_CHUNK_BYTES;
+      offset < bytes.byteLength;
+      offset += SELFHOSTED_FILE_CHUNK_BYTES
+    ) {
+      await this.writeFile({
+        path,
+        content: bytes.subarray(offset, offset + SELFHOSTED_FILE_CHUNK_BYTES),
+        append: true,
+        ...asUser,
+      });
+    }
+  }
+
+  private async applyPermissions(target: string, entry: Entry, runAs?: string): Promise<void> {
+    if (entry.group !== undefined) {
+      throw new SandboxUnsupportedFeatureError(
+        "Compute sandboxes do not materialize named manifest groups.",
+      );
+    }
+    if (entry.permissions === undefined) return;
+    const mode = (new Permissions(entry.permissions).toMode() & 0o777).toString(8);
+    await this.run(`chmod ${mode} -- ${shellQuote(target)}`, "permission change", runAs);
+  }
+
+  private async materialize(path: string, entry: Entry, runAs?: string): Promise<void> {
+    const target = workspacePath(path);
+    if (entry.type === "dir") {
+      await this.run(`mkdir -p -- ${shellQuote(target)}`, "directory materialization", runAs);
+      for (const [childPath, child] of Object.entries(entry.children ?? {})) {
+        await this.materialize(posix.join(path, childPath), child, runAs);
+      }
+      await this.applyPermissions(target, entry, runAs);
+      return;
+    }
+    if (entry.type === "file") {
+      const content =
+        typeof entry.content === "string" ? new TextEncoder().encode(entry.content) : entry.content;
+      await this.writeChunked(target, content, runAs);
+      await this.applyPermissions(target, entry, runAs);
+      return;
+    }
+    if (entry.type === "git_repo") {
+      const temp = `/tmp/opengeni-git-${randomUUID()}`;
+      const subpath = entry.subpath ? normalizeRelativePath(entry.subpath) : null;
+      const script = [
+        "set -eu",
+        `rm -rf -- ${shellQuote(temp)} ${shellQuote(target)}`,
+        `mkdir -p -- ${shellQuote(posix.dirname(target))}`,
+        `git clone --no-checkout --depth=1 ${shellQuote(entry.repo)} ${shellQuote(temp)}`,
+        ...(entry.ref
+          ? [
+              `git -C ${shellQuote(temp)} fetch --depth=1 origin ${shellQuote(entry.ref)}`,
+              `git -C ${shellQuote(temp)} checkout --detach FETCH_HEAD`,
+            ]
+          : [`git -C ${shellQuote(temp)} checkout --detach HEAD`]),
+        subpath
+          ? `mkdir -p -- ${shellQuote(target)} && cp -a -- ${shellQuote(`${temp}/${subpath}/.`)} ${shellQuote(target)}`
+          : `mv -- ${shellQuote(temp)} ${shellQuote(target)}`,
+        subpath ? `rm -rf -- ${shellQuote(temp)}` : ":",
+      ].join("\n");
+      await this.run(script, "git repository materialization", runAs);
+      await this.applyPermissions(target, entry, runAs);
+      return;
+    }
+    // Host-local sources (local_file, local_dir) and mounts would read the
+    // Opengeni server's own filesystem; a remote box never receives them.
+    throw new SandboxUnsupportedFeatureError(
+      `Compute sandboxes do not support manifest entry type "${entry.type}".`,
+    );
+  }
+
+  override async materializeEntry(args: MaterializeEntryArgs): Promise<void> {
+    await this.assertRunAsAvailable(args.runAs);
+    await this.materialize(args.path, args.entry, args.runAs);
+    this.state.manifest = mergeManifestEntryDelta(this.state.manifest, args.path, args.entry);
+  }
+
+  async applyManifest(manifest: Manifest, runAs?: string): Promise<void> {
+    await this.assertRunAsAvailable(runAs);
+    assertSupportedManifest(manifest);
+    for (const [path, entry] of Object.entries(manifest.entries)) {
+      await this.materialize(path, entry, runAs);
+    }
+    const nextManifest = mergeManifestDelta(this.state.manifest, manifest);
+    this.state.environment = await mergeMaterializedEnvironment(
+      this.state.manifest,
+      nextManifest,
+      this.state.environment,
+    );
+    this.state.manifest = nextManifest;
+  }
+
+  private resolvedArchiveLimits(options?: WorkspaceArchiveOptions) {
+    return resolveSandboxArchiveLimits(
+      options?.archiveLimits === undefined ? this.archiveLimits : options.archiveLimits,
+    );
+  }
+
+  /** A portable tar of /workspace. Compute persists the box itself; this
+   * exists only to move a workspace to another backend. */
+  async persistWorkspaceTar(): Promise<Uint8Array> {
+    const archivePath = `${COMPUTE_PRIVATE_ROOT}/capture-${randomUUID()}.tar`;
+    const excludes = [
+      ...this.state.manifest.ephemeralPersistencePaths(),
+      ".opengeni-old-*",
+      ".opengeni-restore-*",
+    ].sort();
+    const excludeArgs = excludes.flatMap((path) => [
+      shellQuote(`--exclude=${path}`),
+      shellQuote(`--exclude=./${path}`),
+    ]);
+    const script = String.raw`set -eu
+mkdir -p ${shellQuote(COMPUTE_PRIVATE_ROOT)}
+cd ${shellQuote(COMPUTE_WORKSPACE_ROOT)}
+if find . -xdev -mindepth 1 \( -type p -o -type b -o -type c \) -print -quit | grep -q .; then
+  printf 'workspace contains a non-portable fifo or device\n' >&2
+  exit 65
+fi
+tar ${excludeArgs.join(" ")} --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf ${shellQuote(archivePath)} .`;
+    try {
+      const result = await this.exec({ cmd: script, maxOutputTokens: 1_000 });
+      if (result.exitCode !== 0) {
+        throw new SandboxArchiveError("Compute workspace archive capture failed", {
+          sandboxId: this.state.sandboxId,
+          exitCode: result.exitCode ?? null,
+        });
+      }
+      const bytes = await this.readFile({ path: archivePath });
+      const limits = this.resolvedArchiveLimits();
+      if (limits && limits.maxInputBytes !== null && bytes.byteLength > limits.maxInputBytes) {
+        throw new SandboxArchiveError("Compute workspace archive exceeds maxInputBytes", {
+          archiveBytes: bytes.byteLength,
+          maxInputBytes: limits.maxInputBytes,
+        });
+      }
+      return bytes;
+    } finally {
+      await this.exec({ cmd: `rm -f -- ${shellQuote(archivePath)}` }).catch(() => undefined);
+    }
+  }
+
+  async persistWorkspace(): Promise<Uint8Array> {
+    return await this.persistWorkspaceTar();
+  }
+
+  async hydrateWorkspace(
+    data: WorkspaceArchiveData,
+    options: WorkspaceArchiveOptions = {},
+  ): Promise<void> {
+    const bytes = await toUint8Array(data);
+    const limits = this.resolvedArchiveLimits(options);
+    if (limits && limits.maxInputBytes !== null && bytes.byteLength > limits.maxInputBytes) {
+      throw new SandboxArchiveError("Compute workspace archive exceeds maxInputBytes", {
+        archiveBytes: bytes.byteLength,
+        maxInputBytes: limits.maxInputBytes,
+      });
+    }
+    const archivePath = `${COMPUTE_PRIVATE_ROOT}/restore-${randomUUID()}.tar`;
+    const stagingPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-restore-${randomUUID()}`;
+    const backupPath = `${COMPUTE_WORKSPACE_ROOT}/.opengeni-old-${randomUUID()}`;
+    await this.run(`mkdir -p -- ${shellQuote(COMPUTE_PRIVATE_ROOT)}`, "archive staging");
+    await this.writeChunked(archivePath, bytes);
+    const excluded = [...this.state.manifest.ephemeralPersistencePaths()].sort().join("\n");
+    const limitArg = (value: number | null | undefined) =>
+      value === null || value === undefined ? "-1" : String(value);
+    const command = [
+      "python3",
+      "-c",
+      shellQuote(archiveRestoreScript()),
+      shellQuote(archivePath),
+      shellQuote(COMPUTE_WORKSPACE_ROOT),
+      shellQuote(stagingPath),
+      shellQuote(backupPath),
+      shellQuote(limitArg(limits?.maxMembers)),
+      shellQuote(limitArg(limits?.maxExtractedBytes)),
+      shellQuote(excluded),
+    ].join(" ");
+    try {
+      const result = await this.exec({ cmd: command, maxOutputTokens: 2_000 });
+      if (result.exitCode !== 0) {
+        throw new SandboxArchiveError("Compute workspace archive restore failed", {
+          sandboxId: this.state.sandboxId,
+          exitCode: result.exitCode ?? null,
+          stderr: result.stderr.slice(-1_000),
+        });
+      }
+      this.state.workspaceReady = true;
+    } finally {
+      await this.exec({
+        cmd: `rm -rf -- ${shellQuote(archivePath)} ${shellQuote(stagingPath)} ${shellQuote(backupPath)}`,
+      }).catch(() => undefined);
+    }
+  }
+
+  override async serializeSessionState(): Promise<never> {
+    throw new Error(
+      "compute sessions serialize through ComputeSandboxClient.serializeSessionState",
+    );
+  }
+}
+
+export async function deleteComputeBox(
+  control: Pick<ComputeControlClient, "delete">,
+  plane: Pick<ComputeAgentPlane, "revokeEnrollment">,
+  state: Pick<ComputeSessionState, "sandboxId" | "workspaceId" | "enrollmentId">,
+): Promise<void> {
+  await control.delete(state.sandboxId);
+  await plane.revokeEnrollment({
+    workspaceId: state.workspaceId,
+    enrollmentId: state.enrollmentId,
+  });
+}
+
+/**
+ * Undo a create whose sandbox nothing durable names: delete the sandbox its
+ * request made, if any, then revoke the enrollment it would run under.
+ *
+ * The control service request id of a compute create is its enrollment id, and the
+ * enrollment is written before the create is sent. It is revoked only once
+ * the control service proves no sandbox exists or can still appear for that request.
+ * Returns whether the enrollment was revoked; false (or a thrown error) leaves
+ * the sandbox, if one appears, to the orphan sweep (./orphans.ts), and an
+ * enrollment that never gets a sandbox to the worker's stale-enrollment revoke.
+ */
+export async function discardComputeCreate(
+  control: Pick<ComputeControlClient, "lookupRequest" | "delete">,
+  plane: Pick<ComputeAgentPlane, "revokeEnrollment">,
+  input: { workspaceId: string; enrollmentId: string; createdAtMs: number },
+  nowMs: number = Date.now(),
+): Promise<boolean> {
+  const found = await control.lookupRequest(input.enrollmentId);
+  if (found.state === "live") {
+    await control.delete(found.sandbox.id);
+  } else if (found.state === "none" && nowMs - input.createdAtMs < UNSEEN_CREATE_SETTLE_MS) {
+    return false;
+  }
+  await plane.revokeEnrollment({
+    workspaceId: input.workspaceId,
+    enrollmentId: input.enrollmentId,
+  });
+  return true;
+}
+
+export interface ComputeSandboxClientOptions {
+  control: ComputeControlClient;
+  /** Resolved lazily: the registry builds clients before the host installs it. */
+  plane: () => ComputeAgentPlane;
+  relay: SelfhostedRelayConfig;
+  /** This deployment's gateway URL. Every sandbox it creates is tagged with
+   * it, so the orphan sweep only ever considers this deployment's sandboxes. */
+  gateway: string;
+  image: string | null;
+  vcpus: number;
+  memoryMib: number;
+  memoryRequestMib?: number;
+  cpuRequestMillis?: number;
+  /** Start the agent with its own virtual desktop (the desktop image). */
+  desktop: boolean;
+  readyTimeoutMs: number;
+  controlTimeoutMs?: number;
+  execTimeoutMs?: number;
+  environment?: Record<string, string>;
+}
+
+function parseStateString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new SandboxConfigError("compute", `persisted compute state has no ${field}`);
+  }
+  return value;
+}
+
+export class ComputeSandboxClient {
+  readonly backendId = "compute" as const;
+  readonly supportsDefaultOptions = false;
+  private readonly options: ComputeSandboxClientOptions;
+
+  constructor(options: ComputeSandboxClientOptions) {
+    this.options = { ...options, environment: { ...(options.environment ?? {}) } };
+  }
+
+  private session(state: ComputeLiveState, archiveLimits?: SandboxArchiveLimits | null) {
+    return new ComputeSandboxSession({
+      state,
+      control: this.options.control,
+      plane: this.options.plane(),
+      relay: this.options.relay,
+      readyTimeoutMs: this.options.readyTimeoutMs,
+      ...(this.options.controlTimeoutMs !== undefined
+        ? { controlTimeoutMs: this.options.controlTimeoutMs }
+        : {}),
+      ...(this.options.execTimeoutMs !== undefined
+        ? { execTimeoutMs: this.options.execTimeoutMs }
+        : {}),
+      ...(archiveLimits !== undefined ? { archiveLimits } : {}),
+    });
+  }
+
+  /**
+   * Create one sandbox: make its agent's enrollment, ask the control service for the
+   * sandbox with an init naming that agent (idempotent by request id, retried
+   * with the same id and body), then wait until the host has opened the
+   * agent's session at the gateway and the agent answers. The lease identity
+   * arrives as `opengeniCreateIdentity` in the second argument.
+   *
+   * The request id is the enrollment id, and the enrollment is written before
+   * the create is sent. The sandbox carries its deployment, workspace, group
+   * and enrollment in its metadata, so one whose cleanup never finished is
+   * found and removed by the orphan sweep from the control service's own inventory.
+   */
+  async create(
+    args?: SandboxClientCreateArgs,
+    options?: Record<string, unknown> & { opengeniCreateIdentity?: ComputeCreateIdentity },
+  ): Promise<ComputeSandboxSession> {
+    const identity = options?.opengeniCreateIdentity;
+    if (!identity) {
+      throw new SandboxConfigError(
+        "compute",
+        "creating a compute sandbox needs its lease identity (account, workspace, sandbox group)",
+      );
+    }
+    const { opengeniCreateIdentity: _identity, ...manifestOptions } = options;
+    const normalized = normalizeSandboxClientCreateArgs(args as never, manifestOptions);
+    if (normalized.snapshot) {
+      throw new SandboxUnsupportedFeatureError(
+        "Compute sandboxes restore workspaces from portable archives only.",
+      );
+    }
+    const manifest = normalized.manifest;
+    assertSupportedManifest(manifest);
+    const environment = {
+      ...(this.options.environment ?? {}),
+      ...(await manifest.resolveEnvironment()),
+    };
+    const plane = this.options.plane();
+    const enrollmentId = randomUUID();
+    const requestId = enrollmentId;
+    await plane.createEnrollment({
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
+      enrollmentId,
+      sandboxGroupId: identity.sandboxGroupId,
+      hasDisplay: this.options.desktop,
+      workspaceRoot: COMPUTE_WORKSPACE_ROOT,
+    });
+    const body: ComputeCreateRequest = {
+      request_id: requestId,
+      ...(this.options.image ? { image: this.options.image } : {}),
+      vcpus: this.options.vcpus,
+      memory_mib: this.options.memoryMib,
+      ...(this.options.memoryRequestMib !== undefined
+        ? { memory_request_mib: this.options.memoryRequestMib }
+        : {}),
+      ...(this.options.cpuRequestMillis !== undefined
+        ? { cpu_request_millis: this.options.cpuRequestMillis }
+        : {}),
+      metadata: {
+        [COMPUTE_METADATA.gateway]: this.options.gateway,
+        [COMPUTE_METADATA.workspaceId]: identity.workspaceId,
+        [COMPUTE_METADATA.sandboxGroupId]: identity.sandboxGroupId,
+        [COMPUTE_METADATA.enrollmentId]: enrollmentId,
+      },
+      init: {
+        env_vars: environment,
+        default_user: "root",
+        default_workdir: COMPUTE_WORKSPACE_ROOT,
+        agent: {
+          workspace_id: identity.workspaceId,
+          agent_id: enrollmentId,
+          workspace_root: COMPUTE_WORKSPACE_ROOT,
+          desktop: this.options.desktop,
+        },
+      },
+    };
+    let view;
+    try {
+      view = await this.options.control.create(body);
+    } catch (error) {
+      // The create may have taken effect without its answer reaching us. If
+      // the control service cannot yet prove there is no sandbox, the orphan sweep
+      // finishes the cleanup.
+      await discardComputeCreate(this.options.control, plane, {
+        workspaceId: identity.workspaceId,
+        enrollmentId,
+        createdAtMs: Date.now(),
+      }).catch(() => false);
+      throw error;
+    }
+    const state: ComputeLiveState = {
+      stateVersion: COMPUTE_STATE_VERSION,
+      sandboxId: view.id,
+      enrollmentId,
+      workspaceId: identity.workspaceId,
+      accountId: identity.accountId,
+      sandboxGroupId: identity.sandboxGroupId,
+      requestId,
+      image: view.image || this.options.image,
+      manifest,
+      environment,
+      workspacePersistence: "tar",
+      workspaceReady: false,
+      agentId: enrollmentId,
+      instanceId: view.id,
+    };
+    const session = this.session(state, normalized.archiveLimits);
+    try {
+      await session.gate.waitForAgent(Date.now() + this.options.readyTimeoutMs);
+      if (Object.keys(manifest.entries).length > 0) {
+        for (const [path, entry] of Object.entries(manifest.entries)) {
+          await session.materializeEntry({ path, entry });
+        }
+      }
+    } catch (error) {
+      // Nothing durable names this sandbox yet: do not leave it behind. A
+      // failed delete leaves it to the orphan sweep.
+      await deleteComputeBox(this.options.control, plane, state).catch(() => undefined);
+      throw error;
+    }
+    return session;
+  }
+
+  async resume(
+    state: ComputeSessionState,
+    options: SandboxClientResumeOptions = {},
+  ): Promise<ComputeSandboxSession> {
+    return await this.resumeExact(state, options);
+  }
+
+  /** Re-address the same box. It may be asleep: the first operation wakes it. */
+  async resumeExact(
+    state: ComputeSessionState,
+    options: SandboxClientResumeOptions = {},
+  ): Promise<ComputeSandboxSession> {
+    try {
+      await this.options.control.get(state.sandboxId);
+    } catch (error) {
+      if (isComputeSandboxGone(error)) {
+        throw new SandboxExactResumeInstanceUnavailableError("compute", state.sandboxId);
+      }
+      throw error;
+    }
+    const live: ComputeLiveState = {
+      ...state,
+      agentId: state.enrollmentId,
+      instanceId: state.sandboxId,
+    };
+    return this.session(live, options.archiveLimits);
+  }
+
+  /** Delete the sandbox, then revoke its enrollment. A failure throws with
+   * the enrollment still active, so the caller's retry (or the orphan sweep)
+   * finishes it. Any other sandbox of the group is the orphan sweep's. */
+  async delete(state: ComputeSessionState): Promise<void> {
+    await deleteComputeBox(this.options.control, this.options.plane(), state);
+  }
+
+  async canPersistOwnedSessionState(): Promise<boolean> {
+    return true;
+  }
+
+  async canReusePreservedOwnedSession(): Promise<boolean> {
+    return false;
+  }
+
+  async serializeSessionState(state: ComputeSessionState): Promise<Record<string, unknown>> {
+    return {
+      stateVersion: COMPUTE_STATE_VERSION,
+      sandboxId: state.sandboxId,
+      enrollmentId: state.enrollmentId,
+      workspaceId: state.workspaceId,
+      accountId: state.accountId,
+      sandboxGroupId: state.sandboxGroupId,
+      requestId: state.requestId,
+      image: state.image,
+      manifest: serializeManifestRecord(state.manifest),
+      environment: serializeRuntimeEnvironmentForPersistence(state.manifest, state.environment),
+      workspacePersistence: "tar",
+      workspaceReady: state.workspaceReady,
+    };
+  }
+
+  async deserializeSessionState(value: Record<string, unknown>): Promise<ComputeSessionState> {
+    if (value.stateVersion !== COMPUTE_STATE_VERSION) {
+      throw new SandboxConfigError(
+        "compute",
+        `unsupported persisted compute state version: ${String(value.stateVersion)}`,
+      );
+    }
+    const manifest = deserializeManifest(
+      value.manifest && typeof value.manifest === "object" && !Array.isArray(value.manifest)
+        ? (value.manifest as Record<string, unknown>)
+        : undefined,
+    );
+    if (manifest.root !== COMPUTE_WORKSPACE_ROOT) {
+      throw new SandboxConfigError(
+        "compute",
+        `persisted manifest root must be ${COMPUTE_WORKSPACE_ROOT}`,
+      );
+    }
+    return {
+      stateVersion: COMPUTE_STATE_VERSION,
+      sandboxId: parseStateString(value.sandboxId, "sandboxId"),
+      enrollmentId: parseStateString(value.enrollmentId, "enrollmentId"),
+      workspaceId: parseStateString(value.workspaceId, "workspaceId"),
+      accountId: parseStateString(value.accountId, "accountId"),
+      sandboxGroupId: parseStateString(value.sandboxGroupId, "sandboxGroupId"),
+      requestId: parseStateString(value.requestId, "requestId"),
+      image: typeof value.image === "string" ? value.image : null,
+      manifest,
+      environment: await rehydratePersistedEnvironmentForRuntime(
+        manifest,
+        value.environment &&
+          typeof value.environment === "object" &&
+          !Array.isArray(value.environment)
+          ? (value.environment as Record<string, string>)
+          : undefined,
+        this.options.environment,
+      ),
+      workspacePersistence: "tar",
+      workspaceReady: value.workspaceReady === true,
+    };
+  }
+}

@@ -7,23 +7,37 @@
 // `og-*` token system — no new visual language, just the missing depth.
 // ----------------------------------------------------------------------------
 import {
-  AlertTriangleIcon,
   ArrowLeftIcon,
+  BuildingIcon,
+  ChevronRightIcon,
   CpuIcon,
   LaptopIcon,
+  PlugIcon,
   RadioIcon,
   ServerIcon,
+  TriangleAlertIcon,
   Trash2Icon,
+  UserIcon,
+  UsersIcon,
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
 import type { MachineView, MetricSample } from "../../types/machines";
+import { connectionStatusForState } from "../../types/machines";
+import { AgentStatusIcon } from "./agent-status-icon";
 import { deriveHealth, HEALTH_TOKEN, healthPulses } from "./health";
+import {
+  describeAgentConnection,
+  describeAgentRuntime,
+  runnerConflict,
+  STATUS_TONE_TEXT,
+} from "./machine-status";
 import { MetricHistoryChart } from "./metric-history-chart";
 import { MetricSparkline } from "./metric-sparkline";
 import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } from "./series";
 import { MachineOperationPolicyEditor } from "./machine-operation-policy";
 import type { UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 export type MachineDetailProps = {
   machine: MachineView;
@@ -39,9 +53,86 @@ export type MachineDetailProps = {
     | ((machine: MachineView, request: UpdateMachineOperationPolicyRequest) => Promise<unknown>)
     | undefined;
   updatingOperationPolicy?: boolean | undefined;
+  /** Open "Who can use it?" for a connected machine. Omit when the viewer
+   * can't change it; the row then shows the current audience read-only. */
+  onChangeAudience?: ((machine: MachineView) => void) | undefined;
+  /** Start, retry or resend the signed agent update. Omit when the viewer can't. */
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingAgent?: boolean | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
+
+const AUDIENCE = (
+  t: OpenGeniText,
+): Record<MachineView["scope"], { label: string; description: string; Icon: typeof UserIcon }> => ({
+  user: {
+    label: t("machines.machineDetail.onlyMe"),
+    description: t("machines.machineDetail.onlyItsOwnerCanRun"),
+    Icon: UserIcon,
+  },
+  workspace: {
+    label: t("machines.machineDetail.thisWorkspace"),
+    description: t("machines.machineDetail.everyoneInThisWorkspaceCan"),
+    Icon: UsersIcon,
+  },
+  organization: {
+    label: t("machines.machineDetail.wholeOrganization"),
+    description: t("machines.machineDetail.everyWorkspaceInTheOrganization"),
+    Icon: BuildingIcon,
+  },
+});
+
+/** Who can use a connected machine. A navigational row when it can change. */
+function MachineAudienceRow({
+  machine,
+  onChange,
+}: {
+  machine: MachineView;
+  onChange?: ((machine: MachineView) => void) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const audience = AUDIENCE(t)[machine.scope];
+  const changeable = onChange !== undefined && machine.scope !== "organization";
+  const content = (
+    <>
+      <audience.Icon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+        <span className="text-og-sm font-medium text-og-fg">
+          {t("machines.machineDetail.whoCanUseIt")}
+        </span>
+        <span className="text-og-xs text-og-fg-muted">{audience.description}</span>
+      </span>
+      <span className="shrink-0 text-og-sm text-og-fg-muted">{audience.label}</span>
+      {changeable ? (
+        <ChevronRightIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+      ) : null}
+    </>
+  );
+  const frame =
+    "flex w-full min-h-14 items-center gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-4 py-3 shadow-og-sm";
+  return changeable ? (
+    <button
+      type="button"
+      data-machine-audience={machine.scope}
+      onClick={() => onChange(machine)}
+      aria-label={t("machines.machineDetail.whoCanUseNameLabel", {
+        name: machine.name,
+        label: audience.label,
+      })}
+      className={cn(
+        frame,
+        "transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50",
+      )}
+    >
+      {content}
+    </button>
+  ) : (
+    <div data-machine-audience={machine.scope} className={frame}>
+      {content}
+    </div>
+  );
+}
 
 function KindIcon({ kind, session }: { kind: string; session: boolean }) {
   if (kind === "local" || kind === "selfhosted")
@@ -50,6 +141,114 @@ function KindIcon({ kind, session }: { kind: string; session: boolean }) {
     return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   if (kind === "modal") return <CpuIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+}
+
+/**
+ * The connected agent: its build and update on one row, its connection on the
+ * next. Past events read as quiet history; only a live problem gets a color.
+ */
+function MachineAgentPanel({
+  machine,
+  now,
+  onUpdateAgent,
+  updatingAgent,
+}: {
+  machine: MachineView;
+  now: number;
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingAgent?: boolean | undefined;
+}) {
+  const t = useOpenGeniText();
+  const authority = machine.connectionAuthority;
+  const runtime = machine.runtime;
+  if (!runtime && authority.state === "not_applicable") return null;
+  const agent = runtime
+    ? describeAgentRuntime(t, runtime, now, connectionStatusForState(machine.state) === "online")
+    : null;
+  const action =
+    agent?.action && machine.enrollmentId && onUpdateAgent && machine.state !== "offline"
+      ? agent.action
+      : null;
+  const connection =
+    authority.state === "not_applicable" ? null : describeAgentConnection(t, authority);
+  const conflict = runnerConflict(authority, now);
+  const conflictAgo = conflict?.lastAt
+    ? formatRelativeTime(t, conflict.lastAt, new Date(now))
+    : null;
+
+  return (
+    <section
+      data-machine-agent
+      aria-label={t("machines.machineDetail.agent")}
+      className="flex flex-col divide-y divide-og-border rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm"
+    >
+      {agent ? (
+        <div data-agent-runtime className="flex min-h-14 items-center gap-3 px-4 py-3">
+          <AgentStatusIcon tone={agent.tone} className="size-4" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-og-sm font-medium text-og-fg">{agent.title}</span>
+            <span
+              data-agent-status={agent.tone}
+              className={cn("text-og-xs", STATUS_TONE_TEXT[agent.tone])}
+            >
+              {agent.status}
+            </span>
+            {agent.note ? <span className="text-og-xs text-og-fg-muted">{agent.note}</span> : null}
+          </div>
+          {action ? (
+            <button
+              type="button"
+              data-update-agent
+              data-update-action={action.kind}
+              disabled={updatingAgent}
+              onClick={() => onUpdateAgent?.(machine)}
+              className="inline-flex min-h-9 shrink-0 items-center rounded-og-sm border border-og-border px-3 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              {updatingAgent ? t("machines.machineDetail.starting") : action.label}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {connection ? (
+        <div
+          data-connection-authority={authority.state}
+          className="flex min-h-14 items-start gap-3 px-4 py-3"
+        >
+          <PlugIcon className="mt-0.5 size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-og-sm font-medium text-og-fg">{connection.label}</span>
+            {connection.detail ? (
+              <span className="text-og-xs text-og-fg-muted">{connection.detail}</span>
+            ) : null}
+            {conflict?.active ? (
+              <span
+                data-runner-conflict="active"
+                className="mt-1 flex items-start gap-1.5 text-og-xs text-og-fg-muted"
+              >
+                <TriangleAlertIcon
+                  className="mt-px size-3.5 shrink-0 text-og-status-waiting"
+                  aria-hidden
+                />
+                {t("machines.machineDetail.aSecondCopyOfThe")}
+              </span>
+            ) : conflict ? (
+              <span data-runner-conflict="past" className="text-og-xs text-og-fg-subtle">
+                {t("machines.machineDetail.keptOutExtraCopiesOf", { count: conflict.count })}
+                {conflictAgo
+                  ? t("machines.machineDetail.mostRecentlyValue", {
+                      value:
+                        conflictAgo === "now"
+                          ? t("machines.machineDetail.justNow")
+                          : `${conflictAgo} ago`,
+                    })
+                  : ""}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 export function MachineDetail({
@@ -62,20 +261,20 @@ export function MachineDetail({
   onRemove,
   onUpdateOperationPolicy,
   updatingOperationPolicy,
+  onChangeAudience,
+  onUpdateAgent,
+  updatingAgent,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
-  const health = deriveHealth(machine.state, machine.metrics, now);
+  const t = useOpenGeniText();
+  const health = deriveHealth(t, machine.state, machine.metrics, now);
   const tone = HEALTH_TOKEN[health.level];
   const latest = machine.metrics;
-  const sampledAgo = latest ? formatRelativeTime(latest.sampledAt, new Date(now)) : null;
-  const authority = machine.connectionAuthority;
-  const duplicateDeniedAgo = authority.duplicateRunnerDeniedAt
-    ? formatRelativeTime(authority.duplicateRunnerDeniedAt, new Date(now))
-    : null;
+  const sampledAgo = latest ? formatRelativeTime(t, latest.sampledAt, new Date(now)) : null;
 
   // Only render metrics that have a value (GPU is dropped on headless boxes).
-  const visible = METRICS.filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
+  const visible = METRICS(t).filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
   // The tile grid tracks the metric count exactly so it never leaves a dead cell.
   const tileCols =
     visible.length >= 5
@@ -92,7 +291,7 @@ export function MachineDetail({
               type="button"
               onClick={onBack}
               className="flex size-7 shrink-0 items-center justify-center rounded-og-sm border border-og-border bg-og-surface-1 text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg"
-              aria-label="Back to machines"
+              aria-label={t("machines.machineDetail.backToMachines")}
             >
               <ArrowLeftIcon className="size-3.5" aria-hidden />
             </button>
@@ -109,12 +308,12 @@ export function MachineDetail({
             <button
               type="button"
               data-remove-machine
-              aria-label={`Remove machine ${machine.name}`}
+              aria-label={t("machines.machineDetail.removeMachineName", { name: machine.name })}
               onClick={() => onRemove(machine)}
               className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-status-failed/40 px-2.5 py-1 font-medium text-og-xs text-og-status-failed transition-colors hover:bg-og-status-failed/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-status-failed/50 pointer-coarse:min-h-11"
             >
               <Trash2Icon className="size-3.5" aria-hidden />
-              <span className="hidden sm:inline">Remove machine</span>
+              <span className="hidden sm:inline">{t("machines.machineDetail.removeMachine")}</span>
             </button>
           ) : null}
           {/* range selector */}
@@ -169,24 +368,26 @@ export function MachineDetail({
             {sampledAgo && (
               <div className="flex flex-col items-end gap-0.5">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-                  Sampled
+                  {t("machines.machineDetail.sampled")}
                 </span>
                 <span className="flex items-center gap-1 font-og-mono text-og-sm tabular-nums text-og-fg">
                   <RadioIcon
                     className={cn("size-3", health.stale ? "text-og-fg-subtle" : tone.text)}
                     aria-hidden
                   />
-                  {sampledAgo === "now" ? "live" : `${sampledAgo} ago`}
+                  {sampledAgo === "now"
+                    ? t("machines.machineDetail.live")
+                    : t("machines.machineDetail.sampledagoAgo", { sampledAgo })}
                 </span>
               </div>
             )}
             {machine.lastSeenAt && (
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-                  Last seen
+                  {t("machines.machineDetail.lastSeen")}
                 </span>
                 <span className="font-og-mono text-og-sm tabular-nums text-og-fg-muted">
-                  {formatRelativeTime(machine.lastSeenAt, new Date(now))}
+                  {formatRelativeTime(t, machine.lastSeenAt, new Date(now))}
                 </span>
               </div>
             )}
@@ -222,31 +423,18 @@ export function MachineDetail({
             })}
           </div>
         )}
-
-        {authority.state !== "not_applicable" ? (
-          <div
-            data-connection-authority={authority.state}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-og-md border border-og-border bg-og-surface-1/75 px-3 py-2 text-og-xs"
-          >
-            <span className="text-og-fg-muted">
-              Runner {authority.state.replace("_", " ")} · generation {authority.generation}
-              {authority.supersededCount > 0
-                ? ` · ${authority.supersededCount} earlier ${authority.supersededCount === 1 ? "runner" : "runners"} fenced`
-                : ""}
-            </span>
-            {authority.duplicateRunnerDeniedCount > 0 ? (
-              <span className="inline-flex items-center gap-1.5 text-og-status-failed">
-                <AlertTriangleIcon className="size-3.5" aria-hidden />
-                Blocked {authority.duplicateRunnerDeniedCount} competing runner
-                {authority.duplicateRunnerDeniedCount === 1 ? "" : "s"}
-                {duplicateDeniedAgo
-                  ? ` · ${duplicateDeniedAgo === "now" ? "now" : `${duplicateDeniedAgo} ago`}`
-                  : ""}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
       </div>
+
+      <MachineAgentPanel
+        machine={machine}
+        now={now}
+        onUpdateAgent={onUpdateAgent}
+        updatingAgent={updatingAgent}
+      />
+
+      {machine.enrollmentId && !machine.isSessionGroup ? (
+        <MachineAudienceRow machine={machine} onChange={onChangeAudience} />
+      ) : null}
 
       {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
         <MachineOperationPolicyEditor
@@ -281,7 +469,7 @@ export function MachineDetail({
                 unit={m.unit}
                 color={m.color}
                 thresholds={m.thresholds}
-                rangeLabel={WINDOW_LABEL[window]}
+                rangeLabel={WINDOW_LABEL(t)[window]}
                 height={128}
                 className={cn(loadingSeries && "opacity-50 transition-opacity")}
               />

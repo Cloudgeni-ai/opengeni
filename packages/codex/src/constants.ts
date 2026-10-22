@@ -25,9 +25,9 @@ export const CODEX_PROVIDER_ID = "codex-subscription";
 export const CODEX_PROVIDER_BASE_URL = "https://chatgpt.com/backend-api";
 export const CODEX_MODEL_ID_PREFIX = "codex/";
 
-// The only Codex subscription models OpenGeni exposes. Older families are not
+// The only Codex subscription models Opengeni exposes. Older families are not
 // advertised. A slug stays in this list before every account has rollout access
-// so the picker can offer it without another OpenGeni release.
+// so the picker can offer it without another Opengeni release.
 export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] as const;
 
 // Live Codex model-catalog values for every exposed subscription slug.
@@ -53,7 +53,7 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 // contract have been reviewed here.
 export const CODEX_CLIENT_VERSION = "0.159.2";
 
-// Public OpenGeni selector for native ChatGPT/Codex subscription WebRTC. This
+// Public Opengeni selector for native ChatGPT/Codex subscription WebRTC. This
 // remains stable for persisted sessions; the provider's remotely configured
 // model is resolved separately before call creation.
 export const CODEX_REALTIME_MODEL = "gpt-live-1-boulder-alpha";

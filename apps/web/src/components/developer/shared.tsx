@@ -3,11 +3,11 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { CopyField } from "@/components/ui/copy-field";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@opengeni/react/ui/api-error";
 
 /**
  * Data for one part of a page: loading, ready, refused for this viewer (a
@@ -89,7 +89,7 @@ export function ExternalLink({ href, children }: { href: string; children: React
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-0.5 rounded-sm font-medium text-brand underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand/55"
+      className="inline-flex items-center gap-0.5 rounded-sm font-medium og-link outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
     >
       {children}
       <ArrowUpRightIcon aria-hidden="true" className="size-3.5" />

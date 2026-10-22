@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createObservability, type Observability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { measureTurnStartupPhase } from "../src/observability-metrics";
 
 test("a held dependency emits no completion before it settles", async () => {

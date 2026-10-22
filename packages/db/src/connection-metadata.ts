@@ -4,11 +4,13 @@ import {
   type ConnectionStatus,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
-import { and, desc, eq, isNull, or, type SQL } from "drizzle-orm";
-import { withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
+import { and, desc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 
 /** Server-owned verification facts; public schemas expose them read-only and nullable. */
@@ -65,21 +67,27 @@ export async function listConnectionsMetadata(
   subjectId?: string | null,
 ): Promise<ConnectionMetadataWithVerification[]> {
   return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      // Legacy rows can share created_at. UUID DESC is the immutable stable
-      // tie-breaker, so every caller that intentionally selects the first row
-      // collapses duplicates in the same documented direction.
-      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
-    return rows.map(mapConnectionMetadata);
+    return await listConnectionsMetadataInScope(scopedDb, workspaceId, subjectId);
   });
+}
+
+/** Internal reader for callers that already hold this workspace's RLS scope. */
+export async function listConnectionsMetadataInScope(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string | null,
+): Promise<ConnectionMetadataWithVerification[]> {
+  const rows = await scopedDb
+    .select(connectionMetadataColumns)
+    .from(schema.connections)
+    .where(
+      and(eq(schema.connections.workspaceId, workspaceId), connectionSubjectVisibility(subjectId)),
+    )
+    // Legacy rows can share created_at. UUID DESC is the immutable stable
+    // tie-breaker, so every caller that intentionally selects the first row
+    // collapses duplicates in the same documented direction.
+    .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
+  return rows.map(mapConnectionMetadata);
 }
 
 export async function getConnectionMetadata(
@@ -101,6 +109,30 @@ export async function getConnectionMetadata(
       )
       .limit(1);
     return row ? mapConnectionMetadata(row) : null;
+  });
+}
+
+/**
+ * The workspace a provider connection was added in, when the caller may use
+ * it from `workspaceId`: their own personal connection (while they are an
+ * active organization member), or a shared connection an organization vault
+ * is linked through. Connected vaults reach beyond the workspace their token
+ * lives in (an Only-me vault follows its owner; an organization vault reaches
+ * every workspace it is available in), so the token is loaded from here.
+ * Null for anything else.
+ */
+export async function getProviderConnectionHomeWorkspace(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  subjectId?: string | null,
+): Promise<string | null> {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const [row] = await rawRows<{ workspace_id: string | null }>(
+      scopedDb,
+      sql`select provider_connection_home_workspace(${connectionId}::uuid) as workspace_id`,
+    );
+    return row?.workspace_id ?? null;
   });
 }
 
@@ -137,6 +169,8 @@ export function mapConnectionMetadata(row: {
     anthropicCredentialOperationDigest: _anthropicOperationDigest,
     claude_subscriptionCredentialOperationId: _claudeOperationId,
     claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {

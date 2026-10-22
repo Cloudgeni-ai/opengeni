@@ -361,18 +361,63 @@ function nativeFailureDiagnostic(
   return undefined;
 }
 
+/** Budget multipliers for successive identity probes. Only a probe that our
+ * own timer terminated is retried: a slow start on a loaded host (a cold
+ * executable page-in, swap) is transient, while a failing or malformed
+ * identity is not. */
+const IDENTITY_PROBE_BUDGET_MULTIPLIERS = [1, 3, 9] as const;
+
+class IdentityProbeTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`native materializer identity probe timed out after ${timeoutMs}ms`);
+    this.name = "IdentityProbeTimeoutError";
+  }
+}
+
 async function probeIdentity(
   options: NativeEditableArtifactSubprocessOptions,
 ): Promise<IdentityEnvelope> {
+  const baseTimeoutMs = options.probeTimeoutMs ?? 5_000;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await probeIdentityOnce(
+        options,
+        baseTimeoutMs * IDENTITY_PROBE_BUDGET_MULTIPLIERS[attempt]!,
+      );
+    } catch (error) {
+      if (
+        !(error instanceof IdentityProbeTimeoutError) ||
+        attempt + 1 >= IDENTITY_PROBE_BUDGET_MULTIPLIERS.length
+      ) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function probeIdentityOnce(
+  options: NativeEditableArtifactSubprocessOptions,
+  timeoutMs: number,
+): Promise<IdentityEnvelope> {
   const child = spawnNative(options, [IDENTITY_ARGUMENT]);
   const terminate = () => terminateChild(child);
-  const timeout = setTimeout(terminate, options.probeTimeoutMs ?? 5_000);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    terminate();
+  }, timeoutMs);
   timeout.unref?.();
   const stdout = collectBounded(child.stdout, MAX_IDENTITY_BYTES, terminate);
   const stderr = drainStderr(child, terminate);
   try {
-    const [bytes, , status] = await Promise.all([stdout, stderr, waitForExit(child)]);
+    const [bytes, , status] = await Promise.all([stdout, stderr, waitForExit(child)]).catch(
+      (error: unknown) => {
+        if (timedOut) throw new IdentityProbeTimeoutError(timeoutMs);
+        throw error;
+      },
+    );
     if (status.code !== 0 || status.signal !== null) {
+      if (timedOut) throw new IdentityProbeTimeoutError(timeoutMs);
       throw new Error("native materializer identity probe failed");
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);

@@ -7,7 +7,10 @@ import {
   getWorkspaceInteractionRevisionState,
   listSessionEventPage,
   listWorkspaceControlEvents,
+  getWorkspaceControlEvent,
+  readSessionEventStorageGapEnd,
   type Database,
+  type SessionListChangeSource,
 } from "@opengeni/db";
 import {
   coalesceSessionEventDeltasWithCoverage,
@@ -19,6 +22,7 @@ import {
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
+import { subscribeSessionListHints } from "./session-list-hints";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
@@ -268,6 +272,32 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
   };
 }
 
+/**
+ * Durable coverage for each projected frame. Storage may omit sequences on
+ * purpose (an archived session keeps only its readable timeline), and clients
+ * treat an uncovered jump as a gap to backfill. Within a page the next stored
+ * row bounds the gap; after the last row, `gapEnd` (when given) reads the
+ * race-free bound from storage.
+ */
+export async function coverStorageGaps(
+  projection: { events: SessionEvent[]; coveredThroughBySequence: ReadonlyMap<number, number> },
+  gapEnd: ((through: number) => Promise<number>) | null,
+): Promise<Map<number, number>> {
+  const coverage = new Map<number, number>();
+  const events = projection.events;
+  for (const [index, event] of events.entries()) {
+    const own = projection.coveredThroughBySequence.get(event.sequence) ?? event.sequence;
+    const next = events[index + 1];
+    coverage.set(event.sequence, next ? Math.max(own, next.sequence - 1) : own);
+  }
+  const last = events.at(-1);
+  if (last && gapEnd) {
+    const own = coverage.get(last.sequence)!;
+    coverage.set(last.sequence, Math.max(own, await gapEnd(own)));
+  }
+  return coverage;
+}
+
 export async function sseSessionStream(
   db: Database,
   bus: EventBus,
@@ -285,12 +315,12 @@ export async function sseSessionStream(
     });
     await options.reauthorize?.();
     const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
+    const coverage = await coverStorageGaps(compactProjection, async (through) =>
+      readSessionEventStorageGapEnd(db, workspaceId, sessionId, through),
+    );
     return finiteSseBatchResponse(
       compactProjection.events.map((event) =>
-        formatSessionEventSse(
-          event,
-          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
-        ),
+        formatSessionEventSse(event, coverage.get(event.sequence) ?? event.sequence),
       ),
       options,
     );
@@ -376,9 +406,16 @@ export async function sseSessionStream(
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
       const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      // Live delivery stops exactly at a published sequence; replay pages also
+      // cover what storage intentionally omits after their last event.
+      const coverage = await coverStorageGaps(
+        compactProjection,
+        targetSequence === undefined
+          ? async (through) => readSessionEventStorageGapEnd(db, workspaceId, sessionId, through)
+          : null,
+      );
       for (const projected of compactProjection.events) {
-        const coveredThrough =
-          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        const coveredThrough = coverage.get(projected.sequence) ?? projected.sequence;
         await writeFrame(formatSessionEventSse(projected, coveredThrough));
         lastSent = coveredThrough;
       }
@@ -643,7 +680,10 @@ export async function sseWorkspaceControlStream(
         }
       }
     }
-    await writeFrame(formatWorkspaceControlEventSse(event));
+    // The bus is workspace-wide, not an authorization projection. Re-read the
+    // exact durable row under this stream's actor before delivering live data.
+    const visible = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    if (visible) await writeFrame(formatWorkspaceControlEventSse(visible));
     lastSent = event.sequence;
   };
   delivery = createLatestWinsDelivery(send, fail);
@@ -700,11 +740,18 @@ export async function sseWorkspaceControlStream(
 
 export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
   pollIntervalMs?: number | undefined;
+  sessionLists?:
+    | {
+        source: SessionListChangeSource;
+        subjectId: string;
+        authorizeIds: (ids: string[]) => Promise<string[]>;
+      }
+    | undefined;
 };
 
 /**
  * One HTTP connection for the two workspace-wide invalidation domains used by
- * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * every visible Opengeni surface. Keeping these as separate HTTP/1 streams
  * consumes all six per-origin browser connections with only two windows and
  * starves ordinary mutations/terminal grants. The durable cursors remain
  * independent; this function only multiplexes their already-bounded SSE frames.
@@ -748,6 +795,7 @@ export async function sseWorkspaceLiveStream(
   }
   const upstream = new AbortController();
   let stopReauthorization = () => {};
+  let stopSessionListHints = () => {};
   const channel = createByteBoundedSseStream({
     connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
@@ -755,6 +803,7 @@ export async function sseWorkspaceLiveStream(
     onObservation: sseObservationReporter("workspace_interaction", options),
     onStop: () => {
       stopReauthorization();
+      stopSessionListHints();
       signal.removeEventListener("abort", abort);
       upstream.abort();
     },
@@ -785,6 +834,16 @@ export async function sseWorkspaceLiveStream(
     writeTail = pending.catch(() => false);
     return pending;
   };
+  if (options.sessionLists && !channel.stopped()) {
+    stopSessionListHints = subscribeSessionListHints({
+      ...options.sessionLists,
+      workspaceId,
+      intervalMs: options.pollIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
+      write: (hint) =>
+        write(`event: workspace.sessions.changed\ndata: ${JSON.stringify(hint)}\n\n`),
+      fail: channel.fail,
+    });
+  }
   const pump = async (response: Response): Promise<void> => {
     if (!response.body) throw new TypeError("workspace live upstream omitted its body");
     const reader = response.body.getReader();

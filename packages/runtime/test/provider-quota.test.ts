@@ -282,9 +282,15 @@ const cases: Case[] = [
     expected: null,
   },
   {
-    name: "OpenGeni credit refusal is not provider evidence",
+    name: "platform credit refusal is not provider evidence",
     status: null,
-    texts: ["429 insufficient OpenGeni credits"],
+    texts: ["429 insufficient workspace credits"],
+    expected: null,
+  },
+  {
+    name: "older platform credit refusal wording is not provider evidence",
+    status: null,
+    texts: ["429 insufficient Opengeni credits"],
     expected: null,
   },
   {

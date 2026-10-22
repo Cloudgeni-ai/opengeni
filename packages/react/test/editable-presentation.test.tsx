@@ -19,6 +19,9 @@ import {
   replacePresentationRichText,
 } from "../src/components/artifacts/editable-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -257,6 +260,7 @@ describe("SDK-backed editable presentation", () => {
 
   test("composes catalog/editor-slide ABI while preserving hierarchy and inheritance", async () => {
     const composed = await composePresentationEditorProjection(
+      englishText,
       new FakePresentationSession() as unknown as EditableArtifactSession,
     );
     expect(composed.projection.slideSize).toEqual({ width: 960, height: 540 });
@@ -276,6 +280,73 @@ describe("SDK-backed editable presentation", () => {
       readOnly: true,
       nodeSource: { kind: "master", id: MASTER_ID },
     });
+  });
+
+  test("downloads PPTX only after an in-flight slide edit has been submitted", async () => {
+    const fake = new FakePresentationSession();
+    const apply = fake.applyPresentationCommands.bind(fake);
+    let release!: () => void;
+    fake.applyPresentationCommands = async (batch) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return apply(batch);
+    };
+    const downloads: AbortSignal[] = [];
+    const saved: string[] = [];
+    const oldCreate = URL.createObjectURL;
+    const oldRevoke = URL.revokeObjectURL;
+    const oldClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = () => "blob:test";
+    URL.revokeObjectURL = () => {};
+    HTMLAnchorElement.prototype.click = function () {
+      saved.push(this.download);
+    };
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Q4 deck.pptx"
+        download={async (signal) => {
+          downloads.push(signal);
+          return new Blob(["pptx"]);
+        }}
+      />,
+    );
+    try {
+      await flush(30);
+      const download = [...rendered.container.querySelectorAll("button")].find((candidate) =>
+        candidate.textContent?.includes("Download"),
+      )!;
+      expect(download.disabled).toBe(false);
+      expect(download.title).toBe("Download presentation as PPTX");
+
+      const editor = rendered.container.querySelector<SVGSVGElement>('[role="application"]')!;
+      await actRun(() => editor.focus());
+      await actRun(() =>
+        editor.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true })),
+      );
+      await actRun(() => {
+        editor.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+        // Same event turn: the move is submitting but not yet an SDK pending transaction.
+        download.click();
+      });
+      expect(downloads).toHaveLength(0);
+      expect(download.disabled).toBe(true);
+
+      await actRun(() => release());
+      await flush(30);
+      expect(fake.commands).toHaveLength(1);
+      expect(download.disabled).toBe(false);
+      await actRun(() => download.click());
+      await flush();
+      expect(downloads).toHaveLength(1);
+      expect(saved).toEqual(["Q4 deck.pptx"]);
+    } finally {
+      await rendered.unmount();
+      URL.createObjectURL = oldCreate;
+      URL.revokeObjectURL = oldRevoke;
+      HTMLAnchorElement.prototype.click = oldClick;
+    }
   });
 
   test("maps canvas movement to exact canonical node bounds", async () => {

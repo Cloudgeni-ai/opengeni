@@ -1,7 +1,7 @@
 //! Release-contained browser/computer helpers.
 //!
-//! A release agent embeds the exact browserd, pinned agent-browser, and native
-//! computer helper built from the same source identity. This intentionally keeps
+//! A release agent embeds the exact browserd and native computer helper built
+//! from the same source identity. This intentionally keeps
 //! the historical one-file updater valid: after its atomic executable swap, the
 //! new process materializes its own complete helper generation before use.
 
@@ -14,12 +14,13 @@ use opengeni_agent_platform::PlatformResult;
 #[cfg(opengeni_embedded_runtime)]
 const BROWSERD: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_BROWSERD"));
 #[cfg(opengeni_embedded_runtime)]
-const AGENT_BROWSER: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_AGENT_BROWSER"));
-#[cfg(opengeni_embedded_runtime)]
 const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_NATIVE"));
 
 #[cfg(opengeni_embedded_cua)]
 const CUA_RUNTIME: &[(&str, &[u8])] = &include!(env!("OPENGENI_EMBEDDED_CUA_RUNTIME"));
+
+/// The helper generation this process materialized, once it has.
+static CURRENT_GENERATION: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Materializes the release-contained runtime and returns its browserd path.
 /// Development builds carry no payload and return `None`, preserving explicit
@@ -39,9 +40,14 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
             .join(&generation[..24]);
         create_private_directory(&directory)?;
         for (name, bytes) in [
-            (companion_name("opengeni-browserd"), BROWSERD),
-            (companion_name("agent-browser"), AGENT_BROWSER),
-            (companion_name("opengeni-computer-native"), COMPUTER_NATIVE),
+            (
+                companion_name(crate::browser_sidecar::BROWSERD_FILE),
+                BROWSERD,
+            ),
+            (
+                companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE),
+                COMPUTER_NATIVE,
+            ),
         ] {
             materialize_executable(&directory.join(name), bytes)?;
         }
@@ -51,14 +57,69 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
             create_private_directory(path.parent().expect("CUA asset parent"))?;
             materialize_executable(&path, bytes)?;
         }
-        Ok(Some(directory.join(companion_name("opengeni-browserd"))))
+        let _ = CURRENT_GENERATION.set(directory.clone());
+        Ok(Some(directory.join(companion_name(
+            crate::browser_sidecar::BROWSERD_FILE,
+        ))))
     }
+}
+
+/// Removes the helper generations earlier agent releases materialized beside
+/// this process's own. Each release adds one (about 100-170 MB) and nothing
+/// else ever removes them.
+///
+/// Only the single running agent calls this, while it holds the instance lock
+/// and after materializing its own generation, so no agent uses the others.
+/// Processes an earlier agent left behind keep their already-open executables
+/// on Unix. Windows refuses to delete a running executable; that generation
+/// stays partly removed, and the next start retries it. Returns the number of
+/// generations removed.
+pub fn prune_stale_generations() -> usize {
+    let Some(current) = CURRENT_GENERATION.get() else {
+        return 0;
+    };
+    prune_generations_except(current)
+}
+
+fn prune_generations_except(current: &Path) -> usize {
+    let (Some(root), Some(current_name)) = (current.parent(), current.file_name()) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == current_name || !is_generation_name(&name) {
+            continue;
+        }
+        // Never follow a link out of the runtime directory.
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::warn!(
+                %error,
+                generation = %name.to_string_lossy(),
+                "could not remove an earlier interaction runtime generation"
+            ),
+        }
+    }
+    removed
+}
+
+/// Generation directories are the first 24 hex digits of the runtime digest.
+fn is_generation_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 #[cfg(opengeni_embedded_runtime)]
 fn runtime_digest() -> String {
     let mut hasher = blake3::Hasher::new();
-    for bytes in [BROWSERD, AGENT_BROWSER, COMPUTER_NATIVE] {
+    for bytes in [BROWSERD, COMPUTER_NATIVE] {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
@@ -123,6 +184,34 @@ fn materialize_executable(path: &Path, expected: &[u8]) -> PlatformResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    #[test]
+    fn removes_only_earlier_generation_directories() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let current = root.path().join("aaaaaaaaaaaaaaaaaaaaaaaa");
+        let earlier = root.path().join("0123456789abcdef01234567");
+        let older = root.path().join("fedcba9876543210fedcba98");
+        let unrelated = root.path().join("notes");
+        let hex_file = root.path().join("bbbbbbbbbbbbbbbbbbbbbbbb");
+        for directory in [&current, &earlier, &older, &unrelated] {
+            std::fs::create_dir_all(directory.join("node_modules")).expect("directory");
+            std::fs::write(directory.join("opengeni-browserd"), b"helper").expect("helper");
+        }
+        std::fs::write(&hex_file, b"file").expect("file");
+
+        assert_eq!(prune_generations_except(&current), 2);
+        assert!(current.join("opengeni-browserd").is_file());
+        assert!(!earlier.exists());
+        assert!(!older.exists());
+        assert!(unrelated.join("opengeni-browserd").is_file());
+        assert!(hex_file.is_file());
+        assert_eq!(prune_generations_except(&current), 0);
+    }
+}
+
 #[cfg(all(test, opengeni_embedded_runtime))]
 mod tests {
     use super::*;
@@ -136,12 +225,10 @@ mod tests {
         let directory = browserd.parent().expect("runtime directory");
         assert_eq!(std::fs::read(&browserd).expect("browserd"), BROWSERD);
         assert_eq!(
-            std::fs::read(directory.join(companion_name("agent-browser"))).expect("agent-browser"),
-            AGENT_BROWSER
-        );
-        assert_eq!(
-            std::fs::read(directory.join(companion_name("opengeni-computer-native")))
-                .expect("computer-native"),
+            std::fs::read(
+                directory.join(companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE,))
+            )
+            .expect("computer-native"),
             COMPUTER_NATIVE
         );
         assert_eq!(materialize(root.path()).expect("replay"), Some(browserd));

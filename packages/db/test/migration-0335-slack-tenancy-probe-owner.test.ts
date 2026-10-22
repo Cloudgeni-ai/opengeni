@@ -5,7 +5,7 @@
 // `FORCE ROW LEVEL SECURITY` never engages, so a SECURITY DEFINER probe over a
 // FORCE-RLS table looks correct there and returns ZERO rows in production.
 // `slack_interactions` is FORCE-RLS with a strict-equality `workspace_isolation`
-// policy, and OpenGeni migrates as a NOSUPERUSER NOBYPASSRLS owner, so the
+// policy, and Opengeni migrates as a NOSUPERUSER NOBYPASSRLS owner, so the
 // definer routine executes as a role that policy still binds.
 //
 // This file drives the real migration chain through
@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 

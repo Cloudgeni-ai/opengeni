@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from "react";
-import type { AuthSession, ClientConfig } from "@/types";
+import type { AuthSession, ClientConfig } from "@opengeni/react/app/types";
 
 /** Personal authentication authority is independent of workspace membership. */
 export type PersonalSecurityContextValue = {

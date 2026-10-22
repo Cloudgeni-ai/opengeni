@@ -32,7 +32,8 @@ const reviewedRows = [
   ["grok-4.6", 2, 0.5, null, 6],
   ["grok-4.7", 2, 0.5, null, 6],
   ["claude-opus-5-5", 4, 0.2, 5, 20],
-  ["claude-sonnet-5-5", 2, 0.2, 2.5, 10],
+  ["claude-sonnet-5-5", 2, 0.1, 2.5, 10],
+  ["claude-haiku-5-5", 0.1, 0.01, 0.125, 0.5],
   ["claude-opus-5", 5, 0.5, 6.25, 25],
   ["claude-sonnet-5", 2, 0.2, 2.5, 10],
   ["claude-opus-4-8", 5, 0.5, 6.25, 25],
@@ -131,7 +132,7 @@ describe("reviewed supported-model list prices", () => {
     expect(
       models.filter((model) => prices[model.id] === undefined).map((model) => model.id),
     ).toEqual([]);
-    expect(models.length).toBe(51);
+    expect(models.length).toBe(55);
     for (const model of models) {
       if (model.credentialSource.kind === "connected_subscription") {
         expect(model.billing).toEqual({
@@ -151,7 +152,7 @@ describe("reviewed supported-model list prices", () => {
     expect(prices["supergrok/grok-4.7"]).toEqual(reviewedModelListPricing["grok-4.7"]);
   });
 
-  test("keeps Claude's no-premium long context and prices 1h cache writes only on that native route", () => {
+  test("keeps Claude's model-specific context pricing and 1h cache writes on that native route", () => {
     let settings = catalogSettings();
     const providers = parseModelProvidersJson(settings.modelProvidersJson);
     providers.find((provider) => provider.id === "workspace-anthropic")!.anthropic!.cacheTtl = "1h";
@@ -160,7 +161,19 @@ describe("reviewed supported-model list prices", () => {
     for (const { upstreamModelId: id } of claudeModels) {
       const fiveMinute = prices[`organization-anthropic/${id}`]!;
       const oneHour = prices[`workspace-anthropic/${id}`]!;
-      expect(selectModelPricing(fiveMinute, 900_000)).toEqual(fiveMinute.default);
+      if (id !== "claude-haiku-5-5")
+        expect(selectModelPricing(fiveMinute, 900_000)).toEqual(fiveMinute.default);
+      else {
+        expect(selectModelPricing(fiveMinute, 100_000).cacheWriteMicrosPerMillionTokens).toBe(
+          125_000,
+        );
+        expect(selectModelPricing(fiveMinute, 100_001).cacheWriteMicrosPerMillionTokens).toBe(
+          625_000,
+        );
+        expect(selectModelPricing(oneHour, 100_001).cacheWriteMicrosPerMillionTokens).toBe(
+          1_000_000,
+        );
+      }
       expect(oneHour.default).toEqual({
         ...fiveMinute.default,
         cacheWriteMicrosPerMillionTokens: fiveMinute.default.inputMicrosPerMillionTokens * 2,

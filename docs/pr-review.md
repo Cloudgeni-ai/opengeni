@@ -1,10 +1,10 @@
-# OpenGeni Review Bot
+# Opengeni Review Bot
 
-OpenGeni Review Bot provides a provider-neutral pull-request adapter, a
+Opengeni Review Bot provides a provider-neutral pull-request adapter, a
 reviewed `pr-review` Skill, and setup
 for narrowly scoped provider credentials. It does not add another execution
 engine: authenticated provider deliveries enter the generic automation
-substrate and accepted runs create ordinary OpenGeni sessions.
+substrate and accepted runs create ordinary Opengeni sessions.
 
 The initial adapter supports GitHub pull requests, GitLab merge requests, and
 Azure DevOps pull requests through one normalized event contract.
@@ -13,18 +13,18 @@ Azure DevOps pull requests through one normalized event contract.
 
 1. Open **Plugins** and find **PR Review**.
 2. For GitHub, choose **Install on GitHub** and authorize the deployment-owned
-   **OpenGeni Lens** App as the personal-account owner or an active organization
+   **Opengeni Lens** App as the personal-account owner or an active organization
    owner. GitHub's installation screen is the repository picker; the callback
    creates or repairs the exact registration and repository triggers
    atomically. GitLab, Azure DevOps, and self-hosted bring-your-own GitHub Apps
    remain available under the advanced credential form.
 3. For an advanced provider registration, configure the provider webhook with
-   the OpenGeni API origin plus the returned opaque path,
+   the Opengeni API origin plus the returned opaque path,
    `/v1/webhooks/automations/:endpointId`.
 4. Enable only the repositories the bot may review, then choose the review
    model for each repository under **Review execution**. The selector is grouped
    by billing source. Choosing a Codex model uses the workspace's connected
-   Codex subscription instead of OpenGeni credits. Provider repository,
+   Codex subscription instead of Opengeni credits. Provider repository,
    installation, and project identifiers are authority, not display metadata.
 
 Registration and secret rotation require workspace administration and
@@ -35,7 +35,7 @@ presence and expiry metadata, never secret values.
 ### GitHub
 
 The ordinary product flow installs a deployment-owned GitHub App named
-**OpenGeni Lens**. It is a separate identity from the platform GitHub App and
+**Opengeni Lens**. It is a separate identity from the platform GitHub App and
 from every human connection. A deployment operator registers it once; workspace
 administrators then install or reconnect it without handling an App ID, private
 key, or webhook secret. Self-hosted deployments may instead use the advanced
@@ -59,15 +59,15 @@ Subscribe to **Pull request** events and configure the webhook URL as
 `..._APP_SLUG`, `..._WEBHOOK_SECRET`, and `..._APP_PRIVATE_KEY` on API and
 worker processes. The flow also requires the existing
 `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` and
-`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. OpenGeni proves exact personal or
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. Opengeni proves exact personal or
 organization ownership, reads the installation's selected repositories,
 persists canonical clone URLs, and mints each live token for the exact
 repository with only `contents:read` and `pull_requests:write`.
 
-The shared App has one webhook URL. OpenGeni verifies its HMAC over the bounded
+The shared App has one webhook URL. Opengeni verifies its HMAC over the bounded
 raw body before parsing provider ids, then resolves the globally unique
 installation/repository route to one workspace source. A repository may have
-only one active OpenGeni Lens route in a deployment, preventing duplicate review
+only one active Opengeni Lens route in a deployment, preventing duplicate review
 sessions across workspaces. Disabling a registration removes those routes but
 does not uninstall the App from GitHub.
 
@@ -87,7 +87,7 @@ Use scopes:
 - `api` for API reads and merge-request discussion writes
 
 Add a **Merge request events** project webhook and use the same secret token in
-GitLab and OpenGeni. Self-managed GitLab is supported through a credential-free
+GitLab and Opengeni. Self-managed GitLab is supported through a credential-free
 HTTPS base URL. Binding verifies the numeric project ID and persists the
 canonical project path and clone URL returned by GitLab.
 
@@ -107,7 +107,7 @@ projects, and repositories. The adapter requires:
 Use an organization URL such as `https://dev.azure.com/example`. Create Web
 Hooks service-hook subscriptions for **Pull request created** and **Pull request
 updated**, using Basic authentication with the same username and secret stored
-in OpenGeni. Binding verifies the repository GUID and project GUID through Azure
+in Opengeni. Binding verifies the repository GUID and project GUID through Azure
 Repos and persists the canonical HTTPS clone URL.
 
 See Microsoft's
@@ -122,7 +122,7 @@ Each repository binding stores one optional exact product model. The model
 catalog is the source of truth for both the serving provider and billing rail;
 there is no second mutable `source` field that could disagree with the model.
 The setup UI currently exposes the two unattended-review billing rails with
-complete admission authority: OpenGeni credits and the workspace's effective
+complete admission authority: Opengeni credits and the workspace's effective
 Codex subscription pool.
 
 Selecting a `codex/...` model freezes that exact model into the trigger revision
@@ -130,7 +130,7 @@ and accepted automation run. Dispatch rechecks that the workspace still has an
 active Codex subscription, classifies the turn as externally billed, and then
 uses the effective workspace or inherited organization Codex allocator and
 capacity-wait lifecycle.
-It consumes no OpenGeni credits. OpenGeni does not freeze a concrete credential
+It consumes no Opengeni credits. Opengeni does not freeze a concrete credential
 row into the trigger: a workspace with multiple connected Codex accounts keeps
 the allocator's normal rotation, lease, cooldown, and failover behavior.
 
@@ -139,7 +139,7 @@ deployment model behavior. Changing the selection creates a new immutable
 trigger revision for future events; a run already accepted against an older
 revision retains its original model. If the selected external subscription is
 later disconnected or becomes unavailable, new dispatch fails closed instead
-of silently falling back to OpenGeni credits.
+of silently falling back to Opengeni credits.
 
 ## Generic automation composition
 

@@ -563,13 +563,18 @@ export async function assertExactNewSessionDraftInTransaction(
   await lockExactNewSessionDraft(db, input);
 }
 
-async function workspaceHasDefaultRig(db: Database, workspaceId: string): Promise<boolean> {
+async function workspacePlacementDefaults(db: Database, workspaceId: string) {
   const [row] = await db
-    .select({ defaultRigId: schema.workspaces.defaultRigId })
+    .select({ defaultRigId: schema.workspaces.defaultRigId, settings: schema.workspaces.settings })
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  return Boolean(row?.defaultRigId);
+  return {
+    hasDefaultRig: Boolean(row?.defaultRigId),
+    // Even a malformed configured value must not silently restore a different
+    // computer. Session creation validates the configured target fail-closed.
+    hasDefaultExecutionTarget: row?.settings?.defaultExecutionTarget != null,
+  };
 }
 
 /**
@@ -613,22 +618,18 @@ export async function seedNewSessionDraftInTransaction(
   // choice covers only the session it was made for: the next form starts on
   // the workspace default again. Without a default nothing is replaced, so the
   // choice is remembered like any other selection.
+  const defaults = await workspacePlacementDefaults(db, input.workspaceId);
+  const rememberCompute = !defaults.hasDefaultExecutionTarget;
   const rememberRig =
-    typeof options.rigId === "string" &&
-    options.rigId.length > 0 &&
-    !(await workspaceHasDefaultRig(db, input.workspaceId));
+    typeof options.rigId === "string" && options.rigId.length > 0 && !defaults.hasDefaultRig;
   const safeOptions: NewSessionDraftOptionsValue = {
     ...(options.visibility ? { visibility: options.visibility } : {}),
-    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
-    ...(targetSandboxId ? { targetSandboxId } : {}),
-    ...(targetSandboxId && typeof options.workingDir === "string"
-      ? { workingDir: options.workingDir }
+    ...(rememberCompute && options.sandboxBackend
+      ? { sandboxBackend: options.sandboxBackend }
       : {}),
-    ...(options.variableSetIds && options.variableSetIds.length > 0
-      ? {
-          variableSetIds: options.variableSetIds,
-          variableSetId: options.variableSetIds[options.variableSetIds.length - 1],
-        }
+    ...(rememberCompute && targetSandboxId ? { targetSandboxId } : {}),
+    ...(rememberCompute && targetSandboxId && typeof options.workingDir === "string"
+      ? { workingDir: options.workingDir }
       : {}),
     ...(rememberRig ? { rigId: options.rigId } : {}),
   };

@@ -1,7 +1,8 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
-import { projectPickerRows } from "@/lib/model-policy";
+import { projectPickerRows } from "@opengeni/react/app/lib/model-policy";
 
 import { defaultModelPickerRows, defaultModelSummary } from "./default-session-model";
 
@@ -10,7 +11,7 @@ function catalogModel(
 ): WorkspaceModelCatalogModel {
   return {
     provider: "opengeni",
-    providerLabel: "OpenGeni",
+    providerLabel: "Opengeni",
     api: "responses",
     cost: "credits",
     credentialReadiness: { status: "ready", reason: null, basis: "configuration", checkedAt: null },
@@ -50,7 +51,7 @@ const codex = catalogModel({
 describe("default model row", () => {
   test("keeps an unready default visible with its label instead of a raw id", () => {
     const models = [creditsDefault, codex];
-    const rows = defaultModelPickerRows(projectPickerRows(models), models, "gpt-6-astra");
+    const rows = defaultModelPickerRows(projectPickerRows(t, models), models, "gpt-6-astra");
     const selected = rows.find((row) => row.id === "gpt-6-astra");
     expect(selected?.label).toBe("GPT-6 Astra");
     expect(selected?.billingClass).toBe("opengeni_credits");
@@ -59,7 +60,7 @@ describe("default model row", () => {
   });
 
   test("does not invent rows for ids the catalog does not know", () => {
-    const rows = projectPickerRows([codex]);
+    const rows = projectPickerRows(t, [codex]);
     expect(defaultModelPickerRows(rows, [codex], "unknown-model")).toBe(rows);
     expect(defaultModelSummary([codex], "unknown-model")).toBeNull();
   });

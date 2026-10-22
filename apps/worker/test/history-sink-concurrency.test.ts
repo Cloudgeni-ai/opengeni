@@ -1,11 +1,37 @@
 import { afterAll, expect, mock, test } from "bun:test";
 
 const realDb = await import("@opengeni/db");
+// mock.module is process-wide and survives mock.restore(), so the replacement
+// only intercepts this file's fake database; later files in the same worker
+// process keep writing real history.
+const realDbFns = {
+  appendSessionHistoryItems: realDb.appendSessionHistoryItems,
+  upsertSandboxSessionEnvelope: realDb.upsertSandboxSessionEnvelope,
+};
+const fakeDb = {};
 const append = mock(async (_db: unknown, _input: { items: Array<{ position: number }> }) => true);
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  appendSessionHistoryItems: append,
-  upsertSandboxSessionEnvelope: async () => {},
+  appendSessionHistoryItems: (
+    db: unknown,
+    input: Parameters<typeof realDbFns.appendSessionHistoryItems>[1],
+  ) =>
+    db === fakeDb
+      ? append(db, input)
+      : realDbFns.appendSessionHistoryItems(
+          db as Parameters<typeof realDbFns.appendSessionHistoryItems>[0],
+          input,
+        ),
+  upsertSandboxSessionEnvelope: async (
+    db: unknown,
+    input: Parameters<typeof realDbFns.upsertSandboxSessionEnvelope>[1],
+  ) =>
+    db === fakeDb
+      ? undefined
+      : await realDbFns.upsertSandboxSessionEnvelope(
+          db as Parameters<typeof realDbFns.upsertSandboxSessionEnvelope>[0],
+          input,
+        ),
 }));
 const { createTurnHistorySink } = await import("../src/activities/agent-turn/history-sink");
 type Deps = import("../src/activities/agent-turn/history-sink").TurnHistorySinkDeps;
@@ -22,7 +48,7 @@ function deferred() {
 function fixture() {
   const state = { history: [{ type: "message", role: "user", content: "start" }] };
   const sink = createTurnHistorySink({
-    db: {},
+    db: fakeDb,
     accountId: "account",
     workspaceId: "workspace",
     sessionId: "session",

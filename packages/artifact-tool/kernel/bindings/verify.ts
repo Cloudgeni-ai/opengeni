@@ -24,6 +24,7 @@ import {
   encodeSpreadsheetArtifactCommandBatch,
   spreadsheetSheetId,
 } from "@opengeni/contracts/editable-artifacts";
+import { decodeCommittedTransactionSummary } from "@opengeni/contracts/editable-artifact-committed-transaction";
 import {
   spreadsheetFormulaProjectionCorpusBytes,
   type FormulaCorpusInput,
@@ -585,6 +586,76 @@ try {
     nativeRuntime.canonicalizeCollaborationSnapshot(nativeCollaboration.snapshot()),
     wasmRuntime.canonicalizeCollaborationSnapshot(wasmCollaboration.snapshot()),
   );
+  const beforeResizeHash = nativeCollaboration.stateHash();
+  const sheet = decodeSpreadsheetMetadataKernelProjection(nativeCollaboration.query(metadataQuery))
+    .sheets[0]!;
+  assert.ok(sheet.generationId);
+  const generation = {
+    kind: "generation" as const,
+    sheetId: sheet.sheetId,
+    creationOperationId: editableArtifactStableId(sheet.generationId),
+  };
+  const resizeIntent = encodeEditableArtifactMutationIntent({
+    envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,
+    protocolVersion: EDITABLE_ARTIFACT_INTENT_PROTOCOL_VERSION,
+    modelSchemaVersion: SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION,
+    commandProtocolVersion: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+    artifactId: "11111111111111111111111111111111",
+    clientTransactionId: "binding.dimensions.current",
+    replicaId: "0000000000004545",
+    replicaCounter: 2,
+    previousLocalTransactionId: null,
+    observedHeadSequence: 1,
+    causalBase: decodeEditableArtifactCausalFrontier(nativeCollaboration.frontier()),
+    selectiveUndoOperationIds: [],
+    commandBytes: encodeSpreadsheetArtifactCommandBatch({
+      version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+      commands: [
+        { kind: "row.height.set", sheet: generation, row: 3, height: 48 },
+        { kind: "column.width.set", sheet: generation, column: 5, width: 180 },
+        { kind: "row.height.set", sheet: generation, row: 0, height: 24 },
+      ],
+    }),
+  });
+  const resized = nativeCollaboration.authorTransaction(
+    resizeIntent,
+    nativeCollaboration.frontier(),
+  );
+  assertBytesEqual(
+    "native resize commit == wasm",
+    resized,
+    wasmCollaboration.authorTransaction(resizeIntent, wasmCollaboration.frontier()),
+  );
+  const summary = decodeCommittedTransactionSummary(resized);
+  assert.equal(summary.stateHash, nativeCollaboration.stateHash());
+  assert.notEqual(beforeResizeHash, summary.stateHash);
+  nativeReplay.applyCommitted(resized);
+  wasmReplay.applyCommitted(resized);
+  assertBytesEqual(
+    "resize replay == native",
+    nativeReplay.snapshot(),
+    nativeCollaboration.snapshot(),
+  );
+  assertBytesEqual("resize replay == wasm", wasmReplay.snapshot(), nativeCollaboration.snapshot());
+  const geometry = decodeSpreadsheetMetadataKernelProjection(
+    nativeCollaboration.query(metadataQuery),
+  );
+  assert.equal(geometry.modeledFeatures.dimensions, true);
+  assert.equal(geometry.sheets[0]!.defaultRowHeight, 24);
+  assert.equal(geometry.sheets[0]!.defaultColumnWidth, 96);
+  assert.deepEqual(geometry.sheets[0]!.rowHeights, [[3, 48]]);
+  assert.deepEqual(geometry.sheets[0]!.columnWidths, [[5, 180]]);
+  const reopenedResize = wasmRuntime.openCollaborationSession(nativeCollaboration.snapshot());
+  try {
+    assert.equal(reopenedResize.stateHash(), summary.stateHash);
+    assertBytesEqual(
+      "resize reopen query == native",
+      reopenedResize.query(metadataQuery),
+      nativeCollaboration.query(metadataQuery),
+    );
+  } finally {
+    reopenedResize.dispose();
+  }
   const nativeBranch = nativeCollaboration.fork();
   const wasmBranch = wasmCollaboration.fork();
   try {
@@ -616,6 +687,7 @@ assert.throws(() => wasm.createWorkbook(zeroNamespace), /\[ARTIFACT_INVALID_NAME
 console.log(
   JSON.stringify({
     collaboration: "byte-identical",
+    dimensions: "native-wasm-commit-replay-hash-snapshot-projection-byte-identical",
     dcfLifecycle: "four-head-native-wasm-compact-reopen",
     formula: "cross-sheet-range-cycle-error-and-math-projections-byte-identical",
     directSnapshotBytes: directExpected.byteLength,

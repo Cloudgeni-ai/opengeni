@@ -19,6 +19,7 @@
   --og-model-policy-label-full-display: inline;
   --og-model-policy-label-short-display: none;
   --og-model-policy-effort-display: inline;
+  --og-model-policy-chevron-display: inline;
 }
 
 [data-og-responsive-basis="container"] .og-composer-input {
@@ -65,8 +66,27 @@
   display: var(--og-model-policy-label-short-display);
 }
 
+/* A host row too narrow for even the short model name (a phone composer that
+   also offers Queue or Steer beside Send) shows the pill's icon alone rather
+   than a clipped sliver of the name. */
+@container model-controls (max-width: 7.999rem) {
+  [data-og-responsive-basis="container"] .og-model-policy-label-short {
+    display: none;
+  }
+}
+
 [data-og-responsive-basis="container"] .og-model-policy-effort {
   display: var(--og-model-policy-effort-display);
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-chevron {
+  display: var(--og-model-policy-chevron-display);
+}
+
+/* Pause steps aside on a narrow composer while there is a draft, so Send and
+   its Queue/Steer choice keep their room. */
+[data-og-responsive-basis="container"] .og-composer-pause-yields {
+  display: inline-flex;
 }
 
 [data-og-responsive-basis="container"] .og-model-picker-native {
@@ -112,19 +132,23 @@
 
 @container og-composer (max-width: 39.999rem) {
   [data-og-responsive-basis="container"] :where(*) {
-    --_og-c-gap: 0.25rem;
+    /* The phone row carries attach, dictate, model, voice, Pause and Send;
+       44px targets space themselves, so tight gaps and a chevron-free model
+       pill leave room for the model's short name. */
+    --_og-c-gap: 0.125rem;
     --_og-c-footer-x: 0.5rem;
     --_og-c-footer-b: 0.5rem;
     --_og-c-controls-wrap: nowrap;
     --_og-c-hint-display: none;
     --_og-c-model-max: 7.5rem;
-    --_og-c-model-x: 0.5rem;
+    --_og-c-model-x: 0.375rem;
     --_og-c-native-max: 7.5rem;
     --_og-c-recovered-max: 8rem;
     --_og-c-error-max: 8rem;
     --og-model-policy-label-full-display: none;
     --og-model-policy-label-short-display: inline;
     --og-model-policy-effort-display: none;
+    --og-model-policy-chevron-display: none;
   }
 
   [data-og-responsive-basis="container"] .og-composer-footer {
@@ -134,6 +158,10 @@
 
   [data-og-responsive-basis="container"] .og-composer-actions {
     flex-wrap: nowrap;
+  }
+
+  [data-og-responsive-basis="container"] .og-composer-pause-yields {
+    display: none;
   }
 
   [data-og-responsive-basis="container"]

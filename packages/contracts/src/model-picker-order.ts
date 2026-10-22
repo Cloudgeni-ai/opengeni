@@ -1,5 +1,5 @@
 export type ModelPickerBillingClass =
-  // Legacy public identifier for the OpenGeni presentation group, including
+  // Legacy public identifier for the Opengeni presentation group, including
   // free deployment models. Never use this UI grouping to decide settlement.
   | "opengeni_credits"
   | "external"

@@ -83,6 +83,7 @@ describe("recoverEscapedMcpTimeout", () => {
         attemptId: input.attemptId,
         reason: "mcp_transport_timeout",
         providerRecoveryCount: input.providerRecoveryCount,
+        retryAfterMs: input.continueDelayMs,
         detail: {
           code: "mcp_transport_timeout",
           retryable: true,

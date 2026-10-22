@@ -17,7 +17,7 @@ import {
   requestFromDraft,
   withCapability,
   withStartingPoint,
-} from "./agent-capabilities";
+} from "@opengeni/react/app/lib/agent-capabilities";
 import { workspaceAgentDefaultsSummary } from "./agent-defaults-summary";
 import { agentConfigFromFormState, formStateFromScheduledTask } from "./scheduled-tasks";
 import {
@@ -26,7 +26,7 @@ import {
   newSessionDraftOptionsFromSessionDraft,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
-} from "./session-create";
+} from "@opengeni/react/app/lib/session-create";
 
 const everything = capabilityAvailability(null);
 
@@ -73,7 +73,7 @@ describe("drafts and requests", () => {
     const draft = withCapability(draftFromRequest("none"), "webSearch", true);
     expect(requestFromDraft(draft, availability)).toBe("none");
     expect(capabilitySummary(draftFromRequest("all").values, availability)).toBe(
-      "All 12 available capabilities",
+      "All 13 available capabilities",
     );
   });
 
@@ -86,14 +86,14 @@ describe("drafts and requests", () => {
         .humanInput,
     ).toBe(true);
     expect(workspaceAgentDefaultsSummary({ agentHumanInputEnabled: false }, null)).toBe(
-      "12 of 13 capabilities",
+      "13 of 14 capabilities",
     );
   });
 
   test("summaries count what is on", () => {
     expect(capabilitySummary(draftFromRequest("all").values, everything)).toBe("All capabilities");
     expect(capabilitySummary(draftFromRequest("none").values, everything)).toBe(
-      "2 of 13 capabilities",
+      "2 of 14 capabilities",
     );
   });
 });
@@ -215,7 +215,7 @@ describe("error copy", () => {
         "fallback",
       ),
     ).toBe("Browser and computer isn't enabled on this server. Turn it off and save again.");
-    expect(agentConfigErrorText(new Error("OpenGeni API 500: boom"), "Couldn't save.")).toBe(
+    expect(agentConfigErrorText(new Error("Opengeni API 500: boom"), "Couldn't save.")).toBe(
       "Couldn't save.",
     );
   });

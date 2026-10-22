@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import type { Agent, AgentInputItem, CallModelInputFilter } from "@openai/agents";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 import {
   CompactionNeededError,
@@ -16,6 +17,7 @@ import {
   repairHistoryProtocolItems,
 } from "./history-sanitizer";
 import {
+  expandInteractionFamilyDisclosures,
   restoreGenericDispatchHistoryItem,
   restoreGenericDispatchHistoryItems,
 } from "./lazy-tool-transport";
@@ -33,10 +35,11 @@ export type ContextRobustnessFilterOptions = {
  * responses, and that store is not durable enough to anchor long runs on: a
  * response that streamed successfully can be missing from the store on the
  * very next call, which then fails with 400 "Item with id ... not found"
- * (observed live on Azure OpenAI mid-turn). All item content — including the
- * encrypted reasoning payload carried in providerData when
- * `openaiReasoningEncryptedContent` is on — is sent inline, so the ids add
- * fragility without adding information. Pairing fields (`call_id`/`callId`)
+ * (observed live on Azure OpenAI mid-turn). Inline encrypted reasoning can
+ * survive this detachment. Hosted search is different: the base model-input
+ * filter projects included evidence into portable text before stripping ids;
+ * the provider otherwise hides those results behind its stored id.
+ * Pairing fields (`call_id`/`callId`)
  * are separate properties and stay untouched; items are cloned, never mutated.
  */
 export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
@@ -498,12 +501,18 @@ export function callModelInputFilterForSettings(
 /** Rules that normalize history but do not impose final bounds/accounting. */
 export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
-  return memoizedInputItemProjectionFilter(
+  const projectItems = memoizedInputItemProjectionFilter(
     (source) => {
       let item = restoreGenericDispatchHistoryItem(source);
       item = normalizeComputerCallAction(
         item as unknown as Record<string, unknown>,
       ) as unknown as AgentInputItem;
+      // Claude's own searches stay native here: every model transport then
+      // calls projectHistoryForProvider, which replays them verbatim to Claude
+      // and projects their readable facts for any other provider.
+      item = projectHostedSearchEvidence(item as unknown as Record<string, unknown>, {
+        preserveAnthropicNative: true,
+      }) as AgentInputItem;
       return stripProviderIds ? stripProviderItemId(item) : item;
     },
     // The SDK's externally-owned run history is immutable and append-only.
@@ -511,4 +520,14 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
     // latest model/tool step instead of walking a six-figure history again.
     { appendOnlyInput: true },
   );
+  return composeCallModelInputFilters([interactionFamilyDisclosureFilter, projectItems]);
 }
+
+/**
+ * Declare an entry-tool call's frozen family after its step's results. Runs
+ * before the item projection, which removes the marker from the call.
+ */
+const interactionFamilyDisclosureFilter: CallModelInputFilter = ({ modelData }) => {
+  const input = expandInteractionFamilyDisclosures(modelData.input);
+  return input === modelData.input ? modelData : { ...modelData, input };
+};

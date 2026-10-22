@@ -55,6 +55,39 @@ export type SandboxLeaseSweepMaintenanceInput = {
   rotationsRequested: number;
 };
 
+/** One warm box an idle checkpoint child captures. */
+export type SandboxIdleCheckpointTarget = {
+  workspaceId: string;
+  sandboxGroupId: string;
+  instanceId: string;
+  leaseEpoch: number;
+};
+
+export type SandboxIdleCheckpointActivityInput = {
+  target: SandboxIdleCheckpointTarget;
+  /** Frozen with the child, like a drain's, so the activity outlives its
+   * own provider capture budget. */
+  timeoutClass: SandboxDrainTimeoutClass;
+};
+
+export type SandboxIdleCheckpointWorkflowInput = SandboxIdleCheckpointActivityInput;
+
+/** Inventory result of one idle checkpoint sweep. */
+export type SandboxIdleCheckpointPlan = {
+  targets: SandboxIdleCheckpointTarget[];
+  timeoutClass: SandboxDrainTimeoutClass;
+};
+
+/** Fixed id of the idle checkpoint sweep: one inventory at a time, started
+ * from the same tick as the drain inventory. */
+export const SANDBOX_IDLE_CHECKPOINT_SWEEP_WORKFLOW_ID = "opengeni-sandbox-idle-checkpoints-v1";
+
+/** One child per exact lease epoch: a sweep that finds the previous child
+ * still running coalesces into it instead of starting a second capture. */
+export function sandboxIdleCheckpointWorkflowId(target: SandboxIdleCheckpointTarget): string {
+  return `sandbox-idle-checkpoint:${target.workspaceId}:${target.sandboxGroupId}:${target.leaseEpoch}`;
+}
+
 export function sandboxDrainTimeoutClass(captureTimeoutMs: number): SandboxDrainTimeoutClass {
   return captureTimeoutMs + SANDBOX_DRAIN_SETTLEMENT_MARGIN_MS <
     SANDBOX_DRAIN_FAST_ACTIVITY_TIMEOUT_MS

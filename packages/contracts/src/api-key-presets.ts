@@ -1,8 +1,11 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import type { Permission } from "./permissions";
 
 /** Optional creation alias for the developer_setup organization access tier. */
-export const OrganizationApiKeyPreset = z.enum(["developer_setup"]);
+export const OrganizationApiKeyPreset = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["developer_setup"]),
+);
 export type OrganizationApiKeyPreset = z.infer<typeof OrganizationApiKeyPreset>;
 
 /**

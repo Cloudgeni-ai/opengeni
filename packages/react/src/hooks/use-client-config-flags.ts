@@ -1,5 +1,6 @@
 import type { ClientVoiceInputConfig, ReasoningEffort } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
+import { cachedClientConfigRead } from "../lib/client-config-read";
 
 /** The client-config fields the stock conversation and chat read. */
 export type ClientConfigFlagsSource = {
@@ -39,6 +40,12 @@ export type ClientConfigFlags = {
    * it off; availability otherwise comes from the realtime model catalog.
    */
   realtimeVoice: boolean;
+  /**
+   * The host explicitly offers live voice to end users (a session proxy with
+   * `realtimeVoice: true`). Embedded conversations show the voice button only
+   * then or when their `realtimeVoice` prop is `true`.
+   */
+  realtimeVoiceOffered: boolean;
 };
 
 const INITIAL_FLAGS: ClientConfigFlags = {
@@ -52,26 +59,8 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   archive: true,
   voiceInput: null,
   realtimeVoice: false,
+  realtimeVoiceOffered: false,
 };
-
-type ClientConfigFlagsInput = Awaited<ReturnType<ClientConfigFlagsSource["getClientConfig"]>>;
-
-// One read per client: the chat, its list, the new-chat composer and the
-// conversation all ask, and behind a session proxy each read is a round trip.
-const configReads = new WeakMap<object, Promise<ClientConfigFlagsInput>>();
-
-function readClientConfig(client: ClientConfigFlagsSource): Promise<ClientConfigFlagsInput> {
-  let read = configReads.get(client);
-  if (!read) {
-    read = client.getClientConfig();
-    configReads.set(client, read);
-    // A failed read is retried by the next mount rather than cached.
-    read.catch(() => {
-      if (configReads.get(client) === read) configReads.delete(client);
-    });
-  }
-  return read;
-}
 
 /** Deployment and session-proxy capabilities from the client config. */
 export function useClientConfigFlags(
@@ -82,7 +71,9 @@ export function useClientConfigFlags(
     // Custom clients without a config read keep the defaults.
     if (typeof client.getClientConfig !== "function") return;
     let live = true;
-    readClientConfig(client as ClientConfigFlagsSource).then(
+    // One read per client: the chat, its list, the new-chat composer and the
+    // conversation all ask, and behind a session proxy each read is a round trip.
+    cachedClientConfigRead(client as ClientConfigFlagsSource).then(
       (config) => {
         if (live) {
           setFlags({
@@ -97,6 +88,7 @@ export function useClientConfigFlags(
             archive: config.archive !== false,
             voiceInput: config.voiceInput?.available === true ? config.voiceInput : null,
             realtimeVoice: config.realtimeVoice !== false,
+            realtimeVoiceOffered: config.realtimeVoice === true,
           });
         }
       },

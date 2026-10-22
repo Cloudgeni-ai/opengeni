@@ -15,6 +15,7 @@ import {
   encodeDocumentIndexCheckpoint,
   encodeKnowledgeBrowseCursor,
   heuristicCuration,
+  OpenAIEmbeddingProvider,
   parseCurationOutcome,
   parseDocumentBytes,
   resolveDocumentAuthority,
@@ -486,6 +487,22 @@ describe("documents", () => {
       baseURL: "https://example.openai.azure.com/openai/deployments/gpt-5.6-sol",
       defaultQuery: { "api-version": "2025-04-01-preview" },
     });
+  });
+
+  test("an OpenAI embedder without any credential reports itself unavailable", () => {
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      expect(new OpenAIEmbeddingProvider({}).available).toBe(false);
+      expect(new OpenAIEmbeddingProvider({ apiKey: "key" }).available).toBe(true);
+      process.env.OPENAI_API_KEY = "environment-key";
+      expect(new OpenAIEmbeddingProvider({}).available).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+    // Local embeddings never need a credential.
+    expect(new DeterministicEmbeddingProvider(3).available).not.toBe(false);
   });
 });
 

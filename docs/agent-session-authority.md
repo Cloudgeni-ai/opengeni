@@ -16,6 +16,13 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+A private parent can create a same-owner private child from a live internal-update
+attempt as well as a human-message attempt. Internal updates keep their service
+audit attribution; they do not become human requests. The private-child database
+capability separately verifies the accepted turn's causal human against the
+parent's active owner and checks the exact parent, turn, attempt, generation and
+interruption state. A service label alone grants no private-child authority.
+
 Browser and desktop inventories apply `session.read` authorization to the chat
 that created each resource, for humans, services, API keys and agent attempts.
 This matches direct resource reads. A later observing/using association does not
@@ -75,7 +82,7 @@ selection; access and canonical identity are inherited from trusted authority.
 The server reconstructs the exact live caller attempt. Caller-supplied lineage
 is never accepted. After that, the agent access scope, Slack-private, and
 `user_private` owner checks still run. An optional embedding-host `SessionAuthorizationPort` may narrow the
-result; it cannot grant a private session OpenGeni already denied, and it cannot
+result; it cannot grant a private session Opengeni already denied, and it cannot
 widen a cross-session projection from exact-target to whole-root.
 
 | Target relative to caller | Read | Message (`session.append`) | Mutate/control |
@@ -91,7 +98,7 @@ widen a cross-session projection from exact-target to whole-root.
 Goal tools remain self-only. Compact `sessions_list` discovery still requires a
 live attempt.
 
-Related-work matching does not widen this table. OpenGeni resolves the exact
+Related-work matching does not widen this table. Opengeni resolves the exact
 caller and optional host list scope before applying lifecycle/root/parent/
 recency filters, matching titles, active goals, or typed work claims, counting
 results, or expanding authorized ancestors. A claim is non-exclusive advisory
@@ -158,10 +165,21 @@ Authority never widens down a tree or through a side door:
   ([`scheduled-task-access.md`](scheduled-task-access.md)).
 - The Codemode SDK proxy (`/v1/workspaces/:workspaceId/codemode/sdk/*`) mints
   its agent token from the session's permissions intersected with the
-  permissions the session's selected first-party tools require, and
-  `siteSessionPath` is an explicit method-plus-path allowlist: session list,
-  create, read, events, stream, send, queue, and composer drafts. Tool policy,
-  visibility, forks, steer, and control are not reachable from a sandbox.
+  permissions the session's selected first-party tools require. The agent's
+  own SDK requests keep a workspace prefix boundary (`siteHostWorkspacePath`)
+  under that ceiling, and the configured tool families narrow it further.
+- Site code is held to the `SITE_OPERATIONS` allowlist
+  (`packages/contracts/src/site-operations.ts`, method plus exact path shape):
+  `siteSessionPath` enforces it in the console bridge, the in-Site SDK and a
+  Codemode preview, and `apps/api/src/site-frame-guard.ts` enforces it again
+  for every request a host marks as a Site frame. A frame lists only its own
+  Site's sessions and may read, send, steer or control only sessions its own
+  Site (or, without a published Site, its own mounted frame) started; anything
+  else is a 404. Sessions, turns and schedules started from a Site record
+  which Site (`_opengeniSiteOrigin`). This provenance does not narrow agent
+  permissions: Site and console turns use the same native authority, approval
+  and tool checks. Private console Sites can also reach exact existing chats
+  through owner grants; the page never grants itself access.
 - A session-scoped grant without a signed `firstPartyMcpTools` claim registers
   no first-party tools.
 

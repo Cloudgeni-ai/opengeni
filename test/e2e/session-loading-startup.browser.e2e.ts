@@ -5,7 +5,8 @@ import { strict as assert } from "node:assert";
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION, type BrowserSession } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
@@ -58,7 +59,8 @@ beforeAll(async () => {
       "The public newest-message hook retains its optional production chunk",
     );
     questionAsset = questionEntry[1].file;
-    composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
+    composerMenuAsset =
+      manifest["../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
     const eager = new Set<string>();
     const visit = (key: string) => {
@@ -67,9 +69,9 @@ beforeAll(async () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     assert.equal(
-      eager.has("src/components/composer-mobile-plus-panel.tsx"),
+      eager.has("../../packages/react/src/app/components/composer-mobile-plus-panel.tsx"),
       false,
       "Composer menu must remain outside the eager production graph",
     );
@@ -277,6 +279,11 @@ function fixtures() {
     configContractHeader: OPENGENI_API_CONTRACT_REVISION,
     configReads: 0,
     failStream: false,
+    holdStreams: false,
+    streamHold: gate(),
+    // A connection kept open until the test releases it, then ended normally.
+    parkStream: undefined as ReturnType<typeof gate> | undefined,
+    streamRequests: [] as { after: number; replayed: number }[],
     failQueue: false,
     deferQueue: false,
     nextQueueTransition: "" as "" | "fail" | "withdraw" | "hold",
@@ -514,10 +521,18 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       }
       await state.gates.stream.wait();
       const after = Number(new URL(request.url()).searchParams.get("after") ?? 0);
+      const replay = state.events.filter((event) => Number(event.sequence) > after);
+      state.streamRequests.push({ after, replayed: replay.length });
+      // A connection that never answers, like one that died in a sleep.
+      if (state.holdStreams) {
+        await state.streamHold.wait();
+        return route.abort("connectionclosed").catch(() => {});
+      }
+      const park = state.parkStream;
+      if (park) await park.wait();
       return route.fulfill({
         contentType: "text/event-stream",
-        body: state.events
-          .filter((event) => Number(event.sequence) > after)
+        body: replay
           .map((event) => `id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
           .join(""),
       });
@@ -1574,6 +1589,85 @@ for (const width of [1280, 390]) {
   }, 45_000);
 }
 
+for (const cause of ["reconnect", "sleep"] as const) {
+  test(`production chat ${cause === "sleep" ? "waking from a sleep" : "reconnecting"} shows the newest messages without replaying the backlog`, async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    state.paginatedHistory = true;
+    const message = (sequence: number) => ({
+      id: crypto.randomUUID(),
+      workspaceId,
+      sessionId,
+      turnId: crypto.randomUUID(),
+      sequence,
+      type: "user.message",
+      payload: { text: `History question ${sequence}`, resources: [] },
+      occurredAt: state.session.createdAt,
+    });
+    state.events = Array.from({ length: 40 }, (_, index) => message(index + 1));
+    state.session.lastSequence = 40;
+    // "reconnect": every response ends, so the SDK keeps reconnecting by
+    // itself. "sleep": the connection never answers, as after a laptop sleep,
+    // and only the page noticing the wake can restore it.
+    state.holdStreams = cause === "sleep";
+    for (const name of ["config", "access", "detail", "history", "stream"] as const)
+      state.gates[name].release();
+    await installApi(page, state);
+    const transcript = page.locator('[data-testid="timeline-user"]');
+    const waitForStreamAfter = async (sequence: number) => {
+      const deadline = Date.now() + 20_000;
+      while (!state.streamRequests.some((request) => request.after >= sequence)) {
+        if (Date.now() > deadline)
+          throw new Error(`No stream after ${sequence}: ${JSON.stringify(state.streamRequests)}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    try {
+      if (cause === "sleep") await page.clock.install();
+      await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      await transcript.getByText("History question 40", { exact: true }).waitFor();
+      await waitForStreamAfter(40);
+      // "reconnect": hold the chat on its next open connection, so the
+      // messages arrive between connections rather than between a
+      // reconnect's head check and its stream request (which would hand that
+      // request the whole backlog as if it had been live for it).
+      const park = cause === "reconnect" ? (state.parkStream = gate()) : undefined;
+      if (park) await park.entered;
+      const before = state.streamRequests.length;
+      // 3,000 messages arrive while the chat is away: far more than the
+      // conversation catch-up appends, so the newest window loads instead.
+      state.events.push(...Array.from({ length: 3_000 }, (_, index) => message(41 + index)));
+      state.session.lastSequence = 3_040;
+      // The held connection ends normally; the SDK reconnects by itself.
+      state.parkStream = undefined;
+      park?.release();
+      if (cause === "sleep") await page.clock.fastForward(5 * 60_000);
+      await transcript.getByText("History question 3040", { exact: true }).waitFor();
+      await waitForStreamAfter(3_040);
+      const rejoined = state.streamRequests.slice(before);
+      assert(
+        rejoined.every((request) => request.replayed <= 16),
+        `The stream replayed the backlog: ${JSON.stringify(rejoined)}`,
+      );
+      assert.equal(
+        await transcript.getByText("History question 41", { exact: true }).count(),
+        0,
+        "The chat shows the newest window, not the missed backlog",
+      );
+      await page.screenshot({ path: `${output}/stream-rejoin-${cause}.png` });
+    } finally {
+      state.parkStream?.release();
+      state.streamHold.release();
+      for (const deferred of Object.values(state.gates)) deferred.release();
+      await context.close();
+    }
+  }, 90_000);
+}
+
 test("a mounted tab refreshes a changed deployment while retaining its URL, draft and browser", async () => {
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -2365,7 +2459,23 @@ for (const theme of ["light", "dark"] as const) {
         await scan("[data-og-review-details]");
         await details.getByRole("button", { name: "Back to review" }).click();
         await surface.waitFor();
-        assert.equal(await open.evaluate((element) => element === document.activeElement), true);
+        // The surface restores focus to the opener in the next animation frame,
+        // so wait for it instead of reading focus in the same frame as the render.
+        assert.equal(
+          await open.evaluate(
+            (element) =>
+              new Promise<boolean>((resolve) => {
+                const deadline = performance.now() + 5_000;
+                const check = () => {
+                  if (element === document.activeElement) resolve(true);
+                  else if (performance.now() > deadline) resolve(false);
+                  else requestAnimationFrame(check);
+                };
+                check();
+              }),
+          ),
+          true,
+        );
         if (width === 768) {
           await page.evaluate(() => {
             document.documentElement.style.zoom = "2";

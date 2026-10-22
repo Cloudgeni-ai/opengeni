@@ -93,13 +93,13 @@ export function installApiFatalProcessBoundary(
     try {
       if (observability?.warn) {
         observability.warn(
-          "OpenGeni API recovered an unhandled database connection loss",
+          "Opengeni API recovered an unhandled database connection loss",
           attributes,
         );
       } else {
         safeFallbackLog(
           fallbackLog,
-          "OpenGeni API recovered an unhandled database connection loss (api_unhandled_database_connection_loss)",
+          "Opengeni API recovered an unhandled database connection loss (api_unhandled_database_connection_loss)",
         );
       }
       observability?.incrementCounter?.({
@@ -233,7 +233,7 @@ function apiFatalReasonKind(reason: unknown): ApiFatalReasonKind {
 
 function apiFatalMessage(diagnostic: ReturnType<typeof apiFatalDiagnostic>): string {
   return (
-    `OpenGeni API fatal process failure (${diagnostic.errorCode}; ` +
+    `Opengeni API fatal process failure (${diagnostic.errorCode}; ` +
     `phase=${diagnostic.phase}; reason_kind=${diagnostic.reasonKind}; ` +
     `correlation_id=${diagnostic.correlationId})`
   );

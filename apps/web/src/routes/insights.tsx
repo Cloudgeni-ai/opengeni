@@ -9,15 +9,15 @@ import {
 } from "@/components/insights/usage-search";
 import { WorkspaceActivity } from "@/components/insights/workspace-activity";
 import type { InsightsRange } from "@/components/insights/activity-data";
-import { ContentPage } from "@/components/ui/content-layout";
-import { BackLink } from "@/components/ui/detail-page";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { PageHeader } from "@/components/ui/page-header";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import type { ReturnTo } from "@/lib/return-to";
-import { workspaceSessionPath } from "@/lib/routes";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { BackLink } from "@opengeni/react/ui/detail-page";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
+import { workspaceSessionPath } from "@opengeni/react/app/lib/routes";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 
 /** The workspace Insights selection: the usage dashboard's keys plus the tab. */
 export type InsightsSearch = UsageSearch & { view?: "activity" };

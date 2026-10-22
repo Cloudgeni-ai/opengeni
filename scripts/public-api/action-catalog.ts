@@ -7,10 +7,11 @@
  * fails when a registered route is neither in the catalog nor exempt.
  */
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
+import { ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports } from "./action-schema-imports";
 
 export type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
 import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
@@ -22,12 +23,19 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
-  { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
-  { pattern: /^\/v1\/mcp-connections\//, reason: "approving an agent sign-in" },
   {
-    pattern: /^\/v1\/organizations\/:organizationId\/mcp-connections/,
-    reason: "managing connected agents: an agent can't widen its own access",
+    pattern: /^\/v1\/site-auth\//,
+    reason: "signing a person in to a published Site, from their own signed-in browser",
   },
+  {
+    pattern: /^\/v1\/site-runtime(\/|$)/,
+    reason: "published Site gateway calls, signed by the gateway",
+  },
+  {
+    pattern: /^\/v1\/native-app\//,
+    reason: "signing the native app in and out, and its push device: the app's own credential",
+  },
+  { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
     pattern: /\/callback$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni",
@@ -38,6 +46,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
+  {
+    pattern: /^\/v1\/office\/workbook-tickets$/,
+    reason: "the Office add-in connecting its own workbook socket",
+  },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
 ];
@@ -47,28 +59,36 @@ export function isActionCatalogExempt(path: string): boolean {
 }
 
 /**
- * Registered actions no MCP caller can ever complete: they need the person's
- * own Opengeni browser session, which neither a connected agent (MCP OAuth)
- * nor an organization API key has. They stay in the catalog, so every route is
- * accounted for, but the MCP server hides them from search and describe and a
- * direct call answers with this reason instead of a bare 401. Matched against
- * "METHOD /path".
+ * Registered actions no MCP caller can ever complete: they act on the
+ * person's own account across organizations, or are an identity ceremony in
+ * their own signed-in browser, which neither a connected agent (MCP OAuth),
+ * an agent with session admin access nor an organization API key has. They
+ * stay in the catalog, so every route is accounted for, but the MCP server
+ * hides them from search and describe and a direct call answers with this
+ * reason instead of a bare 401. Everything else an agent with the person's
+ * full access can do as them. Matched against "METHOD /path".
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
     reason:
-      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization",
+      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization",
   },
   {
     pattern: /^\w+ \/v1\/organizations\/:organizationId\/recovery(\/|$)/,
-    reason: "organization recovery is a ceremony in the person's own browser session",
+    reason:
+      "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in",
   },
   {
     pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/usage-limit$/,
+    reason:
+      "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
   },
 ];
 
@@ -78,6 +98,94 @@ export function actionCatalogBrowserOnlyReason(method: string, path: string): st
 }
 
 export type RegisteredRoute = { method: string; path: string };
+
+/**
+ * Request bodies the public surface manifest can't name because the SDK sends
+ * them inline, matched against "METHOD /path". Without a name, describe shows
+ * an agent no input and it has to guess the body. Each names a schema exported
+ * by @opengeni/contracts that the route accepts.
+ */
+export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vault-providers\/connections$/,
+    request: "InstallVaultProviderRequest",
+  },
+  {
+    pattern:
+      /^PUT \/v1\/workspaces\/:workspaceId\/vault-providers\/connections\/:connectionId\/credentials$/,
+    request: "ReplaceVaultProviderCredentialsRequest",
+  },
+  {
+    pattern:
+      /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
+    request: "ModelConnectionAccessPolicy",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId$/,
+    request: "SubscriptionAccountRenameRequest",
+  },
+  {
+    pattern:
+      /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/accounts\/:accountId\/(allocator|extra-credits)$/,
+    request: "SubscriptionAccountToggleRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/\w+\/:\w+\/(codex|claude|supergrok)\/settings$/,
+    request: "SubscriptionRotationSettingsRequest",
+  },
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/poll$/,
+    request: "SubscriptionConnectPollRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/supergrok\/connect\/start$/,
+    request: "SupergrokConnectStartRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/codex\/source$/,
+    request: "CodexSourceRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/codex\/apps$/,
+    request: "CodexAppsDesignationRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/codex-account$/,
+    request: "SessionCodexAccountPinRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/model-policy$/,
+    request: "UpdateWorkspaceModelPolicyRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
+    request: "SessionControlRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
+    request: "UpsertSitePublicationRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
+    request: "SitePublishWarningFix",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
+    request: "SiteTakedownRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
+    request: "SiteLimitProfile",
+  },
+];
+
+function inlineRequestSchemas(method: string, path: string): string[] {
+  const key = `${method} ${path}`;
+  const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
+  return match ? [match.request] : [];
+}
 
 /**
  * Every callable /v1 route the API registers, with every route-gating flag on,
@@ -129,6 +237,12 @@ const GENERIC_SDK_NAMES = new Set([
   "forWorkspace",
 ]);
 
+/**
+ * SDK methods that read a route through an opt-in query variant. The route's
+ * plain method names the action: `findGoal` is `getGoal` with `?absent=null`.
+ */
+const QUERY_VARIANT_SDK_NAMES = new Set(["findGoal"]);
+
 type ManifestRoute = {
   method: string;
   path: string;
@@ -148,18 +262,23 @@ export function buildActionCatalog(
     .map((key) => {
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
+      const request = route?.request ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
-        request: route?.request ?? [],
+        request: request.length > 0 ? request : inlineRequestSchemas(method, path),
         response: route?.response ?? [],
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
   const preferred = included.map((route) => {
     const names = route.sdk.map((name) => name.split(".").pop()!);
-    return names.find((name) => !GENERIC_SDK_NAMES.has(name)) ?? names[0] ?? null;
+    return (
+      names.find((name) => !GENERIC_SDK_NAMES.has(name) && !QUERY_VARIANT_SDK_NAMES.has(name)) ??
+      names[0] ??
+      null
+    );
   });
   const counts = new Map<string, number>();
   for (const name of preferred) if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -193,9 +312,8 @@ export const ACTION_CATALOG_PATH = new URL(
 );
 
 if (import.meta.main && process.argv.includes("--write")) {
-  await Bun.write(
-    ACTION_CATALOG_PATH,
-    renderActionCatalog(buildActionCatalog(registeredApiRoutes())),
-  );
+  const catalog = buildActionCatalog(registeredApiRoutes());
+  await Bun.write(ACTION_CATALOG_PATH, renderActionCatalog(catalog));
+  await Bun.write(ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog));
   console.log(`[action-catalog] wrote ${ACTION_CATALOG_PATH.pathname}`);
 }

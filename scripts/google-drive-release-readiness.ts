@@ -104,7 +104,7 @@ if (import.meta.main) {
               id: "configuration_parse",
               status: "block",
               message:
-                "OpenGeni runtime configuration is invalid; inspect the secret-safe boot error.",
+                "Opengeni runtime configuration is invalid; inspect the secret-safe boot error.",
             },
           ],
         },

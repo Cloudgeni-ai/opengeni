@@ -14,9 +14,10 @@ import { BotIcon } from "lucide-react";
 import { Popover } from "radix-ui";
 import { useState } from "react";
 
-import { SubagentTree, SubagentsLabel } from "@/components/session/subagents";
-import { MENU_SURFACE_CLASS } from "@/components/ui/menu-styles";
-import { cn } from "@/lib/utils";
+import { SubagentTree, SubagentsLabel } from "@opengeni/react/app/components/session/subagents";
+import { MENU_SURFACE_CLASS } from "@opengeni/react/ui/menu-styles";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { sessionControlPaused } from "@opengeni/react/app/lib/session-rail";
 
 export function ComposerAgentsPill({
   workspaceId,
@@ -35,9 +36,7 @@ export function ComposerAgentsPill({
   const runningCount = nodes.filter(
     (node) => node.session.status === "running" && node.session.effectiveControl.state === "active",
   ).length;
-  const pausedCount = nodes.filter(
-    (node) => node.session.effectiveControl.state === "paused",
-  ).length;
+  const pausedCount = nodes.filter((node) => sessionControlPaused(node.session)).length;
   const live = runningCount > 0;
 
   return (

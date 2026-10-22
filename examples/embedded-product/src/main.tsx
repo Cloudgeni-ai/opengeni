@@ -49,7 +49,7 @@ function Product({ context }: { context: HostContext }) {
       </header>
       <aside>
         Local development example. The host backend owns identity; provider availability depends on
-        your OpenGeni deployment.
+        your Opengeni deployment.
       </aside>
       {error && (
         <p role="alert">Request could not be completed. Reload setup status before retrying.</p>

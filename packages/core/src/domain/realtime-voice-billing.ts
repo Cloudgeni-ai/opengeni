@@ -26,6 +26,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { TranscriptionBillingRefusedError } from "../transcription";
+import { workspaceCreditsDisabled } from "./workspace-credits";
 
 /** Credit debit type and usage source for deployment-funded live voice. */
 export const REALTIME_VOICE_DEBIT_TYPE = "voice_realtime_debit";
@@ -101,7 +102,15 @@ export function deploymentRealtimeVoice(
   return null;
 }
 
-export type RealtimeVoiceUnavailableCode = "not_configured" | "pricing_unconfigured";
+export type RealtimeVoiceUnavailableCode =
+  | "not_configured"
+  | "pricing_unconfigured"
+  | "credits_disabled";
+
+/** Copy for deployment-funded voice in a workspace that turned Opengeni credits off. */
+export const WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE = "Credits are turned off in this workspace.";
+
+export { workspaceCreditsDisabled } from "./workspace-credits";
 
 /** The deployment cannot offer this live-voice model at all (not a credit refusal). */
 export class RealtimeVoiceUnavailableError extends Error {
@@ -122,20 +131,20 @@ export function realtimeVoiceOfferProblem(
   if (!voice.configured) {
     return new RealtimeVoiceUnavailableError(
       "not_configured",
-      "Opengeni live voice is not configured on this deployment.",
+      "Live voice is not configured on this deployment.",
     );
   }
   if (voiceInputCreditBillingActive(settings) && !voice.pricing) {
     return new RealtimeVoiceUnavailableError(
       "pricing_unconfigured",
-      "Opengeni live voice is not available on this deployment yet.",
+      "Live voice is not available on this deployment yet.",
     );
   }
   return null;
 }
 
 export const REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE =
-  "Live voice needs Opengeni credits. Add credits to continue.";
+  "Live voice needs credits. Add credits to continue.";
 
 /**
  * Credits voice can spend (general and signup credits), only model-scoped
@@ -165,7 +174,7 @@ export function voiceInsufficientCreditsMessage(
 ): string {
   return standing === "promotional_only"
     ? `Promotional credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
-    : `${feature} needs Opengeni credits. Add credits to continue.`;
+    : `${feature} needs credits. Add credits to continue.`;
 }
 
 function startOfUtcMonth(now: Date): Date {
@@ -204,7 +213,13 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     workspaceId: string;
     attribution: CreditDebitAttribution;
     now: Date;
-  }): Promise<TranscriptionBillingRefusedError | null> {
+  }): Promise<TranscriptionBillingRefusedError | RealtimeVoiceUnavailableError | null> {
+    if (await workspaceCreditsDisabled(deps.db, input.workspaceId)) {
+      return new RealtimeVoiceUnavailableError(
+        "credits_disabled",
+        WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE,
+      );
+    }
     const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
@@ -269,6 +284,15 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       if (refused) throw refused;
     },
 
+    /**
+     * The workspace turned Opengeni credits off while credits are enforced:
+     * deployment-funded live voice is unavailable there.
+     */
+    async creditsDisabled(workspaceId: string): Promise<boolean> {
+      if (!billingActive()) return false;
+      return await workspaceCreditsDisabled(deps.db, workspaceId);
+    },
+
     /** Spendable credits are positive (always true when credits are not enforced). */
     async hasSpendableCredits(accountId: string): Promise<boolean> {
       return (await this.creditStanding(accountId)) === "spendable";
@@ -309,13 +333,16 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
           debitedMicros: 0,
           stop: new RealtimeVoiceUnavailableError(
             "pricing_unconfigured",
-            "Opengeni live voice is no longer available on this deployment.",
+            "Live voice is no longer available on this deployment.",
           ),
         };
       }
       const attribution: CreditDebitAttribution =
         input.callerSubjectId === facts.ownerSubjectId ? input.attribution : { kind: "unknown" };
-      const cost = realtimeVoiceMinuteCreditMicros(voice.pricing);
+      const cost = realtimeVoiceMinuteCreditMicros(
+        voice.pricing,
+        deps.settings.creditMarginBpsOverride,
+      );
       const minutes = facts.connections.flatMap((connection) =>
         Array.from(
           { length: realtimeVoiceStartedMinutes(connection.startedAt, connection.observedUntil) },

@@ -1,6 +1,23 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatWaitingSince } from "./format";
+import { formatMoneyMicros, formatWaitingSince } from "@opengeni/react/app/lib/format";
+import { formatBudget } from "./usage-allowances";
+
+describe("dollar amounts", () => {
+  test("show a plain $ even in locales that would write US$", () => {
+    const Original = Intl.NumberFormat;
+    function britishFormat(_locale?: string | string[], options?: Intl.NumberFormatOptions) {
+      return new Original("en-GB", options);
+    }
+    Intl.NumberFormat = britishFormat as unknown as typeof Intl.NumberFormat;
+    try {
+      expect(formatMoneyMicros(10_000_000, "usd")).toBe("$10.00");
+      expect(formatBudget(500_000_000)).toBe("$500");
+    } finally {
+      Intl.NumberFormat = Original;
+    }
+  });
+});
 
 const NOW = new Date("2026-08-22T12:00:00.000Z");
 const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();

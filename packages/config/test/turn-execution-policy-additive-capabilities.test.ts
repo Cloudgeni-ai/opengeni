@@ -233,7 +233,6 @@ describe("accepted execution policy additive capabilities", () => {
       registrySettings(additive, {}, { upstreamModelId: "other-model" }),
       registrySettings(additive, {}, { contextWindowTokens: 200_000 }),
       registrySettings(additive, {}, { effectiveContextWindowTokens: 180_000 }),
-      registrySettings(additive, {}, { autoCompactTokenLimit: 160_000 }),
       registrySettings(additive, {}, { toolOutputTruncationTokens: 9000 }),
       registrySettings(
         additive,
@@ -438,6 +437,73 @@ describe("accepted execution policy hosted web-search enablement", () => {
       assertTurnExecutionPolicyMatchesConfigV1(
         registrySettings(enabled),
         { ...accepted, definitionVersion: `sha256:${"f".repeat(64)}` },
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+});
+
+describe("accepted execution policy structured-output enablement", () => {
+  const off = { upstream: "unknown", runnable: false } as const;
+  const on = { upstream: "supported", runnable: true } as const;
+  const beforeEnablement = { ...legacyCapabilities, structuredOutput: off };
+
+  test("keeps a turn accepted before structured output was declared runnable", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(beforeEnablement), input);
+    const current = registrySettings({ ...beforeEnablement, structuredOutput: on });
+    expect(resolveTurnExecutionPolicyV1(current, input).definitionVersion).not.toBe(
+      accepted.definitionVersion,
+    );
+    expect(assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input).policy).toEqual(
+      accepted,
+    );
+  });
+
+  test("composes with an added capability but not with other drift", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(beforeEnablement), input);
+    const additive = {
+      ...beforeEnablement,
+      structuredOutput: on,
+      latencyModes: [standard, fast],
+      inputModalities: ["text" as const, "image" as const],
+    };
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(registrySettings(additive), accepted, input).policy,
+    ).toEqual(accepted);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings({
+          ...beforeEnablement,
+          structuredOutput: on,
+          functionCalling: { upstream: "unsupported", runnable: false },
+        }),
+        accepted,
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+
+  test("disabling structured output, or enabling it from another declaration, still fails closed", () => {
+    const acceptedOn = resolveTurnExecutionPolicyV1(
+      registrySettings({ ...beforeEnablement, structuredOutput: on }),
+      input,
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings(beforeEnablement),
+        acceptedOn,
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    const unsupported = {
+      ...beforeEnablement,
+      structuredOutput: { upstream: "unsupported", runnable: false } as const,
+    };
+    const acceptedUnsupported = resolveTurnExecutionPolicyV1(registrySettings(unsupported), input);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings({ ...beforeEnablement, structuredOutput: on }),
+        acceptedUnsupported,
         input,
       ),
     ).toThrow(TurnExecutionPolicyDefinitionMismatchError);

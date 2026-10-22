@@ -19,11 +19,8 @@ import {
   type DbClient,
   type InstallApiIntegrationInput,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { sql } from "drizzle-orm";

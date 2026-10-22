@@ -209,6 +209,17 @@ export function compactSessionMcpDetail(
     ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
     ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
     lastSequence: session.lastSequence,
+    // Archived sessions keep a readable timeline but accept no new work.
+    ...(session.retention?.archive
+      ? {
+          archive: {
+            state: session.retention.archive.state,
+            archivedAt: session.retention.archive.archivedAt,
+            readOnly: true,
+          },
+        }
+      : {}),
+    ...(session.retention?.keepLive ? { keepLive: true } : {}),
     ...(goal
       ? {
           goal: {

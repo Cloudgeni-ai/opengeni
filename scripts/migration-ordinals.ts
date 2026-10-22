@@ -136,6 +136,58 @@ export function findOrdinalCollisions(
   return { collisions, duplicates };
 }
 
+/**
+ * Compare all protected ledgers without treating published history on one as
+ * new work on another. A complete duplicate group must already coexist on ONE
+ * protected base (origin/main or origin/production, never a custom --base);
+ * combining independent allocations from main and production is not evidence
+ * that either branch accepted that collision. SQL names are migration receipt
+ * identities, so a published pair must not be "repaired" by replaying a rename.
+ */
+export function findProtectedOrdinalCollisions(
+  head: readonly MigrationName[],
+  bases: readonly { ref: string; files: readonly MigrationName[] }[],
+): { collisions: (OrdinalCollision & { ref: string })[]; duplicates: string[][] } {
+  const published = bases
+    .filter((base) => base.ref === "origin/main" || base.ref === "origin/production")
+    .map((base) => new Set(base.files.map((migration) => migration.file)));
+  const coexists = (files: readonly string[]) =>
+    published.some((ledger) => files.every((file) => ledger.has(file)));
+  const headGroups = new Map<string, string[]>();
+  for (const migration of head) {
+    const group = headGroups.get(migration.ordinal) ?? [];
+    group.push(migration.file);
+    headGroups.set(migration.ordinal, group);
+  }
+  const collisions: (OrdinalCollision & { ref: string })[] = [];
+  const duplicates = [...headGroups.values()].filter(
+    (files) => files.length > 1 && !coexists(files),
+  );
+  for (const base of bases) {
+    const baseFiles = new Set(base.files.map((migration) => migration.file));
+    const baseGroups = new Map<string, string[]>();
+    for (const migration of base.files) {
+      const group = baseGroups.get(migration.ordinal) ?? [];
+      group.push(migration.file);
+      baseGroups.set(migration.ordinal, group);
+    }
+    for (const [ordinal, headGroup] of headGroups) {
+      const baseGroup = baseGroups.get(ordinal);
+      if (!baseGroup || coexists([...headGroup, ...baseGroup])) continue;
+      // Never collapse a base ordinal to one representative: an overlapping
+      // name can hide another base member that conflicts with the candidate.
+      // The exemption must witness the entire would-be merged group at once.
+      for (const headFile of headGroup) {
+        if (baseFiles.has(headFile)) continue;
+        for (const baseFile of baseGroup) {
+          collisions.push({ ref: base.ref, ordinal, headFile, baseFile });
+        }
+      }
+    }
+  }
+  return { collisions, duplicates };
+}
+
 export type RenumberRename = { from: string; to: string };
 export type RenumberEdit = { path: string; replacements: number; bareOrdinal: number };
 export type RenumberPlan = {

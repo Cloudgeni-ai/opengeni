@@ -16,7 +16,7 @@
       "id": "sec/00112233445566770000000000000001", "startBlockIndex": 0,
       "page": { "widthPt": 612, "heightPt": 792, "marginTopPt": 72, "marginRightPt": 72, "marginBottomPt": 72, "marginLeftPt": 72 },
       "headers": {
-        "default": { "id": "hdr/00112233445566770000000000000002", "blocks": [{ "kind": "paragraph", "id": "p/00112233445566770000000000000008", "runs": [{ "text": "OpenGeni brief", "style": {} }], "style": {} }] },
+        "default": { "id": "hdr/00112233445566770000000000000002", "blocks": [{ "kind": "paragraph", "id": "p/00112233445566770000000000000008", "runs": [{ "text": "Opengeni brief", "style": {} }], "style": {} }] },
         "first": { "id": "hdr/00112233445566770000000000000003", "blocks": [] },
         "even": { "id": "hdr/00112233445566770000000000000004", "blocks": [] }
       },

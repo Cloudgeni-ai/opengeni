@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, configuredProviders, type ModelCatalogDocument } from "@opengeni/config";
 import { resolveCatalogSettings } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSharedActivityServices } from "../src/activity-services";
 
 describe("worker model catalog source settings", () => {

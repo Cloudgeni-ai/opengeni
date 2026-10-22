@@ -54,7 +54,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "OpenGeni Native Fixture"
+        window.title = "Opengeni Native Fixture"
         window.setFrameAutosaveName("OpenGeniNativeFixtureWindow")
 
         let stack = NSStackView()
@@ -64,7 +64,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = NSTextField(labelWithString: "OpenGeni macOS native fixture")
+        let heading = NSTextField(labelWithString: "Opengeni macOS native fixture")
         heading.font = NSFont.boldSystemFont(ofSize: 18)
         heading.setAccessibilityIdentifier("fixture-heading")
         stack.addArrangedSubview(heading)
@@ -147,7 +147,7 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        sheet.title = "OpenGeni Fixture Modal"
+        sheet.title = "Opengeni Fixture Modal"
         let panel = NSStackView()
         panel.orientation = .vertical
         panel.alignment = .centerX

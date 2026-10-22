@@ -6,11 +6,11 @@ import {
   SESSION_GOAL_TEXT_MAX_BYTES,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
-  armCodexCapacityWait,
+  armSubscriptionCoreCodexCapacityWait,
   appendSessionEventsForTurnAttempt,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -21,7 +21,6 @@ import {
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
-  ensureCodexRotationSettings,
   evaluateGoalContinuation,
   getSessionGoalWithContinuation,
   getSession,
@@ -51,12 +50,16 @@ import {
   setSessionGoalStatusWithEvent,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
-  updateCodexRotationSettings,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -1709,7 +1712,7 @@ describe("durable active-goal wake", () => {
     const continuationModelInput = JSON.stringify(continuationHistory[0]?.item);
     expect(continuationModelInput).toContain(SESSION_GOAL_CONTEXT_LABEL);
     expect(continuationModelInput).toContain("continue Finish the durable wake proof (1)");
-    expect(continuationModelInput).not.toContain("[OpenGeni internal updates]");
+    expect(continuationModelInput).not.toContain("[Opengeni internal updates]");
     expect(
       continuationModelInput.match(/continue Finish the durable wake proof \(1\)/g) ?? [],
     ).toHaveLength(1);
@@ -1913,7 +1916,66 @@ describe("durable active-goal wake", () => {
     });
   });
 
-  test("provider capacity wait blocks synthesis and exposes its durable retry time", async () => {
+  test("a message queued while paused runs before any goal continuation on Resume", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const control = async (action: "pause" | "resume") =>
+      await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+
+    await control("pause");
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            subjectId: ctx.grant.subjectId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "sent while paused",
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+    expect((await materialize(ctx)).action).toBe("none");
+    await control("resume");
+
+    // The resumed workflow evaluates the goal first; the waiting message wins.
+    expect((await materialize(ctx)).action).toBe("queue");
+    expect(await counts(ctx)).toMatchObject({ autoContinuations: 0, updates: 0 });
+    const next = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(next.action).toBe("claimed");
+    if (next.action !== "claimed") return;
+    expect(next.turn.id).toBe(submitted.turn.id);
+    expect(next.turn.source).toBe("user");
+  });
+
+  test("a frozen legacy waiter never supplies the runtime retry deadline", async () => {
     const ctx = await runningGoalFixture();
     await ensureCodexRotationSettings(client.db, ctx.grant.accountId, ctx.grant.workspaceId!);
     await updateCodexRotationSettings(client.db, ctx.grant.workspaceId!, {
@@ -1951,6 +2013,60 @@ describe("durable active-goal wake", () => {
     ).toMatchObject({
       state: "blocked",
       reason: "provider_backpressure",
+    });
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation?.nextAttemptAt,
+    ).not.toBe(armed.waiter.nextCheckAt.toISOString());
+    expect((await materialize(ctx)).action).toBe("none");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 0,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
+  });
+
+  test("a shared-core Codex capacity wait blocks synthesis and exposes its durable retry time", async () => {
+    // After the drained cutover (0680) the core waiter is the only Codex
+    // waiter written; the legacy waiter table is frozen.
+    const ctx = await runningGoalFixture();
+    const goal = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!goal) throw new Error("goal fixture was not created");
+    const armed = await armSubscriptionCoreCodexCapacityWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      turnId: ctx.turn.id,
+      attemptId: ctx.attemptId,
+      goalId: goal.id,
+      goalVersion: 1,
+      waitReason: "all_capacity_exhausted",
+      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      failurePayload: {
+        error: "all connected Codex subscriptions are unavailable",
+        code: "codex_usage_limit_reached",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("core capacity wait was not armed");
+    const [legacy] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from codex_capacity_waiters
+      where session_id = ${ctx.session.id}::uuid`;
+    expect(legacy?.count).toBe(0);
+
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({
+      state: "blocked",
+      reason: "provider_backpressure",
       nextAttemptAt: armed.waiter.nextCheckAt.toISOString(),
     });
     expect((await materialize(ctx)).action).toBe("none");
@@ -1962,6 +2078,16 @@ describe("durable active-goal wake", () => {
       usage: 0,
       events: 0,
     });
+    // The parked turn is not claimable while its core waiter exists.
+    const claim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "unclaimed", reason: "no-work" });
   });
 
   test("terminal and corrupt idle sessions refuse or repair goal work", async () => {

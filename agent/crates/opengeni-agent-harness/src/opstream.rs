@@ -109,6 +109,7 @@ impl OpDriver {
                 window_bytes,
                 deadline_ms,
                 origin_id: "hx-op-scenarios".to_string(),
+                connection_generation: 0,
             }),
         )
         .await

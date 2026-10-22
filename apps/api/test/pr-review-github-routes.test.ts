@@ -12,11 +12,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerPrReviewGitHubRoutes } from "../src/routes/pr-review-github";
 
@@ -77,7 +74,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OpenGeni Lens GitHub installation routes", () => {
+describe("Opengeni Lens GitHub installation routes", () => {
   test("owner-proves one installation, consumes OAuth state once, and routes its signed webhook", async () => {
     if (!client || !workspaceId || !accountId || !subjectId) return;
     const app = new Hono();

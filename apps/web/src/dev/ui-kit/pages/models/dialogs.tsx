@@ -2,21 +2,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRightIcon, CircleCheckIcon, LoaderCircleIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DestructiveConfirm,
   showUndoToast,
   type ConfirmDependency,
-} from "@/components/ui/destructive-confirm";
-import { Checkbox, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
-import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+} from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Checkbox, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 
 import { KIT_NOW, currentWorkspace, you } from "../../fixtures";
@@ -53,6 +53,8 @@ import {
 const GATEWAY_KEYS: Record<GatewayId, { prefix: string; where: string }> = {
   vercel: { prefix: "vck_", where: "Create one in Vercel under AI Gateway, then API keys." },
   openrouter: { prefix: "sk-or-", where: "Create one on openrouter.ai under Keys." },
+  // Opper key format is unverified; accept any key in this dev preview.
+  opper: { prefix: "", where: "Create one at platform.opper.ai under API keys." },
 };
 
 const NEW_ACCOUNT_NAMES = ["design@acme.dev", "support@acme.dev", "data@acme.dev"];
@@ -145,9 +147,11 @@ export function ConnectPage({
 
   const pool = accountsOf(data, scope);
   const newName = NEW_ACCOUNT_NAMES.find((name) => !pool.some((each) => each.name === name));
+  // Only a workspace set to use just the organization's accounts asks.
   const orgPoolInUse =
     scope === "workspace" &&
     questions.q13 === "segmented" &&
+    data.legacySource === "organization" &&
     effectiveSource(data, questions, scenario) === "organization";
   const gateways = data.gateways[scope];
 
@@ -179,11 +183,10 @@ export function ConnectPage({
     // opens its page instead: there is nothing left to connect.
     const choices = [
       { id: "codex" as const, title: "Codex", summary: "Pay with your ChatGPT plan" },
-      ...(["openrouter", "vercel"] as const).map((id) => ({
+      ...(["openrouter", "opper", "vercel"] as const).map((id) => ({
         id,
         title: gateways[id].name,
-        summary:
-          id === "openrouter" ? "Pay per token through OpenRouter" : "Pay per token through Vercel",
+        summary: `Pay per token through ${id === "vercel" ? "Vercel" : gateways[id].name}`,
       })),
     ];
     return (
@@ -226,8 +229,8 @@ export function ConnectPage({
     );
   }
 
-  // Codex: sign in with a device code, then (if the organization's pool is in
-  // use) say which subscriptions new work should use.
+  // Codex: sign in with a device code, then (if the workspace is set to use
+  // only the organization's accounts) say whether new work should use it.
   const signedIn = signin === "done";
   const askSource = signedIn && orgPoolInUse;
   return (
@@ -259,7 +262,7 @@ export function ConnectPage({
       }
       onSubmit={async () => {
         if (askSource && !useChoice) {
-          setUseError("Choose which subscriptions new work should use.");
+          setUseError("Choose whether new work should use this account.");
           return false;
         }
         await wait(900);
@@ -298,18 +301,15 @@ export function ConnectPage({
             scope === "organization"
               ? { ...value, orgAccounts: [...value.orgAccounts, account] }
               : { ...value, workspaceAccounts: [...value.workspaceAccounts, account] };
-          // Automatic uses this workspace's accounts once one is connected; "keep"
-          // saves the organization as an explicit choice.
-          if (!askSource) return next;
-          return {
-            ...next,
-            legacySource: useChoice === "organization" ? "organization" : "automatic",
-          };
+          // "Use it" returns to the automatic choice, which uses both; "keep"
+          // leaves the explicit choice as it is.
+          if (!askSource || useChoice === "organization") return next;
+          return { ...next, legacySource: "automatic" };
         });
         toast.success(`Added ${account.name}`, {
           description:
             askSource && useChoice === "organization"
-              ? `New work keeps using subscriptions from ${ORG_NAME} until you switch.`
+              ? `New work keeps using only subscriptions from ${ORG_NAME} until you change this.`
               : undefined,
         });
       }}
@@ -368,8 +368,8 @@ export function ConnectPage({
         {askSource ? (
           <ChoiceCards
             variant={picks.choice}
-            label="Use this account instead of the organization's subscriptions?"
-            description={`New work in ${currentWorkspace.name} uses one or the other, never both.`}
+            label="Use this account for new work?"
+            description={`${currentWorkspace.name} is set to use only the organization's subscriptions.`}
             value={useChoice}
             onValueChange={(value) => {
               setUseChoice(value);
@@ -378,14 +378,14 @@ export function ConnectPage({
             error={useError}
           >
             <ChoiceCard
-              value="workspace"
-              title="Use this account"
-              description={`New work here switches to this workspace's accounts and stops using subscriptions from ${ORG_NAME}.`}
+              value="together"
+              title="Use it with the organization's subscriptions"
+              description={`New work here uses this account and the subscriptions from ${ORG_NAME}.`}
             />
             <ChoiceCard
               value="organization"
-              title="Keep the organization's subscriptions"
-              description="This account stays connected but isn't used until you switch."
+              title="Keep using only the organization's"
+              description="This account stays connected but isn't used until you change this."
             />
           </ChoiceCards>
         ) : null}
@@ -750,7 +750,8 @@ function DisconnectDialog({ target, onClose }: { target: DetailTarget; onClose: 
     ];
     const choices = modelChoices(data, questions, scenario);
     const defaultChoice = choices.find((each) => each.id === data.defaultModelId);
-    const payer = target.id === "openrouter" ? "OpenRouter" : "AI Gateway";
+    const payer =
+      target.id === "openrouter" ? "OpenRouter" : target.id === "opper" ? "Opper" : "AI Gateway";
     if (target.scope === "workspace" && defaultChoice?.payer === payer) {
       dependencies = [
         {
@@ -861,7 +862,7 @@ function useAllowedForm(target: AllowedTarget) {
   if (target.kind === "workspace") {
     options = choices;
     current = data.allowedModels;
-  } else if (target.id === "openrouter" || target.id === "vercel") {
+  } else if (target.id === "openrouter" || target.id === "opper" || target.id === "vercel") {
     const gateway = data.gateways[target.scope][target.id];
     name = gateway.name;
     current = gateway.modelsServed;
@@ -881,7 +882,7 @@ function useAllowedForm(target: AllowedTarget) {
   const save = (value: "all" | string[]) => {
     setData((state) => {
       if (target.kind === "workspace") return { ...state, allowedModels: value };
-      if (target.id === "openrouter" || target.id === "vercel") {
+      if (target.id === "openrouter" || target.id === "opper" || target.id === "vercel") {
         return updateGateway(state, target.scope, target.id, { modelsServed: value });
       }
       return updateAccount(state, target.scope, target.id, { modelsServed: value });

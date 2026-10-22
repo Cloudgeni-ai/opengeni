@@ -19,7 +19,7 @@ relay/NATS/secret wiring.
 - Optional RDS PostgreSQL when `postgres.mode = "managed"`.
 - `temporal.mode = "officialChart"` output wiring for the stack-wrapper managed upstream Temporal chart, or `external` for Temporal Cloud/customer endpoints.
 
-Keep OpenGeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
+Keep Opengeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
 
 ## Validate
 
@@ -46,4 +46,4 @@ and `postgres.skip_final_snapshot = true` before apply. For production-like
 stacks, keep final snapshots and deletion protection enabled.
 
 Do not commit state, kubeconfigs, generated database passwords, AWS credentials, or filled secret values.
-The official Temporal chart still needs durable Postgres databases prepared outside the OpenGeni app chart before Helm install.
+The official Temporal chart still needs durable Postgres databases prepared outside the Opengeni app chart before Helm install.

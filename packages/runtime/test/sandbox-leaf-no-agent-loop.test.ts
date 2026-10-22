@@ -25,7 +25,7 @@ const FORBIDDEN_AGENT_LOOP_SPECIFIERS = new Set([
   "@openai/agents-core",
 ]);
 
-// The OpenGeni agent-loop barrel markers (defined in packages/runtime/src/index.ts).
+// The Opengeni agent-loop barrel markers (defined in packages/runtime/src/index.ts).
 // If any of these strings appear in the LEAF's resolved bundle, the leaf is
 // transitively pulling the runtime agent code back in — a regression.
 const AGENT_BARREL_MARKERS = ["buildOpenGeniAgent", "prepareRunInput", "withSandboxLifecycleHooks"];
@@ -63,9 +63,9 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
     }
   });
 
-  test("leaf's transitive OpenGeni-authored import graph reaches no agent-loop entrypoint", () => {
+  test("leaf's transitive Opengeni-authored import graph reaches no agent-loop entrypoint", () => {
     // Crawl the resolved transitive import set of the leaf, following only the
-    // OpenGeni-authored source (relative `./` imports + workspace `@opengeni/*`
+    // Opengeni-authored source (relative `./` imports + workspace `@opengeni/*`
     // packages). Third-party packages are inspected as leaves but not recursed.
     // If ANY reachable source file imports a forbidden agent-loop entrypoint —
     // including the runtime barrel (packages/runtime/src/index.ts, whose markers
@@ -271,5 +271,39 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
       providerState: { manifest: unknown };
     };
     expect(sessionState.providerState.manifest).toBe(providerManifest);
+  });
+
+  test("W1: sandboxStateEntryFromRunState strips non-constant env names when asked", async () => {
+    const { sandboxStateEntryFromRunState } = await import("../src/sandbox");
+    const keep = (name: string) => name === "HOME" || name.startsWith("OPENGENI_");
+    const entry = sandboxStateEntryFromRunState(
+      {
+        _sandbox: {
+          currentAgentKey: "root",
+          sessionsByAgent: {
+            root: {
+              backendId: "modal",
+              currentAgentKey: "root",
+              sessionState: {
+                manifest: {
+                  version: 1,
+                  root: "/workspace",
+                  entries: {},
+                  environment: { HOME: "/workspace", LEGACY_SECRET: "canary-legacy" },
+                },
+                environment: { OPENGENI_X: "1", LEGACY_SECRET: "canary-legacy" },
+                providerState: { id: "sb-1", environment: { LEGACY_SECRET: "canary-legacy" } },
+              },
+            },
+          },
+        },
+      },
+      { keepEnvironmentName: keep },
+    );
+    expect(JSON.stringify(entry)).not.toContain("canary-legacy");
+    const sessionState = (entry as { sessionState: Record<string, any> }).sessionState;
+    expect(sessionState.manifest.environment).toEqual({ HOME: "/workspace" });
+    expect(sessionState.environment).toEqual({ OPENGENI_X: "1" });
+    expect(sessionState.providerState).toEqual({ id: "sb-1", environment: {} });
   });
 });

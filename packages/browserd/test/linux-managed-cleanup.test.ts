@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { AgentBrowserJsonRunner, reapManagedBrowserProcesses } from "../src/runner";
+import { ManagedBrowserRunner, reapManagedBrowserProcesses } from "../src/runner";
 
 async function fixture() {
   const root = await mkdtemp("/tmp/og-linux-identity-");
@@ -13,21 +13,10 @@ async function fixture() {
   await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
   await copyFile(process.execPath, executable);
   await chmod(executable, 0o700);
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: "og",
-    sessionName: "identity-fixture",
-    socketDirectory: join(root, "socket"),
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory,
-    downloadDirectory: join(sessionDirectory, "downloads"),
-    screenshotDirectory: join(sessionDirectory, "screenshots"),
     headed: false,
     browserExecutablePath: executable,
-    binary: {
-      path: process.execPath,
-      name: "agent-browser-linux-x64",
-      version: "0.33.2",
-      sha256: "fixture",
-    },
   });
   return { root, profileDirectory, executable, runner };
 }
@@ -120,6 +109,46 @@ describe.skipIf(process.platform !== "linux")("Linux managed browser cleanup", (
       }
     });
   }
+
+  test("startup reap reads the process inventory once across many stale sessions", async () => {
+    const f = await fixture();
+    let child: Bun.Subprocess | undefined;
+    const bystander = Bun.spawn(
+      [f.executable, "-e", "setInterval(()=>{},60_000)", "--user-data-dir=/tmp/unrelated"],
+      { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+    try {
+      for (let index = 0; index < 50; index += 1) {
+        await mkdir(join(f.root, "sessions", randomUUID(), "profile"), { recursive: true });
+      }
+      child = await rewrittenBrowser(f);
+      let inventories = 0;
+      await reapManagedBrowserProcesses(f.root, undefined, {
+        readProcessCommandLines: async () => {
+          inventories += 1;
+          const pids = (await readdir("/proc")).filter((name) => /^[1-9][0-9]*$/u.test(name));
+          const entries = await Promise.all(
+            pids.map(async (name) => {
+              try {
+                return { pid: Number(name), commandLine: await readFile(`/proc/${name}/cmdline`) };
+              } catch {
+                return null;
+              }
+            }),
+          );
+          return entries.filter((entry) => entry !== null);
+        },
+      });
+      expect(inventories).toBe(1);
+      expect(await child.exited).not.toBe(0);
+      expect(bystander.exitCode).toBeNull();
+      expect(() => process.kill(bystander.pid, 0)).not.toThrow();
+    } finally {
+      if (child) await stopFixture(child);
+      await stopFixture(bystander);
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 
   test("does not signal a rewritten title whose private profile lock names another PID", async () => {
     const f = await fixture();

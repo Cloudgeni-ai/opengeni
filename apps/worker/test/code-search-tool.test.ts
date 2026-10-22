@@ -15,7 +15,7 @@ import {
   SandboxChannelAService,
   type ChannelASession,
 } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   codeSearchToolDefinitions,
   codeSearchWorkspaceFromChannel,
@@ -168,6 +168,94 @@ describe("codeSearchToolDefinitions", () => {
     workspace: async () => fixtureWorkspace(),
   };
 
+  test.skipIf(!hasRipgrep)(
+    "shared OpenRouter backend scores code and accounts received usage",
+    async () => {
+      const usage: CodeSearchUsage[] = [];
+      let requests = 0;
+      const definition = createCodeSearchAttemptToolDefinition({
+        settings: {
+          decisionModelProvider: "openrouter",
+          decisionModelId: "typesafe/jev-1.13",
+          decisionModelApiKey: "configured-test-key",
+        },
+        workspace: async () => fixtureWorkspace(),
+        observability,
+        breaker: new JevCircuitBreaker(),
+        recordUsage: async (event) => {
+          usage.push(event);
+        },
+        fetch: (async (url, init) => {
+          requests++;
+          expect(String(url)).toBe("https://openrouter.ai/api/alpha/decisions");
+          const body = JSON.parse(String(init?.body));
+          expect(body.model).toBe("typesafe/jev-1.13");
+          expect(body.messages).toBeUndefined();
+          return Response.json({
+            model: "jev-version",
+            provider: "TypeSafe",
+            answers: Object.fromEntries(
+              Object.keys(body.questions).map((name) => [name, { type: "noul", noul: 0.9 }]),
+            ),
+            usage: { input_tokens: 100, output_tokens: 5, cost: 0.0000042 },
+          });
+        }) as typeof fetch,
+      });
+      const result = await definition.execute(trialArgs, context);
+      expect(result.isError).toBe(false);
+      expect((result.content[0] as { text: string }).text).toContain("approval-policy.ts");
+      expect(requests).toBeGreaterThan(0);
+      expect(usage).toHaveLength(1);
+      expect(usage[0]).toMatchObject({
+        decisionRequests: requests,
+        decisionInputTokens: requests * 100,
+        model: "jev-version",
+        provider: "TypeSafe",
+        costSources: ["provider-reported"],
+      });
+      expect(usage[0]!.decisionCostUsd!).toBeCloseTo(requests * 0.0000042);
+    },
+  );
+
+  test.skipIf(!hasRipgrep)(
+    "typed refusal fails code search without silently replacing scores, retaining usage",
+    async () => {
+      const usage: CodeSearchUsage[] = [];
+      const definition = createCodeSearchAttemptToolDefinition({
+        settings: {
+          decisionModelProvider: "openai",
+          decisionModelId: "gpt-6-luna",
+          decisionModelApiKey: "configured-test-key",
+        },
+        workspace: async () => fixtureWorkspace(),
+        observability,
+        breaker: new JevCircuitBreaker(),
+        recordUsage: async (event) => {
+          usage.push(event);
+        },
+        fetch: (async (url, init) => {
+          expect(String(url)).toBe("https://api.openai.com/v1/decisions");
+          const body = JSON.parse(String(init?.body));
+          return Response.json({
+            model: "luna-version",
+            answers: body.questions.map((question: { name: string }) => ({
+              name: question.name,
+              type: "refusal",
+            })),
+            usage: { input_tokens: 100, output_tokens: 0 },
+          });
+        }) as typeof fetch,
+      });
+      expect((await definition.execute(trialArgs, context)).isError).toBe(true);
+      expect(usage).toHaveLength(1);
+      expect(usage[0]).toMatchObject({
+        decisionInputTokens: 100,
+        decisionCostUsd: null,
+        costSources: ["unknown"],
+      });
+    },
+  );
+
   test("offers the tool only when enabled, keyed, and with compute", () => {
     expect(codeSearchToolDefinitions({ ...base, enabled: false })).toEqual([]);
     expect(
@@ -277,9 +365,9 @@ describe("code_search tool execution", () => {
     // Connection warm-up requests are not scored work and are not counted.
     expect(usage).toHaveLength(1);
     expect(usage[0]!.operationId).toBe("op-1");
-    expect(usage[0]!.jevRequests).toBeGreaterThan(0);
-    expect(usage[0]!.jevInputTokens).toBe(1_000 * usage[0]!.jevRequests);
-    expect(usage[0]!.jevCostUsd).toBeGreaterThan(0);
+    expect(usage[0]!.decisionRequests).toBeGreaterThan(0);
+    expect(usage[0]!.decisionInputTokens).toBe(1_000 * usage[0]!.decisionRequests);
+    expect(usage[0]!.decisionCostUsd).toBeGreaterThan(0);
   });
 
   test.skipIf(!hasRipgrep)("still returns the result when recording usage fails", async () => {

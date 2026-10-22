@@ -8,10 +8,10 @@ import {
   getVideoGenerationOperationSummary,
   withSessionRlsActorContext,
   getWorkspaceVercelAiGatewayConnectionMetadata,
+  getWorkspaceModelPolicy,
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
   VideoGenerationConflictError,
-  workspaceXaiSubscriptionActive,
 } from "@opengeni/db";
 import {
   requireAccessGrant,
@@ -26,18 +26,25 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestJson } from "../http/request-body";
+import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, connection, supergrokConfigured] = await Promise.all([
+    const [policy, connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+      getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
     });
@@ -65,12 +72,18 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, UpdateVideoGenerationPolicyRequest);
-    const [connection, supergrokConfigured] = await Promise.all([
+    const [connection, supergrokConfigured, modelPolicy] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+      getWorkspaceModelPolicy(deps.db, workspaceId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
     });
@@ -131,6 +144,8 @@ function managedVideoGenerationConfigured(deps: ApiRouteDeps): boolean {
 
 function videoGenerationFundingOptions(input: {
   managedConfigured: boolean;
+  /** The workspace turned Opengeni credits off (model policy). */
+  creditsDisabled: boolean;
   workspaceGatewayConfigured: boolean;
   supergrokConfigured: boolean;
 }) {
@@ -138,11 +153,13 @@ function videoGenerationFundingOptions(input: {
     {
       source: "opengeni_credits" as const,
       label: "Opengeni",
-      description: "Uses Opengeni credits through the managed Gateway route.",
-      available: input.managedConfigured,
-      unavailableReason: input.managedConfigured
-        ? null
-        : "Opengeni-managed video generation is not configured.",
+      description: "Uses credits through the managed Gateway route.",
+      available: input.managedConfigured && !input.creditsDisabled,
+      unavailableReason: !input.managedConfigured
+        ? "Managed video generation is not configured."
+        : input.creditsDisabled
+          ? "Credits are turned off in this workspace."
+          : null,
     },
     {
       source: "supergrok_subscription" as const,

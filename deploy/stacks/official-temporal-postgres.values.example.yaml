@@ -1,5 +1,5 @@
-# Example values for the upstream Temporal Helm chart used by the OpenGeni
-# stack wrapper. This file is intentionally not part of the OpenGeni
+# Example values for the upstream Temporal Helm chart used by the Opengeni
+# stack wrapper. This file is intentionally not part of the Opengeni
 # application chart and contains no real secrets.
 #
 # Source chart: https://go.temporal.io/helm-charts

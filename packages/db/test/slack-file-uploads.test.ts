@@ -4,7 +4,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   bindSlackInteractionSession,
@@ -179,7 +179,7 @@ postgresDescribe("Slack file upload ordinary-RLS durable ledger", () => {
         slackTeamName: "Slack uploads",
         botId: `B${suffix}`,
         botUserId: `U${suffix}`,
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: new Date().toISOString(),
       },
     });

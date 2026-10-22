@@ -85,6 +85,15 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.liveness) | nindent 12 }}
           {{- end }}
+          {{- if .Values.web.preStopDrainSeconds }}
+          lifecycle:
+            preStop:
+              # Hold the pod after it is marked for termination so the endpoints controller and
+              # ingress stop routing NEW requests to it before SIGTERM closes the server. The
+              # image has no shell, so this uses the native sleep action (k8s >= 1.30).
+              sleep:
+                seconds: {{ .Values.web.preStopDrainSeconds }}
+          {{- end }}
           {{- with .Values.web.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

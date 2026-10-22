@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SiteViewer } from "@opengeni/sdk";
 
 import { loadSiteSnapshot } from "../../sites-ui";
 import {
@@ -9,6 +10,7 @@ import {
 } from "./artifact-chrome";
 import { ArtifactSandbox } from "./artifact-sandbox";
 import type { SiteSnapshotClient, SiteToolBridgeFactory } from "./chat-interactive-block";
+import { useOpenGeniText } from "../../messages/runtime";
 
 type Snapshot = Awaited<ReturnType<typeof loadSiteSnapshot>>;
 
@@ -18,6 +20,8 @@ export type SiteViewProps = {
   siteId: string;
   /** Host-owned Site API access. Omit it and the Site renders without workspace tools. */
   toolBridge?: SiteToolBridgeFactory | undefined;
+  /** Who is viewing, answered to the Site's `site.viewer`. */
+  viewer?: SiteViewer | undefined;
   theme?: "light" | "dark" | undefined;
   /** Shown instead of the archived notice; the console links to its full page. */
   archivedMessage?: string | undefined;
@@ -27,6 +31,13 @@ export type SiteViewProps = {
   loadingLabel?: string | undefined;
   /** Called with the loaded title, for a host header. */
   onTitle?: ((title: string) => void) | undefined;
+  /** Hide the frame toolbar under a host header that draws reload and full screen. */
+  showToolbar?: boolean | undefined;
+  /** Reload the Site whenever this changes. */
+  reloadToken?: number | undefined;
+  /** Host-controlled full screen; omit to let the frame manage it. */
+  fullScreen?: boolean | undefined;
+  onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
   className?: string | undefined;
 };
 
@@ -39,13 +50,19 @@ export function SiteView({
   workspaceId,
   siteId,
   toolBridge,
+  viewer,
   theme,
   archivedMessage,
   showTitle = true,
   loadingLabel,
   onTitle,
+  showToolbar,
+  reloadToken,
+  fullScreen,
+  onFullScreenChange,
   className,
 }: SiteViewProps) {
+  const t = useOpenGeniText();
   const labels = useArtifactLabels();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -91,7 +108,7 @@ export function SiteView({
   if (error)
     return (
       <ArtifactProblem
-        view={artifactLoadErrorView(error, "site", labels)}
+        view={artifactLoadErrorView(t, error, "site", labels)}
         onRetry={() => void load()}
       />
     );
@@ -105,10 +122,21 @@ export function SiteView({
       html={content.html}
       title={snapshot.detail.artifact.title}
       showTitle={showTitle}
-      versionLabel={`v${snapshot.detail.artifact.currentVersion?.revision}`}
+      versionLabel={
+        snapshot.detail.artifact.currentVersion
+          ? t("artifacts.siteView.vRevision", {
+              revision: snapshot.detail.artifact.currentVersion.revision,
+            })
+          : undefined
+      }
       toolBridge={bridge}
+      viewer={viewer}
       connectedToolCount={content.requestedTools.length}
       theme={theme}
+      {...(showToolbar !== undefined ? { showToolbar } : {})}
+      {...(reloadToken !== undefined ? { reloadToken } : {})}
+      {...(fullScreen !== undefined ? { fullScreen } : {})}
+      {...(onFullScreenChange ? { onFullScreenChange } : {})}
       fill
       className={className ?? "h-full rounded-none border-0"}
     />

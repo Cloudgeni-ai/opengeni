@@ -8,12 +8,9 @@ import type {
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createDb, createOrganizationApiKey, createWorkspace, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Hono } from "hono";
 import { createApp } from "../src/app";
 

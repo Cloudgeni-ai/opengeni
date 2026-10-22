@@ -16,7 +16,7 @@ import {
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 
 let available = true;

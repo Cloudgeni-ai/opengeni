@@ -648,6 +648,7 @@ export function boundSessionDetailMcp(
     pinned: session.pinned,
     pinnedAt: session.pinnedAt,
     pinVersion: session.pinVersion,
+    ...(session.retention === undefined ? {} : { retention: session.retention }),
     ...(session.treeStats === undefined ? {} : { treeStats: session.treeStats }),
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,

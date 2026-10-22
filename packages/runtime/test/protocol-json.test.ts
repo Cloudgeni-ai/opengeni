@@ -13,7 +13,7 @@ describe("normalizeProtocolJsonValue", () => {
       providerData: {
         type: "web_search_call",
         optional: undefined,
-        result: { query: "OpenGeni" },
+        result: { query: "Opengeni" },
       },
     };
 
@@ -23,7 +23,7 @@ describe("normalizeProtocolJsonValue", () => {
       type: "hosted_tool_call",
       providerData: {
         type: "web_search_call",
-        result: { query: "OpenGeni" },
+        result: { query: "Opengeni" },
       },
     });
     expect(Object.hasOwn(input, "output")).toBe(true);

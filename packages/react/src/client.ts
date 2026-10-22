@@ -49,20 +49,6 @@ type SessionClientMethods = Pick<
   | "uploadFile"
   | "getFile"
   | "createFileDownloadUrl"
-  // VariableSets
-  | "listVariableSets"
-  | "getVariableSetVariable"
-  | "createVariableSet"
-  | "updateVariableSet"
-  | "deleteVariableSet"
-  | "setVariableSetVariable"
-  | "deleteVariableSetVariable"
-  | "listEnvironments"
-  | "createEnvironment"
-  | "updateEnvironment"
-  | "deleteEnvironment"
-  | "setEnvironmentVariable"
-  | "deleteEnvironmentVariable"
   // Channels (rail organization)
   | "listChannels"
   | "createChannel"
@@ -115,7 +101,6 @@ type SessionClientMethods = Pick<
   | "getAuthRun"
   | "startBrowserAuthRun"
   | "reportBrowserAuthRun"
-  | "protectedBrowserAuthFill"
   | "verifyBrowserAuthRun"
   | "listInteractionInterventions"
   | "getInteractionIntervention"
@@ -186,20 +171,25 @@ type SessionClientMethods = Pick<
       | "createVideoArtifactPlaybackSource"
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
+      | "listWorkspaceBackgroundCommands"
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
+      | "getSessionModelAccount"
     >
   >;
 
-/** Compact list transport is optional for scripted and older clients. */
+/**
+ * Compact list transport is optional for scripted and older clients, and so is
+ * the attention mutation an open conversation uses to mark itself read.
+ */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage">>;
+  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal" | "updateSessionAttention">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
  *
  * A host proxy can implement only these session-scoped operations instead of
- * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * stubbing Opengeni's workbench, billing, rig, file-system, and workspace
  * administration APIs. Workspace-level resume is deliberately optional: a
  * host that does not expose that authority still supports every session-local
  * composer/control path.
@@ -224,6 +214,18 @@ export type EmbeddedSessionClientLike = Pick<
   | "sendApprovalDecision"
 > & {
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+  /**
+   * Optional: lets an open conversation mark itself read while the person
+   * watches it. Without it the conversation works, but replies stay unread.
+   */
+  updateSessionAttention?: OpenGeniClient["updateSessionAttention"] | undefined;
+  /**
+   * Optional: lets conversation history see what the server's history filter
+   * applied and whether a page has more. Without it history stays correct on
+   * every server version, but keeps each long turn's tool calls and model
+   * bookkeeping in its reads.
+   */
+  listEventPage?: OpenGeniClient["listEventPage"] | undefined;
 };
 
 /** Event-read surface shared by hooks that optionally tail a session. */
@@ -233,9 +235,15 @@ export type EmbeddedSessionEventClientLike = Pick<OpenGeniClient, "getSession" |
 export type EmbeddedSessionReadClientLike = EmbeddedSessionEventClientLike &
   Pick<OpenGeniClient, "getSession" | "updateSession">;
 
-/** Exact client surface required by {@link useGoal}. */
+/**
+ * Exact client surface required by {@link useGoal}. `findGoal` is optional:
+ * when present the hook reads a goal-less session as a successful `null`
+ * instead of an absorbed 404.
+ */
 export type EmbeddedGoalClientLike = EmbeddedSessionEventClientLike &
-  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
+  Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal"> & {
+    findGoal?: OpenGeniClient["findGoal"] | undefined;
+  };
 
 /** Exact client surface required by {@link useSessionLineage}. */
 export type EmbeddedSessionLineageClientLike = EmbeddedSessionEventClientLike &
@@ -265,7 +273,8 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "activateCodexRealtimeConnection"
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
->;
+> &
+  Partial<Pick<OpenGeniClient, "negotiateRealtimeWebsocket">>;
 
 /** Exact public SDK surface required by cross-surface human interventions. */
 export type EmbeddedInterventionClientLike = Pick<
@@ -293,7 +302,6 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "getAuthRun"
   | "startBrowserAuthRun"
   | "reportBrowserAuthRun"
-  | "protectedBrowserAuthFill"
   | "verifyBrowserAuthRun"
   | "listInteractionInterventions"
   | "getInteractionIntervention"

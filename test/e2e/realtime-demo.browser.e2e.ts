@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDirectory =
@@ -66,7 +67,8 @@ describe("public realtime React demo browser acceptance", () => {
     const existing = page.locator("[data-realtime-existing-composer]");
     const next = page.locator("[data-realtime-new-composer]");
     const primary = existing.getByTestId("realtime-primary-action");
-    await expectLabel(primary, "Start voice with Codex Live");
+    await expectLabel(primary, "Start voice");
+    await expectVoiceModel(existing, "Codex Live");
     expect(
       await existing.locator('[aria-label="Realtime voice"]').getAttribute("data-picker-side"),
     ).toBe("top");
@@ -77,7 +79,7 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(existing);
     await page.getByTestId("model-picker-back").click();
-    await page.getByTestId("realtime-model-provider-opengeni_credits").click();
+    await page.getByTestId("realtime-model-provider-opengeni").click();
     await page
       .getByTestId("realtime-model-choice-opengeni-gateway/openai/gpt-realtime-2.1")
       .waitFor();
@@ -85,7 +87,8 @@ describe("public realtime React demo browser acceptance", () => {
     await page
       .getByTestId("realtime-model-choice-opengeni-gateway/openai/gpt-realtime-2.1")
       .click();
-    await expectLabel(primary, "Start voice with GPT Realtime 2.1");
+    await expectLabel(primary, "Start voice");
+    await expectVoiceModel(existing, "GPT Realtime 2.1");
 
     await primary.click();
     await expectPhase(primary, "connecting");
@@ -142,7 +145,8 @@ describe("public realtime React demo browser acceptance", () => {
 
     await primary.click();
     await expectPhase(primary, "stopping");
-    await expectLabel(primary, "Start voice with GPT Realtime 2.1");
+    await expectLabel(primary, "Start voice");
+    await expectVoiceModel(existing, "GPT Realtime 2.1");
     await page.getByRole("button", { name: "Simulate error" }).click();
     await expectPhase(primary, "error");
     expect(await existing.getByRole("alert").textContent()).toContain(
@@ -152,11 +156,12 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(next);
     await page.getByTestId("model-picker-back").click();
-    await page.getByTestId("realtime-model-provider-byok").click();
+    await page.getByTestId("realtime-model-provider-gateway").click();
     await page
       .getByTestId("realtime-model-choice-workspace-gateway/openai/gpt-realtime-mini")
       .click();
-    await next.getByRole("button", { name: "Start voice with GPT Realtime Mini" }).click();
+    await expectVoiceModel(next, "GPT Realtime Mini");
+    await next.getByRole("button", { name: "Start voice", exact: true }).click();
     await page.getByTestId("realtime-first-count").filter({ hasText: "1" }).waitFor();
     const createdSessionId = await page.getByTestId("current-session-id").textContent();
     expect(createdSessionId).not.toBeNull();
@@ -249,6 +254,19 @@ describe("public realtime React demo browser acceptance", () => {
 async function openPicker(surface: Locator): Promise<void> {
   await surface.getByRole("button", { name: "Choose voice model and options" }).click();
   await surface.page().getByTestId("realtime-model-picker-menu").waitFor();
+}
+
+/** The chosen voice model shows on the model menu trigger, not in the action label. */
+async function expectVoiceModel(surface: Locator, label: string): Promise<void> {
+  const trigger = surface.getByRole("button", { name: "Choose voice model and options" });
+  await trigger.waitFor();
+  await surface
+    .page()
+    .waitForFunction(
+      ({ trigger: element, expected }) => element?.getAttribute("title") === expected,
+      { trigger: await trigger.elementHandle(), expected: `Voice model: ${label}` },
+    );
+  expect(await trigger.getAttribute("title")).toBe(`Voice model: ${label}`);
 }
 
 async function expectLabel(button: Locator, label: string): Promise<void> {

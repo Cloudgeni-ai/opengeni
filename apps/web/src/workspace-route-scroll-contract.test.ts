@@ -12,28 +12,28 @@ const workspaceRouteContracts = {
   workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
-    source: "routes/sessions-index.tsx",
+    source: "../../../packages/react/src/app/routes/sessions-index.tsx",
   },
-  workspaceSessionRoute: { kind: "self-managed", source: "routes/session.tsx" },
+  workspaceSessionRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/session.tsx",
+  },
   workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
-  workspaceVariableSetsRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  // The list and each set's page only match the URL; the parent's single
-  // VariableSetsRoute component renders both inside one ContentPage.
-  workspaceVariableSetsIndexRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  workspaceVariableSetDetailRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
+  // Secrets: the list, each vault and each item only match the URL; the
+  // parent's single Secrets component renders them inside one ContentPage.
+  workspaceSecretsRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
+  // The old Variable sets URLs redirect to Secrets.
+  workspaceVariableSetsRoute: { kind: "redirect" },
+  workspaceVariableSetDetailRoute: { kind: "redirect" },
   workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
+  workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
+  workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
@@ -51,12 +51,18 @@ const workspaceRouteContracts = {
     source: "routes/workspace-state.tsx",
     scrollSource: "components/knowledge/knowledge-page.tsx",
   },
-  workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
+  workspaceArtifactsRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
+  },
   workspaceArtifactDetailRoute: {
     kind: "page",
-    source: "routes/artifacts.tsx",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
   },
-  workspaceRetainedArtifactRoute: { kind: "page", source: "routes/retained-artifact.tsx" },
+  workspaceRetainedArtifactRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/retained-artifact.tsx",
+  },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",

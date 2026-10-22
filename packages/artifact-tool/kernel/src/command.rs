@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     formula::{FormulaCellKey, FormulaEngine, FormulaEngineError},
-    Cell, CellBlock, CellBlockError, CellCoord, CellRange, IdGenerator, Sheet, StableId, Workbook,
+    Cell, CellBlock, CellBlockError, CellCoord, CellRange, DimensionAxis, IdGenerator, Sheet,
+    StableId, Workbook,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +28,12 @@ pub enum Command {
     ClearRange {
         sheet_id: StableId,
         range: CellRange,
+    },
+    SetDimension {
+        sheet_id: StableId,
+        axis: DimensionAxis,
+        index: u32,
+        pixels: Option<u32>,
     },
 }
 
@@ -171,6 +178,17 @@ impl Workbook {
                         .expect("prepared clear sheet must exist")
                         .clear_range(*range);
                 }
+                Command::SetDimension {
+                    sheet_id,
+                    axis,
+                    index,
+                    pixels,
+                } => {
+                    self.sheets
+                        .get_mut(sheet_id)
+                        .expect("prepared dimension sheet must exist")
+                        .set_dimension(*axis, *index, *pixels);
+                }
             }
         }
         self.ids = plan.next_ids;
@@ -294,6 +312,19 @@ impl Workbook {
                         return Err(fail(CommandErrorKind::UnknownSheet(*sheet_id)));
                     }
                 }
+                Command::SetDimension {
+                    sheet_id,
+                    axis,
+                    pixels,
+                    ..
+                } => {
+                    if !catalog.contains_key(sheet_id) {
+                        return Err(fail(CommandErrorKind::UnknownSheet(*sheet_id)));
+                    }
+                    if !axis.valid_pixels(*pixels) {
+                        return Err(fail(CommandErrorKind::InvalidDimension));
+                    }
+                }
             }
         }
         Ok(BatchPlan {
@@ -374,6 +405,7 @@ fn apply_formula_commands(
                     engine_changed |= touched;
                 })
             }
+            Command::SetDimension { .. } => Ok(()),
         };
         result.map_err(|error| BatchError {
             command_index,
@@ -434,7 +466,9 @@ fn final_values_for_keys(
                     }
                 }
             }
-            Command::RenameSheet { .. } | Command::DeleteSheet { .. } => {}
+            Command::RenameSheet { .. }
+            | Command::DeleteSheet { .. }
+            | Command::SetDimension { .. } => {}
             Command::SetCells {
                 sheet_id,
                 anchor,
@@ -530,6 +564,12 @@ enum UndoEntry {
         sheet_id: StableId,
         cells: Vec<(CellCoord, Cell)>,
     },
+    Dimension {
+        sheet_id: StableId,
+        axis: DimensionAxis,
+        index: u32,
+        previous: Option<u32>,
+    },
 }
 
 #[derive(Debug)]
@@ -593,6 +633,18 @@ impl BatchJournal {
                     } else {
                         debug_assert!(false, "cleared sheet disappeared during transaction");
                     }
+                }
+                UndoEntry::Dimension {
+                    sheet_id,
+                    axis,
+                    index,
+                    previous,
+                } => {
+                    workbook
+                        .sheets
+                        .get_mut(&sheet_id)
+                        .expect("dimension rollback sheet exists")
+                        .set_dimension(axis, index, previous);
                 }
             }
         }
@@ -726,6 +778,25 @@ impl BatchTransaction<'_> {
                         cells: removed,
                     });
                 }
+                Command::SetDimension {
+                    sheet_id,
+                    axis,
+                    index,
+                    pixels,
+                } => {
+                    let previous = self
+                        .workbook
+                        .sheets
+                        .get_mut(sheet_id)
+                        .expect("prepared dimension sheet must exist")
+                        .set_dimension(*axis, *index, *pixels);
+                    journal.undo.push(UndoEntry::Dimension {
+                        sheet_id: *sheet_id,
+                        axis: *axis,
+                        index: *index,
+                        previous,
+                    });
+                }
             }
         }
         self.workbook.ids = plan.next_ids;
@@ -839,6 +910,7 @@ pub struct BatchError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandErrorKind {
+    InvalidDimension,
     RevisionExhausted,
     ZeroId,
     InvalidEntityId(StableId),
@@ -863,6 +935,9 @@ impl fmt::Display for BatchError {
 impl fmt::Display for CommandErrorKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidDimension => {
+                formatter.write_str("dimension pixels must be from 1 through 4096")
+            }
             Self::RevisionExhausted => formatter.write_str("workbook revision is exhausted"),
             Self::ZeroId => formatter.write_str("sheet id must not be zero"),
             Self::InvalidEntityId(id) => write!(formatter, "invalid sheet entity id {id}"),
@@ -886,6 +961,73 @@ mod tests {
         encode_snapshot, AtomicBatch, Cell, CellBlock, CellCoord, CellRange, CellValue, Command,
         Number, StableId, Workbook,
     };
+
+    #[test]
+    fn dimensions_are_sparse_snapshotted_and_rollback_exactly() {
+        let id = StableId::from_parts(77, 2);
+        let mut workbook = Workbook::new(77).unwrap();
+        workbook
+            .apply_batch(&AtomicBatch::from_commands(vec![Command::CreateSheet {
+                id,
+                name: "Data".into(),
+            }]))
+            .unwrap();
+        let previous = encode_snapshot(&workbook).unwrap();
+        let edit = AtomicBatch::from_commands(vec![Command::SetDimension {
+            sheet_id: id,
+            axis: crate::DimensionAxis::Row,
+            index: 7,
+            pixels: Some(50),
+        }]);
+        {
+            let transaction = workbook.begin_batch(&edit).unwrap();
+            let bytes = encode_snapshot(transaction.workbook()).unwrap();
+            assert_ne!(bytes, previous);
+            let restored = crate::decode_snapshot(&bytes).unwrap();
+            assert_eq!(encode_snapshot(&restored).unwrap(), bytes);
+            assert_eq!(
+                restored
+                    .sheet(id)
+                    .unwrap()
+                    .dimension_entries(crate::DimensionAxis::Row)
+                    .collect::<Vec<_>>(),
+                vec![(7, 50)]
+            );
+        }
+        assert_eq!(encode_snapshot(&workbook).unwrap(), previous);
+        let mut defaults = workbook.clone();
+        defaults
+            .apply_batch(&AtomicBatch::from_commands(vec![Command::SetDimension {
+                sheet_id: id,
+                axis: crate::DimensionAxis::Row,
+                index: 7,
+                pixels: Some(24),
+            }]))
+            .unwrap();
+        workbook
+            .apply_batch(&AtomicBatch::from_commands(vec![Command::SetDimension {
+                sheet_id: id,
+                axis: crate::DimensionAxis::Row,
+                index: 7,
+                pixels: None,
+            }]))
+            .unwrap();
+        assert_eq!(
+            encode_snapshot(&workbook).unwrap(),
+            encode_snapshot(&defaults).unwrap()
+        );
+        assert_eq!(&encode_snapshot(&workbook).unwrap()[10..12], &[0, 0]);
+        let before = encode_snapshot(&workbook).unwrap();
+        assert!(workbook
+            .apply_batch(&AtomicBatch::from_commands(vec![Command::SetDimension {
+                sheet_id: id,
+                axis: crate::DimensionAxis::Row,
+                index: 7,
+                pixels: Some(0)
+            }]))
+            .is_err());
+        assert_eq!(encode_snapshot(&workbook).unwrap(), before);
+    }
 
     #[test]
     fn batch_can_create_and_populate_a_sheet() {

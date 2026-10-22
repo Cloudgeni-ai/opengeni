@@ -5,10 +5,10 @@ import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, TextArea } from "@/components/ui/field";
-import { useAppContext } from "@/context";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 type OrganizationKnowledgeModelSelection = {
   model: string;

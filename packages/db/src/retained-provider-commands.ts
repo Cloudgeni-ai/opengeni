@@ -222,10 +222,10 @@ export function recordedCommandOutput(
   if (eof)
     return startOffset <= limit
       ? text
-      : `[OpenGeni did not record part of this ${stream} after ${mib} MiB; its final ${endOffset - startOffset} bytes follow.]\n${text}`;
+      : `[Opengeni did not record part of this ${stream} after ${mib} MiB; its final ${endOffset - startOffset} bytes follow.]\n${text}`;
   // Pages are contiguous and fenced by the cursor, so exactly one page per
   // stream crosses or starts at the limit and carries the marker.
-  const marker = `[OpenGeni stopped recording ${stream} after ${mib} MiB; the final part will still be recorded.]\n`;
+  const marker = `[Opengeni stopped recording ${stream} after ${mib} MiB; the final part will still be recorded.]\n`;
   if (startOffset < limit) return `${text}${text.endsWith("\n") ? "" : "\n"}${marker}`;
   return startOffset === limit ? marker : "";
 }

@@ -158,6 +158,8 @@ type GoogleDriveOAuthState = {
   returnPath: string;
   encryptedPkceVerifier: string;
   capability: "source_read" | "publish";
+  /** Server-verified Picker selection, carried only into the scope-upgrade step. */
+  publishingFolderId?: string;
   connectionId?: string;
   connectionVersion?: number;
   nonce: string;
@@ -267,7 +269,7 @@ export async function startGoogleDriveOAuth(
   },
 ): Promise<GoogleDriveOAuthStartResponse> {
   await withOrganizationIntegrationAcquisition(deps.db, input, ["google-drive"], async () => {});
-  const google = requireGoogleDriveSettings(deps.settings);
+  requireGoogleDriveSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
         deps.db,
@@ -288,46 +290,64 @@ export async function startGoogleDriveOAuth(
     requireGoogleDriveConnection(existing, input.subjectId);
   }
 
-  const key = requireEnvironmentEncryption(deps.settings);
-  const verifier = randomBytes(48).toString("base64url");
-  const redirectUri = requireGoogleDriveOAuthCallbackUrl(deps.settings);
-  const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
+  return googleDriveOAuthAuthorization(deps.settings, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
-    kind: GOOGLE_DRIVE_OAUTH_STATE_KIND,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
-    ...(input.externalContinuation
-      ? {
-          encryptedExternalContinuation: encryptEnvironmentValue(
-            key,
-            JSON.stringify(ExternalActorContinuation.parse(input.externalContinuation)),
-          ),
-        }
-      : {}),
+    ...(input.externalContinuation ? { externalContinuation: input.externalContinuation } : {}),
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     returnPath: GOOGLE_DRIVE_RETURN_PATH(input.workspaceId),
-    encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
     capability: input.payload.capability,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
+}
+
+function googleDriveOAuthAuthorization(
+  settings: Settings,
+  authority: Omit<GoogleDriveOAuthState, "nonce" | "iat" | "encryptedPkceVerifier">,
+): GoogleDriveOAuthStartResponse {
+  const key = requireEnvironmentEncryption(settings);
+  const verifier = randomBytes(48).toString("base64url");
+  const { externalContinuation, ...claims } = authority;
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    ...claims,
+    kind: GOOGLE_DRIVE_OAUTH_STATE_KIND,
+    ...(externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            key,
+            JSON.stringify(ExternalActorContinuation.parse(externalContinuation)),
+          ),
+        }
+      : {}),
+    encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
+  });
+  const pickingFolder = authority.capability === "publish" && !authority.publishingFolderId;
   const authorizationUrl = new URL(GOOGLE_AUTHORIZATION_URL);
-  authorizationUrl.searchParams.set("client_id", google.clientId);
-  authorizationUrl.searchParams.set("redirect_uri", redirectUri);
+  authorizationUrl.searchParams.set("client_id", requireGoogleDriveSettings(settings).clientId);
+  authorizationUrl.searchParams.set("redirect_uri", requireGoogleDriveOAuthCallbackUrl(settings));
   authorizationUrl.searchParams.set("response_type", "code");
   authorizationUrl.searchParams.set(
     "scope",
-    input.payload.capability === "publish" ? GOOGLE_DRIVE_FILE_SCOPE : GOOGLE_DRIVE_READONLY_SCOPE,
+    pickingFolder
+      ? GOOGLE_DRIVE_FILE_SCOPE
+      : authority.capability === "publish"
+        ? `${GOOGLE_DRIVE_READONLY_SCOPE} ${GOOGLE_DRIVE_FILE_SCOPE}`
+        : GOOGLE_DRIVE_READONLY_SCOPE,
   );
   authorizationUrl.searchParams.set("access_type", "offline");
-  authorizationUrl.searchParams.set("include_granted_scopes", "true");
+  // Google's OAuth-integrated Picker permits drive.file alone. Incremental
+  // authorization would import existing Drive/Gmail grants and reject it with
+  // invalid_scope. Merge grants only in a separate ordinary OAuth request.
+  authorizationUrl.searchParams.set("include_granted_scopes", pickingFolder ? "false" : "true");
   authorizationUrl.searchParams.set(
     "prompt",
-    input.payload.capability === "publish" ? "consent" : "consent select_account",
+    authority.capability === "publish" ? "consent" : "consent select_account",
   );
-  if (input.payload.capability === "publish") {
+  if (pickingFolder) {
     authorizationUrl.searchParams.set("trigger_onepick", "true");
     authorizationUrl.searchParams.set("allow_folder_selection", "true");
     authorizationUrl.searchParams.set("allow_multiple", "false");
@@ -361,6 +381,8 @@ export async function completeGoogleDriveOAuthCallback(
   let state: GoogleDriveOAuthState | null = null;
   let exactReturnUrl: string | undefined;
   let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  let operationClaimed = false;
+  let operationSettlementStarted = false;
   try {
     state = readGoogleDriveOAuthState(input.state, deps.settings);
     if (state.connectAttemptId) {
@@ -389,7 +411,20 @@ export async function completeGoogleDriveOAuthCallback(
         "google-drive",
         Boolean(input.code && !input.error),
       );
-      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+      if (claim.status === "replayed") {
+        // A first-stage receipt retains its continuation even after final
+        // completion or cancellation. Reopen only the still-current action.
+        const latest = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+        if (
+          claim.attempt.nextAction.type === "authorize" &&
+          latest.attempt.nextAction.type === "authorize" &&
+          latest.attempt.nextAction.url === claim.attempt.nextAction.url
+        ) {
+          return { redirectTo: claim.attempt.nextAction.url };
+        }
+        return { redirectTo: exactReturnUrl, exactReturn: true };
+      }
+      operationClaimed = true;
     }
     await requireGoogleDriveCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
@@ -404,6 +439,7 @@ export async function completeGoogleDriveOAuthCallback(
       throw new GoogleDriveCallbackError("state_replayed");
     }
     if (operation && (input.error || !input.code)) {
+      operationSettlementStarted = true;
       await finishConnectOperation(deps.db, state, {
         ...operation,
         authorize: (tx, _attempt, origin) =>
@@ -451,8 +487,7 @@ export async function completeGoogleDriveOAuthCallback(
     if (
       !scopeDecision.accessMode ||
       !scopeDecision.capabilities.includes(requiredCapability) ||
-      (state.capability === "publish" &&
-        !scopeDecision.capabilities.includes("recursive_source_sync"))
+      (state.publishingFolderId && !scopeDecision.capabilities.includes("recursive_source_sync"))
     ) {
       throw new GoogleDriveCallbackError("scope_not_granted");
     }
@@ -481,12 +516,43 @@ export async function completeGoogleDriveOAuthCallback(
       state.capability === "publish"
         ? await verifyPickedGoogleDriveOutputDestination(
             token.accessToken,
-            input.pickedFileIds,
+            state.publishingFolderId ?? input.pickedFileIds,
             fetchImpl,
           )
         : previousMetadata?.outputDestination;
     if (state.capability === "publish") {
       if (!existing) throw new GoogleDriveCallbackError("connection_conflict");
+      if (!state.publishingFolderId) {
+        // The file-only Picker credential must never replace the existing
+        // recursive-read credential. Carry only its verified folder into a
+        // fresh, single-use PKCE flow that obtains both capabilities.
+        const { nonce: _nonce, iat: _iat, encryptedPkceVerifier: _verifier, ...authority } = state;
+        const continuation = googleDriveOAuthAuthorization(deps.settings, {
+          ...authority,
+          publishingFolderId: outputDestination!.folderId,
+        });
+        if (operation) {
+          const acceptedState = state;
+          operationSettlementStarted = true;
+          await finishOAuthAcquisition(
+            deps.db,
+            acceptedState,
+            {
+              ...operation,
+              authorize: (tx, _attempt, origin) =>
+                requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+              commit: async (_tx, current) => ({
+                ...current,
+                revision: current.revision + 1,
+                state: "requires_user_action",
+                nextAction: { type: "authorize", url: continuation.authorizationUrl },
+              }),
+            },
+            "google-drive",
+          );
+        }
+        return { redirectTo: continuation.authorizationUrl };
+      }
     }
     let refreshToken = token.refreshToken;
     if (!refreshToken && existing) {
@@ -582,6 +648,7 @@ export async function completeGoogleDriveOAuthCallback(
           });
     };
     if (operation) {
+      operationSettlementStarted = true;
       await finishOAuthAcquisition(
         deps.db,
         acceptedState,
@@ -629,6 +696,50 @@ export async function completeGoogleDriveOAuthCallback(
       redirectTo: googleDriveReturnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
+    if (
+      state &&
+      operation &&
+      operationClaimed &&
+      !operationSettlementStarted &&
+      error instanceof GoogleDriveCallbackError &&
+      [
+        "state_replayed",
+        "scope_not_granted",
+        "connection_conflict",
+        "account_mismatch",
+        "output_folder_required",
+        "output_folder_unavailable",
+        "refresh_token_missing",
+        "identity_verification_failed",
+      ].includes(error.reason)
+    ) {
+      // A definite validation rejection before persistence has no connection
+      // effect. Record a terminal receipt so polling and replay can finish.
+      // Transport failures and errors after settlement starts remain fenced:
+      // their outcome may be unknown, so never overwrite or retry them here.
+      const acceptedState = state;
+      try {
+        await finishConnectOperation(deps.db, acceptedState, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (_tx, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: {
+              code: error.reason,
+              message: "Authorization was not completed. Start a new connection attempt.",
+              retryable: false,
+            },
+          }),
+        });
+      } catch {
+        // Revoked authority or unavailable storage cannot authorize settlement.
+        // Preserve the claim rather than manufacture a terminal outcome.
+      }
+    }
     if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     // Reading the state is the first step, so no state means the link itself
     // was unusable: say whether it expired rather than blame configuration.
@@ -1717,7 +1828,6 @@ async function materializeGoogleDriveKnowledgeSchedules(
           action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
-          connectionAccounts: [],
           agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,
@@ -2283,6 +2393,16 @@ function readGoogleDriveOAuthState(
   if (capability !== "source_read" && capability !== "publish") {
     throw new HTTPException(400, { message: "invalid Google Drive OAuth capability" });
   }
+  const publishingFolderId = optionalString(payload.publishingFolderId) ?? undefined;
+  if (
+    payload.publishingFolderId !== undefined &&
+    (!publishingFolderId ||
+      publishingFolderId.length > 512 ||
+      capability !== "publish" ||
+      !connectionId)
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive publishing state" });
+  }
   if (
     (connectionVersion !== undefined && !Number.isInteger(connectionVersion)) ||
     Boolean(connectionId) !== Boolean(connectionVersion)
@@ -2315,6 +2435,7 @@ function readGoogleDriveOAuthState(
       "state.encryptedPkceVerifier",
     ),
     capability,
+    ...(publishingFolderId ? { publishingFolderId } : {}),
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
     iat,

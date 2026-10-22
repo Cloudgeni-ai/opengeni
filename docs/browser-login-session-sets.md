@@ -308,13 +308,29 @@ The product-owned API is:
   `currentPassword` when a password already exists. Existing password proof is
   rechecked by hash comparison under the same transaction as the update.
 
+### Browser API origin
+
+Personal sign-in changes require the browser API URL to have the same scheme,
+hostname and effective port as the web page. A different port is a different
+origin, even when CORS allows ordinary reads. The Security page detects this
+configuration before displaying sign-in controls; the API still refuses unsafe
+requests with `403` and `error.details.code=SIGN_IN_METHOD_SAME_ORIGIN_REQUIRED`.
+
+Serve `/v1` through a reverse proxy on the web origin and build the frontend with
+`VITE_API_BASE_URL` unset (relative requests) or set to that web origin. Keep
+`OPENGENI_PUBLIC_BASE_URL` aligned with the public web origin. Do not point the
+browser at a separate API port or remove the origin/CSRF checks to work around
+this requirement. Rebuild the frontend after changing its build-time API URL,
+then reload existing tabs. API services may still listen on separate internal
+ports behind the proxy.
+
 All mutations require a verified local email, a live canonical managed-cookie
 session authenticated within five minutes, same-origin JSON browser admission,
 and the expected identity revision. Session refresh/mirroring does not create a
 new authentication timestamp. The expected canonical identity is a non-authorizing
 view fence, compared before work and at commit: a legacy cookie swap from human A
 to human B cannot apply A's form to B even when their revision numbers match.
-Freshness means a recent explicit OpenGeni password sign-in or verified provider
+Freshness means a recent explicit Opengeni password sign-in or verified provider
 authorization-code sign-in, not a guarantee of forced password/MFA entry at the
 provider; Google/GitHub may reuse their own SSO sessions. The unsupported raw
 ID-token shortcut is rejected. Dual/broker callers must first establish a selected

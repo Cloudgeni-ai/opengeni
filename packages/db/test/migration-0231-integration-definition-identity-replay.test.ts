@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, test } from "bun:test";
 import { stableJson } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {

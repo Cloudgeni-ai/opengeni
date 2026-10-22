@@ -8,7 +8,7 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   type SlackUserLinkAccessRequest,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {
@@ -90,7 +90,7 @@ async function slackConnection(target: { accountId: string; workspaceId: string 
       slackTeamName: `Slack ${label}`,
       botId: `B_${label}`,
       botUserId: `UB_${label}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });

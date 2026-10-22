@@ -1,4 +1,14 @@
 export type ConnectOwnership = "personal" | "workspace";
+/** Non-secret endpoint and header mapping; values enter only credential submission. */
+export type PreparedMcpSetup = {
+  name: string;
+  endpointUrl: string;
+  headers: Array<
+    | { name: string; value: string }
+    | { name: string; secret: string; prefix?: string | undefined; suffix?: string | undefined }
+  >;
+  secretFields: Array<{ id: string; label: string }>;
+};
 export type ConnectProvider = {
   id: string;
   label: string;
@@ -70,6 +80,8 @@ export type ConnectAttempt = {
   expiresAt: string;
   account?: ConnectAccount;
   installationTarget?: ConnectInstallationTarget;
+  mcpSetup?: PreparedMcpSetup;
+  mcpCapabilityId?: string;
   source?:
     | { kind: "definition"; definitionId: string }
     | { kind: "openapi" | "auto"; url: string; baseUrl?: string }
@@ -99,6 +111,7 @@ export interface ConnectTransport {
       idempotencyKey: string;
       reconnectAccountId?: string;
       installationTarget?: ConnectInstallationTarget;
+      mcpSetup?: PreparedMcpSetup;
     },
     options?: ConnectCallOptions,
   ): Promise<ConnectAttempt>;

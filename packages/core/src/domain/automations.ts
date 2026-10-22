@@ -236,7 +236,7 @@ export function buildAutomationAcceptedExecution(input: {
       ...(credentialRestriction ? { credentialRestriction } : {}),
     },
     serviceSubjectId: `automation:${input.trigger.id}`,
-    serviceLabel: `OpenGeni automation: ${input.trigger.name}`,
+    serviceLabel: `Opengeni automation: ${input.trigger.name}`,
     provenance: {
       sourceId: input.source.id,
       sourceVersion: input.source.version,

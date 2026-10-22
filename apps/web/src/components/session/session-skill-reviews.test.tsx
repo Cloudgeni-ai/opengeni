@@ -2,14 +2,15 @@ import { act } from "react";
 import { expect, mock, test } from "bun:test";
 import type { SessionEvent, SkillRecord } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import type { AppContextValue } from "@/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import {
   registerDom,
   renderComponent,
   flush,
 } from "../../../../../packages/react/test/render-hook";
 registerDom();
-const { SessionSkillReviews } = await import("./session-skill-reviews");
+const { SessionSkillReviews } =
+  await import("@opengeni/react/app/components/session/session-skill-reviews");
 const operationId = "11111111-1111-4111-8111-111111111111";
 const skillId = "22222222-2222-4222-8222-222222222222";
 const revisionId = "33333333-3333-4333-8333-333333333333";

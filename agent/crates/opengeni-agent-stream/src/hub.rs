@@ -38,9 +38,11 @@ use opengeni_agent_proto::v1::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
+use crate::activity::StreamActivity;
 use crate::backoff::ChannelBackoff;
 use crate::browser_pump;
 use crate::channel::{ChannelConfig, RelayChannel};
+use crate::credential::RelayCredential;
 use crate::framebuffer_pump::{self, InputPolicy};
 use crate::pty_pump::{self, PtyCommand, PtyControlTx};
 
@@ -64,20 +66,20 @@ pub const DESKTOP_STREAM_PORT: u32 = 6080;
 const BROWSER_STREAM_PORT_START: u32 = 20_000;
 const BROWSER_STREAM_PORT_END: u32 = 65_535;
 
-/// Static configuration for the relay hub: the agent identity, the relay URL, and
-/// the agent's relay token + consent policy.
+/// Configuration for the relay hub: the agent identity, its relay credential,
+/// and its consent policy.
 #[derive(Debug, Clone)]
 pub struct RelayHubConfig {
     /// The workspace this agent is scoped to (the channel key + token scope).
     pub workspace_id: String,
     /// The agent (machine) id.
     pub agent_id: String,
-    /// The relay base URL to dial (from enrollment; `wss://relay…`).
-    pub relay_url: String,
-    /// The agent's relay token presented on producer registration (enrollment
-    /// scoped). NEVER logged. The viewer's `ogs_` token is a SEPARATE control-plane
-    /// mint (see the module + crate docs).
-    pub agent_token: String,
+    /// The relay address and the agent's producer token, presented on each
+    /// producer registration: fixed by a Connected Machine's enrollment, or
+    /// handed to a compute sandbox's agent by its host and replaced before it
+    /// expires. Never logged. The viewer's `ogs_` token is a SEPARATE
+    /// control-plane mint (see the module + crate docs).
+    pub credential: RelayCredential,
     /// Whether the user consented to screen-control (computer-use input). When
     /// false, desktop channels are view-only (inbound input is dropped).
     pub allow_screen_control: bool,
@@ -95,14 +97,38 @@ pub struct RelayHub {
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
     /// Idempotent terminal scopes → their live PTY/channel. The value is removed
     /// when the PTY pump exits. A scope is supplied by the control plane's durable
-    /// OpenGeni session identity; explicit unscoped `pty_open` remains create-new.
-    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
+    /// Opengeni session identity; explicit unscoped `pty_open` remains create-new.
+    pty_scopes: Arc<Mutex<HashMap<String, ScopedPty>>>,
     /// Per-scope singleflight locks. Weak values make the lock table self-pruning:
     /// it does not retain one allocation for every historical session forever.
     pty_scope_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     /// Allocated logical relay ports for browser frame subscriptions. They are
     /// routing handles, not listening TCP ports.
     browser_ports: Arc<Mutex<HashSet<u32>>>,
+    /// When each open channel last carried traffic.
+    activity: StreamActivity,
+}
+
+#[derive(Clone)]
+struct ScopedPty {
+    response: PtyOpenResponse,
+    descriptor: tokio::sync::watch::Receiver<Option<StreamChannel>>,
+}
+
+impl ScopedPty {
+    async fn response(mut self) -> PlatformResult<PtyOpenResponse> {
+        let descriptor = tokio::time::timeout(
+            PUMP_READY_TIMEOUT,
+            self.descriptor.wait_for(Option::is_some),
+        )
+        .await
+        .map_err(|_| PlatformError::stream("terminal relay is reconnecting", true))?
+        .map_err(|_| PlatformError::stream("terminal relay ended during reconnect", true))?;
+        Ok(PtyOpenResponse {
+            pty_id: self.response.pty_id.clone(),
+            channel: descriptor.clone(),
+        })
+    }
 }
 
 impl std::fmt::Debug for RelayHub {
@@ -125,7 +151,15 @@ impl RelayHub {
             pty_scopes: Arc::new(Mutex::new(HashMap::new())),
             pty_scope_locks: Arc::new(Mutex::new(HashMap::new())),
             browser_ports: Arc::new(Mutex::new(HashSet::new())),
+            activity: StreamActivity::new(),
         }
+    }
+
+    /// When the hub's open channels last carried traffic: what the agent
+    /// reports as streams in use.
+    #[must_use]
+    pub fn activity(&self) -> &StreamActivity {
+        &self.activity
     }
 
     /// Builds a [`StreamChannel`] descriptor for `(kind, port)` with a fresh
@@ -137,15 +171,17 @@ impl RelayHub {
             agent_id: self.config.agent_id.clone(),
             kind: kind as i32,
             port,
+            relay_route: None,
         }
     }
 
-    /// The channel config (descriptor + token + relay url) for a descriptor.
+    /// The channel config (descriptor, credential, activity stamp) for a
+    /// descriptor.
     fn channel_config(&self, channel: StreamChannel) -> ChannelConfig {
         ChannelConfig {
             channel,
-            token: self.config.agent_token.clone(),
-            relay_url: self.config.relay_url.clone(),
+            credential: self.config.credential.clone(),
+            activity: self.activity.track(),
         }
     }
 
@@ -165,7 +201,7 @@ impl RelayHub {
 
     /// Returns the scoped PTY only while its pump/control sender is still live.
     /// A stale scope entry is removed eagerly so the next ensure can recreate it.
-    fn live_scoped_pty(&self, scope_id: &str) -> Option<PtyOpenResponse> {
+    fn live_scoped_pty(&self, scope_id: &str) -> Option<ScopedPty> {
         let response = self
             .pty_scopes
             .lock()
@@ -175,7 +211,7 @@ impl RelayHub {
             .ptys
             .lock()
             .ok()
-            .and_then(|ptys| ptys.get(&response.pty_id).cloned())
+            .and_then(|ptys| ptys.get(&response.response.pty_id).cloned())
             .is_some_and(|sender| !sender.is_closed());
         if live {
             return Some(response);
@@ -183,7 +219,7 @@ impl RelayHub {
         if let Ok(mut scopes) = self.pty_scopes.lock() {
             if scopes
                 .get(scope_id)
-                .is_some_and(|candidate| candidate.pty_id == response.pty_id)
+                .is_some_and(|candidate| candidate.response.pty_id == response.response.pty_id)
             {
                 scopes.remove(scope_id);
             }
@@ -204,7 +240,7 @@ impl RelayHub {
         let pty_id = descriptor.channel_id.clone();
         let response = PtyOpenResponse {
             pty_id: pty_id.clone(),
-            channel: Some(descriptor),
+            channel: Some(channel.channel().clone()),
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<PtyCommand>(PTY_COMMAND_BUFFER);
@@ -213,7 +249,13 @@ impl RelayHub {
         }
         if let Some(scope_id) = scope_id.as_ref() {
             if let Ok(mut scopes) = self.pty_scopes.lock() {
-                scopes.insert(scope_id.clone(), response.clone());
+                scopes.insert(
+                    scope_id.clone(),
+                    ScopedPty {
+                        response: response.clone(),
+                        descriptor: channel.descriptor_updates(),
+                    },
+                );
             }
         }
 
@@ -236,7 +278,7 @@ impl RelayHub {
             if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), self.pty_scopes.lock()) {
                 if scopes
                     .get(scope_id)
-                    .is_some_and(|candidate| candidate.pty_id == pty_id)
+                    .is_some_and(|candidate| candidate.response.pty_id == pty_id)
                 {
                     scopes.remove(scope_id);
                 }
@@ -264,7 +306,7 @@ impl StreamRegistry for RelayHub {
         let lock = self.scope_lock(&req.scope_id);
         let _guard = lock.lock().await;
         if let Some(response) = self.live_scoped_pty(&req.scope_id) {
-            return Ok(response);
+            return response.response().await;
         }
         let process = spawn_pty(req, default_shell)?;
         self.register_pty_scoped(process, Some(req.scope_id.clone()))
@@ -286,6 +328,8 @@ impl StreamRegistry for RelayHub {
         let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
+
+        let descriptor = channel.channel().clone();
 
         let policy = InputPolicy {
             allow_input: self.config.allow_screen_control,
@@ -328,9 +372,10 @@ impl StreamRegistry for RelayHub {
                 return Err(stream_to_platform(error));
             }
         };
+        let descriptor = channel.channel().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
                 Ok(()) => {
                     channel
@@ -384,9 +429,10 @@ impl StreamRegistry for RelayHub {
                 return Err(stream_to_platform(error));
             }
         };
+        let descriptor = channel.channel().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         let browser_ports = self.browser_ports.clone();
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
                 Ok(()) => {
                     channel
@@ -463,10 +509,10 @@ fn spawn_pty_pump(
     pty_id: String,
     scope_id: Option<String>,
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
-    pty_scopes: Arc<Mutex<HashMap<String, PtyOpenResponse>>>,
+    pty_scopes: Arc<Mutex<HashMap<String, ScopedPty>>>,
     ready: oneshot::Sender<()>,
 ) {
-    tokio::spawn(async move {
+    opengeni_agent_platform::spawn_reserved(async move {
         // The PTY pump owns reconnects because its reader/writer handles are
         // once-only and must remain alive across every relay transport generation.
         match pty_pump::run(&mut process, &mut channel, &mut commands, Some(ready)).await {
@@ -484,7 +530,7 @@ fn spawn_pty_pump(
         if let (Some(scope_id), Ok(mut scopes)) = (scope_id.as_ref(), pty_scopes.lock()) {
             if scopes
                 .get(scope_id)
-                .is_some_and(|candidate| candidate.pty_id == pty_id)
+                .is_some_and(|candidate| candidate.response.pty_id == pty_id)
             {
                 scopes.remove(scope_id);
             }
@@ -499,7 +545,7 @@ fn spawn_desktop_pump(
     policy: InputPolicy,
     ready: oneshot::Sender<()>,
 ) {
-    tokio::spawn(async move {
+    opengeni_agent_platform::spawn_reserved(async move {
         // The readiness signal is fired by the pump on its FIRST run only (after the
         // first frame is captured + forwarded); a reconnect re-enters with `None`.
         let mut ready = Some(ready);
@@ -619,8 +665,7 @@ mod tests {
         let hub = RelayHub::new(RelayHubConfig {
             workspace_id: "ws".to_string(),
             agent_id: "ag".to_string(),
-            relay_url: "wss://relay".to_string(),
-            agent_token: "tok".to_string(),
+            credential: RelayCredential::fixed("wss://relay", "tok"),
             allow_screen_control: true,
         });
         let d = hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
@@ -689,8 +734,7 @@ mod tests {
         let hub = RelayHub::new(RelayHubConfig {
             workspace_id: "ws".to_string(),
             agent_id: "ag".to_string(),
-            relay_url: "wss://unreachable.invalid".to_string(),
-            agent_token: "tok".to_string(),
+            credential: RelayCredential::fixed("wss://unreachable.invalid", "tok"),
             allow_screen_control: true,
         });
         let descriptor = hub.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
@@ -699,14 +743,19 @@ mod tests {
             channel: Some(descriptor),
         };
         let (control, _commands) = mpsc::channel(1);
+        let (current_descriptor, descriptor_updates) =
+            tokio::sync::watch::channel(response.channel.clone());
         hub.ptys
             .lock()
             .expect("ptys")
             .insert(response.pty_id.clone(), control);
-        hub.pty_scopes
-            .lock()
-            .expect("scopes")
-            .insert("session-1".to_string(), response.clone());
+        hub.pty_scopes.lock().expect("scopes").insert(
+            "session-1".to_string(),
+            ScopedPty {
+                response: response.clone(),
+                descriptor: descriptor_updates,
+            },
+        );
 
         // An impossible command proves reuse occurs before spawn/dial. Concurrent
         // capability refreshes must both receive the exact existing descriptor.
@@ -726,5 +775,22 @@ mod tests {
         assert_eq!(first.expect("first reuse"), response);
         assert_eq!(second.expect("second reuse"), response);
         assert_eq!(hub.ptys.lock().expect("ptys").len(), 1);
+        let mut migrated = response.channel.clone().unwrap();
+        migrated.relay_route = Some("new-owner-route".into());
+        current_descriptor.send_replace(Some(migrated.clone()));
+        let refreshed = hub.open_pty(&request, &[]).await.unwrap();
+        assert_eq!(refreshed.pty_id, response.pty_id);
+        assert_eq!(refreshed.channel, Some(migrated));
+        current_descriptor.send_replace(None);
+        let pending_refresh = hub.open_pty(&request, &[]);
+        tokio::pin!(pending_refresh);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending_refresh)
+                .await
+                .is_err(),
+            "a refresh must not return the known-dead owner during backoff"
+        );
+        current_descriptor.send_replace(response.channel.clone());
+        assert_eq!(pending_refresh.await.unwrap(), response);
     }
 }

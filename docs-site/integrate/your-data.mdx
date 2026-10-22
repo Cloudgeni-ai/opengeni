@@ -27,6 +27,7 @@ The session proxy attaches your MCP endpoint to every chat, mints a short-lived 
       toolServer: {
         url: "https://app.example.com/api/mcp", // public HTTPS
         approvals: { ask: ["rename_post"] }, // the user approves each call
+        eager: ["search_posts", "get_post"], // on the first request, no tool_search round trip
       },
     });
     ```

@@ -22,7 +22,7 @@ import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/m
 import { agentRunFailurePayload } from "../../../apps/worker/src/activities/agent-turn/errors";
 import { ModalCommandStartRejectedError } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalCommandObservationTransportError } from "../src/sandbox/providers/modal-command-observation-errors";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildAgentCapabilities } from "../src/index";
 import {
   RoutingSandboxSession,

@@ -3,7 +3,7 @@ import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as config from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
 
 import {
@@ -12,6 +12,9 @@ import {
   recordModelUsageAndDebitCredits,
   sanitizedModelUsageInput,
 } from "../src/activities/agent-turn/model-usage";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
@@ -213,6 +216,7 @@ describe("recordAuthoritativeModelCallFact", () => {
           provider: "codex-subscription",
           providerApi: "responses",
           model: "codex/gpt-5.6-sol",
+          purpose: "main",
           sourceKey,
           usage: { usage },
           normalizedUsage: billing.normalizedUsage,
@@ -243,6 +247,78 @@ describe("recordAuthoritativeModelCallFact", () => {
       });
     }
     expect(factSpy).toHaveBeenCalledTimes(3);
+  });
+
+  test("stores the call's measured timing on the usage event and the fact", async () => {
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => usageSpy.mockRestore());
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockResolvedValue(undefined as never);
+    restores.push(() => factSpy.mockRestore());
+    const payloads: Array<Record<string, unknown>> = [];
+    const observability = { info: () => undefined, warn: () => undefined } as never;
+    const timing = {
+      preDispatchMs: 15,
+      timeToFirstTokenMs: 420,
+      timeToFirstTextMs: null,
+      durationMs: 3_100,
+    };
+    const sourceKey = "timing-source";
+    const usage = { inputTokens: 1000, outputTokens: 50, totalTokens: 1050 };
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-timing",
+      turnId: "turn-timing",
+      turnAttemptId: "attempt-timing",
+      model: "codex/gpt-5.6-sol",
+      externallyBilled: true,
+      usage,
+      sourceKey,
+    });
+    expect(billing).not.toBeNull();
+    if (!billing) return;
+    const common = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-timing",
+      turnId: "turn-timing",
+      provider: "codex-subscription",
+      providerApi: "responses",
+      model: "codex/gpt-5.6-sol",
+      sourceKey,
+    } as const;
+    expect(
+      await emitModelCallUsage({
+        ...common,
+        observability,
+        publish: async (batch) => {
+          payloads.push(batch[0]?.payload as Record<string, unknown>);
+          return {
+            accepted: true,
+            events: batch.map((event) => ({
+              ...event,
+              id: crypto.randomUUID(),
+              turnAssociation: "current" as const,
+            })) as never,
+          };
+        },
+        purpose: "main",
+        usage: { usage },
+        normalizedUsage: billing.normalizedUsage,
+        billingPath: billing.billingPath,
+        timing,
+      }),
+    ).toBe(true);
+    await recordAuthoritativeModelCallFact({
+      ...common,
+      db,
+      observability,
+      turnAttemptId: "attempt-timing",
+      billing,
+      timing,
+    });
+    expect(payloads.at(-1)).toMatchObject({ sourceKey, timing });
+    expect(factSpy.mock.calls.at(-1)?.[1]).toMatchObject({ sourceKey, timing });
   });
 
   test("freezes accepted total and class comparisons in the event and fact without a new debit", async () => {
@@ -286,6 +362,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         provider: "claude-subscription",
         providerApi: "anthropic-messages",
         model: "snapshot-model",
+        purpose: "main",
         sourceKey: "response-snapshot",
         usage: { usage },
         normalizedUsage: billing.normalizedUsage,
@@ -560,6 +637,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       provider: "openai",
       providerApi: "responses",
       model: "scripted-model",
+      purpose: "main",
       sourceKey: "response-free",
       usage: { usage },
       normalizedUsage: billing.normalizedUsage,

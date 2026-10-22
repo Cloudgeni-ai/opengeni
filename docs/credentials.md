@@ -4,7 +4,7 @@ Audience: integrators and operators. One page for every credential the system
 mints or accepts — what it is, who issues it, where it travels, and who may see
 it. If you are deciding *which* credential to use: an external product backend
 uses an **organization API key**; hosts acting on behalf of their own users use
-a **delegated token**; everything else is machinery you receive from OpenGeni
+a **delegated token**; everything else is machinery you receive from Opengeni
 rather than choose. The canonical product boundary is in
 [`product-integration.md`](product-integration.md).
 
@@ -12,6 +12,7 @@ rather than choose. The canonical product boundary is in
 | --- | --- | --- | --- | --- | --- |
 | Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Ordinary callers and deployment-only surfaces of a key-gated deployment (coarse perimeter, not identity) |
 | Organization API key | `ogk_…` bearer | Organization key administration via `POST /v1/organizations/:organizationId/api-keys` | Hash lookup (stored hashed, shown once) plus organization/workspace authorization | Until expiration or revocation | An external product backend calling organization-workspace routes; never a browser or Personal workspace |
+| Personal API key | `ogp_…` bearer | The person, in Organization settings > Developer, via `POST /v1/organizations/:organizationId/personal-api-keys` | Hash lookup at request entry, then the person's live membership, role and workspace access, capped by the key's access setting | Until its expiry (30, 90 or 365 days, or none), revocation, or the person leaving the organization | A script or outside agent that should act as one person, shown as them |
 | Workspace API key | `ogk_…` bearer | Authorized caller via `POST /v1/workspaces/:workspaceId/api-keys` | Hash lookup plus exact workspace authorization | Until expiration or revocation | A backend or automation constrained to one organization workspace |
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
@@ -24,12 +25,12 @@ rather than choose. The canonical product boundary is in
 | NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | Connection | Machine agents and internal services on the message bus |
 | Session MCP headers | Arbitrary headers, authenticated-encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
 | Capability MCP headers | Arbitrary headers, authenticated-encrypted at rest | Workspace admin when configuring a capability | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Until reconfigured | Third-party MCP servers enabled workspace-wide |
-| Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow in Workspace or Organization settings | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | One workspace pool, or one organization pool inherited by current and future shared workspaces; personal workspaces remain local |
-| Organization Vercel AI Gateway / OpenRouter keys | Provider API key, encrypted | Organization settings → Models, connected by owners and admins and available in every shared workspace or the ones they choose | Organization provider account; OpenGeni never returns the key | Until rotated or disconnected | One organization connection per provider inherited by current/future shared workspaces; Personal workspaces remain local; workspace-only connections remain independent |
-| Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | OpenGeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
-| Personal GitHub Git broker bearer | Encrypted opaque `oggh1.…` password used only by Git smart HTTP | OpenGeni worker from an exact accepted personal repository snapshot | OpenGeni API broker plus live connection/repository/provider revalidation | Five minutes, proactively renewed without changing routes | One active managed-sandbox attempt; delivered through private editor/file ingress, never provider CLIs, Connected Machines, model context, manifests, remotes, argv, logs, events, or audit text |
+| Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow in Workspace or Organization settings | OpenAI; Opengeni stores encrypted, never returns them | Provider-defined, auto-refreshed | One workspace pool, or one organization pool inherited by current and future shared workspaces; personal workspaces remain local |
+| Organization Vercel AI Gateway / OpenRouter / Opper keys | Provider API key, encrypted | Organization settings → Models, connected by owners and admins and available in every shared workspace or the ones they choose | Organization provider account; Opengeni never returns the key | Until rotated or disconnected | One organization connection per provider inherited by current/future shared workspaces; Personal workspaces remain local; workspace-only connections remain independent |
+| Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | Opengeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
+| Personal GitHub Git broker bearer | Encrypted opaque `oggh1.…` password used only by Git smart HTTP | Opengeni worker from an exact accepted personal repository snapshot | Opengeni API broker plus live connection/repository/provider revalidation | Five minutes, proactively renewed without changing routes | One active managed-sandbox attempt; delivered through private editor/file ingress, never provider CLIs, Connected Machines, model context, manifests, remotes, argv, logs, events, or audit text |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials`, or a standalone product through the workspace credential provider (`docs/workspace-integrations.md`) | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
-| Sandbox Codemode bearer | Narrow `ogd_…`; protected attempt file via `OPENGENI_CODEMODE_TOKEN_FILE` on managed boxes, direct `OPENGENI_CODEMODE_TOKEN` only in an exact Connected Machine child exec | OpenGeni worker from first-party signing authority | Exact-attempt Codemode API | One hour per bearer, proactively renewed during the active attempt | `@opengeni/codemode`/`ogtool` on managed sandboxes; native `opengeni-agent codemode` or an installed client in Connected Machine commands. Group-global ttyd and stable machine state receive no bearer |
+| Sandbox Codemode bearer | Narrow `ogd_…`; protected attempt file via `OPENGENI_CODEMODE_TOKEN_FILE` on managed boxes, direct `OPENGENI_CODEMODE_TOKEN` only in an exact Connected Machine child exec | Opengeni worker from first-party signing authority | Exact-attempt Codemode API | One hour per bearer, proactively renewed during the active attempt | `@opengeni/codemode`/`ogtool` on managed sandboxes; native `opengeni-agent codemode` or an installed client in Connected Machine commands. Group-global ttyd and stable machine state receive no bearer |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
@@ -41,6 +42,21 @@ Rules that hold across the table:
   Personal workspaces are excluded. Store the token in a secret manager, map
   product tenants to opaque workspace ids, and proxy browser operations through
   the product backend. See [`product-integration.md`](product-integration.md).
+
+- **Personal keys act as the person.** A personal API key carries no grant of
+  its own: each request verifies the key (`stampPersonalApiKeyRequest` in
+  `@opengeni/core`) and resolves through the same path as an agent acting as
+  the person, so it reaches exactly what they can do now in that organization,
+  capped by the key's access setting, and everything it does is attributed to
+  them. A changed role applies on the next request, suspension pauses the key,
+  and leaving the organization revokes it for good. Only the person can create
+  one (in the browser, or through an agent or key with their Full access, so a
+  limited key never mints a broader one); they see and revoke their own, and
+  owners and admins see and revoke everyone's. A personal key is never combined
+  with external-user or service headers. It works on every route the person
+  can use, including the organization MCP server (`/v1/mcp`). Stored rows keep
+  the legacy `permissions` column empty, so an older API instance in a rolling
+  deploy reads the key as having no access. Migration `0722` is rolling.
 
 - **Ambiguous legacy account keys are revoked on upgrade.** Migration 0382
   marks historical null-workspace keys without explicit organization provenance

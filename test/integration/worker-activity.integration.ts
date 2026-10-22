@@ -42,21 +42,11 @@ import {
   deleteScheduledTask,
   createSession,
   createSessionGoal,
-  createVariableSet,
   dbSql,
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  fetchCodexUsageForAccount,
-  listCodexAccountStatuses,
   requestSessionCompaction,
   isSessionCompactionRequested,
-  setInitialActiveCodexCredential,
-  setSessionCodexPin,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
-  loadVariableSetForRun,
-  setVariableSetVariable,
   getSession,
   getSessionTurn,
   getSessionSystemUpdateOutboxByDedupeKey,
@@ -88,6 +78,14 @@ import {
   withWorkspaceSubjectRls,
   type Database,
 } from "@opengeni/db";
+import {
+  connectSubscriptionCoreCodexConnection,
+  fetchSubscriptionCoreCodexUsage,
+  getSubscriptionCoreCodexWorkspaceProjection,
+  pinSubscriptionCoreSessionCodexAccount,
+  setSubscriptionCoreCodexPrimary,
+  setSubscriptionCoreCodexRotation,
+} from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
@@ -115,15 +113,11 @@ import {
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { reconcilePendingParentSystemUpdates } from "../../apps/worker/src/activities/parent-wake";
-import {
-  ScriptedModel,
-  functionCall,
-  latestStatus,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  type TestServices,
-} from "@opengeni/testing";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { latestStatus } from "@opengeni/testing/assertions";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
 
 async function setSessionStatus(
   db: Database,
@@ -987,7 +981,7 @@ describe("worker activities integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
             timeoutMs: undefined,
             cacheToolsList: false,
@@ -1093,7 +1087,7 @@ describe("worker activities integration", () => {
       // context validation and the worker's MCP runtime see the same server.
       apiSettings.mcpServers.push({
         id: "opengeni",
-        name: "OpenGeni",
+        name: "Opengeni",
         url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
         timeoutMs: undefined,
         cacheToolsList: false,
@@ -1521,7 +1515,7 @@ describe("worker activities integration", () => {
     const leaseRows = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
       db.execute<{ count: number }>(dbSql`
         select count(*)::int as count
-        from codex_credential_leases
+        from subscription_leases
         where workspace_id = ${grant.workspaceId}
           and turn_id = ${turn.id}
       `),
@@ -2729,6 +2723,7 @@ describe("worker activities integration", () => {
       { type: "user.message", payload: { text: "read repo" } },
     ]);
     const sandboxExecCalls: Array<Record<string, unknown>> = [];
+    let launcherRuns = 0;
     const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -2746,6 +2741,10 @@ describe("worker activities integration", () => {
             },
             execCommand: async (args: Record<string, unknown>) => {
               sandboxExecCalls.push(args);
+              // A fresh box has no staged repository setup program yet: the
+              // first launcher run reports it missing, so the runtime stages it.
+              if (String(args.cmd).includes("opengeni_setup_program=") && launcherRuns++ === 0)
+                return { status: 86, output: "__OPENGENI_SETUP_PROGRAM_MISSING__\n" };
               return { status: 0, output: "" };
             },
           }),
@@ -2765,15 +2764,37 @@ describe("worker activities integration", () => {
 
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls.length).toBeGreaterThan(3);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
-    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+    // Client installation is independent of the ordered seed/renewal/clone
+    // chain. Locate the operations, not their absolute exec positions; loading
+    // the client bytes can let the token seed reach the sandbox first.
+    const clientInstall = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes("fs.constants.X_OK"),
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    const tokenSeed = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes('printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"'),
     );
-    const chunks = sandboxExecCalls.slice(2).flatMap(({ cmd }) => {
+    expect(clientInstall).toBeGreaterThanOrEqual(0);
+    expect(tokenSeed).toBeGreaterThanOrEqual(0);
+    // Compare booleans so a failed assertion never prints a command's bearer.
+    expect(
+      String(sandboxExecCalls[clientInstall]?.cmd).includes("OPENGENI_CODEMODE_TOKEN_SEED"),
+    ).toBe(false);
+    expect(
+      String(sandboxExecCalls[tokenSeed]?.cmd).includes(
+        "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+      ),
+    ).toBe(true);
+    const launchers = sandboxExecCalls.flatMap(({ cmd }, index) =>
+      String(cmd).includes("opengeni_setup_program=") ? [index] : [],
+    );
+    // Missing program, staged once, then the same one-command launcher again.
+    expect(launchers).toHaveLength(2);
+    expect(launchers[0]).toBeGreaterThan(tokenSeed);
+    const launcher = String(sandboxExecCalls[launchers[0]!]?.cmd);
+    expect(launcher).toContain("opengeni_setup_program='/workspace/.opengeni/setup-programs-");
+    expect(launcher).toContain('exec /bin/sh "$opengeni_setup_program"');
+    expect(String(sandboxExecCalls[launchers[1]!]?.cmd)).toBe(launcher);
+    const chunks = sandboxExecCalls.slice(launchers[0]!).flatMap(({ cmd }) => {
       const match = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
       return match ? [match[1]!] : [];
     });
@@ -2783,16 +2804,24 @@ describe("worker activities integration", () => {
       "start_repository_clone '/workspace/repos/git.example.com/team/fixture.git'",
     );
     expect(cloneCommand).toContain(
-      'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
+      'repository_git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"',
     );
+    expect(cloneCommand).not.toContain("--filter=blob:none");
     expect(cloneCommand).toContain("x-access-token");
-    const cloneExecution = sandboxExecCalls.findIndex(({ cmd }) =>
-      String(cmd).includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    // The persisted program never carries this turn's credential seeds.
+    expect(cloneCommand).not.toMatch(/export OPENGENI_GIT_[A-Z0-9_]*TOKEN_SEED=/u);
+    const install = sandboxExecCalls.findIndex(({ cmd }) =>
+      /mv -f '\/workspace\/\.opengeni\/setup-programs-[0-9a-f]+\/[0-9a-f]{64}\.sh\.[^']+\.tmp' '\/workspace\/\.opengeni\/setup-programs-/u.test(
+        String(cmd),
+      ),
     );
-    expect(cloneExecution).toBeGreaterThan(2);
-    expect(String(sandboxExecCalls.at(-1)?.cmd)).toContain(
-      "rm -f '/tmp/opengeni/repository-setup-payloads/",
-    );
+    expect(install).toBeGreaterThan(launchers[0]!);
+    expect(install).toBeLessThan(launchers[1]!);
+    expect(
+      sandboxExecCalls.some(({ cmd }) =>
+        String(cmd).includes("/tmp/opengeni/repository-setup-payloads/"),
+      ),
+    ).toBe(false);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
@@ -3341,7 +3370,7 @@ describe("worker activities integration", () => {
       filename: "no-credit-doc.txt",
       safeFilename: "no-credit-doc.txt",
       contentType: "text/plain",
-      sizeBytes: new TextEncoder().encode("OpenGeni managed document credit test.").byteLength,
+      sizeBytes: new TextEncoder().encode("Opengeni managed document credit test.").byteLength,
       bucket: "test",
       objectKey: `workspaces/${grant.workspaceId}/files/no-credit-doc.txt`,
       expiresAt: new Date(Date.now() + 60_000),
@@ -3374,7 +3403,7 @@ describe("worker activities integration", () => {
       }),
       db: dbClient.db,
       bus,
-      objectStorage: fakeObjectStorage("OpenGeni managed document credit test."),
+      objectStorage: fakeObjectStorage("Opengeni managed document credit test."),
       documentServices: {
         parser: {
           name: "test-text",
@@ -3936,7 +3965,7 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
+  test("scheduled dispatch and its retry skip without a chat while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
     await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
@@ -3967,6 +3996,8 @@ describe("worker activities integration", () => {
       metadata: {},
     });
     const workflowWakes: unknown[] = [];
+    const model = new ScriptedModel([{ outputText: "should not run" }]);
+    const balanceBefore = await getBillingBalance(dbClient.db, grant.accountId);
     const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -3977,11 +4008,11 @@ describe("worker activities integration", () => {
       wakeSessionWorkflow: async (input) => {
         workflowWakes.push(input);
       },
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "ok" }]),
-      }),
+      runtime: createProductionAgentRuntime({ model }),
     });
     const producerKey = `paused-fire:${crypto.randomUUID()}`;
+    const sessionsBefore = await listSessions(dbClient.db, grant.workspaceId);
+    expect(sessionsBefore).toEqual([]);
 
     const first = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
@@ -3989,6 +4020,8 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
       producerKey,
     });
+    const firstRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(firstRuns).toHaveLength(1);
     const retry = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
@@ -3996,23 +4029,57 @@ describe("worker activities integration", () => {
       producerKey,
     });
 
-    expect(first.workflowWakeRevision).toBeNull();
-    expect(retry).toMatchObject({
-      sessionId: first.sessionId,
-      workflowWakeRevision: null,
-    });
+    // A workspace Pause skips a new-chat run before any chat exists, and the
+    // retry of the same fire settles on that skipped run.
+    const skipped = { action: "blocked", reason: "scheduled_run_terminal" };
+    expect(first).toEqual(skipped);
+    expect(retry).toEqual(skipped);
     expect(workflowWakes).toHaveLength(0);
-    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
-      status: "queued",
-      effectiveControl: { state: "paused" },
+    expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(sessionsBefore.length);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({
+        id: firstRuns[0]!.id,
+        status: "skipped",
+        error: "scheduled_workspace_paused",
+        sessionId: null,
+        triggerEventId: null,
+      }),
+    ]);
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) => {
+      const [state] = await db.execute(dbSql`
+        select workspace_state,
+          (select count(*)::int from session_turns
+            where workspace_id = ${grant.workspaceId}::uuid) as turns,
+          (select count(*)::int from session_events
+            where workspace_id = ${grant.workspaceId}::uuid) as events,
+          (select count(*)::int from session_system_updates
+            where workspace_id = ${grant.workspaceId}::uuid) as updates
+        from workspace_inference_controls
+        where workspace_id = ${grant.workspaceId}::uuid
+      `);
+      expect(state).toMatchObject({ workspace_state: "paused", turns: 0, events: 0, updates: 0 });
     });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
-    // session.created carries the public "queued" status directly; there is no
-    // separate session.status.changed event before the (withheld) wake.
-    expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
-      status: "queued",
+    expect((await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).status).toBe(
+      "active",
+    );
+    expect(model.calls).toBe(0);
+    expect((await getBillingBalance(dbClient.db, grant.accountId)).balanceMicros).toBe(
+      balanceBefore.balanceMicros,
+    );
+    const usage = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 100,
     });
-    expect(events.filter((event) => event.type === "session.status.changed")).toHaveLength(0);
+    expect(
+      usage.filter((event) =>
+        ["agent_run.created", "model.tokens", "model.cost"].includes(event.eventType),
+      ),
+    ).toEqual([]);
+    // Occurrence bookkeeping is retained exactly once; it is not model spend.
+    const fired = usage.filter((event) => event.eventType === "scheduled_task.fired");
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ sourceResourceId: firstRuns[0]!.id, quantity: 1 });
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
@@ -4678,9 +4745,36 @@ describe("worker activities integration", () => {
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
           action: "pause",
-          reason: "verify scheduled idle reservation",
+          reason: "verify Pause skips a reusable occurrence",
           operationKey: `pause:${crypto.randomUUID()}`,
           expectedRevision: 0,
+        }),
+      ),
+    );
+    // Pause skips the occurrence instead of reserving a queued boundary that
+    // nothing could service until Resume.
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "idle",
+      effectiveControl: { state: "paused" },
+    });
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "resume",
+          reason: "verify the next reusable occurrence after Resume",
+          operationKey: `resume:${crypto.randomUUID()}`,
+          expectedRevision: 1,
         }),
       ),
     );
@@ -4690,14 +4784,10 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
       producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
-    expect(third).toMatchObject({
-      action: "signal",
-      sessionId: first.sessionId,
-      workflowWakeRevision: null,
-    });
+    expect(third).toMatchObject({ action: "signal", sessionId: first.sessionId });
     expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
       status: "queued",
-      effectiveControl: { state: "paused" },
+      effectiveControl: { state: "active" },
     });
     expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
       id: goalAfterFirst.id,
@@ -4724,11 +4814,13 @@ describe("worker activities integration", () => {
     expect(
       await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
     ).toHaveLength(1);
-    expect(
-      (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
-        (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
-      ),
-    ).toHaveLength(2);
+    const skipped = (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
+      (run) => run.status === "skipped",
+    );
+    // The occurrence dispatched while the workspace was paused records that,
+    // not a busy or self-pausing chat.
+    expect(skipped.filter((run) => run.error === "scheduled_session_not_idle")).toHaveLength(2);
+    expect(skipped.filter((run) => run.error === "scheduled_workspace_paused")).toHaveLength(1);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
@@ -4940,101 +5032,7 @@ describe("worker activities integration", () => {
     ).toBe(agentRunsBefore);
   });
 
-  test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
-    const grant = await testGrant(dbClient.db);
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      environmentsEncryptionKey: workerEnvironmentsKey,
-    });
-    const environment = await seedWorkspaceEnvironment(
-      dbClient.db,
-      grant,
-      {
-        API_TOKEN: "worker-secret-token-1234",
-        DB_PASSWORD: "worker-secret-pass-5678",
-      },
-      "Operator notes: API_TOKEN authenticates the worker against the test API.",
-    );
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "load attached variable set",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-      subjectId: grant.subjectId,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "load attached variable set" } },
-    ]);
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: `environment-fixture-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") {
-      throw new Error(`environment fixture was not claimed: ${claimed.reason}`);
-    }
-    const initiatingHumanSubjectId = claimed.turn.initiatingHumanSubjectId;
-    if (!initiatingHumanSubjectId) {
-      throw new Error("environment fixture has no initiating human");
-    }
-    const authority = {
-      kind: "agent_attempt" as const,
-      subjectId: initiatingHumanSubjectId,
-      sessionId: session.id,
-      turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
-    };
-
-    expect(
-      await loadVariableSetForRun(dbClient.db, settings, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: null,
-        authority,
-      }),
-    ).toBeNull();
-    const loaded = await loadVariableSetForRun(dbClient.db, settings, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      variableSetId: environment.id,
-      authority,
-    });
-    expect(loaded).toMatchObject({
-      id: environment.id,
-      name: environment.name,
-      description: "Operator notes: API_TOKEN authenticates the worker against the test API.",
-    });
-    expect(loaded?.values).toEqual({
-      API_TOKEN: "worker-secret-token-1234",
-      DB_PASSWORD: "worker-secret-pass-5678",
-    });
-
-    await expect(
-      loadVariableSetForRun(dbClient.db, testSettings({ databaseUrl: services.databaseUrl }), {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: environment.id,
-        authority,
-      }),
-    ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
-    await expect(
-      loadVariableSetForRun(dbClient.db, settings, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: crypto.randomUUID(),
-        authority,
-      }),
-    ).rejects.toThrow();
-  });
-
-  test("layers workspace environment values between deployment env and GitHub run auth", async () => {
+  test("builds the sandbox environment from deployment env and GitHub run auth only", async () => {
     const settings = testSettings({
       sandboxBackend: "docker",
       sandboxEnvAllowlist: "WORKER_TEST_ALLOWLISTED",
@@ -5044,14 +5042,10 @@ describe("worker activities integration", () => {
     const previous = process.env.WORKER_TEST_ALLOWLISTED;
     process.env.WORKER_TEST_ALLOWLISTED = "deployment-value";
     try {
-      const { environment: unattached } = await sandboxEnvironmentForRun(settings, []);
-      expect(unattached.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
-      const { environment } = await sandboxEnvironmentForRun(settings, [], {
-        WORKER_TEST_ALLOWLISTED: "workspace-override",
-        WORKSPACE_ONLY_TOKEN: "workspace-only-value",
-      });
-      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("workspace-override");
-      expect(environment.WORKSPACE_ONLY_TOKEN).toBe("workspace-only-value");
+      // Workspace secrets are never injected as env; agents reach them through
+      // `{{secret:…}}` references resolved at execution time.
+      const { environment } = await sandboxEnvironmentForRun(settings, []);
+      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
       expect(environment.GIT_AUTHOR_NAME).toBe("Deployment Author");
       expect(environment.HOME).toBe("/workspace");
     } finally {
@@ -5062,248 +5056,6 @@ describe("worker activities integration", () => {
       }
     }
   });
-
-  test("preserves attached environment values echoed by the agent in session events", async () => {
-    const secret = "echoed-workspace-secret-987654";
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      LEAKED_TOKEN: secret,
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        environmentsEncryptionKey: workerEnvironmentsKey,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([
-          {
-            outputText: `the token is ${secret} end`,
-            chunks: ["the token is ", secret, " end"],
-          },
-        ]),
-      }),
-    });
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-environment-exact-content",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("idle");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    const serialized = JSON.stringify(events);
-    expect(serialized).toContain(secret);
-    const completed = events.find((event) => event.type === "agent.message.completed");
-    expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
-      `the token is ${secret} end`,
-    );
-  });
-
-  test("fails attached runs closed when the worker has no encryption key", async () => {
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      REQUIRED_TOKEN: "required-secret-123456",
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "never reached" }]),
-      }),
-    });
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-environment-missing-key",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("failed");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(JSON.stringify(failed?.payload)).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
-    expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
-  });
-
-  test.each([
-    undefined,
-    { kind: "service" as const, subjectId: "cloudgeni:scheduled-sync", label: "Scheduled sync" },
-  ])(
-    "materializes scheduled task workspace Variable Sets for pure service turns (%j)",
-    async (createdBy) => {
-      const grant = await testGrant(dbClient.db);
-      const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-        TASK_TOKEN: "task-secret-123456",
-      });
-      const task = await createOwnedScheduledTask(dbClient.db, grant, {
-        name: "environment dispatch",
-        status: "active",
-        schedule: { type: "interval", everySeconds: 3600 },
-        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-        runMode: "new_session_per_run",
-        overlapPolicy: "allow_concurrent",
-        agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-        ...(createdBy ? { createdBy, createdByContext: { job: "scheduled-sync-42" } } : {}),
-        variableSetId: environment.id,
-        metadata: {},
-      });
-      const activities = createWorkerActivities({
-        settings: testSettings({
-          databaseUrl: services.databaseUrl,
-          natsUrl: services.natsUrl,
-          environmentsEncryptionKey: workerEnvironmentsKey,
-        }),
-        db: dbClient.db,
-        bus,
-        runtime: createProductionAgentRuntime({
-          model: new ScriptedModel([{ outputText: "ok" }]),
-        }),
-      });
-      const dispatched = await activities.dispatchScheduledTaskRun({
-        workspaceId: grant.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `worker-activity-${crypto.randomUUID()}`,
-      });
-      expect(dispatched.action).toBe("start");
-      if (dispatched.action !== "start")
-        throw new Error("Variable Set schedule was not dispatched");
-      const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
-      expect(session?.environmentId).toBe(environment.id);
-      expect(session?.createdBy).toEqual({
-        kind: "service",
-        subjectId: "scheduler",
-        label: "OpenGeni scheduler",
-      });
-      const events = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        0,
-        10,
-      );
-      const createdEvent = events.find((event) => event.type === "session.created");
-      expect(createdEvent?.payload).toMatchObject({
-        variableSetId: environment.id,
-        variableSetName: environment.name,
-      });
-      expect(JSON.stringify(events)).not.toContain("task-secret-123456");
-
-      const attemptId = crypto.randomUUID();
-      const result = await activities.runAgentTurn({
-        attemptId,
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: dispatched.sessionId,
-        trigger: { kind: "next" },
-        workflowId: `session-${dispatched.sessionId}`,
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(result.status).toBe("idle");
-      const [scheduledTurn] = await listSessionTurns(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        10,
-      );
-      const expectedInitiator = createdBy ?? {
-        kind: "service",
-        subjectId: "scheduler",
-        label: "OpenGeni scheduler",
-      };
-      expect(scheduledTurn?.initiator).toEqual(expectedInitiator);
-      if (createdBy) {
-        expect(scheduledTurn?.initiatorContext).toMatchObject({ job: "scheduled-sync-42" });
-      }
-      expect(scheduledTurn?.personalConnections).toEqual([]);
-      const [storedAuthority] = await withWorkspaceRls(
-        dbClient.db,
-        grant.workspaceId,
-        async (scopedDb) =>
-          await scopedDb.execute<{
-            initiatorKind: string;
-            initiatorSubjectId: string;
-            initiatingHumanSubjectId: string | null;
-          }>(dbSql`
-          select initiator_kind as "initiatorKind",
-            initiator_subject_id as "initiatorSubjectId",
-            initiating_human_subject_id as "initiatingHumanSubjectId"
-          from session_turns where id = ${scheduledTurn!.id}
-        `),
-      );
-      expect(storedAuthority).toEqual({
-        initiatorKind: "service",
-        initiatorSubjectId: expectedInitiator.subjectId,
-        initiatingHumanSubjectId: null,
-      });
-      const [materializationAudit] = await withWorkspaceRls(
-        dbClient.db,
-        grant.workspaceId,
-        async (scopedDb) =>
-          await scopedDb.execute<{
-            subjectId: string;
-            actorKind: string;
-            causalHumanSubjectId: string | null;
-          }>(dbSql`
-          select subject_id as "subjectId", metadata->>'actorKind' as "actorKind",
-            metadata->>'causalHumanSubjectId' as "causalHumanSubjectId"
-          from audit_events
-          where workspace_id = ${grant.workspaceId}
-            and action = 'variable_set.materialized'
-            and metadata->>'attemptId' = ${attemptId}
-        `),
-      );
-      expect(materializationAudit).toEqual({
-        subjectId: expectedInitiator.subjectId,
-        actorKind: "service",
-        causalHumanSubjectId: null,
-      });
-      const completedEvents = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        0,
-        100,
-      );
-      expect(completedEvents.some((event) => event.type === "turn.completed")).toBe(true);
-      expect(completedEvents.some((event) => event.type === "turn.failed")).toBe(false);
-      expect(JSON.stringify(completedEvents)).not.toContain("task-secret-123456");
-    },
-  );
 
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
     const grant = await testGrant(dbClient.db);
@@ -5373,7 +5125,7 @@ describe("worker activities integration", () => {
     expect(runs[0]).toMatchObject({ status: "skipped", error: "session_cancelled" });
   });
 
-  describe("Codex subscription plan downgrade", () => {
+  describe("Codex shared-core refusal, consent and same-turn recovery", () => {
     // The production model client is cached per provider and keeps the fetch it
     // was built with, so one fake backend serves the whole block. Every test
     // registers its own ChatGPT account ids.
@@ -5404,6 +5156,15 @@ describe("worker activities integration", () => {
       rotationEnabled?: boolean;
     }) {
       const grant = await testGrant(dbClient.db);
+      // Keep the seeded core gate. The test's administrator has a distinct
+      // Personal workspace; these are workspace-managed shared connections.
+      const personalId = crypto.randomUUID();
+      await dbClient.db.execute(dbSql`insert into workspaces(id, account_id, name)
+        values (${personalId}::uuid, ${grant.accountId}::uuid, 'Codex fixture Personal')`);
+      await dbClient.db.execute(dbSql`insert into organization_memberships
+        (account_id, subject_id, role, status, personal_workspace_id)
+        values (${grant.accountId}::uuid, ${grant.subjectId}, 'owner', 'active', ${personalId}::uuid)
+        on conflict (account_id, subject_id) do nothing`);
       const credentialIds = new Map<string, string>();
       for (const account of input.accounts) {
         credentialIds.set(
@@ -5411,29 +5172,36 @@ describe("worker activities integration", () => {
           await connectFakeCodexCredential(dbClient.db, grant, account.externalId, account.label),
         );
       }
-      await ensureCodexRotationSettings(dbClient.db, grant.accountId, grant.workspaceId);
-      await setInitialActiveCodexCredential(
-        dbClient.db,
-        grant.workspaceId,
-        credentialIds.get(input.homeExternalId)!,
-      );
-      await updateCodexRotationSettings(dbClient.db, grant.workspaceId, {
-        rotationEnabled: input.rotationEnabled ?? true,
+      await setSubscriptionCoreCodexPrimary(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        connectionId: credentialIds.get(input.homeExternalId)!,
+      });
+      await setSubscriptionCoreCodexRotation(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        rotationEnabled: input.rotationEnabled ?? false,
       });
       const session = await createOwnedSession(dbClient.db, grant, {
-        initialMessage: "plan downgrade",
+        subjectId: grant.subjectId,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        initialMessage: "core refusal",
         resources: [],
         metadata: {},
         model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       });
-      await setSessionCodexPin(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        credentialIds.get(input.homeExternalId)!,
-        input.pinSource,
-      );
+      if (input.pinSource === "manual")
+        await pinSubscriptionCoreSessionCodexAccount(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          connectionId: credentialIds.get(input.homeExternalId)!,
+          subjectId: grant.subjectId,
+        });
       await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "plan downgrade" } },
       ]);
@@ -5456,18 +5224,132 @@ describe("worker activities integration", () => {
       });
     }
 
-    test("an empty-body 400 after a Pro to Free downgrade recovers the same turn on another subscription", async () => {
-      Object.assign(fakeAccounts, {
-        "acct-downgraded": { responses: "empty_400", usagePlan: "free", refreshedPlan: "free" },
-        "acct-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+    test("included exhaustion reported by response headers moves the next turn before opted-in credits", async () => {
+      const ids = ["acct-credit-first", "acct-included-second"];
+      fakeAccounts[ids[0]!] = {
+        responses: "ok",
+        usagePlan: "pro",
+        refreshedPlan: "pro",
+        usagePercent: 100,
+      };
+      fakeAccounts[ids[1]!] = {
+        responses: "ok",
+        usagePlan: "pro",
+        refreshedPlan: "pro",
+        usagePercent: 20,
+      };
+      const { grant, session, credentialIds } = await seedCodexTurn({
+        accounts: ids.map((externalId) => ({ externalId, label: externalId })),
+        homeExternalId: ids[0]!,
+        pinSource: "policy",
       });
-      {
+      const { setSubscriptionCoreCodexExtraCredits } = await import("@opengeni/db");
+      await setSubscriptionCoreCodexExtraCredits(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        connectionId: credentialIds.get(ids[0]!)!,
+        subjectId: grant.subjectId,
+        enabled: true,
+        expectedVersion: 1,
+      });
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      // Nothing is known about usage before the first request, so it is
+      // admitted without a usage read; its own headers report the exhaustion.
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
+      const servedByExhausted = callsFor("responses", [ids[0]!]).length;
+      expect(servedByExhausted).toBeGreaterThan(0);
+      expect(callsFor("responses", [ids[1]!])).toEqual([]);
+      expect(callsFor("usage", ids)).toEqual([]);
+      // The observed exhaustion is stored, so the next turn uses the account
+      // that still has included usage instead of spending credits.
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "Continue the synthetic task" } },
+      ]);
+      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
+      expect(callsFor("responses", [ids[1]!]).length).toBeGreaterThan(0);
+      expect(callsFor("responses", [ids[0]!])).toHaveLength(servedByExhausted);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    });
+
+    for (const scenario of ["unverifiable", "model_unavailable"] as const)
+      test(`${scenario} allowance candidate does not block or trap credit routing`, async () => {
+        const first = `acct-${scenario}-first`;
+        const second = `acct-${scenario}-second`;
+        fakeAccounts[first] = {
+          responses: "ok",
+          usagePlan: "pro",
+          refreshedPlan: "pro",
+          usagePercent: 100,
+          ...(scenario === "unverifiable" ? { usageUnavailable: true } : {}),
+        };
+        fakeAccounts[second] = {
+          responses: "ok",
+          usagePlan: "pro",
+          refreshedPlan: "pro",
+          usagePercent: 20,
+          ...(scenario === "model_unavailable" ? { models: ["smaller-model"] } : {}),
+        };
         const { grant, session, credentialIds } = await seedCodexTurn({
-          accounts: [
-            { externalId: "acct-downgraded", label: "Downgraded Pro" },
-            { externalId: "acct-healthy", label: "Healthy Pro" },
-          ],
-          homeExternalId: "acct-downgraded",
+          accounts: [first, second].map((externalId) => ({ externalId, label: externalId })),
+          homeExternalId: first,
+          pinSource: "policy",
+        });
+        const { setSubscriptionCoreCodexExtraCredits } = await import("@opengeni/db");
+        await setSubscriptionCoreCodexExtraCredits(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          connectionId: credentialIds.get(first)!,
+          subjectId: grant.subjectId,
+          enabled: true,
+          expectedVersion: 1,
+        });
+        const activities = createWorkerActivities({
+          settings: codexSettings(),
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime(),
+        });
+        if (scenario === "unverifiable") {
+          // Unknown usage never refuses: the request is admitted on the bound
+          // account without waiting for the unavailable usage endpoint.
+          expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+            status: "idle",
+          });
+          expect(callsFor("responses", [first]).length).toBeGreaterThan(0);
+          expect(callsFor("responses", [second])).toEqual([]);
+        } else {
+          expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
+            status: "idle",
+          });
+          expect(callsFor("responses", [second])).toEqual([]);
+          expect(callsFor("responses", [first]).length).toBeGreaterThan(0);
+        }
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+        expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      }, 60_000);
+
+    // The retired usage-based plan inference/copy remains characterized by
+    // codex-plan-entitlement and historical failure-settlement unit fixtures.
+    // Core never upgrades an ambiguous empty 400 into account-switch authority.
+    for (const observedPlan of ["free", "pro"] as const) {
+      test(`an empty 400 with observed ${observedPlan} plan does not switch or quarantine`, async () => {
+        const failing = `empty-400-${observedPlan}`;
+        const healthy = `empty-400-${observedPlan}-healthy`;
+        fakeAccounts[failing] = {
+          responses: "empty_400",
+          usagePlan: observedPlan,
+          refreshedPlan: observedPlan,
+        };
+        fakeAccounts[healthy] = { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" };
+        const { grant, session, credentialIds } = await seedCodexTurn({
+          accounts: [failing, healthy].map((externalId) => ({ externalId, label: externalId })),
+          homeExternalId: failing,
           pinSource: "policy",
         });
         const activities = createWorkerActivities({
@@ -5476,186 +5358,60 @@ describe("worker activities integration", () => {
           bus,
           runtime: createProductionAgentRuntime(),
         });
-
         const first = await runCodexTurn(activities, grant, session.id);
-        const firstEvents = await listSessionEvents(
-          dbClient.db,
-          grant.workspaceId,
-          session.id,
-          0,
-          100,
-        );
-        expect(
-          firstEvents.find((event) => event.type === "turn.failed")?.payload ?? null,
-        ).toBeNull();
-        expect(first).toMatchObject({ status: "recovering" });
-        expect(
-          firstEvents.find((event) => event.type === "turn.recovery.requested")?.payload,
-        ).toMatchObject({
-          reason: "codex_credential_failover",
-          credentialId: credentialIds.get("acct-downgraded"),
-          failureKind: "plan_entitlement",
-        });
-
-        const accounts = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
-        const downgraded = accounts.find(
-          (account) => account.id === credentialIds.get("acct-downgraded"),
-        );
-        expect(downgraded).toMatchObject({
-          planType: "free",
-          planPreviousType: "pro",
-          status: "active",
-        });
-        expect(downgraded?.planEntitlementExclusion).toEqual({
-          planType: "free",
-          models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
-        });
-
-        const second = await runCodexTurn(activities, grant, session.id);
-        expect(second).toMatchObject({ status: "idle", turnId: first.turnId });
+        expect(first.status).toBe("failed");
         const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
-        expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-        const completed = events.find((event) => event.type === "turn.completed");
-        expect(JSON.stringify(completed?.payload)).toContain("Served by acct-healthy");
-        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
-        expect(turns).toHaveLength(1);
-        expect(callsFor("responses", ["acct-downgraded", "acct-healthy"])).toEqual([
-          "acct-downgraded",
-          "acct-healthy",
-        ]);
-      }
-    }, 60_000);
+        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+        expect(events.some((event) => event.type === "turn.failed")).toBe(true);
+        const projection = await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          viewerSubjectId: grant.subjectId,
+        });
+        expect(
+          projection.accounts.find((row) => row.id === credentialIds.get(failing)),
+        ).toMatchObject({ status: "active", planType: "pro", planEntitlementExclusion: null });
+        expect(callsFor("responses", [failing, healthy])).toEqual([failing]);
+      }, 60_000);
+    }
 
-    test("without another subscription the turn fails with typed plan copy until the plan is upgraded", async () => {
-      const solo: FakeCodexAccountBehavior = {
+    test("a single account's unexplained rejection does not poison later accepted turns", async () => {
+      const externalId = "core-solo-rejection";
+      const behavior: FakeCodexAccountBehavior = {
         responses: "empty_400",
         usagePlan: "free",
         refreshedPlan: "free",
       };
-      fakeAccounts["acct-solo"] = solo;
-      {
-        const { grant, session, credentialIds } = await seedCodexTurn({
-          accounts: [{ externalId: "acct-solo", label: "Solo Pro" }],
-          homeExternalId: "acct-solo",
-          pinSource: "manual",
-        });
-        const activities = createWorkerActivities({
-          settings: codexSettings(),
-          db: dbClient.db,
-          bus,
-          runtime: createProductionAgentRuntime(),
-        });
-        const expectedCopy =
-          'The ChatGPT account "Solo Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
-          "Upgrade it, use another connected account, or choose another model.";
-
-        const first = await runCodexTurn(activities, grant, session.id);
-        expect(first).toMatchObject({ status: "failed" });
-        let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
-        expect(events.filter((event) => event.type === "turn.failed").at(-1)?.payload).toEqual({
-          error: expectedCopy,
-          code: "codex_plan_entitlement",
-          retryable: false,
-          planType: "free",
-          model: "codex/gpt-6-sol",
-          detail: "The Codex backend answered HTTP 400 with no error body.",
-        });
-        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
-        const [soloAccount] = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
-        expect(soloAccount).toMatchObject({
-          id: credentialIds.get("acct-solo"),
-          planType: "free",
-          status: "active",
-          planEntitlementExclusion: {
-            planType: "free",
-            models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
-          },
-        });
-
-        // A new message while the account is still Free fails at admission:
-        // the plan is re-read once, and no model request is sent.
-        await appendOwnedEvents(dbClient.db, grant, session.id, [
-          { type: "user.message", payload: { text: "still free" } },
-        ]);
-        const responsesBefore = callsFor("responses", ["acct-solo"]).length;
-        const second = await runCodexTurn(activities, grant, session.id);
-        expect(second).toMatchObject({ status: "failed" });
-        expect(callsFor("responses", ["acct-solo"])).toHaveLength(responsesBefore);
-        events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
-        expect(events.filter((event) => event.type === "turn.failed").at(-1)?.payload).toEqual({
-          error:
-            'The ChatGPT account "Solo Pro" is on the Free plan, which doesn\'t include GPT-6 Sol. ' +
-            "Upgrade it, use another connected account, or choose another model.",
-          code: "codex_plan_entitlement",
-          retryable: false,
-          planType: "free",
-          model: "codex/gpt-6-sol",
-        });
-
-        // The account is upgraded again. Admission re-reads the plan, retires
-        // the exclusion, and the same account serves the next turn.
-        solo.responses = "ok";
-        solo.usagePlan = "pro";
-        solo.refreshedPlan = "pro";
-        await appendOwnedEvents(dbClient.db, grant, session.id, [
-          { type: "user.message", payload: { text: "upgraded" } },
-        ]);
-        const third = await runCodexTurn(activities, grant, session.id);
-        expect(third).toMatchObject({ status: "idle" });
-        events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
-        expect(JSON.stringify(events.filter((e) => e.type === "turn.completed").at(-1))).toContain(
-          "Served by acct-solo",
-        );
-        const [upgraded] = await listCodexAccountStatuses(dbClient.db, grant.workspaceId);
-        expect(upgraded).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
-      }
-    }, 60_000);
-
-    test("an empty-body 400 on an unchanged paid plan fails with typed copy and keeps the account", async () => {
-      Object.assign(fakeAccounts, {
-        "acct-paid": { responses: "empty_400", usagePlan: "pro", refreshedPlan: "pro" },
-        "acct-other": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
+      fakeAccounts[externalId] = behavior;
+      const { grant, session } = await seedCodexTurn({
+        accounts: [{ externalId, label: "Solo" }],
+        homeExternalId: externalId,
+        pinSource: "manual",
       });
-      {
-        const { grant, session, credentialIds } = await seedCodexTurn({
-          accounts: [
-            { externalId: "acct-paid", label: "Paid Pro" },
-            { externalId: "acct-other", label: "Other Pro" },
-          ],
-          homeExternalId: "acct-paid",
-          pinSource: "policy",
-        });
-        const activities = createWorkerActivities({
-          settings: codexSettings(),
-          db: dbClient.db,
-          bus,
-          runtime: createProductionAgentRuntime(),
-        });
-
-        const result = await runCodexTurn(activities, grant, session.id);
-        expect(result).toMatchObject({ status: "failed" });
-        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
-        expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
-        expect(events.find((event) => event.type === "turn.failed")?.payload).toEqual({
-          error: expect.stringMatching(
-            /^The Codex backend rejected this request \(HTTP 400\) without an error message\. The ChatGPT account "Paid Pro" still reports the Pro plan, so \S+ did not switch accounts\. Try again, or choose another model if it keeps failing\.$/,
-          ),
-          code: "codex_request_rejected",
-          retryable: false,
-          planType: "pro",
-          detail: "The Codex backend answered HTTP 400 with no error body.",
-        });
-        const paid = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
-          (account) => account.id === credentialIds.get("acct-paid"),
-        );
-        expect(paid).toMatchObject({
-          planType: "pro",
-          status: "active",
-          planEntitlementExclusion: null,
-        });
-        expect(paid?.planCheckedAt).toBeInstanceOf(Date);
-        expect(callsFor("responses", ["acct-paid", "acct-other"])).toEqual(["acct-paid"]);
-      }
+      const activities = createWorkerActivities({
+        settings: codexSettings(),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime(),
+      });
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("failed");
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "new accepted request" } },
+      ]);
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("failed");
+      expect(callsFor("responses", [externalId])).toHaveLength(2);
+      behavior.responses = "ok";
+      behavior.usagePlan = "pro";
+      behavior.refreshedPlan = "pro";
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "provider recovered" } },
+      ]);
+      expect((await runCodexTurn(activities, grant, session.id)).status).toBe("idle");
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 300);
+      expect(
+        JSON.stringify(events.filter((event) => event.type === "turn.completed").at(-1)),
+      ).toContain(`Served by ${externalId}`);
+      expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
     }, 60_000);
 
     // Shared driver: the first attempt fails over with a plan entitlement
@@ -5694,14 +5450,17 @@ describe("worker activities integration", () => {
         credentialId: credentialIds.get(input.failing),
         failureKind: "plan_entitlement",
       });
-      const failing = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
-        (account) => account.id === credentialIds.get(input.failing),
-      );
+      const failing = (
+        await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          viewerSubjectId: grant.subjectId,
+        })
+      ).accounts.find((account) => account.id === credentialIds.get(input.failing));
       expect(failing).toMatchObject({
         status: "active",
         exhaustedUntil: null,
         planEntitlementExclusion: {
-          planType: input.excludedPlan,
           models: [{ modelId: "codex/gpt-6-sol", excludedAt: expect.any(Date) }],
         },
       });
@@ -5722,13 +5481,13 @@ describe("worker activities integration", () => {
       return seeded;
     }
 
-    test("a Pro to Plus downgrade that a usage read observed first still fails over the same turn", async () => {
+    test("a usage read before an explicit Plus-plan refusal preserves same-turn failover", async () => {
       // The Plus plan does not include gpt-6-sol here, and Codex answers with an
       // empty 400. The accounts page (a usage read) sees Plus BEFORE the turn,
       // so the failing turn's own re-check reads Plus again; the recorded
       // change from Pro is what still explains the refusal.
       Object.assign(fakeAccounts, {
-        "acct-plus-first": { responses: "empty_400", usagePlan: "plus", refreshedPlan: "plus" },
+        "acct-plus-first": { responses: "plan_403", usagePlan: "plus", refreshedPlan: "plus" },
         "acct-plus-healthy": { responses: "ok", usagePlan: "pro", refreshedPlan: "pro" },
       });
       await expectPlanFailover({
@@ -5736,17 +5495,26 @@ describe("worker activities integration", () => {
         healthy: "acct-plus-healthy",
         excludedPlan: "plus",
         beforeTurn: async ({ grant, credentialIds }) => {
-          const usage = await fetchCodexUsageForAccount(
+          const { usage } = await fetchSubscriptionCoreCodexUsage(
             dbClient.db,
             codexSettings(),
-            grant.workspaceId,
+            {
+              kind: "workspace",
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              subjectId: grant.subjectId,
+            },
             credentialIds.get("acct-plus-first")!,
           );
           expect(usage.planType).toBe("plus");
-          const observed = (await listCodexAccountStatuses(dbClient.db, grant.workspaceId)).find(
-            (account) => account.id === credentialIds.get("acct-plus-first"),
-          );
-          expect(observed).toMatchObject({ planType: "plus", planPreviousType: "pro" });
+          const observed = (
+            await getSubscriptionCoreCodexWorkspaceProjection(dbClient.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              viewerSubjectId: grant.subjectId,
+            })
+          ).accounts.find((row) => row.id === credentialIds.get("acct-plus-first"));
+          expect(observed).toMatchObject({ planType: "pro", planEntitlementExclusion: null });
         },
       });
     }, 60_000);
@@ -5779,7 +5547,7 @@ describe("worker activities integration", () => {
       });
     }, 60_000);
 
-    test("an empty 400 on the remote compaction request fails over like an ordinary request", async () => {
+    test("an explicit plan refusal on remote compaction recovers the same turn without losing its opaque history", async () => {
       const home: FakeCodexAccountBehavior = {
         responses: "ok",
         usagePlan: "pro",
@@ -5809,7 +5577,7 @@ describe("worker activities integration", () => {
       ).toBe("remote_v2");
 
       // The home account drops to Free; the next work is an operator /compact.
-      home.responses = "empty_400";
+      home.responses = "plan_403";
       home.usagePlan = "free";
       home.refreshedPlan = "free";
       await requestSessionCompaction(dbClient.db, grant.workspaceId, session.id);
@@ -5875,15 +5643,16 @@ async function connectFakeCodexCredential(
   label: string,
 ): Promise<string> {
   const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
-  const result = await upsertCodexSubscriptionCredential(db, {
+  const result = await connectSubscriptionCoreCodexConnection(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     credentialEncrypted: encryptEnvironmentValue(
       key,
       JSON.stringify(fakeCodexTokens(externalId, "pro")),
     ),
-    chatgptAccountId: externalId,
-    scopes: null,
+    providerAccountId: externalId,
+    providerSubjectId: `fixture:${externalId}`,
+    subjectId: grant.subjectId,
     planType: "pro",
     isFedramp: false,
     expiresAt: new Date(Date.now() + 3_600_000),
@@ -5891,11 +5660,14 @@ async function connectFakeCodexCredential(
     accountEmail: `${externalId}@example.test`,
     label,
   });
-  if (result.kind !== "upserted") throw new Error("fake Codex credential was not connected");
+  if (result.kind !== "connected") throw new Error("fake Codex credential was not connected");
   return result.id;
 }
 
 type FakeCodexAccountBehavior = {
+  usagePercent?: number;
+  usageUnavailable?: boolean;
+  models?: string[];
   responses: "ok" | "empty_400" | "plan_403" | "usage_not_included_429";
   usagePlan: string | null;
   refreshedPlan: string;
@@ -6047,15 +5819,45 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
         .join("");
       return new Response(sse, {
         status: 200,
-        headers: { "content-type": "text/event-stream" },
+        headers: {
+          "content-type": "text/event-stream",
+          // Every real Codex response reports both included-usage windows.
+          ...(behavior.usagePercent === undefined
+            ? {}
+            : {
+                "x-codex-primary-used-percent": String(behavior.usagePercent),
+                "x-codex-primary-limit-window-seconds": "18000",
+                "x-codex-primary-reset-after-seconds": "3600",
+                "x-codex-secondary-used-percent": "20",
+                "x-codex-secondary-limit-window-seconds": "604800",
+                "x-codex-secondary-reset-after-seconds": "86400",
+              }),
+        },
       });
+    }
+    if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
+      const behavior = account ? accounts[account] : undefined;
+      return new Response(
+        JSON.stringify({ models: (behavior?.models ?? ["gpt-6-sol"]).map((slug) => ({ slug })) }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     }
     if (url === "https://chatgpt.com/backend-api/wham/usage") {
       calls.push({ route: "usage", account });
       const behavior = account ? accounts[account] : undefined;
       if (!behavior) return new Response("", { status: 401 });
+      if (behavior.usageUnavailable) return new Response("", { status: 503 });
       return new Response(
-        JSON.stringify(behavior.usagePlan === null ? {} : { plan_type: behavior.usagePlan }),
+        JSON.stringify({
+          ...(behavior.usagePlan === null ? {} : { plan_type: behavior.usagePlan }),
+          rate_limit: {
+            primary_window: {
+              used_percent: behavior.usagePercent ?? 10,
+              limit_window_seconds: 18000,
+            },
+            secondary_window: { used_percent: 20, limit_window_seconds: 604800 },
+          },
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -6083,33 +5885,6 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
 }
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
-
-async function seedWorkspaceEnvironment(
-  db: TestDb,
-  grant: AccessGrant,
-  values: Record<string, string>,
-  description?: string,
-): Promise<{ id: string; name: string }> {
-  const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
-  const environment = await createVariableSet(db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    name: `worker-env-${crypto.randomUUID()}`,
-    ...(description !== undefined ? { description } : {}),
-  });
-  for (const [name, value] of Object.entries(values)) {
-    await setVariableSetVariable(db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      variableSetId: environment.id,
-      name,
-      valueEncrypted: encryptEnvironmentValue(key, value),
-    });
-  }
-  return { id: environment.id, name: environment.name };
-}
 
 async function testGrant(db: TestDb): Promise<AccessGrant> {
   const id = crypto.randomUUID();

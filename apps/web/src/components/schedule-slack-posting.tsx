@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { Field } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { Field } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import {
   activeOpenGeniSlackBotConnections,
   openGeniSlackBotConnectionOptions,
 } from "@/lib/slack-bot";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 type SlackChannelOption = { id: string; name: string | null; isPrivate: boolean };
 
@@ -18,7 +18,7 @@ const MAX_CHANNEL_PAGES = 5;
 const DONT_POST = "__dont_post__";
 
 /**
- * The one Slack channel a scheduled task's runs may post to as the OpenGeni
+ * The one Slack channel a scheduled task's runs may post to as the Opengeni
  * workspace bot. A person chooses it here; the agent cannot post anywhere
  * else. Changing it needs permission to manage connections.
  *

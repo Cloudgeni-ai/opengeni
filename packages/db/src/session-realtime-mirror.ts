@@ -158,7 +158,7 @@ export function renderRealtimeHumanInputContext(input: {
     `  <status>${input.routing}</status>`,
     `  <delivery>${input.delivery}</delivery>`,
     `  <text>${escapeXmlText(input.text)}</text>`,
-    "  <instruction>Already routed by OpenGeni; do not delegate this message again.</instruction>",
+    "  <instruction>Already routed by Opengeni; do not delegate this message again.</instruction>",
     "</session_user_message>",
   ].join("\n");
 }
@@ -188,6 +188,18 @@ export function renderRealtimeHumanInputRequestContext(input: {
       `    <expires_at>${escapeXmlText(renderExpiry(request.expiresAt))}</expires_at>`,
     );
     for (const question of request.questions) {
+      if (question.kind === "secret") {
+        // Secrets are never spoken or delegated (AC-5): point to the app.
+        lines.push(
+          "    <question>",
+          `      <id>${escapeXmlText(question.id)}</id>`,
+          "      <kind>secret</kind>",
+          `      <prompt>${escapeXmlText(question.prompt)}</prompt>`,
+          "      <answer_in_app>true</answer_in_app>",
+          "    </question>",
+        );
+        continue;
+      }
       lines.push(
         "    <question>",
         `      <id>${escapeXmlText(question.id)}</id>`,
@@ -222,7 +234,7 @@ export function renderRealtimeHumanInputRequestContext(input: {
     lines.push("  </request>");
   }
   lines.push(
-    "  <instruction>The current work is waiting for the user's input. Ask the questions naturally, one at a time when useful, without changing their meaning or answering for the user. The user may answer in the visible form or answer conversationally here. If the user answers here, delegate exactly once with a complete message containing the relevant question and the user's answer. If the user changes direction instead, delegate that new direction normally. Do not claim the work resumed until a later session update confirms it.</instruction>",
+    "  <instruction>The current work is waiting for the user's input. Ask the questions naturally, one at a time when useful, without changing their meaning or answering for the user. The user may answer in the visible form or answer conversationally here. If the user answers here, delegate exactly once with a complete message containing the relevant question and the user's answer. If the user changes direction instead, delegate that new direction normally. Do not claim the work resumed until a later session update confirms it. A question of kind secret (a password, key or code) is answered only in the app: tell the user to answer it in the app, never ask for it aloud, and never delegate a spoken secret.</instruction>",
     "</session_human_input_request>",
   );
   return lines.join("\n");

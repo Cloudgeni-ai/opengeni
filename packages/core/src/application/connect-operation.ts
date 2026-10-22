@@ -37,11 +37,14 @@ export async function executeConnectOperation(input: {
   /** Trusted server adapter classification, never derived from request data.
    * Cancellation releases pending setup; it acquires no integration authority. */
   purpose?: "acquisition" | "cancellation";
+  /** Trusted adapter's exact attempt fence, inside the organization policy
+   * prefix and before Connect row locks, for both claim and final commit. */
+  beforeOperation?: ((tx: Database) => Promise<void>) | undefined;
   authorize: ConnectOperationAuthorization;
   execute: (attempt: ConnectAttempt) => Promise<PreparedConnectOperation>;
 }): Promise<ConnectAttempt> {
   // Snapshot caller-controlled identity before the first asynchronous boundary.
-  const { db, authorize, execute, purpose = "acquisition" } = input;
+  const { db, authorize, execute, beforeOperation, purpose = "acquisition" } = input;
   const scope = { ...input.scope };
   const operation = {
     attemptId: input.attemptId,
@@ -50,8 +53,9 @@ export async function executeConnectOperation(input: {
     inputDigest: input.inputDigest,
     authorize,
   };
-  const claim = await withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) =>
-    claimConnectOperation(tx, scope, {
+  const claim = await withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) => {
+    await beforeOperation?.(tx);
+    return claimConnectOperation(tx, scope, {
       ...operation,
       authorizeAcquisition: async (_tx, attempt) => {
         if (purpose === "cancellation") return;
@@ -60,12 +64,13 @@ export async function executeConnectOperation(input: {
           integrationKeyForConnectProvider(attempt.providerId),
         );
       },
-    }),
-  );
+    });
+  });
   if (claim.status === "replayed") return claim.attempt;
   const prepared = await execute(structuredClone(claim.attempt));
-  return withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) =>
-    finishConnectOperation(tx, scope, {
+  return withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) => {
+    await beforeOperation?.(tx);
+    return finishConnectOperation(tx, scope, {
       ...operation,
       commit: prepared.commit,
       authorizeAcquisition: async (_tx, attempt) => {
@@ -75,6 +80,6 @@ export async function executeConnectOperation(input: {
           integrationKeyForConnectProvider(attempt.providerId),
         );
       },
-    }),
-  );
+    });
+  });
 }

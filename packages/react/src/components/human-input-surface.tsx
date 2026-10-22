@@ -20,6 +20,8 @@ export type HumanInputSurfaceProps = {
   autoFocus?: boolean | undefined;
   /** Forwarded to the active form: yes/no decisions as two buttons. */
   decisionButtons?: boolean | undefined;
+  /** Forwarded to the active form: where secret answers may be saved. */
+  allowedSaveTo?: HumanInputFormProps["allowedSaveTo"];
 };
 
 /**
@@ -38,6 +40,7 @@ export function HumanInputSurface({
   className,
   autoFocus = true,
   decisionButtons,
+  allowedSaveTo,
 }: HumanInputSurfaceProps) {
   const batchTotalRef = useRef(0);
 
@@ -79,6 +82,7 @@ export function HumanInputSurface({
     progressLabel,
     autoFocus,
     decisionButtons,
+    allowedSaveTo,
     ...(messages ? { messages } : {}),
     onSubmit: (response) => onSubmit(active.id, response),
   };

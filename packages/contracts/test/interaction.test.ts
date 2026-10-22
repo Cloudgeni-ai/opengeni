@@ -1020,22 +1020,20 @@ describe("interaction contracts", () => {
       verificationUrlPrefixes: ["https://example.com/app"],
       authorities: [
         {
-          id: "password-authority",
-          kind: "connection_fields",
-          label: "Workspace connection",
+          id: "provider-authority",
+          kind: "external_provider",
+          label: "Provider-managed login",
+          adapterId: "kernel",
+          connectionId: "kernel-auth-connection-1",
           credential,
-          fields: [
-            { id: "email", purpose: "identifier", credentialKey: "email" },
-            { id: "password", purpose: "password", credentialKey: "password" },
-          ],
         },
       ],
       methods: [
         {
-          id: "password",
-          kind: "password",
-          label: "Email and password",
-          authorityIds: ["password-authority"],
+          id: "external",
+          kind: "external",
+          label: "Provider-managed login",
+          authorityIds: ["provider-authority"],
         },
       ],
       preferredIdentityId: null,
@@ -1054,6 +1052,19 @@ describe("interaction contracts", () => {
       CreateSiteAuthConnectionRequest.safeParse({
         ...auth,
         origins: ["https://example.com"],
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateSiteAuthConnectionRequest.safeParse({
+        ...auth,
+        authorities: [
+          {
+            id: "human-authority",
+            kind: "human",
+            label: "Human typed login",
+            fields: [{ id: "password", purpose: "password" }],
+          },
+        ],
       }).success,
     ).toBe(false);
     expect(
@@ -1082,7 +1093,6 @@ describe("interaction contracts", () => {
       methodId: null,
       authorityId: null,
       choices: [],
-      pendingFields: [],
       externalAction: null,
       interventionId: null,
       verifiedUrl: null,
@@ -1095,7 +1105,7 @@ describe("interaction contracts", () => {
       settledAt: null,
     };
     expect(AuthRun.parse({ ...baseRun, state: "discovering" }).state).toBe("discovering");
-    expect(AuthRun.safeParse({ ...baseRun, state: "awaiting_secret" }).success).toBe(false);
+    expect(AuthRun.safeParse({ ...baseRun, state: "awaiting_choice" }).success).toBe(false);
     expect(
       ReportAuthRunRequest.safeParse({
         operationId,

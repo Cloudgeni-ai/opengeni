@@ -9,11 +9,11 @@ import {
   personalOnlyCapability,
 } from "./capability-copy";
 import { CatalogItemPage } from "./catalog-item-page";
-import { nativeCatalogItemNotice } from "./native-connect-readiness";
+import { nativeCatalogItemNotice } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { IntegrationPage } from "./integration-page";
-import type { IntegrationViewModel } from "./integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { ProviderPage } from "./provider-page";
-import type { CapabilityCatalogItem, SocialConnection } from "@/types";
+import type { CapabilityCatalogItem, SocialConnection } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -79,7 +79,7 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     kind: "mcp",
     source: "registry",
     name: "Gmail",
-    description: "Search and read Gmail through OpenGeni's reviewed Gmail bridge.",
+    description: "Search and read Gmail through Opengeni's reviewed Gmail bridge.",
     category: "communication",
     tags: ["mcp", "oauth2"],
     homepageUrl: "https://developers.google.com/gmail",

@@ -30,6 +30,7 @@ import {
   verifySandboxExecReadiness,
   withoutSandboxProviderIdentity,
   WorkspaceArchiveIntegrityError,
+  workspaceArchiveDownloadTemporaryDirectory,
   type EstablishedSandboxSession,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime/sandbox";
@@ -246,14 +247,21 @@ export async function establishApiSandboxSpawner(input: {
     established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
+      createIdentity: {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+      },
       ...(input.objectStorage
         ? {
             loadHostWorkspaceArchive: async (ref) => {
               try {
-                return await downloadWorkspaceArchiveSpool(input.objectStorage!, ref.key, {
-                  bytes: ref.bytes,
-                  sha256: ref.sha256,
-                });
+                return await downloadWorkspaceArchiveSpool(
+                  input.objectStorage!,
+                  ref.key,
+                  { bytes: ref.bytes, sha256: ref.sha256 },
+                  { temporaryDirectory: workspaceArchiveDownloadTemporaryDirectory },
+                );
               } catch (error) {
                 if (error instanceof WorkspaceArchiveStorageError) {
                   throw new WorkspaceArchiveIntegrityError(error.code, error.message, {

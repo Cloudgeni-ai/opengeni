@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   applyCreditDebitAfterUse,
@@ -18,6 +18,13 @@ import {
   setSubjectRlsContext,
   withSessionActivityRlsContext,
 } from "../src";
+import {
+  stageVaultPolicyColumns,
+  stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
+  dropSiteSessionAudienceColumns,
+  dropConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 const repair = "0552_usage_allowances.sql";
 // Current adapters require the actual nullable agent config and canonical
@@ -27,6 +34,7 @@ const repair = "0552_usage_allowances.sql";
 const currentWriterMigrations = [
   "0559_session_agent_config.sql",
   "0598_claude_subscription_account_pools.sql",
+  "0834_session_activity_xid.sql",
 ];
 const visibilityPlanningMigration = "0591_insights_aggregate_query_plans.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
@@ -67,6 +75,13 @@ test("0552 attribution lifecycle does not rewrite source visibility or read priv
   expect(source).toContain("receipt.idempotency_key='knowledge.query_cost:'||NEW.source_id");
 });
 
+const v2CarrierTables = [
+  "scheduled_tasks",
+  "scheduled_task_revision_authorities",
+  "session_system_updates",
+  "session_system_update_outbox",
+] as const;
+
 test("real non-bypass owner preserves source policy bytes through receipt repair and exact visibility through later planning", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("0552-attribution-visibility");
   if (!owned) {
@@ -87,6 +102,9 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
+    await stageVaultPolicyColumns(owned.ownerUrl);
+    await stageConnectionAccountIntentColumns(owned.ownerUrl);
+    await stageSiteSessionAudienceColumns(owned.ownerUrl);
     // Current adapters need nullable reader fields, not the deferred import
     // lifecycle. Remove these before the real ordered migration replay.
     await owner`ALTER TABLE sessions
@@ -94,16 +112,34 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       ADD COLUMN imported_archive_imported_at timestamptz,
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
-      ADD COLUMN imported_archive_next_offset integer`;
+      ADD COLUMN imported_archive_next_offset integer,
+      ADD COLUMN keep_live boolean NOT NULL DEFAULT false,
+      ADD COLUMN content_archive_state text,
+      ADD COLUMN content_archive_started_at timestamptz,
+      ADD COLUMN content_archived_at timestamptz,
+      ADD COLUMN content_archive jsonb,
+      ADD COLUMN content_archive_purged_at timestamptz`;
     // Current event writers read this additive field while seeding legacy rows.
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
+    // Current event readers project 0810's usage source key and 0889's tool name.
+    await owner`ALTER TABLE session_events ADD COLUMN usage_source_key text, ADD COLUMN tool_name text`;
     // Current session/turn adapters project 0608's nullable context fields.
     // Stage only empty reader columns for historical seeds, not its authority
     // triggers or backfill; remove them before the real ordered 0608 replay.
     await owner`ALTER TABLE sessions ADD COLUMN execution_context_turn_id uuid`;
     await owner`ALTER TABLE session_turns ADD COLUMN execution_context_turn_id uuid`;
+    // The current turn adapter also projects the later M3 authority snapshot;
+    // keep this historical fixture's staged schema compatible while seeding.
+    await owner`ALTER TABLE session_turns ADD COLUMN subscription_authority jsonb`;
+    // ...and the M3 PR 3b slots on the other accepted-work carriers.
+    for (const table of v2CarrierTables)
+      await owner.unsafe(`ALTER TABLE ${table} ADD COLUMN subscription_authority jsonb`);
+    // The current schedule adapter projects 0720's audience; remove it before
+    // the real ordered replay.
+    await owner`ALTER TABLE scheduled_tasks
+      ADD COLUMN visibility text NOT NULL DEFAULT 'workspace_shared'`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply those adapter prerequisites early; allowance/collaborator repairs
@@ -267,8 +303,15 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       DROP COLUMN imported_archive_imported_at,
       DROP COLUMN imported_archive_request_hash,
       DROP COLUMN imported_archive_subject_id,
-      DROP COLUMN imported_archive_next_offset`;
+      DROP COLUMN imported_archive_next_offset,
+      DROP COLUMN keep_live,
+      DROP COLUMN content_archive_state,
+      DROP COLUMN content_archive_started_at,
+      DROP COLUMN content_archived_at,
+      DROP COLUMN content_archive,
+      DROP COLUMN content_archive_purged_at`;
     await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
+    await owner`ALTER TABLE session_events DROP COLUMN usage_source_key, DROP COLUMN tool_name`;
     // Assert the attribution repair's literal policy invariance before the
     // separately governed 0591 planner optimization. This fixture already
     // stages future receipts to replay a historical migration boundary; retain
@@ -294,8 +337,35 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         and polname = 'attribution_expected_planned_visibility'`;
     expect(planned?.qual).toBeDefined();
     await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
+    // 0721 later widens the run read policy by exactly one disjunct: the
+    // capability-gated summary of private schedules. Parse that expected
+    // predicate in PostgreSQL too instead of loosening the comparison.
+    const runVisibility = before.find(
+      (row) =>
+        row.relname === "scheduled_task_runs" && row.polname === "session_visibility_isolation",
+    );
+    expect(runVisibility?.qual).toBeDefined();
+    await owner.unsafe(`CREATE POLICY attribution_expected_private_schedule_runs ON scheduled_task_runs
+      AS RESTRICTIVE FOR SELECT USING ((${runVisibility!.qual}) OR
+        (SELECT insights_fact_read_policy_capability_active((CURRENT_USER)::text,
+          (pg_get_userbyid((SELECT relation.relowner FROM pg_class relation
+            WHERE relation.oid = 'scheduled_task_runs'::regclass)))::text,
+          'private_scheduled_task_summary')))`);
+    const [plannedRuns] = await owner`select pg_get_expr(polqual, polrelid) as qual
+      from pg_policy where polrelid = 'scheduled_task_runs'::regclass
+        and polname = 'attribution_expected_private_schedule_runs'`;
+    expect(plannedRuns?.qual).toBeDefined();
+    await owner.unsafe(
+      "DROP POLICY attribution_expected_private_schedule_runs ON scheduled_task_runs",
+    );
     await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
     await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
+    await owner`ALTER TABLE session_turns DROP COLUMN subscription_authority`;
+    for (const table of v2CarrierTables)
+      await owner.unsafe(`ALTER TABLE ${table} DROP COLUMN subscription_authority`);
+    await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
+    await dropConnectionAccountIntentColumns(owned.ownerUrl);
+    await dropSiteSessionAudienceColumns(owned.ownerUrl);
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
@@ -305,11 +375,127 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       { session_context: null, turn_context: null },
     ]);
     const plannedPolicies = before.map((row) =>
-      row.relname === "usage_events" && row.polname === "session_visibility_isolation"
-        ? { ...row, qual: planned!.qual }
-        : row,
+      row.polname !== "session_visibility_isolation"
+        ? row
+        : row.relname === "usage_events"
+          ? { ...row, qual: planned!.qual }
+          : row.relname === "scheduled_task_runs"
+            ? { ...row, qual: plannedRuns!.qual }
+            : row,
     );
-    expect([...(await snapshot())]).toEqual(plannedPolicies);
+    // The full replay also runs 0739, which adds exactly one owner-scoped vault
+    // read lane on two snapshotted tables. Pin its exact shape.
+    const [ownerRole] = await owned.admin<Array<{ oid: string }>>`
+      select oid::text as oid from pg_roles where rolname = ${owned.ownerRole}`;
+    const vaultRead = (relname: string) => ({
+      relname,
+      polname: "vault_authority_capability_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: `{${ownerRole!.oid}}`,
+      qual: `((CURRENT_USER = '${owned.ownerRole}'::name) AND opengeni_private.vault_authority_capability_active())`,
+      check: null,
+    });
+    const byPolicy = (rows: Array<Record<string, unknown>>) =>
+      [...rows].sort((a, b) =>
+        `${a.relname}\0${a.polname}` < `${b.relname}\0${b.polname}` ? -1 : 1,
+      );
+    // ...and 0761, which adds the exact-owner exhausted-schedule inventory read.
+    const exhaustedScheduleRead = {
+      relname: "scheduled_task_runs",
+      polname: "exhausted_schedule_inventory_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: "{0}",
+      qual: `session_tenancy_fence_owner_policy_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, (2200)::oid, workspace_id, true)`,
+      check: null,
+    };
+    // ...and 0765, which lets the connected-machine audience routines read runs
+    // under their same-transaction scoped-compute capability.
+    const scopedComputeRead = {
+      relname: "scheduled_task_runs",
+      polname: "scoped_compute_capability_read",
+      polcmd: "r",
+      polpermissive: true,
+      roles: "{0}",
+      qual: `scoped_compute_policy_capability_active((CURRENT_USER)::text, '${owned.ownerRole}'::text, NULL::text)`,
+      check: null,
+    };
+    // 0823 allows account-bound scoped-compute row locks, not writes. Normalize
+    // the expected initplan with PostgreSQL rather than hard-coding whitespace.
+    await owner.unsafe(`CREATE POLICY expected_scoped_compute_lock ON session_turns
+      FOR UPDATE USING (
+        account_id = nullif(current_setting('opengeni.account_id', true), '')::uuid
+        AND (SELECT scoped_compute_policy_capability_active(
+          current_user, '${owned.ownerRole.replaceAll("'", "''")}', NULL))
+      ) WITH CHECK (false)`);
+    const [normalizedLock] = await owner`
+      select pg_get_expr(polqual, polrelid) as qual,
+        pg_get_expr(polwithcheck, polrelid) as check
+      from pg_policy where polrelid = 'session_turns'::regclass
+        and polname = 'expected_scoped_compute_lock'`;
+    await owner`DROP POLICY expected_scoped_compute_lock ON session_turns`;
+    const scopedComputeLock = {
+      relname: "session_turns",
+      polname: "scoped_compute_capability_lock",
+      polcmd: "w",
+      polpermissive: true,
+      roles: "{0}",
+      qual: normalizedLock!.qual,
+      check: normalizedLock!.check,
+    };
+    const plannedWithVaults = byPolicy([
+      ...plannedPolicies,
+      vaultRead("scheduled_task_runs"),
+      vaultRead("session_turns"),
+      exhaustedScheduleRead,
+      scopedComputeRead,
+      scopedComputeLock,
+      // 0849 lets bounded owner-only maintenance see ended turns and inventory.
+      // These predicates are not caller settings: they require a backend/xid
+      // capability minted by the SECURITY DEFINER entry point.
+      ...["ended_epoch", "inventory"].map((operation) => ({
+        relname: "session_turns",
+        polname: `maintenance_${operation}_select`,
+        polcmd: "r",
+        polpermissive: true,
+        roles: "{0}",
+        qual: `( SELECT opengeni_private.maintenance_claim_active((CURRENT_USER)::text, '${operation}'::text) AS maintenance_claim_active)`,
+        check: null,
+      })),
+    ]);
+    // ...and 0805, which inlines every session_reference_visible() call as
+    // the same EXISTS probe of sessions, kept per-row by 0827's OFFSET 0. Let
+    // PostgreSQL deparse the expected rewrite so formatting matches exactly.
+    const inlineSessionProbe = async (relname: string, expression: unknown) => {
+      if (typeof expression !== "string" || !expression.includes("session_reference_visible("))
+        return expression;
+      const rewritten = expression.replace(
+        /session_reference_visible\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)/g,
+        (_match, account: string, workspace: string, session: string) =>
+          `(${relname}.${session} IS NULL OR EXISTS (SELECT 1 FROM sessions session_row` +
+          ` WHERE session_row.account_id = ${relname}.${account}` +
+          ` AND session_row.workspace_id = ${relname}.${workspace}` +
+          ` AND session_row.id = ${relname}.${session} OFFSET 0))`,
+      );
+      await owner.unsafe(
+        `CREATE POLICY expected_inline_session_probe ON ${relname} AS RESTRICTIVE USING (${rewritten})`,
+      );
+      const [normalized] = await owner`select pg_get_expr(polqual, polrelid) as qual
+        from pg_policy where polrelid = ${relname}::regclass
+          and polname = 'expected_inline_session_probe'`;
+      await owner.unsafe(`DROP POLICY expected_inline_session_probe ON ${relname}`);
+      return normalized!.qual;
+    };
+    const plannedWithInlineProbe = [];
+    for (const row of plannedWithVaults) {
+      plannedWithInlineProbe.push({
+        ...row,
+        qual: await inlineSessionProbe(row.relname as string, row.qual),
+        check: await inlineSessionProbe(row.relname as string, row.check),
+      });
+    }
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithInlineProbe);
     const [backfill] =
       await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='turn' and source_id=${String(turn!.id)}`;
@@ -495,7 +681,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     const [closed] =
       await owned.admin`select count(*)::int as count from opengeni_private.usage_allowance_capabilities`;
     expect(closed!.count).toBe(0);
-    expect([...(await snapshot())]).toEqual(plannedPolicies);
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithInlineProbe);
   } finally {
     await appSql?.end();
     await app?.close();

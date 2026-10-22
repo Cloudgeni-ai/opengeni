@@ -1,6 +1,9 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -8,6 +11,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
+import type { UpdateBlocker } from "./update-admission";
 import {
   ComputerInteractionController,
   InteractionControllerError,
@@ -27,6 +31,7 @@ import type {
   ComputerImageFrame,
 } from "./computer-media";
 import { ComputerNativeClient } from "./computer-native-client";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 const DEFAULT_MAX_SESSIONS = 64;
 
@@ -89,6 +94,8 @@ type Runtime = {
   environmentLease: ComputerEnvironmentLease;
   journal: SqliteComputerOperationJournal;
   driver: ComputerSupervisorDriver;
+  /** What the session reports; see pinActionBatches. */
+  capabilities: ComputerSessionCapabilities;
   controller: ComputerInteractionController;
   lifecycle: "active" | "ending";
 };
@@ -108,6 +115,8 @@ export class ComputerSupervisor {
   private readonly ending = new Map<string, Promise<void>>();
   private displaceGate: Promise<void> | null = null;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
 
   private constructor(options: ComputerSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -194,14 +203,39 @@ export class ComputerSupervisor {
     return await this.installSession(options);
   }
 
-  /** A queued shared-seat create owns work before its runtime exists. */
+  /** A queued shared-seat create owns work before its runtime exists. An open
+   * session on the machine's own physical seat holds no state of its own: a
+   * restart only drops the controller, which the next request recreates. An
+   * isolated virtual seat owns its display and apps, so it still blocks. */
   isIdle(): boolean {
-    return (
-      this.displaceGate === null &&
-      this.sessions.size === 0 &&
-      this.creating.size === 0 &&
-      this.ending.size === 0
-    );
+    return this.updateBlockers().length === 0;
+  }
+
+  updateBlockers(): UpdateBlocker[] {
+    const blockers: UpdateBlocker[] = [];
+    if (this.cleanupUncertain) blockers.push({ kind: "computer_cleanup", count: 1 });
+    if (this.displaceGate) blockers.push({ kind: "computer_seat_transfer", count: 1 });
+    for (const resourceId of this.creating.keys())
+      blockers.push({ kind: "computer_creation", resourceId, count: 1 });
+    for (const resourceId of this.ending.keys())
+      blockers.push({ kind: "computer_closing", resourceId, count: 1 });
+    for (const runtime of this.sessions.values()) {
+      const kind =
+        runtime.lifecycle !== "active"
+          ? "computer_session"
+          : runtime.environmentLease.rfbPort !== null
+            ? "computer_virtual_seat"
+            : !runtime.controller.isIdle()
+              ? "computer_action"
+              : null;
+      if (kind) blockers.push({ kind, resourceId: runtime.options.computerSessionId, count: 1 });
+    }
+    return blockers;
+  }
+
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
+    return this.sessions.size === 0 && this.isIdle();
   }
 
   listSessions(): Array<
@@ -221,7 +255,7 @@ export class ComputerSupervisor {
         adapter: runtime.driver.adapterId,
         seatId: runtime.environmentLease.seatId,
         displayId: runtime.environmentLease.displayId,
-        capabilities: runtime.driver.capabilities,
+        capabilities: runtime.capabilities,
       }));
   }
 
@@ -249,7 +283,17 @@ export class ComputerSupervisor {
     }).controller.run(command);
   }
 
-  receipt(reference: ComputerSessionReference, operationId: string): ComputerActionReceipt | null {
+  nativeCall(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    return this.requireActive({
+      computerSessionId: command.computerSessionId,
+      controllerGeneration: command.controllerGeneration,
+    }).controller.runNative(command);
+  }
+
+  receipt(
+    reference: ComputerSessionReference,
+    operationId: string,
+  ): ComputerOperationReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
   }
 
@@ -334,9 +378,14 @@ export class ComputerSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
-    await this.displaceGate;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    await this.displaceGate?.catch(() => undefined);
     await Promise.allSettled([...this.creating.values()]);
     const results = await Promise.allSettled(
       [...this.sessions.values()].map(async (runtime) => await this.endSession(binding(runtime))),
@@ -344,7 +393,10 @@ export class ComputerSupervisor {
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
     );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous computer cleanup remains unsettled"));
     if (failures.length > 0) {
+      this.cleanupUncertain = true;
       throw new AggregateError(failures, "computer supervisor shutdown failed");
     }
   }
@@ -354,9 +406,8 @@ export class ComputerSupervisor {
   ): Promise<ComputerSupervisorSession> {
     if (this.sessions.size + this.creating.size >= this.maxSessions) {
       throw new InteractionControllerError(
-        "resource_unavailable",
-        "computer supervisor session capacity is exhausted",
-        true,
+        "capacity_exhausted",
+        `This machine is already running its limit of ${this.maxSessions} computer sessions. End computer sessions that are no longer needed, then open a new one; retrying will not help until one ends.`,
       );
     }
     const creation = this.buildRuntime(options);
@@ -364,7 +415,12 @@ export class ComputerSupervisor {
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "computer supervisor is closed",
@@ -403,6 +459,15 @@ export class ComputerSupervisor {
       "computer-sessions",
       options.computerSessionId,
     );
+    // A session resumed after a restart keeps its journal and batch mode even
+    // when this attempt fails; only a directory this attempt created is removed.
+    const resumed = await lstat(sessionDirectory).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     await chmod(sessionDirectory, 0o700);
     const journal = await SqliteComputerOperationJournal.open({
@@ -430,6 +495,7 @@ export class ComputerSupervisor {
         displayId,
         environment,
       });
+      const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities, resumed);
       let runtime: Runtime | undefined;
       const controllerDriver = driver;
       const controller = journal.withRecoveredRecords(
@@ -461,33 +527,44 @@ export class ComputerSupervisor {
         environmentLease,
         journal,
         driver,
+        capabilities,
         controller,
         lifecycle: "active",
       };
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
+      let driverClosed = !(error instanceof UnsettledCleanupError);
       try {
         await driver?.close();
       } catch (cleanupError) {
+        driverClosed = false;
         failures.push(cleanupError);
       }
-      try {
-        await environmentLease?.close();
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      let environmentClosed = false;
+      if (driverClosed) {
+        try {
+          await environmentLease?.close();
+          environmentClosed = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       try {
         journal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      try {
-        await rm(sessionDirectory, { recursive: true, force: true });
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      if (!resumed && driverClosed && environmentClosed && failures.length === 1) {
+        try {
+          await rm(sessionDirectory, { recursive: true, force: true });
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         const cleanupFailure = new Error("computer runtime creation cleanup failed", {
           cause: error,
         });
@@ -505,7 +582,7 @@ export class ComputerSupervisor {
       adapter: runtime.driver.adapterId,
       seatId: runtime.environmentLease.seatId,
       displayId: runtime.environmentLease.displayId,
-      capabilities: runtime.driver.capabilities,
+      capabilities: runtime.capabilities,
       targets: await runtime.driver.listTargets(),
     };
   }
@@ -558,11 +635,15 @@ export class ComputerSupervisor {
     } catch (error) {
       failures.push(error);
     }
-    try {
-      await runtime.environmentLease.close();
-      environmentClosed = true;
-    } catch (error) {
-      failures.push(error);
+    // A still-running driver may be using this display and profile. Preserve
+    // them until its process cleanup is confirmed.
+    if (driverClosed) {
+      try {
+        await runtime.environmentLease.close();
+        environmentClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (removeState && driverClosed && environmentClosed && journalClosed) {
       try {
@@ -628,4 +709,42 @@ function boundedPositiveInteger(value: number, label: string): number {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+/**
+ * Whether a session runs a computer_act batch as one operation is fixed for
+ * the session's life, kept beside its operation journal. The two ways send a
+ * batch under different operation ids, so every try of one batch, including
+ * concurrent tries and tries on either side of an agent update, must choose
+ * the same way. An update that adds batch support applies to new sessions. A
+ * session that began with batches and lost support keeps reporting them; its
+ * batches are then refused before anything runs, instead of a retry repeating
+ * actions one by one. A resumed session without a record began before batch
+ * modes were recorded, when every batch ran one action at a time, so it keeps
+ * doing that.
+ */
+async function pinActionBatches(
+  sessionDirectory: string,
+  capabilities: ComputerSessionCapabilities,
+  resumed: boolean,
+): Promise<ComputerSessionCapabilities> {
+  const path = join(sessionDirectory, "action-batches.json");
+  let pinned: boolean;
+  try {
+    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as { actionBatches?: unknown }).actionBatches !== "boolean"
+    )
+      throw new Error("computer session batch mode record is invalid");
+    pinned = (value as { actionBatches: boolean }).actionBatches;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    pinned = !resumed && capabilities.actionBatches === true;
+    const staged = `${path}.${process.pid}.tmp`;
+    await writeFile(staged, JSON.stringify({ actionBatches: pinned }), { mode: 0o600 });
+    await rename(staged, path);
+  }
+  return { ...capabilities, actionBatches: pinned };
 }

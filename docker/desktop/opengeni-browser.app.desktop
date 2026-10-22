@@ -1,9 +1,9 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=OpenGeni Browser
+Name=Opengeni Browser
 GenericName=Web Browser
-Comment=Container-safe Chrome for the OpenGeni sandbox desktop
+Comment=Container-safe Chrome for the Opengeni sandbox desktop
 Exec=/usr/local/bin/opengeni-browser %U
 Terminal=false
 Icon=web-browser

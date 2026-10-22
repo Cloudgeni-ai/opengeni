@@ -11,7 +11,7 @@ import {
   WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
@@ -20,6 +20,7 @@ import {
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
+  requireWorkspaceToolGatewayAuthorization,
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
@@ -31,6 +32,12 @@ const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const subjectId = "user:workspace-tool-gateway-test";
 
+test("a caller-shaped published Site tool capability is not authenticated authority", () => {
+  expect(() =>
+    requireWorkspaceToolGatewayAuthorization({ kind: "published_site_tools", grant: grant() }),
+  ).toThrow("workspace access authorization is invalid");
+});
+
 describe("Site version tool authorization", () => {
   const context = {
     siteArtifactId: "44444444-4444-4444-8444-444444444444",
@@ -40,8 +47,8 @@ describe("Site version tool authorization", () => {
   type Resolver = NonNullable<Parameters<typeof requireWorkspaceSiteToolAuthorization>[3]>;
   const version = { id: context.siteVersionId, requestedTools: [context.identity] };
   const resolve = (status = "active", requestedTools = version.requestedTools): Resolver =>
-    (async (_db, workspace, artifact, selectedVersion) => {
-      expect([workspace, artifact, selectedVersion]).toEqual([
+    (async (_db, caller, artifact, selectedVersion) => {
+      expect([caller.workspaceId, artifact, selectedVersion]).toEqual([
         workspaceId,
         context.siteArtifactId,
         context.siteVersionId,

@@ -2,8 +2,14 @@ import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
-import { rlsContextForWorkspace, withRlsContext } from "./database";
+import {
+  rlsContextForWorkspace,
+  withRlsContext,
+  withDatabaseMaintenanceLifetime,
+} from "./database";
 import * as schema from "./schema";
+import { modelCallTimingColumns, modelCallTimingOrNull } from "./model-call-timing";
+import { reconcileModelCallFactPage } from "./model-call-fact-reconciliation";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1105,6 +1111,7 @@ export async function countOnlineMachines(
       .where(
         and(
           eq(schema.enrollments.workspaceId, workspaceId),
+          eq(schema.enrollments.kind, "machine"),
           eq(schema.enrollments.status, "active"),
           gte(schema.enrollments.lastSeenAt, cutoff),
         ),
@@ -1314,7 +1321,12 @@ async function insertModelCallFactFromUsageEvent(
       listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
+      ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
       occurredAt: event.occurredAt,
+      connectionId:
+        provider === "codex-subscription"
+          ? await repairedCodexFactConnectionId(scopedDb, workspaceId, event)
+          : null,
     })
     .onConflictDoNothing({
       target: [
@@ -1325,6 +1337,40 @@ async function insertModelCallFactFromUsageEvent(
     })
     .returning({ id: schema.modelCallFacts.id });
   return insertedRows.length > 0;
+}
+
+/**
+ * The shared-core connection that served a repaired Codex call (M3 PR 3):
+ * the account the same turn attempt recorded in `codex.credential.selected`
+ * (one connection per attempt; a re-placement starts a new attempt), resolved
+ * through the provider's aliases to its canonical id. Read under the caller's
+ * row security, so a connection this workspace cannot see (a personal one)
+ * is not attributed and the fact keeps a NULL `connection_id`.
+ */
+async function repairedCodexFactConnectionId(
+  scopedDb: Database,
+  workspaceId: string,
+  event: ModelUsageEventRow,
+): Promise<string | null> {
+  if (!event.turnAttemptId || !event.turnId) return null;
+  const [row] = await scopedDb.execute<{ id: string | null }>(sql`
+    select coalesce(direct.id, alias.connection_id)::text as id
+    from ${schema.sessionEvents} selected
+    left join subscription_connections direct
+      on direct.account_id = selected.account_id and direct.provider = 'codex'
+     and direct.id::text = selected.payload->>'credentialId'
+    left join subscription_connection_aliases alias
+      on alias.account_id = selected.account_id and alias.provider = 'codex'
+     and alias.alias_connection_id::text = selected.payload->>'credentialId'
+    where selected.workspace_id = ${workspaceId}::uuid
+      and selected.turn_id = ${event.turnId}::uuid
+      and selected.turn_attempt_id = ${event.turnAttemptId}::uuid
+      and selected.type = 'codex.credential.selected'
+      and selected.occurred_at <= ${new Date(event.occurredAt).toISOString()}::timestamptz
+    order by selected.sequence desc
+    limit 1
+  `);
+  return row?.id ?? null;
 }
 
 /**
@@ -1407,8 +1453,22 @@ export async function backfillModelCallFactsFromSessionEvents(
 /** One ordered page of workspace ids for global maintenance sweeps. */
 export async function listWorkspaceIdsAfter(
   db: Database,
-  input: { afterId: string | null; limit: number },
+  input: {
+    afterId: string | null;
+    limit: number;
+    signal?: AbortSignal;
+    deadlineAtMs?: number;
+  },
 ): Promise<string[]> {
+  if (input.signal)
+    return withDatabaseMaintenanceLifetime(
+      db,
+      {
+        signal: input.signal,
+        ...(input.deadlineAtMs === undefined ? {} : { deadlineAtMs: input.deadlineAtMs }),
+      },
+      (scoped) => listWorkspaceIdsAfter(scoped, { afterId: input.afterId, limit: input.limit }),
+    );
   const rows = await db
     .select({ id: schema.workspaces.id })
     .from(schema.workspaces)
@@ -1419,120 +1479,43 @@ export async function listWorkspaceIdsAfter(
 }
 
 export type ModelCallFactReconciliation = {
-  /** Charged ledger calls in the window whose per-call fact is missing. */
+  /** Missing calls resolved (repaired or unrepairable) in this page. */
   missing: number;
   /** Missing facts rebuilt from their durable `agent.model.usage` event. */
   repaired: number;
   /** Missing facts not rebuilt: no usable durable usage event (or a concurrent writer won). */
   unrepaired: number;
-  /** True when more missing facts remain than this bounded pass examined. */
+  /** True while the persisted ledger/event scan has further pages. */
   truncated: boolean;
 };
 
 /**
- * Find ledger model calls (`usage_events` model.cost) in the window that have
- * no model_call_fact for the exact (turn, source key), and rebuild each from its
- * durable usage event. The ledger key is `${turnId}:${sourceKey}`, so detection
- * is exact regardless of each writer's own timestamp. Bounded and idempotent:
- * never rewrites the ledger or an existing fact.
+ * Advance one durable ledger/event page, repairing exact missing (turn, source
+ * key) facts. `limit` bounds scanned input, not only returned gaps. Repeated
+ * calls finish the persisted window before beginning the requested new one.
+ * Never rewrites the ledger or an existing fact.
  */
 export async function reconcileModelCallFacts(
   db: Database,
-  input: { workspaceId: string; since: Date; until: Date; limit?: number },
+  input: {
+    workspaceId: string;
+    since: Date;
+    until: Date;
+    limit?: number;
+    signal?: AbortSignal;
+    deadlineAtMs?: number;
+  },
 ): Promise<ModelCallFactReconciliation> {
-  const limit = Math.max(1, Math.min(input.limit ?? 1_000, 10_000));
-  const context = await rlsContextForWorkspace(db, input.workspaceId);
-  return await withRlsContext(db, context, async (scopedDb) => {
-    const missingRows = await scopedDb.execute<{
-      turn_id: string;
-      session_id: string;
-      source_key: string;
-    }>(sql`
-      select usage_row.turn_id, usage_row.session_id,
-        substr(usage_row.source_resource_id, 38) as source_key
-      from ${schema.usageEvents} usage_row
-      where usage_row.workspace_id = ${input.workspaceId}::uuid
-        and usage_row.event_type = 'model.cost'
-        and usage_row.source_resource_type = 'model_response'
-        and usage_row.occurred_at >= ${input.since.toISOString()}::timestamp with time zone
-        and usage_row.occurred_at < ${input.until.toISOString()}::timestamp with time zone
-        and usage_row.turn_id is not null
-        and usage_row.session_id is not null
-        and left(usage_row.source_resource_id, 37) = usage_row.turn_id::text || ':'
-        and not exists (
-          select 1
-          from ${schema.modelCallFacts} fact
-          where fact.workspace_id = usage_row.workspace_id
-            and fact.turn_id = usage_row.turn_id
-            and fact.source_key = substr(usage_row.source_resource_id, 38)
-        )
-      -- Rows with no usage event stay missing on every pass; rank them last so
-      -- they cannot starve repairable rows out of the bounded page.
-      order by
-        not exists (
-          select 1
-          from ${schema.sessionEvents} event
-          where event.workspace_id = usage_row.workspace_id
-            and event.session_id = usage_row.session_id
-            and event.turn_id = usage_row.turn_id
-            and event.type = 'agent.model.usage'
-            and event.turn_association = 'current'
-            and event.payload->>'sourceKey' = substr(usage_row.source_resource_id, 38)
-        ),
-        usage_row.occurred_at,
-        usage_row.id
-      limit ${limit + 1}
-    `);
-    const truncated = missingRows.length > limit;
-    const candidates: Array<{ turn_id: string; session_id: string; source_key: string }> = [
-      ...missingRows,
-    ].slice(0, limit);
-    const events =
-      candidates.length === 0
-        ? []
-        : await scopedDb
-            .select({
-              id: schema.sessionEvents.id,
-              accountId: schema.sessionEvents.accountId,
-              workspaceId: schema.sessionEvents.workspaceId,
-              sessionId: schema.sessionEvents.sessionId,
-              turnId: schema.sessionEvents.turnId,
-              turnAttemptId: schema.sessionEvents.turnAttemptId,
-              payload: schema.sessionEvents.payload,
-              occurredAt: schema.sessionEvents.occurredAt,
-              sourceKey: sql<string | null>`${schema.sessionEvents.payload}->>'sourceKey'`,
-            })
-            .from(schema.sessionEvents)
-            .where(
-              and(
-                eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                inArray(schema.sessionEvents.turnId, [
-                  ...new Set(candidates.map((candidate) => candidate.turn_id)),
-                ]),
-                eq(schema.sessionEvents.type, "agent.model.usage"),
-                eq(schema.sessionEvents.turnAssociation, "current"),
-              ),
-            )
-            .orderBy(schema.sessionEvents.occurredAt, schema.sessionEvents.id);
-    const eventByKey = new Map<string, (typeof events)[number]>();
-    for (const event of events) {
-      const key = `${event.turnId}:${event.sourceKey}`;
-      if (event.sourceKey !== null && !eventByKey.has(key)) eventByKey.set(key, event);
-    }
-    let repaired = 0;
-    for (const candidate of candidates) {
-      const event = eventByKey.get(`${candidate.turn_id}:${candidate.source_key}`);
-      if (event && (await insertModelCallFactFromUsageEvent(scopedDb, input.workspaceId, event))) {
-        repaired += 1;
-      }
-    }
-    return {
-      missing: candidates.length,
-      repaired,
-      unrepaired: candidates.length - repaired,
-      truncated,
-    };
-  });
+  if (input.signal)
+    return withDatabaseMaintenanceLifetime(
+      db,
+      {
+        signal: input.signal,
+        ...(input.deadlineAtMs === undefined ? {} : { deadlineAtMs: input.deadlineAtMs }),
+      },
+      (scoped) => reconcileModelCallFactPage(scoped, input, insertModelCallFactFromUsageEvent),
+    );
+  return reconcileModelCallFactPage(db, input, insertModelCallFactFromUsageEvent);
 }
 
 function numberOrNull(value: unknown): number | null {

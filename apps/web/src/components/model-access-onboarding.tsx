@@ -7,41 +7,44 @@ import { ArrowUpRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { CreditAmountPicker } from "@/components/credit-amount-picker";
-import { CouponRedeem } from "@/components/credits/coupon-redeem";
-import { OpenGeniCreditsTile, type ModelProviderId } from "@/components/models/provider-mark";
+import { CreditAmountPicker } from "@opengeni/react/app/components/credit-amount-picker";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import {
+  OpenGeniCreditsTile,
+  type ModelProviderId,
+} from "@opengeni/react/app/components/models/provider-mark";
 import {
   ProviderConnectList,
   providerPaymentSummary,
   type ProviderConnectChoice,
 } from "@/components/models/provider-connect-list";
-import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
-import { CreditsPrize } from "@/components/onboarding/credits-prize";
+import { CelebrationBurst } from "@opengeni/react/app/components/onboarding/celebration-burst";
+import { CreditsPrize } from "@opengeni/react/app/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
-import { Button } from "@/components/ui/button";
-import { ListRow } from "@/components/ui/list-row";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
-import { validTopupAmount } from "@/lib/format";
-import { userErrorText } from "@/lib/api-error";
-import { analyticsAction } from "@/lib/analytics-actions";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
+import { validTopupAmount } from "@opengeni/react/app/lib/format";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   type ConnectedModelFamily,
-} from "@/lib/model-access-onboarding";
+} from "@opengeni/react/app/lib/model-access-onboarding";
 import type { StartingCreditsOnboarding } from "@/lib/onboarding-starting-credits";
-import { formatCreditAmount } from "@/lib/onboarding-use-case";
+import { formatCreditAmount } from "@opengeni/react/app/lib/onboarding-use-case";
 import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,
 } from "@/components/supergrok-device-poll";
 
-type ProviderKey = "vercel" | "openrouter";
+type ProviderKey = "vercel" | "openrouter" | "opper";
 
 const PROVIDER_KEYS: Record<
   ProviderKey,
@@ -52,7 +55,7 @@ const PROVIDER_KEYS: Record<
     placeholder: string;
     help: string;
     family: ConnectedModelFamily;
-    analytics: "connect_ai_gateway" | "connect_openrouter";
+    analytics: "connect_ai_gateway" | "connect_openrouter" | "connect_opper";
   }
 > = {
   vercel: {
@@ -73,6 +76,15 @@ const PROVIDER_KEYS: Record<
     family: "openrouter",
     analytics: "connect_openrouter",
   },
+  opper: {
+    domain: "api.opper.ai",
+    role: "opper",
+    label: "Opper",
+    placeholder: "Opper API key",
+    help: "Create one at platform.opper.ai under API keys.",
+    family: "opper",
+    analytics: "connect_opper",
+  },
 };
 
 /** Names the service in the selection toast; model labels repeat across services. */
@@ -81,6 +93,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
+  opper: "Opper",
   credits: "Opengeni credits",
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
@@ -159,7 +172,8 @@ export function ModelAccessOnboardingPanel({
   const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
     !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
   );
-  const keyProvider: ProviderKey | null = open === "vercel" || open === "openrouter" ? open : null;
+  const keyProvider: ProviderKey | null =
+    open === "vercel" || open === "openrouter" || open === "opper" ? open : null;
   const connectedModelId = useRef<string | undefined>(undefined);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
@@ -511,6 +525,7 @@ export function ModelAccessOnboardingPanel({
         ["openai", "OpenAI"],
         ["azure_openai", "Azure OpenAI"],
         ["openrouter", "OpenRouter"],
+        ["opper", "Opper"],
         ["vercel", "Vercel AI Gateway"],
       ] as const
     ).map(([id, title]) => ({
@@ -633,7 +648,9 @@ export function ModelAccessOnboardingPanel({
         />
       );
     }
-    return choice.id === "vercel" || choice.id === "openrouter" ? keyPanel(choice.id) : null;
+    return choice.id === "vercel" || choice.id === "openrouter" || choice.id === "opper"
+      ? keyPanel(choice.id)
+      : null;
   }
 
   const creditsPanel =
@@ -710,18 +727,31 @@ export function ModelAccessOnboardingPanel({
 
   if (startingCredits || won) {
     const currency = startingCredits?.balance?.currency ?? "usd";
-    const trialAmount = startingCredits?.balance
+    const startingAmount = startingCredits?.balance
       ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
+      : null;
+    const monthlyPlan =
+      !won &&
+      startingCredits?.balance?.plan?.key === "free" &&
+      startingCredits.balance.plan.creditScoped
+        ? startingCredits.balance.plan
+        : null;
+    const monthlyAmount = monthlyPlan
+      ? formatCreditAmount(monthlyPlan.creditGrantedMicros, currency)
       : null;
     const wonAmount = won ? formatCreditAmount(won.amountMicros, "usd") : null;
     const heading = won
       ? won.free
         ? `You got ${wonAmount} in free credits`
         : `You added ${wonAmount} in credits`
-      : trialAmount
-        ? `You got ${trialAmount} in free credits`
-        : "You got free Opengeni credits";
-    const prizeMicros = won ? won.amountMicros : (startingCredits?.balance?.balanceMicros ?? null);
+      : monthlyAmount
+        ? `${monthlyAmount} in free credits every month`
+        : startingAmount
+          ? `You got ${startingAmount} in free credits`
+          : "You got free Opengeni credits";
+    const prizeMicros = won
+      ? won.amountMicros
+      : (monthlyPlan?.creditRemainingMicros ?? startingCredits?.balance?.balanceMicros ?? null);
     return (
       <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
         <CelebrationBurst key={won?.celebration ?? 0} />
@@ -731,11 +761,21 @@ export function ModelAccessOnboardingPanel({
               key={won?.celebration ?? 0}
               amountMicros={prizeMicros}
               currency={won ? "usd" : currency}
-              label={won ? (won.free ? "Coupon redeemed" : "Credits added") : "Free credits"}
+              label={
+                won
+                  ? won.free
+                    ? "Coupon redeemed"
+                    : "Credits added"
+                  : monthlyPlan
+                    ? "Monthly Free credit"
+                    : "Free credits"
+              }
               caption={
                 won && won.balanceMicros !== null
                   ? `Your balance is now ${formatCreditAmount(won.balanceMicros, "usd")}`
-                  : `Added to ${organizationName || "your organization"}`
+                  : monthlyPlan
+                    ? "Resets monthly · Unused credit doesn't roll over"
+                    : `Added to ${organizationName || "your organization"}`
               }
             />
           ) : null}
@@ -745,7 +785,9 @@ export function ModelAccessOnboardingPanel({
             {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            Start chatting. No card or API key needed.
+            {monthlyPlan
+              ? "For the free-credit models. No card or API key needed."
+              : "Start chatting. No card or API key needed."}
           </p>
           <Button
             type="button"

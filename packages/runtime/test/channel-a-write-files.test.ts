@@ -28,6 +28,7 @@ import {
   parseWriteFilesOutput,
   WRITE_FILES_COMMAND_MAX_BYTES,
 } from "../src/sandbox/write-files-script";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 setDefaultTimeout(30_000);
 
@@ -453,19 +454,27 @@ describe("fsWriteFiles", () => {
     expect(admissions).toBe(2);
   });
 
-  test("works through a banner-only command surface such as Modal's", async () => {
+  test("works through a command-only facade with trusted separate receipts", async () => {
     const { root } = workspace();
     const { session: shell } = shellSession(root);
+    const pages = new Map<unknown, ReturnType<typeof synchronousNativeOutputFixture>>();
     const session: ChannelASession = {
+      getSynchronousCommandOutput: (raw) =>
+        pages.get(raw)?.getSynchronousCommandOutput(raw) ?? null,
       execCommand: async (args) => {
         const result = await shell.exec!(args);
-        return [
-          "Chunk ID: banner",
+        const raw = [
+          `Chunk ID: ${crypto.randomUUID()}`,
           "Wall time: 0.0100 seconds",
           `Process exited with code ${result.exitCode}`,
           "Output:",
           `${result.stdout}${result.stderr}`,
         ].join("\n");
+        // Capture the actual host streams before the presentation merges them.
+        const output = synchronousNativeOutputFixture();
+        output.record(raw, result.stdout, result.stderr, result.exitCode);
+        pages.set(raw, output);
+        return raw;
       },
     };
     const result = await service(session).fsWriteFiles({ directory: "demo", files: skillFiles });

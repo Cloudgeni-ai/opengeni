@@ -20,6 +20,7 @@ import {
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
 import { usePageLiveActivity } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type BrowserFrameConnectionState =
   | "idle"
@@ -78,6 +79,7 @@ export type UseBrowserFrameStreamResult = {
 export function useBrowserFrameStream(
   options: UseBrowserFrameStreamOptions,
 ): UseBrowserFrameStreamResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
   const pageLive = usePageLiveActivity();
   const enabled = (options.enabled ?? true) && pageLive;
@@ -297,7 +299,7 @@ export function useBrowserFrameStream(
 
     const onError = (source: BrowserFrameWebSocket) => {
       if (source !== socket) return;
-      fail(new Error("Browser view lost connection."));
+      fail(new Error(t("hooks.useBrowserFrameStream.browserViewLostConnection")));
     };
 
     const onClose = (source: BrowserFrameWebSocket) => {
@@ -418,7 +420,7 @@ export function useBrowserFrameStream(
       if (expiryTimer) clearTimeout(expiryTimer);
       clearSocket(true);
     };
-  }, [client, enabled, nonce, options.browserSessionId, options.targetId, workspaceId]);
+  }, [client, enabled, nonce, options.browserSessionId, options.targetId, workspaceId, t]);
 
   return { ...result, reconnect };
 }

@@ -1,13 +1,16 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  initializeSessionStartAtomically,
+  type DbClient,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 
@@ -225,6 +228,15 @@ describe("workspace control busy HTTP mapping", () => {
   test("DELETE /sessions/:id renders the retryable 503 envelope and is retryable", async () => {
     if (!available) return;
     const value = await fixture();
+    // Creation reserves an idle shell (#4330); admit the queued first turn.
+    await initializeSessionStartAtomically(client.db, {
+      accountId: value.session.accountId,
+      workspaceId: value.workspaceId,
+      sessionId: value.session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
     const url = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.session.id}`;
     const request = () => app().request(url, { method: "DELETE", headers: value.headers });
     const release = await holdControlRow(value.workspaceId);

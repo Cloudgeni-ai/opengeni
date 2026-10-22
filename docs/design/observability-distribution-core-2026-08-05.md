@@ -5,12 +5,12 @@
 # Shared observability distribution core
 
 Status: accepted design
-Owner: OpenGeni infrastructure
+Owner: Opengeni infrastructure
 Date: 2026-08-05
 
 ## Decision
 
-OpenGeni will ship one public Kubernetes observability distribution that both
+Opengeni will ship one public Kubernetes observability distribution that both
 self-hosted and managed installations can consume with environment overlays.
 
 The existing `deploy/observability` dashboard directory becomes the root of a
@@ -21,7 +21,7 @@ resource defaults, and canonical dashboard ConfigMaps. Dashboard ConfigMaps are
 rendered directly from the JSON files already in that directory; generated or
 environment-owned copies are not authoritative.
 
-The OpenGeni application chart remains separate. It owns application metrics,
+The Opengeni application chart remains separate. It owns application metrics,
 `ServiceMonitor`, `PrometheusRule`, and OTLP integration, but it does not acquire
 the observability platform as a chart dependency. The stack plan installs the
 wrapper first so its CRDs exist. The next ordinary application release then
@@ -41,7 +41,7 @@ Environment overlays may add or replace only deployment-specific concerns:
 - storage classes, scheduling, topology, replicas, and capacity;
 - additive environment-only dashboards, probes, and rules.
 
-They must not fork the canonical OpenGeni dashboard JSON or replace the public
+They must not fork the canonical Opengeni dashboard JSON or replace the public
 application rule catalog.
 
 ## Rationale
@@ -53,7 +53,7 @@ verification independently. That separation also makes it easy for the managed
 installation to drift from the public dashboards and application rules.
 
 Making the application chart depend directly on `kube-prometheus-stack` would
-solve distribution at the wrong boundary. It would make every OpenGeni chart
+solve distribution at the wrong boundary. It would make every Opengeni chart
 upgrade own cluster-scoped CRDs and a large platform lifecycle, conflict with
 clusters that already have monitoring, and couple application rollback to
 Prometheus and Grafana data.
@@ -85,11 +85,11 @@ must prove:
 1. the expected wrapper chart version is deployed;
 2. every canonical dashboard ConfigMap exactly matches its source bytes, hash,
    and source revision;
-3. OpenGeni `ServiceMonitor` and `PrometheusRule` objects exist with the shared
+3. Opengeni `ServiceMonitor` and `PrometheusRule` objects exist with the shared
    selector label;
 4. required recording and alerting rules are present in the objects and loaded
    healthily by the live Prometheus rules API;
-5. every OpenGeni `ServiceMonitor` has discovered, healthy live targets;
+5. every Opengeni `ServiceMonitor` has discovered, healthy live targets;
 6. Grafana is healthy and its dashboard sidecar has materialized the exact
    canonical files.
 

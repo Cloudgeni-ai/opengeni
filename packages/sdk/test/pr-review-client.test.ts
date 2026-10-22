@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniCoreClient } from "../src/core";
 import { OpenGeniPrReviewClient } from "../src/pr-review";
 
-describe("OpenGeni Review Bot SDK", () => {
+describe("Opengeni Review Bot SDK", () => {
   test("keeps PrReview requests behind the optional client entry", async () => {
     const requests: Array<{ method: string; path: string; body: unknown }> = [];
     const coreClient = new OpenGeniCoreClient({

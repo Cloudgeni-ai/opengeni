@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -497,6 +498,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
 
     if (url.pathname === "/v1/config/client") return json(clientConfig());
+    if (url.pathname === "/v1/inbox" && request.method() === "GET")
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);

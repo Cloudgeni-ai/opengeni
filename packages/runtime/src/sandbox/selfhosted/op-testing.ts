@@ -163,6 +163,9 @@ export class FakeOpRunner implements ControlRpc {
   /** Op ids that answer LOST (evicted) on query/attach — bounded-retention
    *  collateral. */
   readonly lostOps = new Set<string>();
+  /** Op ids released by an `OpRelease` for their exact exit frame: dropped,
+   *  and answered LOST (released) from then on. */
+  readonly releasedOps = new Set<string>();
   private readonly cancelledBeforeStart = new Set<string>();
 
   constructor(opts: {
@@ -240,6 +243,13 @@ export class FakeOpRunner implements ControlRpc {
         return this.handleQuery(req.requestId, op.opQuery.opId, connectionInstanceId);
       case "opCancel":
         return this.handleCancel(req.requestId, op.opCancel.opId, connectionInstanceId);
+      case "opRelease":
+        return this.handleRelease(
+          req.requestId,
+          op.opRelease.opId,
+          BigInt(op.opRelease.exitSeq),
+          connectionInstanceId,
+        );
       default: {
         return errorResponse(
           req.requestId,
@@ -322,12 +332,18 @@ export class FakeOpRunner implements ControlRpc {
     generation: string,
     connectionInstanceId: string,
   ): ControlResponse {
+    if (this.releasedOps.has(opId)) {
+      return statusOnly(requestId, releasedStatus(opId));
+    }
     if (this.lostOps.has(opId)) {
       return statusOnly(requestId, lostStatus(opId));
     }
     const run = this.runs.get(opId);
     if (!run) {
-      return statusOnly(requestId, lostStatus(opId));
+      return statusOnly(
+        requestId,
+        this.cancelledBeforeStart.has(opId) ? tombstoneStatus(opId) : lostStatus(opId),
+      );
     }
     if (run.connectionInstanceId !== connectionInstanceId) {
       return errorResponse(
@@ -370,12 +386,18 @@ export class FakeOpRunner implements ControlRpc {
     opId: string,
     connectionInstanceId: string,
   ): ControlResponse {
+    if (this.releasedOps.has(opId)) {
+      return statusOnly(requestId, releasedStatus(opId));
+    }
     if (this.lostOps.has(opId)) {
       return statusOnly(requestId, lostStatus(opId));
     }
     const run = this.runs.get(opId);
     if (!run) {
-      return statusOnly(requestId, lostStatus(opId));
+      return statusOnly(
+        requestId,
+        this.cancelledBeforeStart.has(opId) ? tombstoneStatus(opId) : lostStatus(opId),
+      );
     }
     if (run.connectionInstanceId !== connectionInstanceId) {
       return errorResponse(
@@ -385,6 +407,32 @@ export class FakeOpRunner implements ControlRpc {
       );
     }
     return statusOnly(requestId, this.statusOf(opId, run));
+  }
+
+  /** The agent's OpRelease: drop a COMPLETE op whose exit frame is exactly
+   *  `exitSeq` and confirm it in the answer; anything else answers its status
+   *  and releases nothing. */
+  private handleRelease(
+    requestId: string,
+    opId: string,
+    exitSeq: bigint,
+    connectionInstanceId: string,
+  ): ControlResponse {
+    const answer = this.handleQuery(requestId, opId, connectionInstanceId);
+    const run = this.runs.get(opId);
+    if (
+      !run ||
+      this.releasedOps.has(opId) ||
+      this.lostOps.has(opId) ||
+      answer.result?.$case !== "opStatus" ||
+      answer.result.opStatus.state !== OpState.OP_STATE_COMPLETE ||
+      run.exitSeq !== exitSeq
+    ) {
+      return answer;
+    }
+    this.releasedOps.add(opId);
+    run.finalAcked = true;
+    return statusOnly(requestId, releasedStatus(opId));
   }
 
   private handleCancel(
@@ -507,6 +555,7 @@ export class FakeOpRunner implements ControlRpc {
       totals,
       failureCode: "",
       failureDetail: {},
+      backgroundChildrenStopped: false,
       ...script.exit,
     };
     frames.push({ opId, seq: seq.toString(), body: { $case: "exit", exit } });
@@ -554,6 +603,7 @@ export function createMockSelfhostedOpStream(input: {
           exitCode: response.exitCode,
           timedOut: response.timedOut,
           durationMs: response.durationMs,
+          backgroundChildrenStopped: response.backgroundChildrenStopped,
         },
       };
     },
@@ -625,6 +675,16 @@ function lostStatus(opId: string): OpStatus {
   };
 }
 
+function releasedStatus(opId: string): OpStatus {
+  return { ...lostStatus(opId), lostReason: OpLostReason.OP_LOST_REASON_RELEASED };
+}
+
+/** The agent's status for an op cancelled before it began: complete and
+ *  cancelled, no frame ever sent, no output record. */
+function tombstoneStatus(opId: string): OpStatus {
+  return { ...cancelledStatus(opId), nextSeq: "0" };
+}
+
 function cancelledStatus(opId: string): OpStatus {
   return {
     opId,
@@ -640,6 +700,7 @@ function cancelledStatus(opId: string): OpStatus {
       totals: {},
       failureCode: "",
       failureDetail: {},
+      backgroundChildrenStopped: false,
     },
     lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
   };

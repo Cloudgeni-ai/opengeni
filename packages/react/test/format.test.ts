@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  COMPOSER_SITE_REFUSAL_MESSAGES,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
@@ -19,6 +20,9 @@ import {
   tryParseJson,
 } from "../src/lib/format";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 describe("failure presentation", () => {
   test("database failures show a safe explanation without altering stored diagnostics", () => {
@@ -35,7 +39,7 @@ describe("failure presentation", () => {
         lastRetryableError: "fixture-value",
       });
       const before = JSON.stringify(payload);
-      expect(presentFailure(payload)).toEqual({
+      expect(presentFailure(englishText, payload)).toEqual({
         reason: "The service encountered a database error.",
         safetyRefusal: false,
       });
@@ -44,9 +48,39 @@ describe("failure presentation", () => {
   });
   const refusal =
     "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+  test("a coded capacity-recovery failure reads in the host's language, not server English", () => {
+    const stored =
+      "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.";
+    for (const code of [
+      "codex_capacity_recovery_exhausted",
+      "xai_capacity_recovery_exhausted",
+      "claude_capacity_recovery_exhausted",
+    ]) {
+      const payload = {
+        error: stored,
+        code,
+        recovery: "user_message",
+        recoveryExhausted: true,
+        retryable: false,
+      };
+      const before = JSON.stringify(payload);
+      expect(presentFailure(englishText, payload).reason).toBe(
+        "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+      );
+      const norwegian = createOpenGeniText({
+        locale: "nb",
+        messages: { "lib.format.capacityRecoveryExhausted": "Abonnementet er tomt for kapasitet." },
+      });
+      expect(presentFailure(norwegian, payload)).toEqual({
+        reason: "Abonnementet er tomt for kapasitet.",
+        safetyRefusal: false,
+      });
+      expect(JSON.stringify(payload)).toBe(before);
+    }
+  });
   test("exposes the actual reason in legacy exhausted-retry failures", () => {
     expect(
-      presentFailure({
+      presentFailure(englishText, {
         error: "Upstream unavailable. Send a message to retry.",
         lastRetryableError: refusal,
       }),
@@ -57,7 +91,7 @@ describe("failure presentation", () => {
   });
   test("retains the exact diagnostic on new safety failures", () => {
     expect(
-      presentFailure({
+      presentFailure(englishText, {
         code: "provider_safety_refusal",
         error: "Automatic retries stopped.",
         detail: refusal,
@@ -69,18 +103,22 @@ describe("failure presentation", () => {
   });
   test("keeps other underlying failures and ignores nontext details", () => {
     expect(
-      presentFailure({ error: "Retries exhausted.", lastRetryableError: "Connection reset." })
-        .reason,
+      presentFailure(englishText, {
+        error: "Retries exhausted.",
+        lastRetryableError: "Connection reset.",
+      }).reason,
     ).toBe("Retries exhausted. Connection reset.");
-    expect(presentFailure({ error: "Failed.", detail: { nested: true } }).reason).toBe("Failed.");
-    expect(presentFailure({})).toEqual({ reason: null, safetyRefusal: false });
+    expect(presentFailure(englishText, { error: "Failed.", detail: { nested: true } }).reason).toBe(
+      "Failed.",
+    );
+    expect(presentFailure(englishText, {})).toEqual({ reason: null, safetyRefusal: false });
   });
 });
 
 describe("formatClockTime", () => {
   test("formats date + time and rejects invalid input", () => {
-    expect(formatClockTime("not-a-date")).toBe("");
-    const formatted = formatClockTime("2026-07-15T08:04:00");
+    expect(formatClockTime(englishText, "not-a-date")).toBe("");
+    const formatted = formatClockTime(englishText, "2026-07-15T08:04:00");
     expect(formatted.toLowerCase()).toMatch(/jul/);
     expect(formatted).toMatch(/15/);
     expect(formatted).toMatch(/\d/);
@@ -91,16 +129,16 @@ describe("formatRelativeTime", () => {
   const now = new Date("2026-06-12T12:00:00Z");
 
   test("scales from now to days", () => {
-    expect(formatRelativeTime("2026-06-12T11:59:55Z", now)).toBe("now");
-    expect(formatRelativeTime("2026-06-12T11:59:20Z", now)).toBe("40s");
-    expect(formatRelativeTime("2026-06-12T11:53:00Z", now)).toBe("7m");
-    expect(formatRelativeTime("2026-06-12T09:00:00Z", now)).toBe("3h");
-    expect(formatRelativeTime("2026-06-10T12:00:00Z", now)).toBe("2d");
+    expect(formatRelativeTime(englishText, "2026-06-12T11:59:55Z", now)).toBe("now");
+    expect(formatRelativeTime(englishText, "2026-06-12T11:59:20Z", now)).toBe("40s");
+    expect(formatRelativeTime(englishText, "2026-06-12T11:53:00Z", now)).toBe("7m");
+    expect(formatRelativeTime(englishText, "2026-06-12T09:00:00Z", now)).toBe("3h");
+    expect(formatRelativeTime(englishText, "2026-06-10T12:00:00Z", now)).toBe("2d");
   });
 
   test("handles invalid and future timestamps gracefully", () => {
-    expect(formatRelativeTime("not-a-date", now)).toBe("");
-    expect(formatRelativeTime("2026-06-12T12:30:00Z", now)).toBe("now");
+    expect(formatRelativeTime(englishText, "not-a-date", now)).toBe("");
+    expect(formatRelativeTime(englishText, "2026-06-12T12:30:00Z", now)).toBe("now");
   });
 });
 
@@ -131,20 +169,22 @@ describe("tryParseJson", () => {
 
 describe("isCreditExhaustion", () => {
   test("matches the engine error text, bare and wrapped, case-insensitively", () => {
-    expect(isCreditExhaustion("insufficient OpenGeni credits")).toBe(true);
-    expect(isCreditExhaustion("Activity task failed: insufficient OpenGeni credits")).toBe(true);
+    expect(isCreditExhaustion("insufficient workspace credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient workspace credits")).toBe(true);
+    expect(isCreditExhaustion("insufficient Opengeni credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);
     expect(
-      isCreditExhaustion({ error: "Activity task failed: insufficient OpenGeni credits" }),
+      isCreditExhaustion({ error: "Activity task failed: insufficient Opengeni credits" }),
     ).toBe(true);
-    expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits" })).toBe(true);
+    expect(isCreditExhaustion({ detail: "insufficient Opengeni credits" })).toBe(true);
   });
 
   test("matches the budget_exhausted segment limit on its own", () => {
     expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
     expect(
       isCreditExhaustion({
-        detail: "insufficient OpenGeni credits",
+        detail: "insufficient Opengeni credits",
         segmentLimit: "budget_exhausted",
       }),
     ).toBe(true);
@@ -166,17 +206,50 @@ describe("composerSubmissionErrorMessage", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),
     );
 
     expect(error.code).toBe("payment_required");
-    expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(composerSubmissionErrorMessage(englishText, error)).toBe(
+      COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText),
+    );
     expect(composerSubmissionCanRetry(error)).toBe(false);
-    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("free");
-    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("Codex");
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText)).not.toContain("free");
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText)).not.toContain("Codex");
+  });
+
+  test("a published Site's assistant refusals read plainly; only busy is retryable", () => {
+    const refusal = (status: number, code: string) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: {
+            status,
+            code: status === 429 ? "rate_limited" : "forbidden",
+            message: "Internal wording",
+            retryable: status === 429,
+            requestId: "req-site",
+            details: { code },
+          },
+        }),
+        { mutation: true },
+      );
+    for (const [status, code, retry] of [
+      [403, "not_available_for_viewer", false],
+      [402, "site_budget_exhausted", false],
+      [429, "site_budget_busy", true],
+      [503, "site_platform_brake_engaged", false],
+    ] as const) {
+      const error = refusal(status, code);
+      expect({ code, message: composerSubmissionErrorMessage(englishText, error) }).toEqual({
+        code,
+        message: COMPOSER_SITE_REFUSAL_MESSAGES(englishText)[code]!,
+      });
+      expect({ code, retry: composerSubmissionCanRetry(error) }).toEqual({ code, retry });
+    }
   });
 
   test("a model removed from the catalog asks for another model instead of a retry", () => {
@@ -199,16 +272,20 @@ describe("composerSubmissionErrorMessage", () => {
       modelId: "openrouter/vendor/retired-model:free",
     });
     expect(isModelUnavailableSubmissionError(error)).toBe(true);
-    expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_MODEL_UNAVAILABLE_MESSAGE);
-    expect(composerSubmissionErrorMessage(error)).not.toMatch(/422|Reference|retired-model/);
+    expect(composerSubmissionErrorMessage(englishText, error)).toBe(
+      COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+    );
+    expect(composerSubmissionErrorMessage(englishText, error)).not.toMatch(
+      /422|Reference|retired-model/,
+    );
     expect(composerSubmissionCanRetry(error)).toBe(false);
 
     // Only the stored text survives a reload, and older APIs omit the detail code.
     for (const text of [
       COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
-      "OpenGeni API 422: model is not available: gpt-old Reference: abc.",
+      "Opengeni API 422: model is not available: gpt-old Reference: abc.",
     ]) {
-      expect(composerSubmissionErrorMessage(new Error(text))).toBe(
+      expect(composerSubmissionErrorMessage(englishText, new Error(text))).toBe(
         COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
       );
       expect(composerSubmissionCanRetry(new Error(text))).toBe(false);
@@ -231,7 +308,7 @@ describe("composerSubmissionErrorMessage", () => {
   });
 
   test("keeps unrelated submission diagnostics out of default UI copy", () => {
-    expect(composerSubmissionErrorMessage(new Error("network unavailable"))).toBe(
+    expect(composerSubmissionErrorMessage(englishText, new Error("network unavailable"))).toBe(
       "The request could not be completed.",
     );
     expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
@@ -250,26 +327,33 @@ describe("composerSubmissionErrorMessage", () => {
       { outcomeUnknown: true, correlationId: "uncertain-model" },
     );
     expect(error.details).toEqual({ code: "model_unavailable" });
-    expect(composerSubmissionErrorMessage(error)).toContain("Check its status before retrying");
-    expect(composerSubmissionErrorMessage(error)).toContain("Reference: uncertain-model.");
-    expect(composerSubmissionErrorMessage(error)).not.toContain("Choose another model");
+    expect(composerSubmissionErrorMessage(englishText, error)).toContain(
+      "Check its status before retrying",
+    );
+    expect(composerSubmissionErrorMessage(englishText, error)).toContain(
+      "Reference: uncertain-model.",
+    );
+    expect(composerSubmissionErrorMessage(englishText, error)).not.toContain(
+      "Choose another model",
+    );
   });
 
   test("preserves composer-owned validation and safe reconciliation guidance", () => {
     expect(
       composerSubmissionErrorMessage(
-        new ComposerStateError("A message can include at most 12 timeline annotations."),
+        englishText,
+        new ComposerStateError("Wait for the current message to finish sending."),
       ),
-    ).toContain("at most 12");
-    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
-      "cannot safely retry",
-    );
-    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
-      "reconcile the session",
-    );
+    ).toContain("Wait for the current message");
+    expect(
+      composerSubmissionErrorMessage(englishText, new ComposerReconciliationRequiredError()),
+    ).toContain("cannot safely retry");
+    expect(
+      composerSubmissionErrorMessage(englishText, new ComposerReconciliationRequiredError()),
+    ).toContain("reconcile the session");
     expect(new ComposerReconciliationRequiredError().message).toContain("Opengeni");
     expect(
-      composerSubmissionErrorMessage(new ComposerWorkspaceControlUnavailableError()),
+      composerSubmissionErrorMessage(englishText, new ComposerWorkspaceControlUnavailableError()),
     ).toContain("Ask your administrator");
     expect(new ComposerWorkspaceControlUnavailableError().message).toContain(
       "setWorkspaceInferenceState",
@@ -277,8 +361,10 @@ describe("composerSubmissionErrorMessage", () => {
   });
 
   test("recognizes retained legacy credit errors without their API object", () => {
-    const legacy = new Error("OpenGeni API 402: insufficient OpenGeni credits");
-    expect(composerSubmissionErrorMessage(legacy)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    const legacy = new Error("Opengeni API 402: insufficient Opengeni credits");
+    expect(composerSubmissionErrorMessage(englishText, legacy)).toBe(
+      COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText),
+    );
     expect(composerSubmissionCanRetry(legacy)).toBe(false);
   });
 
@@ -290,7 +376,7 @@ describe("composerSubmissionErrorMessage", () => {
       displayMessage: "Member allowance exhausted",
     });
     expect(composerSubmissionCanRetry(allowance)).toBe(false);
-    expect(composerSubmissionErrorMessage(allowance)).toContain("workspace admin");
+    expect(composerSubmissionErrorMessage(englishText, allowance)).toContain("workspace admin");
     expect(composerSubmissionCanRetry(new OpenGeniApiError(429, "rate limited"))).toBe(true);
     expect(composerSubmissionCanRetry(new OpenGeniApiError(503, "unavailable"))).toBe(true);
   });
@@ -298,16 +384,31 @@ describe("composerSubmissionErrorMessage", () => {
 
 describe("humanizeFailureReason", () => {
   test("maps credit exhaustion to the canonical sentence", () => {
-    expect(humanizeFailureReason("insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
-    expect(humanizeFailureReason("Activity task failed: insufficient OpenGeni credits")).toBe(
-      CREDIT_EXHAUSTION_MESSAGE,
+    expect(humanizeFailureReason(englishText, "insufficient Opengeni credits")).toBe(
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
     );
+    expect(
+      humanizeFailureReason(englishText, "Activity task failed: insufficient Opengeni credits"),
+    ).toBe(CREDIT_EXHAUSTION_MESSAGE(englishText));
   });
 
   test("keeps auth/quota mappings and passes other reasons through", () => {
-    expect(humanizeFailureReason("Incorrect API key provided")).toContain("engine credentials");
-    expect(humanizeFailureReason("insufficient_quota")).toContain("provider quota");
-    expect(humanizeFailureReason("something else broke")).toBe("something else broke");
-    expect(humanizeFailureReason(null)).toBeNull();
+    expect(humanizeFailureReason(englishText, "Incorrect API key provided")).toContain(
+      "engine credentials",
+    );
+    expect(humanizeFailureReason(englishText, "insufficient_quota")).toContain("provider quota");
+    expect(humanizeFailureReason(englishText, "something else broke")).toBe("something else broke");
+    expect(humanizeFailureReason(englishText, null)).toBeNull();
+  });
+
+  test("a turn refused for a retired or removed model names the fix", () => {
+    for (const reason of [
+      "Turn execution policy model is retired from new selection",
+      "Turn execution policy model is not present in the configured catalog",
+    ]) {
+      expect(humanizeFailureReason(englishText, reason)).toBe(
+        englishText("lib.format.modelUnavailable"),
+      );
+    }
   });
 });

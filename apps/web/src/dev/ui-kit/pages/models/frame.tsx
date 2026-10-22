@@ -37,13 +37,13 @@ import {
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { toast } from "sonner";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, currentWorkspace, organization, you } from "../../fixtures";
 import { PagePreview, useKitPane } from "../../kit";

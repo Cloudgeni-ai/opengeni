@@ -1,14 +1,14 @@
 // Uses the production menu with in-memory selections; never contacts a provider.
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import type { SessionToolSelection } from "@/components/pickers";
-import type { McpServerOption } from "@/lib/session-tools";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
+import type { McpServerOption } from "@opengeni/react/app/lib/session-tools";
 import "@/styles.css";
 import linearLogo from "../../../data/catalog/logos/linear-app-4b4a9f349c60.png";
 import slackLogo from "../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg";
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import type { ConnectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
+import type { ConnectionAccountChoices } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 
 const accounts = [
   { id: "personal-fixture", subjectId: "viewer", metadata: { email: "alex@example.com" } },
@@ -88,7 +88,7 @@ function Preview() {
                 },
               }}
             />
-            <span className="text-xs text-fg-muted">OpenGeni</span>
+            <span className="text-xs text-fg-muted">Opengeni</span>
           </div>
         </div>
         <p role="status" className="text-xs text-fg-subtle">

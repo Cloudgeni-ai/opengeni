@@ -6,7 +6,7 @@ import type {
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
   authorityKind: ConnectorDocumentDestinationAuthority;

@@ -3,13 +3,13 @@ import type {
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
   BrowserTarget,
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
-  BrowserProtectedAuthController,
   InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
 } from "../src";
 
@@ -622,79 +622,136 @@ describe("BrowserInteractionController", () => {
       code: "driver_failed",
     });
   });
+
+  test("an unknown target is named, with where current ones are found", async () => {
+    const targets = new Map([["target-1", target()]]);
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: driver(targets, async () => observation(targets.get("target-1")!)),
+    });
+
+    await expect(controller.observe("app:guessed")).rejects.toMatchObject({
+      code: "target_not_found",
+      message:
+        'browser target "app:guessed" does not exist; list the current targets and use one of their ids',
+    });
+  });
 });
 
-function protectedCommand(value: string): BrowserProtectedAuthFillCommand {
-  const base = command(20);
-  return {
-    protocolVersion: 1,
-    operationId: base.operationId,
-    browserSessionId,
-    controllerGeneration,
-    targetId: base.targetId,
-    expectedTargetGeneration: base.expectedTargetGeneration,
-    expectedDocumentGeneration: "document-1",
-    expectedFrameId: "frame-1",
-    actor: base.actor,
-    authorityId: "password-authority",
-    credentialVersion: 7,
-    allowedOrigins: ["https://target-1.test"],
-    fields: [
-      {
-        fieldId: "password",
-        locator: { kind: "ref", ref: "e-password" },
-        purpose: "password",
-        value,
-      },
-    ],
-    submit: { type: "press", key: "Enter" },
-  };
-}
+describe("resolved action targets", () => {
+  const headerClose = {
+    actionIndex: 0,
+    ref: "e7",
+    role: "button",
+    name: "Close",
+    container: { role: "banner", name: null },
+  } as const;
 
-describe("BrowserProtectedAuthController", () => {
-  test("journals a secret-free digest and deduplicates retries without comparing value bytes", async () => {
-    const records: unknown[] = [];
-    let dispatchCount = 0;
-    const currentTarget = target();
-    const controller = new BrowserProtectedAuthController({
+  function tracedController(
+    dispatch: BrowserInteractionDriver["dispatch"],
+    records: Array<{ receipt: BrowserActionReceipt }>,
+  ) {
+    return new BrowserInteractionController({
       browserSessionId,
       controllerGeneration,
       onJournalRecord(record) {
-        records.push(record);
+        records.push(structuredClone(record));
       },
-      driver: {
-        async target(targetId) {
-          return targetId === currentTarget.id ? currentTarget : null;
-        },
-        async observe() {
-          return { target: currentTarget, status: "working" };
-        },
-        async dispatch() {
-          dispatchCount += 1;
-          return { target: currentTarget, status: "submitted" };
-        },
-      },
+      driver: driver(new Map([["target-1", target()]]), dispatch),
     });
+  }
 
-    const first = await controller.run(protectedCommand("correct horse battery staple"));
-    const retry = await controller.run(protectedCommand("different one-time value"));
-    expect(first.state).toBe("completed");
-    expect(retry).toEqual(first);
-    expect(dispatchCount).toBe(1);
-    expect(JSON.stringify(records)).not.toContain("correct horse battery staple");
-    expect(JSON.stringify(records)).not.toContain("different one-time value");
-    expect(controller.journalSnapshot()[0]?.commandDigest).toMatch(/^[0-9a-f]{64}$/u);
+  test("returns what each locator resolved to without journaling it", async () => {
+    const records: Array<{ receipt: BrowserActionReceipt }> = [];
+    const controller = tracedController(async (_command, trace) => {
+      trace?.record(headerClose);
+      trace?.record({ ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null });
+      return observation(target());
+    }, records);
 
-    expect(() =>
-      controller.run({
-        ...protectedCommand("correct horse battery staple"),
-        fields: [
-          {
-            ...protectedCommand("unused").fields[0]!,
-            locator: { kind: "ref", ref: "another-field" },
-          },
-        ],
-      }),
-    ).toThrow(InteractionControllerError);
+    const receipt = await controller.run(command(1));
+
+    expect(receipt.state).toBe("completed");
+    expect(receipt.targets).toEqual([
+      headerClose,
+      { ...headerClose, actionIndex: 1, ref: null, role: "textbox", name: null },
+    ]);
+    // An older controller reading this journal must parse every record.
+    expect(records.length).toBeGreaterThan(0);
+    for (const record of records) expect(record.receipt).not.toHaveProperty("targets");
+    expect(controller.receipt(operationId(1))).not.toHaveProperty("targets");
+  });
+
+  test("keeps targets when the action fails after input", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("invalid_action", "fixture refusal"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+      new Error("fixture transport loss"),
+    ]) {
+      const controller = tracedController(async (_command, trace) => {
+        trace?.record(headerClose);
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).not.toBe("completed");
+      expect(receipt.targets).toEqual([headerClose]);
+    }
+  });
+
+  test("never lets an invalid or absent trace change the outcome", async () => {
+    const invalid = tracedController(async (_command, trace) => {
+      trace?.record({ ...headerClose, role: "" });
+      return observation(target());
+    }, []);
+    const invalidReceipt = await invalid.run(command(1));
+    expect(invalidReceipt.state).toBe("completed");
+    expect(invalidReceipt).not.toHaveProperty("targets");
+
+    const untraced = tracedController(async () => observation(target()), []);
+    expect(await untraced.run(command(1))).not.toHaveProperty("targets");
+  });
+
+  test("returns the page a driver observed after a failure", async () => {
+    for (const failure of [
+      new InteractionDefiniteDriverError("locator_not_found", "fixture stale ref"),
+      new InteractionOutcomeUnknownDriverError("outcome_unknown", "fixture unknown"),
+    ]) {
+      failure.observation = observation(target());
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe(
+        failure instanceof InteractionDefiniteDriverError ? "failed" : "outcome_unknown",
+      );
+      expect(receipt.error?.code).toBe(failure.code);
+      expect(receipt.observation?.target.id).toBe("target-1");
+    }
+
+    // An observation of another target, or one that does not parse, is dropped
+    // without changing the failure.
+    for (const invalid of [observation(target("target-2")), { bogus: true }]) {
+      const failure = new InteractionDefiniteDriverError("invalid_action", "fixture refusal");
+      failure.observation = invalid;
+      const controller = tracedController(async () => {
+        throw failure;
+      }, []);
+      const receipt = await controller.run(command(1));
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
+      expect(receipt.observation).toBeNull();
+    }
+  });
+
+  test("bounds recorded targets", async () => {
+    const controller = tracedController(async (_command, trace) => {
+      for (let index = 0; index < 500; index += 1) {
+        trace?.record({ ...headerClose, actionIndex: index % 32 });
+      }
+      return observation(target());
+    }, []);
+    const receipt = await controller.run(command(1));
+    expect(receipt.targets).toHaveLength(64);
   });
 });

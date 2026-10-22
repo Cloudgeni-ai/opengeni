@@ -1,15 +1,15 @@
 # First-party MCP response contracts
 
-Audience: integrators and maintainers of the built-in OpenGeni MCP servers.
+Audience: integrators and maintainers of the built-in Opengeni MCP servers.
 
-OpenGeni's first-party MCP mutation tools return a compact, versioned receipt
+Opengeni's first-party MCP mutation tools return a compact, versioned receipt
 instead of returning the full entity they just created or changed. The caller
 already has the mutation arguments in its tool-call history; returning prompts,
 instructions, commands, evidence, secret values, or other request fields again
 wastes model context and duplicates sensitive data across storage and transport
 surfaces.
 
-This contract applies to the built-in OpenGeni MCP and docs MCP. It does not
+This contract applies to the built-in Opengeni MCP and docs MCP. It does not
 change REST response bodies. Codemode-proxied tools retain the result contract
 of their selected first-party, capability, or per-session provider.
 
@@ -203,7 +203,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `session_wait`, `command_wait` | Read/wait | Bounded durable state/event result; timeout is non-mutating and never cancels work |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
-| First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |
+| First-party: `secret_save`, `secret_move`, `secret_delete` | Mutation | Item summary and ready references; secret values are never returned. The retired `variable_set_*` and `environment_*` tools are no longer registered. |
 | First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
@@ -216,7 +216,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
 | First-party: `knowledge_search`, `knowledge_prepare_save`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status. A model call to `knowledge_search` or `knowledge_prepare_save` receives a compact copy without bookkeeping or repeated preview text; other callers receive the exact result ([details](knowledge.md#model-visible-discovery-results)) |
 | First-party: `sandboxes_list` | List | Existing fleet projection |
-| First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
+| First-party: `rig_list`, `sessions_list`, `secret_search` | List | Existing compact list projections; secret values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
 | First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |

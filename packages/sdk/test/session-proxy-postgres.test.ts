@@ -3,12 +3,9 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import type { Permission } from "@opengeni/contracts";
 import { createDb, createOrganizationApiKey, createWorkspace, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../../apps/api/src/app";
 import {
   artifactViewerCapability,

@@ -173,7 +173,7 @@ describe("Northstar deferred agent panel recovery", () => {
     expect(AgentPanelLoadBoundary.getDerivedStateFromError()).toEqual({ failed: true });
     const fallback = renderToStaticMarkup(<AgentPanelLoadError />);
     expect(fallback).toContain('role="alert"');
-    expect(fallback).toContain("OpenGeni panel unavailable");
+    expect(fallback).toContain("Opengeni panel unavailable");
     expect(fallback).toContain("Reload demo");
   });
 });

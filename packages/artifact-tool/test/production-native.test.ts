@@ -23,6 +23,11 @@ import {
   PresentationFile as ReferencePresentationFile,
 } from "../src/presentation";
 import { Workbook as ReferenceWorkbook } from "../src/spreadsheet";
+import { SpreadsheetFile as ReferenceSpreadsheetFile } from "../src/spreadsheet-file";
+import {
+  decodeSpreadsheetMetadataKernelProjection,
+  encodeSpreadsheetMetadataKernelQuery,
+} from "@opengeni/contracts/editable-artifacts";
 import {
   decodePresentationArtifactQueryResponse,
   encodePresentationArtifactQuery,
@@ -33,6 +38,7 @@ import {
   NativeSpreadsheetSession,
 } from "../src/native";
 import { requireCompositeState } from "../src/production-composite";
+import { reconcileSpreadsheetProjection } from "../src/production-spreadsheet-native";
 import { encodePresentationProjectionCommands } from "../src/production-native-codecs";
 import {
   productionTestRuntime,
@@ -47,6 +53,153 @@ const ONE_PIXEL_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("production facade over the real native addon", () => {
+  test("keeps default-only imports byte-identical to dimension-free workbooks", () => {
+    const plain = ReferenceWorkbook.create();
+    plain.worksheets.add("Defaults").getRange("A1").values = [[42]];
+    const defaults = ReferenceWorkbook.fromJSON(plain.toJSON());
+    defaults.worksheets.getItem("Defaults").setRowHeight(0, 24);
+    defaults.worksheets.getItem("Defaults").setColumnWidth(0, 96);
+    const first = reconcileSpreadsheetProjection(plain, productionTestRuntime(), 0x1234n);
+    const second = reconcileSpreadsheetProjection(defaults, productionTestRuntime(), 0x1234n);
+    try {
+      expect(first.session.snapshot()).toEqual(second.session.snapshot());
+      expect(first.session.stateHash()).toBe(second.session.stateHash());
+    } finally {
+      first.session.dispose();
+      second.session.dispose();
+    }
+  });
+
+  test("retains native authority for dimension mutations, reads, and resets", () => {
+    const workbook = Workbook.create();
+    try {
+      const sheet = workbook.worksheets.add("Geometry");
+      const state = requireCompositeState(workbook, "spreadsheet");
+      const native = state.native as NativeSpreadsheetSession;
+      sheet.setColumnWidth(8, 160);
+      sheet.getRange("A21:C21").format.rowHeightPx = 48;
+      expect(state.native).toBe(native);
+      const revision = workbook.revision;
+      const snapshot = native.snapshot();
+      expect(sheet.columnWidth(8)).toBe(160);
+      expect(sheet.rowHeight(20)).toBe(48);
+      expect([...sheet.columnWidthEntries()]).toEqual([[8, 160]]);
+      expect([...sheet.rowHeightEntries()]).toEqual([[20, 48]]);
+      expect(workbook.toJSON().worksheets[0]).toMatchObject({
+        columnWidths: [[8, 160]],
+        rowHeights: [[20, 48]],
+      });
+      expect(workbook.revision).toBe(revision);
+      expect(native.snapshot()).toEqual(snapshot);
+      const reopened = NativeSpreadsheetSession.open(productionTestRuntime(), snapshot);
+      try {
+        const metadata = decodeSpreadsheetMetadataKernelProjection(
+          reopened.query(encodeSpreadsheetMetadataKernelQuery({ maxSheets: 1, maxBytes: 4096 })),
+        );
+        expect(metadata.sheets[0]).toMatchObject({
+          usedBounds: null,
+          columnWidths: [[8, 160]],
+          rowHeights: [[20, 48]],
+        });
+      } finally {
+        reopened.dispose();
+      }
+      for (const size of [0, 1.5, 4097]) {
+        expect(() => sheet.setRowHeight(20, size)).toThrow("integer pixels");
+        expect(native.snapshot()).toEqual(snapshot);
+        expect(sheet.rowHeight(20)).toBe(48);
+      }
+      sheet.setColumnWidth(8, 96);
+      sheet.setRowHeight(20, 24);
+      expect([...sheet.columnWidthEntries()]).toEqual([]);
+      expect([...sheet.rowHeightEntries()]).toEqual([]);
+      expect(sheet.columnWidth(8)).toBe(96);
+      expect(sheet.rowHeight(20)).toBe(24);
+      expect(state.native).toBe(native);
+    } finally {
+      disposeArtifact(workbook);
+    }
+  });
+
+  test("reconciles dimension ranges larger than the canonical command limit without poisoning state", () => {
+    const workbook = Workbook.create();
+    try {
+      const sheet = workbook.worksheets.add("Large geometry");
+      sheet.getRangeByIndexes(0, 0, 5000, 1).format.rowHeightPx = 30;
+      sheet.getRangeByIndexes(0, 0, 1, 5000).format.columnWidthPx = 180;
+      expect(sheet.rowHeight(0)).toBe(30);
+      expect(sheet.rowHeight(4999)).toBe(30);
+      expect(sheet.columnWidth(0)).toBe(180);
+      expect(sheet.columnWidth(4999)).toBe(180);
+      expect([...sheet.rowHeightEntries()]).toHaveLength(5000);
+      expect([...sheet.columnWidthEntries()]).toHaveLength(5000);
+      const state = requireCompositeState(workbook, "spreadsheet");
+      const native = state.native as NativeSpreadsheetSession;
+      const reopened = NativeSpreadsheetSession.open(productionTestRuntime(), native.snapshot());
+      try {
+        expect(reopened.stateHash()).toBe(native.stateHash());
+      } finally {
+        reopened.dispose();
+      }
+      sheet.getRange("A1").values = [[42]];
+      expect(sheet.getRange("A1").values).toEqual([[42]]);
+      expect(sheet.rowHeight(4999)).toBe(30);
+    } finally {
+      disposeArtifact(workbook);
+    }
+  });
+
+  test("imports and reexports sparse XLSX geometry on empty sheets", async () => {
+    const reference = ReferenceWorkbook.create();
+    const sheet = reference.worksheets.add("Empty geometry");
+    sheet.setColumnWidth(8, 160);
+    sheet.setRowHeight(20, 48);
+    const source = await ReferenceSpreadsheetFile.exportXlsx(reference);
+    const production = await SpreadsheetFile.importXlsx(source);
+    try {
+      const imported = production.worksheets.getItem("Empty geometry");
+      expect(imported.columnWidth(8)).toBe(160);
+      expect(imported.rowHeight(20)).toBe(48);
+      const native = requireCompositeState(production, "spreadsheet")
+        .native as NativeSpreadsheetSession;
+      const metadata = decodeSpreadsheetMetadataKernelProjection(
+        native.query(encodeSpreadsheetMetadataKernelQuery({ maxSheets: 1, maxBytes: 4096 })),
+      );
+      expect(metadata.sheets[0]).toMatchObject({
+        usedBounds: null,
+        columnWidths: [[8, 160]],
+        rowHeights: [[20, 48]],
+      });
+      const roundTrip = await ReferenceSpreadsheetFile.importXlsx(
+        await SpreadsheetFile.exportXlsx(production),
+      );
+      expect(roundTrip.worksheets.getItem("Empty geometry").columnWidth(8)).toBe(160);
+      expect(roundTrip.worksheets.getItem("Empty geometry").rowHeight(20)).toBe(48);
+    } finally {
+      disposeArtifact(production);
+    }
+  });
+
+  test("rejects fractional imported pixel dimensions instead of discarding geometry", async () => {
+    const reference = ReferenceWorkbook.create();
+    reference.worksheets.add("Fractional").setRowHeight(20, 25.5);
+    const source = await ReferenceSpreadsheetFile.exportXlsx(reference);
+    await expect(SpreadsheetFile.importXlsx(source)).rejects.toThrow("integer pixels");
+  });
+
+  test("rejects XLSX export of tiny native columns rather than changing their width", async () => {
+    const workbook = Workbook.create();
+    try {
+      const sheet = workbook.worksheets.add("Tiny");
+      sheet.setColumnWidth(8, 5);
+      expect(sheet.columnWidth(8)).toBe(5);
+      await expect(SpreadsheetFile.exportXlsx(workbook)).rejects.toThrow("below 6 pixels");
+      expect(sheet.columnWidth(8)).toBe(5);
+    } finally {
+      disposeArtifact(workbook);
+    }
+  });
+
   test("captures exact durable snapshots for every modality", () => {
     const workbook = Workbook.create();
     workbook.worksheets.add("Published").getRange("A1").values = [[42]];
@@ -381,7 +534,7 @@ describe("production facade over the real native addon", () => {
           config: {
             geometry: "textbox",
             name: "Master title",
-            text: "OpenGeni",
+            text: "Opengeni",
             position: { left: 40, top: 20, width: 300, height: 48 },
           },
         },

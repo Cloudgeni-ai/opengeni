@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1, verifyDelegatedAccessToken } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { turnCredentialRestriction } from "../src/activities/agent-turn/credential-restriction";
 import {
   prepareRunCredentials,
@@ -91,7 +91,6 @@ describe("trusted worker credential restriction", () => {
         groupBoxBackend: "selfhosted",
         sandboxCreationBackend: "selfhosted",
         effectiveRunCredentialBackend: "selfhosted",
-        sandboxWorkspaceEnvironmentValues: {},
         connectionScope: scope,
         runWorkspaceMutationForSandbox: async (_sandbox, _operation, mutation) => await mutation(),
       } as PrepareRunCredentialsDeps);

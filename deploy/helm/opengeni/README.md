@@ -1,4 +1,4 @@
-# OpenGeni chart workload configuration hooks
+# Opengeni chart workload configuration hooks
 
 ## Release identity
 
@@ -10,12 +10,36 @@ no explicit entry. Other provider credentials and configuration keep their
 existing precedence. Canary renderers must preserve an already-correct entry's
 position so saved values reproduce the same pod template on later upgrades.
 
+## Hook release settings
+
+Migration and catalog-import Jobs read job-scoped settings snapshots rendered
+from the incoming release, not the live workload ConfigMap. Each snapshot uses
+the Job's hook events and a weight one lower than the Job, so a pre-upgrade
+migration sees new config before Helm updates ordinary resources. The canonical
+ConfigMap rendering supplies all generated settings as well as `config` values.
+
+When `secret.create=true`, the chart also snapshots the incoming runtime Secret
+for each Job. Externally managed runtime and migration Secrets remain external
+references: provision their desired contents before invoking Helm. The order
+stays config, runtime Secret, then the separate migration Secret; explicit
+generated environment entries retain their existing precedence. Catalog import
+still takes its owner database URL from the migration Secret.
+
+Snapshots are replaced before the next hook run and deleted after a successful
+hook event. They remain available throughout Job execution; Helm performs
+successful-hook cleanup only after the event's hooks finish. Custom hook events
+and weights follow the corresponding Job. With hooks disabled, snapshots are
+ordinary release resources. Disabling a Job disables its snapshots too.
+
+This does not make externally managed Secret updates atomic with rolling pods;
+operators must still coordinate changes incompatible with old running pods.
+
 ## Service links
 
-Every OpenGeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
+Every Opengeni pod sets `enableServiceLinks: false`. Kubernetes otherwise
 injects `<SERVICE>_PORT=tcp://<ip>:<port>` variables for each Service in the
 namespace. For a Service such as `opengeni-api-metrics` that yields
-`OPENGENI_API_METRICS_PORT`, which collides with an OpenGeni setting and fails
+`OPENGENI_API_METRICS_PORT`, which collides with an Opengeni setting and fails
 settings parsing at startup in any pod that does not set it explicitly. Pods
 reach services through DNS.
 
@@ -109,3 +133,33 @@ its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
 when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
 never scales a Deployment back to `replicaCount` and kills pods with in-flight
 turns. `replicaCount` applies only when autoscaling is off.
+
+`worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
+source contract, not a production acceptance flag. It adds Namespace demand,
+queue-only and busy-pod metrics to CPU, memory and agent-only inflight. The
+initial policy disables downscale. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md) for prerequisites,
+exact semantics, adapter freshness fencing and recovery gates. Its dedicated
+`worker-scaler-prometheusrule.yaml` does not alter the accepted legacy alerts.
+All Object metrics bind namespace/release/environment/Temporal namespace/queue;
+the adapter example must be rebound to that exact rendered source identity.
+Atomic completion evidence rejects empty-but-failed classification stages;
+queue producer observations expire at 45 seconds, other raw/activity TTLs at 60.
+Identity is declared per recording rule, tested with Prometheus 2.55.1 and 3.5.0.
+The adapter pairs each value with its same-evaluation expiry on all labels
+except the metric name before MAX aggregation, including HA cohorts.
+
+Run real Helm/schema and Prometheus rule fixtures with:
+
+```sh
+bun test ./deploy/helm/opengeni/test/queue-demand.test.ts
+# All chart tests isolated, all example values linted, upgrade contracts:
+bun scripts/check-worker-queue-demand.ts
+```
+
+The focused suite requires real binaries: `OPENGENI_HELM` and
+`OPENGENI_PROMTOOL` (or `PATH`) override the test tools. On Linux x64 it downloads
+official Helm 3.19.0 and Prometheus 3.5.0 into a temporary cache, verifies their
+official archive checksums and checks cached binary hashes. It fails rather
+than silently skipping when tooling is unavailable. Application dependencies
+and the lockfile are untouched.

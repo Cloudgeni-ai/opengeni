@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import {
   generateSessionTitle,

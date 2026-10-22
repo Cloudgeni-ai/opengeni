@@ -34,13 +34,17 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 
 ## Report delivery
 
-Agents answer in chat by default, including summaries and reports. A native
-document Artifact is the deliverable when the user asks for a document or file,
-or when the result is large (multi-page) or clearly meant to be kept or shared.
+Agents answer in chat by default, including summaries, reports, briefs, letters
+and plans written on request. A native document Artifact is the deliverable when
+the user asks for a document, asks to edit an existing document artifact, or
+when the result is too long to read comfortably in chat (several pages). A Word,
+Excel, PDF or PowerPoint file the user sends to be changed, or asks for in a
+format the artifact exporter does not serve, is made or edited in the sandbox
+with ordinary tools and published instead; it is not a report deliverable.
 That can include a secondary output such as an audit produced while organizing
 Knowledge. The chat reply then gives a short summary and the artifact link
 rather than restating the document. Routing lives in the provider-neutral
-operational instructions; the bundled `opengeni-documents` Skill owns the
+operational instructions; the bundled `documents` Skill owns the
 authoring procedure. The artifact is the working document from the start, not a
 published copy of a sandbox Markdown or DOCX report.
 
@@ -304,7 +308,7 @@ The locked decision applies these rules:
    next evaluation as ordinary input. The API projects the pacing delay as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
-   OpenGeni does not infer progress or blockage from tool/event shape; the
+   Opengeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
 6. Goals are NOT capped by continuation count by default - runs legitimately
@@ -409,7 +413,7 @@ previous-continuation pointers are cleared together. A worker can re-dispatch a
 recovering logical goal turn under a new fenced attempt after death; that is
 recovery of the same turn, not creation or charging of another continuation.
 An embedding host's funding refusal uses `usage_policy`: its private meter can
-deny for reasons other than credits, so OpenGeni does not invent a balance diagnosis.
+deny for reasons other than credits, so Opengeni does not invent a balance diagnosis.
 
 ## Pauses and failures
 
@@ -456,7 +460,10 @@ deny for reasons other than credits, so OpenGeni does not invent a balance diagn
   `session.created`.
 - `GET /v1/workspaces/:id/sessions/:sessionId/goal` returns the goal plus a
   `continuation` projection from one repeatable-read Postgres snapshot
-  (`sessions:read`; 404 when the session has no goal). The projection reports
+  (`sessions:read`; 404 when the session has no goal, or 200 `null` when the
+  client opts in with `?absent=null` - the SDK's `findGoal`, which
+  `useGoal` prefers so a goal-less chat logs no failed browser request; a
+  missing session is always 404). The projection reports
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
   typed reason, wake/observed revisions, optional next-attempt time, the
   latest workflow-wake error, and (for `held_for_input`) the agent's stated

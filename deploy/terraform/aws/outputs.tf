@@ -19,12 +19,12 @@ output "ecr_repository_urls" {
 }
 
 output "runtime_secret_name" {
-  description = "AWS Secrets Manager secret intended for OpenGeni runtime values."
+  description = "AWS Secrets Manager secret intended for Opengeni runtime values."
   value       = aws_secretsmanager_secret.runtime.name
 }
 
 output "runtime_role_arn" {
-  description = "IAM role ARN intended for OpenGeni workload IRSA."
+  description = "IAM role ARN intended for Opengeni workload IRSA."
   value       = aws_iam_role.runtime.arn
 }
 
@@ -44,12 +44,12 @@ output "object_storage_backend" {
 }
 
 output "object_storage_bucket" {
-  description = "S3 bucket for OpenGeni file storage."
+  description = "S3 bucket for Opengeni file storage."
   value       = var.object_storage.mode == "managed" ? aws_s3_bucket.files[0].bucket : var.object_storage.bucket
 }
 
 output "helm_set_values" {
-  description = "Non-secret Helm values that connect OpenGeni workloads to this AWS substrate."
+  description = "Non-secret Helm values that connect Opengeni workloads to this AWS substrate."
   value = {
     "global.imageRegistry"                                      = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
     "api.image.repository"                                      = local.repository_names.api

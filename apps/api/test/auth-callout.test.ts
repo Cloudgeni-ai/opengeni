@@ -40,8 +40,17 @@ const realDb = await import("@opengeni/db");
 // here avoids infinite self-delegation.
 const realGetEnrollment = realDb.getEnrollment;
 const realClaimEnrollmentConnection = realDb.claimEnrollmentConnection;
+const realRecordExpired = realDb.recordEnrollmentExpiredCredentials;
+const expiredDiagnostics: string[] = [];
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  recordEnrollmentExpiredCredentials: async (
+    db: never,
+    input: Parameters<typeof realRecordExpired>[1],
+  ) => {
+    if (input.workspaceId !== WS) return realRecordExpired(db, input);
+    expiredDiagnostics.push(input.enrollmentId);
+  },
   getEnrollment: async (db: never, workspaceId: string, enrollmentId: string) => {
     // Only intercept this test's synthetic workspace; everyone else gets the
     // real DAO so unrelated, process-shared test files are unaffected.
@@ -175,6 +184,25 @@ describe("handleAuthorizationRequest", () => {
     expect(res.error).toMatch(/missing/i);
   });
 
+  test("every connect decision is counted by outcome and closed reason", async () => {
+    const counted: Array<Record<string, string>> = [];
+    const observed = {
+      ...deps(),
+      observability: {
+        warn: () => undefined,
+        incrementCounter: (input: { name: string; labels: Record<string, string> }) => {
+          if (input.name === "opengeni_machine_connect_total") counted.push(input.labels);
+        },
+      } as never,
+    };
+    await handleAuthorizationRequest(observed, authRequest(undefined));
+    await handleAuthorizationRequest(observed, authRequest("oge_garbage.sig"));
+    expect(counted).toEqual([
+      { outcome: "denied", reason: "missing_bearer" },
+      { outcome: "denied", reason: "invalid_bearer" },
+    ]);
+  });
+
   test("an INVALID bearer (bad signature) is denied", async () => {
     const out = await handleAuthorizationRequest(deps(), authRequest("oge_garbage.sig"));
     const res = readResponse(out);
@@ -228,6 +256,7 @@ describe("handleAuthorizationRequest", () => {
   });
 
   test("an EXPIRED bearer is denied", async () => {
+    expiredDiagnostics.length = 0;
     const expired = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
       agentId: AGENT,
@@ -240,6 +269,10 @@ describe("handleAuthorizationRequest", () => {
     const res = readResponse(out);
     expect(res.granted).toBe(false);
     expect(res.error).toMatch(/invalid|expired/i);
+    expect(expiredDiagnostics).toEqual([AGENT]);
+    expiredDiagnostics.length = 0;
+    await handleAuthorizationRequest(deps(), authRequest("oge_forged.invalid"));
+    expect(expiredDiagnostics).toEqual([]);
   });
 
   test("a REVOKED enrollment (not active) is denied even with a valid bearer", async () => {

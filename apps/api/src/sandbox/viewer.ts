@@ -31,7 +31,7 @@ import {
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
-import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
+import { type AccessGrant, type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
   getLiveEnrollmentConnection,
@@ -74,6 +74,7 @@ import {
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
+  usesAgentTransport,
   verifySandboxExecReadiness,
   StreamPortUnavailableError,
   renewSandboxProviderExpiration,
@@ -90,7 +91,6 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
-import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -155,11 +155,9 @@ export async function sessionAttachEnvironment(
    *  the materialization audit fact. Null records the legacy service sentinel. */
   attachSubjectId: string | null,
 ): Promise<Record<string, string>> {
-  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(
-    services.db,
-    services.settings,
-    { accountId: session.accountId, workspaceId, session, subjectId: attachSubjectId },
-  );
+  // The manifest carries deployment constants only (W1): user secrets are
+  // resolved per command from `{{secret:…}}` references, never seeded here.
+  void attachSubjectId;
   // Build the env with the SESSION's backend, not the deployment default: the
   // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
   // git token-file/askpass pointers derive from HOME), the box is established
@@ -172,11 +170,7 @@ export async function sessionAttachEnvironment(
     session.sandboxBackend !== services.settings.sandboxBackend
       ? { ...services.settings, sandboxBackend: session.sandboxBackend }
       : services.settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironmentValues,
-    { workspaceId },
-  );
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(
       environment,
@@ -206,6 +200,10 @@ export async function attachViewer(
     /** The authenticated subject attaching this viewer (0281): recorded on
      *  the holder row together with the live session authority epoch. */
     viewerSubjectId?: string;
+    /** The authenticated route grant, when one drives the attach. It resolves
+     *  the session's Sandbox Environment for an agent attempt as its
+     *  initiating human. */
+    grant?: AccessGrant;
     /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
     waitSignal?: AbortSignal;
   },
@@ -236,7 +234,12 @@ export async function attachViewer(
     : null;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(
+    db,
+    settings,
+    session,
+    input.grant ? { grant: input.grant } : { subjectId: attachSubjectId },
+  );
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -282,7 +285,7 @@ export async function attachViewer(
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
           error.reason === "balance"
-            ? "insufficient Opengeni credits for an idle sandbox viewer"
+            ? "insufficient workspace credits for an idle sandbox viewer"
             : "workspace sandbox warm allowance exhausted",
         cause: error,
       });
@@ -969,6 +972,21 @@ export async function mintDesktopStream(
       return null;
     }
 
+    // A compute sandbox's agent owns its display and serves the framebuffer
+    // over the relay, fenced by the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: DESKTOP_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, resolution: defaultResolution(settings) } : null;
+    }
+
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
     try {
@@ -1235,6 +1253,21 @@ export async function mintTerminalStream(
       return null;
     }
 
+    // A compute sandbox's agent serves its terminal as a relay PTY, fenced by
+    // the lease epoch. Nothing runs over exec.
+    if (usesAgentTransport(established.backendId)) {
+      const relayed = await mintSelfhostedStream(services, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId: input.viewerId,
+        activeEpoch: lease.leaseEpoch,
+        viewerAuthority,
+        port: TERMINAL_STREAM_PORT,
+        session: established.session as RelayResolvableSession,
+      });
+      return relayed ? { ...relayed, transport: "relay-pty" } : null;
+    }
+
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
     try {
@@ -1378,6 +1411,8 @@ async function tryMintActiveSelfhostedStream(
       if (!enrollment.workspaceRoot) return null;
       const client = new SelfhostedSandboxClient({
         workspaceId,
+        // Addressed where the machine is enrolled (it can serve other workspaces).
+        controlWorkspaceId: enrollment.workspaceId,
         workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => controlRpc(bus),

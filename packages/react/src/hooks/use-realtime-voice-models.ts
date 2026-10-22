@@ -1,67 +1,46 @@
-import type { WorkspaceRealtimeModelCatalogResponse } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
-
-type CatalogClient = {
-  getWorkspaceRealtimeModelCatalog?: (
-    workspaceId: string,
-    options?: { signal?: AbortSignal | undefined },
-  ) => Promise<WorkspaceRealtimeModelCatalogResponse>;
-};
-
-type AvailableVoiceModels = WorkspaceRealtimeModelCatalogResponse["models"];
-
-const CACHE_TTL_MS = 60_000;
-const cache = new WeakMap<
-  object,
-  Map<string, { models: Promise<AvailableVoiceModels>; expiresAt: number }>
->();
-
-function load(client: CatalogClient, workspaceId: string): Promise<AvailableVoiceModels> {
-  let byWorkspace = cache.get(client);
-  if (!byWorkspace) {
-    byWorkspace = new Map();
-    cache.set(client, byWorkspace);
-  }
-  const hit = byWorkspace.get(workspaceId);
-  if (hit && hit.expiresAt > Date.now()) return hit.models;
-  // A throwing structural client (one without voice) just means no voice.
-  const models = Promise.resolve()
-    .then(() => client.getWorkspaceRealtimeModelCatalog!(workspaceId))
-    .then((catalog) => catalog.models.filter((model) => model.available));
-  const entry = { models, expiresAt: Date.now() + CACHE_TTL_MS };
-  byWorkspace.set(workspaceId, entry);
-  models.catch(() => {
-    if (byWorkspace.get(workspaceId) === entry) byWorkspace.delete(workspaceId);
-  });
-  return models;
-}
+import type { RealtimeControllerClient, RealtimeModelOption } from "../realtime/session-realtime";
 
 /**
- * Voice models this user can start right now in the workspace, or an empty
- * list while unknown, disabled, unsupported (older API or proxy), or failed.
- * Availability is advisory; Opengeni still admits and meters every call.
+ * Voice models this user can start in the workspace, or an empty list while
+ * disabled, unsupported or unknown. Shares the stock voice control's catalog
+ * cache, without eagerly loading voice code for a text-only embed.
  */
 export function useRealtimeVoiceModels(
   client: unknown,
   workspaceId: string,
   enabled: boolean,
-): AvailableVoiceModels {
-  const [models, setModels] = useState<AvailableVoiceModels>([]);
+): RealtimeModelOption[] {
+  const [snapshot, setSnapshot] = useState<{
+    client: unknown;
+    workspaceId: string;
+    models: RealtimeModelOption[];
+  } | null>(null);
   useEffect(() => {
-    setModels([]);
-    const catalogClient = client as CatalogClient;
     if (!enabled || !workspaceId) return;
-    if (typeof catalogClient.getWorkspaceRealtimeModelCatalog !== "function") return;
-    let live = true;
-    load(catalogClient, workspaceId).then(
-      (available) => {
-        if (live) setModels(available);
-      },
-      () => undefined,
-    );
-    return () => {
-      live = false;
-    };
+    const controller = new AbortController();
+    void import("../realtime/session-realtime")
+      .then(async ({ loadRealtimeModelCatalog }) => {
+        const models = await loadRealtimeModelCatalog(
+          client as RealtimeControllerClient,
+          workspaceId,
+          controller.signal,
+        );
+        if (!controller.signal.aborted) {
+          setSnapshot({
+            client,
+            workspaceId,
+            models: models?.filter((model) => model.available) ?? [],
+          });
+        }
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
   }, [client, workspaceId, enabled]);
-  return models;
+  return enabled &&
+    snapshot !== null &&
+    snapshot.client === client &&
+    snapshot.workspaceId === workspaceId
+    ? snapshot.models
+    : [];
 }

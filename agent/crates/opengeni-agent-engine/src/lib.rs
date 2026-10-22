@@ -33,6 +33,7 @@ pub mod admission;
 pub mod flow;
 pub mod registry;
 pub mod retention;
+pub mod update_drain;
 
 /// Measured host capacity, sampled by the integration layer (the engine
 /// receives measurements, never takes them — it stays pure). Budgets and

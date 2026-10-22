@@ -1,17 +1,23 @@
-import { RowButton } from "@/components/ui/page-actions";
-import { Section } from "@/components/ui/section";
-import { SettingRow } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
-import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import {
+  analyticsPreferencesAvailable,
+  openAnalyticsPreferences,
+} from "@opengeni/react/app/lib/analytics-consent";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 /**
  * Privacy preferences, in Your account. It only exists on a deployment that
  * asks for analytics consent, and reopens the same consent choices the first
  * banner offered.
  */
-export function PrivacyPreferencesSection() {
-  const context = useAppContext();
-  if (!analyticsPreferencesAvailable(context.clientConfig.analytics)) return null;
+export function PrivacyPreferencesSection({
+  analytics,
+}: {
+  analytics: ClientConfig["analytics"] | undefined;
+}) {
+  if (!analyticsPreferencesAvailable(analytics)) return null;
   return (
     <div className="mt-8 min-w-0">
       <Section title="Privacy" description="Choose what Opengeni may collect about how you use it.">

@@ -1,8 +1,13 @@
 import { signupCreditModelIds } from "@opengeni/config";
+import { ApiHttpError } from "../http/api-error";
 import {
   lookupExternalIdentityForRequest,
   cancelExternalWorkspaceMemberGrantForRequest,
   updateExternalWorkspaceMemberForRequest,
+  getOrganizationPrivacySettings,
+  OrganizationPrivacyLockedError,
+  privacyDeploymentLimits,
+  updateOrganizationPrivacySettings,
 } from "@opengeni/core";
 import {
   type Permission,
@@ -21,6 +26,7 @@ import {
   OrganizationInvitation,
   OrganizationUserSetupDelivery,
   OrganizationMember,
+  OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
   OrganizationSummary,
@@ -33,6 +39,7 @@ import {
   RevokeOrganizationWorkspaceMemberResponse,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  UpdateOrganizationPrivacySettingsRequest,
   UpdateOrganizationPrivateSessionSettingsRequest,
   UpdateOrganizationRetentionPolicyRequest,
   UpdateOrganizationWorkspaceRequest,
@@ -241,6 +248,15 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
 
 function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
   const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "P0S01") {
+    throw new ApiHttpError(402, {
+      code: "seat_limit_reached",
+      message: "Organization seat limit reached. Upgrade your plan to add people.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { action: { type: "upgrade", href: "/billing" } },
+    });
+  }
   if (sqlState === "54000" && resourceLimitMessage) {
     throw new HTTPException(409, {
       message: resourceLimitMessage,
@@ -661,13 +677,16 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     try {
+      const value = await getOrganizationPrivateSessionSettings(deps.db, {
+        organizationId,
+        actorSubjectId: subjectId,
+      });
+      // A deployment that turns Only me off makes it unavailable everywhere.
       return context.json(
-        OrganizationPrivateSessionSettings.parse(
-          await getOrganizationPrivateSessionSettings(deps.db, {
-            organizationId,
-            actorSubjectId: subjectId,
-          }),
-        ),
+        OrganizationPrivateSessionSettings.parse({
+          ...value,
+          available: value.available && privacyDeploymentLimits(deps.settings).onlyMeAllowed,
+        }),
       );
     } catch (error) {
       rethrowMembershipError(error);
@@ -682,6 +701,9 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     const payload = await parseBody(context, UpdateOrganizationPrivateSessionSettingsRequest);
+    if (payload.enabled && !privacyDeploymentLimits(deps.settings).onlyMeAllowed) {
+      throw new HTTPException(409, { message: "Only me is turned off for this app." });
+    }
     try {
       return context.json(
         OrganizationPrivateSessionSettings.parse(
@@ -693,6 +715,58 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  // The organization's privacy choices: the default audience for new chats and
+  // schedules, and whether admins see that other people's Only me schedules
+  // exist. `limits` reports what this deployment fixes.
+  app.get("/v1/organizations/:organizationId/privacy-settings", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
+    try {
+      // The same owner/admin check the private session settings read makes.
+      await getOrganizationPrivateSessionSettings(deps.db, {
+        organizationId,
+        actorSubjectId: subjectId,
+      });
+      return context.json(
+        OrganizationPrivacySettings.parse(
+          await getOrganizationPrivacySettings(deps, organizationId),
+        ),
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.patch("/v1/organizations/:organizationId/privacy-settings", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
+    const request = await parseBody(context, UpdateOrganizationPrivacySettingsRequest);
+    try {
+      return context.json(
+        OrganizationPrivacySettings.parse(
+          await updateOrganizationPrivacySettings(deps, {
+            organizationId,
+            actorSubjectId: subjectId,
+            request,
+          }),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof OrganizationPrivacyLockedError) {
+        throw new HTTPException(409, { message: error.message });
+      }
       rethrowMembershipError(error);
     }
   });

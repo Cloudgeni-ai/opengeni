@@ -1,5 +1,5 @@
 import { OpenGeniApiError } from "../errors";
-import type { OpenGeni } from "./opengeni";
+import type { Opengeni } from "./opengeni";
 import { OpenGeniChatError, type ChatImportedMessage, type ChatOptions } from "./types";
 
 /** Internal HTTP plumbing shared by the native handler and the protocol adapters. */
@@ -81,11 +81,11 @@ export function clientConversation(request: Request, protocolField: unknown): st
  * an unscoped client id could address any conversation in the workspace.
  */
 export async function openResolvedChat(
-  og: OpenGeni,
+  og: Opengeni,
   resolution: ChatResolution,
   clientConversationId: string | undefined,
 ): Promise<
-  { chat: Awaited<ReturnType<OpenGeni["chat"]>>; response?: undefined } | { response: Response }
+  { chat: Awaited<ReturnType<Opengeni["chat"]>>; response?: undefined } | { response: Response }
 > {
   if (!resolution.conversation && !resolution.user) {
     return {
@@ -149,7 +149,7 @@ export function sseLine(data: string, event?: string): string {
 /**
  * Pull-based text-to-bytes stream over already-formatted SSE blocks. Upstream
  * consumption follows downstream demand; cancelling fires `onCancel` so the
- * producer can abort its OpenGeni stream.
+ * producer can abort its Opengeni stream.
  */
 export function sseByteStream(
   blocks: AsyncIterable<string>,

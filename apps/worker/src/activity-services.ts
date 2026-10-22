@@ -3,6 +3,7 @@ import {
   resolveWebSearchProvider,
   dbSearchPath,
   getSettings,
+  environmentsEncryptionKeyBytes,
   resolveNatsControlPlaneAuth,
 } from "@opengeni/config";
 import {
@@ -12,12 +13,18 @@ import {
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { resolveCatalogSettings } from "@opengeni/core";
+import {
+  createRemoteExternalVaultFactories,
+  installComputeAgentPlane,
+  resolveCatalogSettings,
+} from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
 import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
+import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
+import { createNativeExternalVaultFactories } from "./external-vault-providers";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -43,6 +50,9 @@ export function createSharedActivityServices(
         : createDb(settings.databaseUrl, {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
+            ...(settings.databasePreparedStatements === undefined
+              ? {}
+              : { preparedStatements: settings.databasePreparedStatements }),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
@@ -60,19 +70,22 @@ export function createSharedActivityServices(
           reason: webSearchProvider.reason,
         });
       }
+      const bus =
+        dependencies.bus ??
+        (await createNatsEventBus(
+          settings.natsUrl,
+          controlPlaneAuth
+            ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+            : undefined,
+          observabilityEventBusOptions(observability),
+        ));
+      // Compute sandboxes reach their agent over this process's bus and database.
+      installComputeAgentPlane({ db, bus, settings });
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,
-        bus:
-          dependencies.bus ??
-          (await createNatsEventBus(
-            settings.natsUrl,
-            controlPlaneAuth
-              ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
-              : undefined,
-            observabilityEventBusOptions(observability),
-          )),
+        bus,
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
@@ -81,12 +94,26 @@ export function createSharedActivityServices(
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
+        startSessionTitleWorkflow: environmentsEncryptionKeyBytes(settings)
+          ? (dependencies.startSessionTitleWorkflow ?? null)
+          : null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
           dependencies.connectionCredentials ??
           createStandaloneConnectionCredentialsPort(settings, db),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
+        onePasswordVaultProvider:
+          dependencies.onePasswordVaultProvider === undefined
+            ? loadOnePasswordVaultProvider
+            : dependencies.onePasswordVaultProvider,
+        externalVaultProviders:
+          dependencies.externalVaultProviders === undefined
+            ? {
+                ...createRemoteExternalVaultFactories(settings),
+                ...createNativeExternalVaultFactories(settings),
+              }
+            : dependencies.externalVaultProviders,
       };
     })();
     return await servicesPromise;

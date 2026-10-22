@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import {
+  CUA_DESKTOP_TOOLS,
+  CUA_WINDOWS_DESKTOP_TOOLS,
+  parseSecretReference,
+  referenceKey,
+} from "@opengeni/contracts";
+import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
 import { CuaComputerBackend } from "../src/cua/backend";
+import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
   ComputerBackendActionCommand,
@@ -19,11 +27,15 @@ function result(data: Record<string, unknown>, isError = false): ToolResult {
 }
 
 class Fixture implements CuaDesktopRuntime {
+  listToolsJson?: () => Promise<string>;
   readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   snapshot = 0;
   captures = 0;
   live = true;
   stopped = false;
+  applyLabel = "Apply";
+  fieldLabel = "Password";
+  title = "Fixture";
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -38,7 +50,7 @@ class Fixture implements CuaDesktopRuntime {
               {
                 pid: 42,
                 window_id: 1,
-                title: "Fixture",
+                title: this.title,
                 app_name: "Fixture",
                 bounds: { x: 50, y: 50, width: 200, height: 100 },
               },
@@ -52,6 +64,10 @@ class Fixture implements CuaDesktopRuntime {
         window_bounds: { x: 50, y: 50, width: 200, height: 100 },
       };
       if (args.include_accessibility_tree) {
+        // The worker defaults to Markdown on every platform and returns
+        // structured elements only when asked; the adapter needs both.
+        expect(args.tree_format).toBe("both");
+        expect(args.timeout_ms).toBe(this instanceof WindowsFixture ? 5_000 : undefined);
         const snapshot = ++this.snapshot;
         Object.assign(data, {
           snapshot_id: `s${snapshot}`,
@@ -60,14 +76,15 @@ class Fixture implements CuaDesktopRuntime {
               element_index: 0,
               element_token: `s${snapshot}:0`,
               role: "AXButton",
-              label: "Apply",
+              label: this.applyLabel,
               actions: ["AXPress"],
+              frame: { x: 60, y: 60, w: 40, h: 20 },
             },
             {
               element_index: 1,
               element_token: `s${snapshot}:1`,
               role: "AXSecureTextField",
-              label: "Password",
+              label: this.fieldLabel,
               value: "must-not-leak",
               actions: [],
             },
@@ -95,6 +112,13 @@ class Fixture implements CuaDesktopRuntime {
   }
   async shutdown() {
     this.stopped = true;
+  }
+}
+
+class LinuxPermissionsFixture extends Fixture {
+  async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+    if (name === "check_permissions") return result({ atspi: true, x11: true });
+    return await super.callTool(name, argumentsJson);
   }
 }
 
@@ -153,6 +177,155 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("select presses a radio button, and is still refused on a plain button", async () => {
+    class RadioFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "get_window_state" || !response.structuredJson) return response;
+        const data = JSON.parse(response.structuredJson);
+        if (data.elements)
+          data.elements.push({
+            ...data.elements[0],
+            element_index: 2,
+            element_token: `s${this.snapshot}:2`,
+            role: "AXRadioButton",
+            label: "Landscape",
+          });
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      }
+    }
+    const fixture = new RadioFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const radio = observation.roots.find((node) => node.role === "radio")!;
+      expect(radio.actions).toEqual(["invoke", "focus"]);
+      await backend.dispatch({
+        ...command(observation),
+        action: { type: "semantic", action: "select", locator: { kind: "ref", ref: radio.ref } },
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:2",
+        button: "left",
+      });
+      const fresh = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(fresh),
+          action: { ...command(fresh).action, action: "select" } as never,
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element does not offer select; use one it offers: invoke, focus",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("revives idle owned sessions and retires expired viewer controls before input", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    const expired = new Set<string>();
+    let refusedSession: string | null = null;
+    fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json);
+      if (name === "start_session") {
+        fixture.calls.push({ name, args });
+        if (args.session === refusedSession)
+          return result({ status: "refused", refusal: { code: "session_unavailable" } }, true);
+        return result({ active: true, revived: expired.delete(args.session) });
+      }
+      if (expired.has(args.session)) throw new Error("expired session reached dispatch");
+      if (name === "get_cursor_position") {
+        fixture.calls.push({ name, args });
+        return {
+          ...result({ x: 1, y: 2 }),
+          rawJson: JSON.stringify({ content: [], structuredContent: { x: 1, y: 2 } }),
+        };
+      }
+      return original(name, json);
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const frame = await backend.capture(target.id);
+      const viewerSession = fixture.calls.find((call) => call.name === "start_session")!.args
+        .session as string;
+      expired.add(viewerSession);
+      await expect(backend.dispatch(command(observation))).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+      });
+      await expect(
+        backend.dispatch({
+          ...command(observation),
+          expectedFrameId: frame.frameId,
+          action: { type: "pointer", action: "click", frameId: frame.frameId, x: 10, y: 10 },
+        }),
+      ).rejects.toMatchObject({ code: "frame_stale", dispatched: false });
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(0);
+      const refreshed = await backend.observe(target.id);
+      expect(refreshed.target.targetGeneration).toBe(target.targetGeneration);
+      await backend.dispatch(command(refreshed));
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      const native = {
+        operationId: crypto.randomUUID(),
+        tool: "get_cursor_position",
+        arguments: {},
+      };
+      expect((await backend.callNative(native)).outcome).toBe("completed");
+      const nativeSession = fixture.calls.find((call) => call.name === "get_cursor_position")!.args
+        .session as string;
+      expired.add(nativeSession);
+      expect(
+        (await backend.callNative({ ...native, operationId: crypto.randomUUID() })).outcome,
+      ).toBe("completed");
+      expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+      // Quick cursor motion once per session, and again after CUA revives it.
+      const motions = fixture.calls.filter((call) => call.name === "set_agent_cursor_motion");
+      expect(motions.map((call) => call.args.session)).toEqual([
+        viewerSession,
+        viewerSession,
+        nativeSession,
+        nativeSession,
+      ]);
+      expect(motions[0]!.args).toMatchObject({
+        timing: "fixed",
+        glide_duration_ms: 150,
+        dwell_after_click_ms: 0,
+      });
+      refusedSession = nativeSession;
+      const computerSessionId = crypto.randomUUID();
+      const controllerGeneration = "controller-fixture";
+      const controller = new ComputerInteractionController({
+        computerSessionId,
+        controllerGeneration,
+        driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+      });
+      const rejected = await controller.runNative({
+        ...native,
+        operationId: crypto.randomUUID(),
+        protocolVersion: 1,
+        computerSessionId,
+        controllerGeneration,
+        targetId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+      });
+      expect(rejected.state).toBe("failed");
+      expect(rejected.error?.code).toBe("driver_failed");
+      expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+    } finally {
+      refusedSession = null;
+      await backend.close();
+    }
+  });
+
   test("rejects one-pair continuation before any CUA discovery or input delivery", async () => {
     const fixture = new Fixture();
     const backend = await CuaComputerBackend.open(fixture, "macos");
@@ -181,7 +354,9 @@ describe("CUA desktop boundary", () => {
         code: "unsupported",
         dispatched: false,
       });
-      expect(fixture.calls).toHaveLength(before);
+      expect(fixture.calls.slice(before).filter((call) => call.name !== "start_session")).toEqual(
+        [],
+      );
     } finally {
       await backend.close();
     }
@@ -235,18 +410,18 @@ describe("CUA desktop boundary", () => {
         { redacted: true, reason: "policy" },
       ]);
       expect(observation.roots[0]).toMatchObject({
-        ref: "s1:0",
+        ref: "e1",
         name: "Named field",
         actions: ["set_value"],
       });
-      expect(observation.roots[1]).toMatchObject({ ref: "s1:1", actions: ["set_value"] });
+      expect(observation.roots[1]).toMatchObject({ ref: "e2", actions: ["set_value"] });
       expect(observation.roots[1]!.name).toBeUndefined();
       await backend.dispatch({
         ...command(observation),
         action: {
           type: "semantic",
           action: "set_value",
-          locator: { kind: "ref", ref: "s1:1" },
+          locator: { kind: "ref", ref: "e2" },
           value: "Replacement",
         },
       });
@@ -260,7 +435,7 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("Windows retains real platform identity and only advertises native UIA actions", async () => {
+  test("Windows retains real platform identity and advertises UIA actions and ordinary input", async () => {
     const fixture = new WindowsFixture();
     const backend = await CuaComputerBackend.open(fixture, "windows");
     try {
@@ -273,8 +448,8 @@ describe("CUA desktop boundary", () => {
         semanticActions: true,
         backgroundActions: true,
         windowCapture: true,
-        pointerInput: false,
-        keyboardInput: false,
+        pointerInput: true,
+        keyboardInput: true,
         backgroundInput: false,
       });
       expect(
@@ -318,15 +493,61 @@ describe("CUA desktop boundary", () => {
             value: "Rejected",
           },
         }),
-      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element offers no actions; act on a nearby control or its window instead",
+      });
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows delivers pointer and keyboard input in the foreground with Windows modifiers", async () => {
+    const fixture = new WindowsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "windows");
+    try {
+      const target = (await backend.targets())[0]!;
+      const frame = await backend.capture(target.id);
+      const observation = await backend.observe(target.id);
+      await backend.dispatch({
+        ...command(observation),
+        expectedFrameId: frame.frameId,
+        action: { type: "pointer", action: "click", frameId: frame.frameId, x: 120, y: 80 },
+      });
+      expect(fixture.calls.find((call) => call.name === "click")?.args).toMatchObject({
+        pid: 42,
+        window_id: 1,
+        x: 120,
+        y: 80,
+        button: "left",
+        count: 1,
+        delivery_mode: "foreground",
+      });
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "type", value: "Hello Ω" },
+      });
+      expect(fixture.calls.find((call) => call.name === "type_text")?.args).toMatchObject({
+        text: "Hello Ω",
+        delivery_mode: "foreground",
+      });
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Meta+Shift+S" },
+      });
+      expect(fixture.calls.find((call) => call.name === "press_key")?.args).toMatchObject({
+        key: "s",
+        modifiers: ["win", "shift"],
+        delivery_mode: "foreground",
+      });
       await expect(
-        backend.dispatch({
-          ...command(latest),
-          action: { type: "keyboard", action: "type", value: "Rejected" },
+        backend.validate({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "Fn+A" },
         }),
       ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
-      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
-      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
     } finally {
       await backend.close();
     }
@@ -365,6 +586,38 @@ describe("CUA desktop boundary", () => {
       } finally {
         await backend.close();
       }
+    }
+  });
+
+  test("reports a walk that ran out of time as an incomplete observation", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let partial = true;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && partial) {
+        const state = JSON.parse(response.structuredJson!);
+        Object.assign(state, {
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_visited: 296,
+          nodes_pending: 567,
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const cut = await backend.observe(target.id);
+      expect(cut.incomplete).toEqual({ reason: "time_budget", unreadCount: 567 });
+      expect(cut.roots.length).toBeGreaterThan(0);
+      partial = false;
+      expect((await backend.observe(target.id)).incomplete).toBeUndefined();
+    } finally {
+      await backend.close();
     }
   });
 
@@ -410,6 +663,63 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("focuses a macOS control through CUA's element focus click", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    const focused: Record<string, unknown>[] = [];
+    fixture.callTool = async (name, argumentsJson) => {
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "click" && args.action === "focus") focused.push(args);
+      return await original(name, argumentsJson);
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      expect(observed.roots[0]!.actions).toEqual(["invoke", "focus"]);
+      expect(observed.roots[1]!.actions).toEqual(["set_value", "focus"]);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await backend.dispatch(focus);
+      // The ref is Opengeni's; CUA gets its own token of the latest snapshot.
+      expect(focused).toEqual([
+        expect.objectContaining({
+          element_token: `${observed.observationId.split(":").pop()}:0`,
+          action: "focus",
+          delivery_mode: "background",
+        }),
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an element that cannot take the focus says what to do instead", async () => {
+    const fixture = new LinuxPermissionsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await expect(backend.dispatch(focus)).rejects.toMatchObject({
+        code: "unsupported",
+        message:
+          "Elements cannot be focused on their own here: invoke the element, or set its value",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keeps tokens current, redacts protected values and never calls browser tools", async () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);
@@ -419,18 +729,21 @@ describe("CUA desktop boundary", () => {
       const target = (await backend.targets())[0]!;
       const first = await backend.observe(target.id);
       expect(JSON.stringify(first)).not.toContain("must-not-leak");
-      await backend.observe(target.id);
-      await expect(backend.dispatch(command(first))).rejects.toMatchObject({
-        code: "observation_stale",
-        dispatched: false,
+      const second = await backend.observe(target.id);
+      // CUA honours only its latest tokens: the ref, the same in both
+      // readings, is sent as its element's token from the latest one.
+      expect(second.roots[0]!.ref).toBe(first.roots[0]!.ref);
+      await backend.dispatch(command(first));
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: second.observationId.split(":").pop() + ":0",
       });
       const fresh = await backend.observe(target.id);
       await backend.validate(command(fresh));
       await backend.dispatch(command(fresh));
-      await expect(backend.dispatch(command(fresh))).rejects.toMatchObject({
-        code: "observation_stale",
-      });
-      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(1);
+      // The same ref acts again while its element is unchanged, as a page ref
+      // does in a browser.
+      await backend.dispatch(command(fresh));
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(3);
       expect(
         fixture.calls.every((call) => !call.name.startsWith("browser_") && call.name !== "page"),
       ).toBe(true);
@@ -440,7 +753,7 @@ describe("CUA desktop boundary", () => {
     expect(fixture.stopped).toBe(true);
   });
 
-  test("maps window coordinates and permits repeated scroll/drag without new screenshots", async () => {
+  test("maps viewer coordinates into fresh action captures for repeated scroll/drag", async () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);
     try {
@@ -497,7 +810,7 @@ describe("CUA desktop boundary", () => {
           endY: 80,
         },
       });
-      expect(fixture.captures).toBe(capturesBeforeInput);
+      expect(fixture.captures).toBe(capturesBeforeInput + 3);
       expect(fixture.calls.find((call) => call.name === "scroll")?.args).toMatchObject({
         direction: "down",
         amount: 2,
@@ -533,6 +846,1177 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("a ref from an earlier observation names the same element in the latest one; an unknown one says what is current", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const seen = await backend.observe(target.id);
+      // An action without fences is checked against a fresh observation. CUA
+      // mints new tokens for it, but an element that stayed keeps its ref,
+      // which now names the fresh token.
+      const fresh = await backend.observe(target.id);
+      expect(fresh.roots[0]!.ref).toBe(seen.roots[0]!.ref);
+      expect(fresh.observationId).not.toBe(seen.observationId);
+      await backend.dispatch({
+        ...command(fresh),
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: seen.roots[0]!.ref },
+          action: "invoke",
+        },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "click")?.args,
+      ).toMatchObject({ element_token: expect.stringMatching(/^s[0-9a-f]+:0$/u) });
+      const freshToken = (
+        [...fixture.calls].reverse().find((call) => call.name === "click")!.args as {
+          element_token: string;
+        }
+      ).element_token;
+      // A ref action may name the observation its ref came from, even after
+      // the window was read again.
+      const again = await backend.observe(target.id);
+      await backend.dispatch({ ...command(seen), targetId: again.target.id });
+      const againToken = (
+        [...fixture.calls].reverse().find((call) => call.name === "click")!.args as {
+          element_token: string;
+        }
+      ).element_token;
+      expect(againToken).not.toBe(freshToken);
+      // Other actions still need the latest observation.
+      await expect(
+        backend.dispatch({
+          ...command(seen),
+          action: { type: "semantic", locator: { kind: "role", role: "button" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({ code: "observation_stale", dispatched: false });
+      // Another element changing leaves a ref alone.
+      fixture.fieldLabel = "Password again";
+      const sibling = await backend.observe(target.id);
+      expect(sibling.roots[0]!.ref).toBe(seen.roots[0]!.ref);
+      expect(sibling.roots[1]!.ref).not.toBe(seen.roots[1]!.ref);
+      fixture.fieldLabel = "Password";
+      // Once its element changed, or the window's title did (a Delete button
+      // can look the same for another document), an earlier ref is refused
+      // before any input, without quoting any label.
+      const clicks = fixture.calls.filter((call) => call.name === "click").length;
+      for (const change of [
+        async () => {
+          fixture.applyLabel = "Apply all";
+        },
+        async () => {
+          fixture.title = "Another document";
+          await backend.targets();
+        },
+      ]) {
+        const before = await backend.observe(target.id);
+        await change();
+        const changed = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(changed),
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: before.roots[0]!.ref },
+              action: "invoke",
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: "observation_stale",
+          dispatched: false,
+          message: `CUA ref ${before.roots[0]!.ref} is from an earlier observation, and the window has changed since; use a ref from the latest observation (${changed.observationId.split(":").pop()})`,
+        });
+      }
+      expect(fixture.calls.filter((call) => call.name === "click").length).toBe(clicks);
+      // CUA's own stale refusal says what the caller does, not CUA's tool names.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "stale_element_token",
+            message: "element_token is stale; call get_window_state again to refresh",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe(target.id))),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message:
+          "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
+      });
+      fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
+      fixture.applyLabel = "Apply";
+      fixture.fieldLabel = "Password";
+      fixture.title = "Fixture";
+      await backend.targets();
+      const latest = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(latest),
+          action: { type: "semantic", locator: { kind: "ref", ref: "s99:0" }, action: "invoke" },
+        }),
+      ).rejects.toMatchObject({
+        code: "locator_not_found",
+        message: `CUA ref s99:0 is not in a recent observation of this window; observe it again and use a ref from the latest observation (${latest.observationId.split(":").pop()})`,
+      });
+      // macOS accepts the usual names for the command key, and a shortcut goes
+      // through CUA's hotkey, which reaches a background app's menus.
+      await backend.dispatch({
+        ...command(latest),
+        action: { type: "keyboard", action: "press", value: "super+n" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "hotkey")?.args,
+      ).toMatchObject({
+        pid: 42,
+        window_id: 1,
+        keys: ["cmd", "n"],
+        delivery_mode: "background",
+      });
+      // A single key is still a key press.
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Enter" },
+      });
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({ key: "return", modifiers: [] });
+      // A menu item macOS keeps disabled in the background is refused, clearly.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "background_unavailable",
+            message: "Save is disabled while TextEdit is in the background",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "cmd+s" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message:
+          "CUA hotkey refused the operation: Save is disabled while TextEdit is in the background",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a macOS sheet is reached through its window, and refusals say how", async () => {
+    // A Save sheet has its own window id inside its document window, but its
+    // controls are in the document window's tree. While the sheet has focus,
+    // CUA refuses background keys to either window.
+    class SheetFixture extends Fixture {
+      sheet = true;
+      showSheet = true;
+      other = false;
+      // Another window of the app that the sheet also lies within.
+      decoy = { x: 90, y: 55, width: 130, height: 70 };
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "list_windows") {
+          this.calls.push({ name, args });
+          return result({
+            windows: [
+              {
+                pid: 42,
+                window_id: 1,
+                title: "Untitled",
+                app_name: "TextEdit",
+                bounds: { x: 50, y: 50, width: 200, height: 100 },
+              },
+              ...(this.sheet
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 2,
+                      title: "Save",
+                      app_name: "TextEdit",
+                      bounds: { x: 101, y: 60, width: 100, height: 60 },
+                    },
+                    {
+                      pid: 42,
+                      window_id: 4,
+                      title: "Decoy",
+                      app_name: "TextEdit",
+                      bounds: this.decoy,
+                    },
+                  ]
+                : []),
+              ...(this.other
+                ? [
+                    {
+                      pid: 42,
+                      window_id: 3,
+                      title: "Other",
+                      app_name: "TextEdit",
+                      bounds: { x: 400, y: 50, width: 200, height: 100 },
+                    },
+                  ]
+                : []),
+            ],
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 2) {
+          // CUA produces neither its pixels nor its accessibility tree.
+          if (!args.include_accessibility_tree)
+            return {
+              text: "No content produced (neither AX tree nor screenshot succeeded)",
+              images: [],
+              isError: true,
+              degraded: false,
+              rawJson: "{}",
+            };
+          this.calls.push({ name, args });
+          return result({
+            pid: 42,
+            window_id: 2,
+            degraded_reason:
+              "ax_window_unresolved: window_id 2 exists and is owned by pid 42, but none of the AXWindow elements reports it",
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        // The other window reads normally, without the sheet.
+        if (name === "get_window_state" && args.window_id === 4) {
+          const state = JSON.parse(response.structuredJson!);
+          response.structuredJson = JSON.stringify({
+            ...state,
+            window_id: 4,
+            window_bounds: this.decoy,
+          });
+        }
+        if (name === "get_window_state" && args.window_id === 1 && this.sheet && this.showSheet) {
+          const state = JSON.parse(response.structuredJson!);
+          if (state.elements) {
+            state.elements.push({
+              element_index: 2,
+              element_token: `s${this.snapshot}:2`,
+              role: "AXSheet",
+              label: "save",
+              actions: ["AXRaise"],
+              frame: { x: 101, y: 60, w: 100, h: 60 },
+            });
+            response.structuredJson = JSON.stringify(state);
+          }
+        }
+        return response;
+      }
+    }
+    const fixture = new SheetFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      await backend.targets();
+      // The sheet's own window has no tree: point at the window it belongs to,
+      // the one whose reading now shows the sheet, though another window of
+      // the app holds it too and is centered on it exactly.
+      fixture.decoy = { x: 76, y: 55, width: 150, height: 70 };
+      await backend.targets();
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 is a sheet attached to the window cua:window:42:1, and its controls are read and used through that window: observe cua:window:42:1 and act on its refs",
+      });
+      // The other window was read too, and does not show the sheet.
+      expect(
+        (await backend.observe("cua:window:42:4")).roots.some((node) => node.role === "AXSheet"),
+      ).toBe(false);
+      // When no window shows it now, no parent is guessed.
+      fixture.showSheet = false;
+      await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
+        code: "target_stale",
+        message:
+          "cua:window:42:2 cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of cua:window:42:1, cua:window:42:4) and act on its refs",
+      });
+      fixture.showSheet = true;
+      const keys = (value: string, observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "type", value },
+        });
+      const refused = (code: string) =>
+        result({ effect: "refused", code, reason: "CUA's own reason" }, true);
+      // Keys aimed at the document window while its sheet has focus.
+      fixture.mutation = refused("window_not_key");
+      await expect(
+        keys("name.txt", await backend.observe("cua:window:42:1")),
+      ).rejects.toMatchObject({
+        code: "driver_failed",
+        dispatched: false,
+        message:
+          "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+      });
+      // Keys aimed at the sheet's own window, which cannot be observed, stop
+      // before any input with the same direction.
+      const dispatched = fixture.calls.length;
+      await expect(
+        backend.dispatch({
+          targetId: "cua:window:42:2",
+          expectedTargetGeneration: (await backend.targets()).find(
+            (target) => target.id === "cua:window:42:2",
+          )!.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          action: { type: "keyboard", action: "press", value: "Enter" },
+        }),
+      ).rejects.toMatchObject({
+        code: "target_stale",
+        dispatched: false,
+        message: expect.stringContaining("observe cua:window:42:1 and act on its refs"),
+      });
+      expect(fixture.calls.slice(dispatched).some((call) => call.name === "press_key")).toBe(false);
+      // Without a sheet, another window of the app has focus: name it.
+      fixture.sheet = false;
+      fixture.other = true;
+      await backend.targets();
+      fixture.mutation = refused("window_not_key");
+      await expect(keys("text", await backend.observe("cua:window:42:1"))).rejects.toMatchObject({
+        dispatched: false,
+        message:
+          "Keys reach only the focused window of a background app, and another of its windows has focus (one of cua:window:42:3), so none were sent: act on that window, or close it first",
+      });
+      // There is no focus action; work happens in the background.
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe("cua:window:42:1")),
+          action: { type: "focus", targetId: "cua:window:42:1" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        message: expect.stringContaining("it has no focus action"),
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a launch observes the launched app's window, once it appears", async () => {
+    // The launched app's window shows up in the second listing after launch.
+    class LaunchFixture extends Fixture {
+      launched = false;
+      listings = 0;
+      /** Listings after launch that still lack the app's window. */
+      listingsBeforeWindow = 1;
+      reportWindows = false;
+      // Linux reports the launcher process; the app's window belongs to its
+      // child, and an unrelated window appears at the same time.
+      linux = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "check_permissions" && this.linux) return result({ atspi: true, x11: true });
+        if (name === "launch_app") {
+          this.calls.push({ name, args });
+          this.launched = true;
+          if (this.linux) return result({ launcher_pid: 76 });
+          const window = { pid: 77, window_id: 9, title: "Untitled", app_name: "TextEdit" };
+          return result({
+            pid: 77,
+            windows: this.reportWindows
+              ? [{ ...window, bounds: { x: 0, y: 0, width: 300, height: 200 } }]
+              : [],
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (
+          name === "list_windows" &&
+          this.launched &&
+          ++this.listings > this.listingsBeforeWindow
+        ) {
+          const data = JSON.parse(response.structuredJson!);
+          // Another app opens a window at the same time, listed first.
+          if (this.linux)
+            data.windows.push({
+              pid: 99,
+              window_id: 3,
+              title: "Unrelated",
+              app_name: "Other",
+              bounds: { x: 0, y: 0, width: 300, height: 200 },
+            });
+          data.windows.push({
+            pid: 77,
+            window_id: 9,
+            title: "Untitled",
+            app_name: "TextEdit",
+            bounds: { x: 0, y: 0, width: 300, height: 200 },
+          });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.pid === 77) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: 77, window_id: 9 });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    for (const [reportWindows, linux] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ] as const) {
+      const fixture = new LaunchFixture();
+      fixture.reportWindows = reportWindows;
+      fixture.linux = linux;
+      // The app (77) runs as a child of the launcher (76); 99 is unrelated.
+      const parents = new Map([
+        [77, 76],
+        [76, 1],
+        [99, 1],
+      ]);
+      const backend = await CuaComputerBackend.open(fixture, linux ? "linux" : "macos", {
+        parentPid: (pid) => parents.get(pid) ?? null,
+      });
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(launched?.target.title).toBe("Untitled");
+        expect((await backend.targets()).map((listed) => listed.id)).toContain("cua:window:77:9");
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // A window already there is observed at once, and a cold app's window,
+    // seconds late on macOS, is waited for instead of observing the action's
+    // own target. Neither waits out the whole window wait.
+    for (const [listingsBeforeWindow, atLeast, below] of [
+      [0, 0, 250],
+      [7, 1_000, 4_000],
+    ] as const) {
+      const fixture = new LaunchFixture();
+      fixture.listingsBeforeWindow = listingsBeforeWindow;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        const elapsed = performance.now() - started;
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(elapsed).toBeGreaterThanOrEqual(atLeast);
+        expect(elapsed).toBeLessThan(below);
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The controller records the launched window's observation in the receipt.
+    {
+      const fixture = new LaunchFixture();
+      fixture.reportWindows = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(receipt.state).toBe("completed");
+        expect(receipt.targetId).toBe(target.id);
+        expect(receipt.observation?.target.id).toBe("cua:window:77:9");
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // A macOS app that keeps running without a window is launched once more,
+    // which CUA sends as a reopen, and the window that answers is observed.
+    {
+      class ReopenFixture extends LaunchFixture {
+        override listingsBeforeWindow = Number.POSITIVE_INFINITY;
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const launches = this.calls.filter((call) => call.name === "launch_app").length;
+          const response = await super.callTool(name, argumentsJson);
+          // The window answers the second launch, the reopen.
+          if (name === "launch_app" && launches === 1) this.listingsBeforeWindow = this.listings;
+          return response;
+        }
+      }
+      const fixture = new ReopenFixture();
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const started = performance.now();
+        const launched = await backend.dispatch({
+          ...command(observation),
+          action: { type: "launch", applicationId: "com.apple.TextEdit" },
+        });
+        expect(launched?.target.id).toBe("cua:window:77:9");
+        expect(fixture.calls.filter((call) => call.name === "launch_app")).toHaveLength(2);
+        // The reopen waits for a slow first window, and then answers at once.
+        expect(performance.now() - started).toBeGreaterThanOrEqual(2_000);
+        expect(performance.now() - started).toBeLessThan(4_000);
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // An app that opens no window leaves the action's own target observed.
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await original(name, json);
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 300 });
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const started = Date.now();
+      const launched = await backend.dispatch({
+        ...command(observation),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      expect(launched?.target.id).toBe(target.id);
+      // It waits out the window wait, and no longer.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      await backend.close();
+    }
+
+    // The wait does not hold the queue: previews and observations run between
+    // window searches, and closing ends the wait.
+    const windowless = new Fixture();
+    const listed = windowless.callTool.bind(windowless);
+    windowless.callTool = async (name, json) =>
+      name === "launch_app" ? result({ pid: 78, windows: [] }) : await listed(name, json);
+    const waiting = await CuaComputerBackend.open(windowless);
+    try {
+      const target = (await waiting.targets())[0]!;
+      const before = await waiting.observe(target.id);
+      const started = performance.now();
+      const launching = waiting.dispatch({
+        ...command(before),
+        action: { type: "launch", applicationId: "Menu Bar Helper" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waiting.observe(target.id);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      await waiting.close();
+      await launching;
+      expect(performance.now() - started).toBeLessThan(2_000);
+    } finally {
+      await waiting.close();
+    }
+  }, 20_000);
+
+  test("a launch observes the app's own window before a window lying within it", async () => {
+    // A document app launching to its Open panel reports the panel's
+    // accessory view first; it lies within the panel and cannot be read.
+    const accessory = { pid: 77, window_id: 8, title: "Accessory View", app_name: "Editor" };
+    const panel = { pid: 77, window_id: 9, title: "Open", app_name: "Editor" };
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let launched = false;
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json) as Record<string, unknown>;
+      if (name === "launch_app") {
+        launched = true;
+        return result({ pid: 77, windows: [accessory, panel] });
+      }
+      const response = await original(name, json);
+      if (name === "list_windows" && launched) {
+        const data = JSON.parse(response.structuredJson!);
+        data.windows.push(
+          { ...accessory, bounds: { x: 120, y: 300, width: 300, height: 40 } },
+          { ...panel, bounds: { x: 100, y: 100, width: 500, height: 400 } },
+        );
+        response.structuredJson = JSON.stringify(data);
+      }
+      if (name === "get_window_state" && args.pid === 77) {
+        const data = JSON.parse(response.structuredJson!);
+        Object.assign(data, { pid: 77, window_id: args.window_id });
+        response.structuredJson = JSON.stringify(data);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const after = await backend.dispatch({
+        ...command(observation),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(after?.target.id).toBe("cua:window:77:9");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an action that opens one window of its app observes that window", async () => {
+    // After the action, list_windows adds the windows in `opens`, and the
+    // action's result carries CUA's `report` of the windows it opened. With
+    // `closes`, the acted window closes and the new one is listed only from
+    // the second listing after the action.
+    type Opened = { pid: number; window_id: number; title: string; bounds: Record<string, number> };
+    class OpeningFixture extends Fixture {
+      acted = false;
+      closes = false;
+      unreadable = false;
+      listingsAfter = 0;
+      report = "";
+      opens: Opened[] = [];
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (
+          name === "get_window_state" &&
+          args.window_id === 1 &&
+          (!this.live || (this.unreadable && this.acted))
+        )
+          return { ...result({}, true), structuredJson: null, text: "window 1 is gone" } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "click") {
+          this.acted = true;
+          if (this.closes) this.live = false;
+          return { ...response, text: `Clicked.${this.report}` };
+        }
+        if (name === "list_windows" && this.acted && (!this.closes || ++this.listingsAfter > 1)) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens) data.windows.push({ ...window, app_name: "Fixture" });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const opened = (title: string) => `\n\n🪟 Action opened new window(s): Fixture ("${title}").`;
+    const beside = { x: 300, y: 50, width: 200, height: 100 };
+    const within = { x: 60, y: 60, width: 100, height: 50 };
+    const document = { pid: 42, window_id: 2, title: "Untitled", bounds: beside };
+    for (const { opens, report, observed } of [
+      // A new document window of the app, named by CUA's report.
+      { opens: [document], report: opened("Untitled"), observed: 2 },
+      // An untitled window is named by its app.
+      {
+        opens: [{ ...document, title: "" }],
+        report: "\n\n🪟 Action opened new window(s): Fixture.",
+        observed: 2,
+      },
+      // A window that appeared without CUA reporting it is not the action's.
+      { opens: [document], report: "", observed: 1 },
+      // Nor is one CUA's report does not name.
+      { opens: [{ ...document, title: "Unrelated" }], report: opened("Untitled"), observed: 1 },
+      // A window the previous action opened late is not this action's.
+      {
+        opens: [document],
+        report:
+          '\n\n🪟 After the previous action returned, it opened new window(s): Fixture ("Untitled").',
+        observed: 1,
+      },
+      // A sheet is read through the window it is attached to, and a window
+      // appearing beside it is not the action's.
+      {
+        opens: [
+          { pid: 42, window_id: 2, title: "Save", bounds: within },
+          { ...document, window_id: 3, title: "Unrelated" },
+        ],
+        report: opened("Save"),
+        observed: 1,
+      },
+      // Two candidates are never guessed between.
+      {
+        opens: [document, { ...document, window_id: 3 }],
+        report: opened("Untitled"),
+        observed: 1,
+      },
+      // Another app's window is not this target's.
+      { opens: [{ ...document, pid: 43 }], report: opened("Untitled"), observed: 1 },
+    ]) {
+      const fixture = new OpeningFixture();
+      fixture.opens = opens;
+      fixture.report = report;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        const listings = fixture.calls.filter((call) => call.name === "list_windows").length;
+        const after = await backend.dispatch(command(observation));
+        expect(after?.target.id).toBe(`cua:window:42:${observed}`);
+        // Windows are listed again only for a reported new window.
+        expect(fixture.calls.filter((call) => call.name === "list_windows").length).toBe(
+          listings + (report.includes("Action opened") ? 1 : 0),
+        );
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The acted window closes and a window of its app appears unreported:
+    // closing proves nothing about where that window came from, so nothing
+    // is observed in its place.
+    {
+      const fixture = new OpeningFixture();
+      fixture.opens = [document];
+      fixture.closes = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        expect(await backend.dispatch(command(observation))).toBeNull();
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The acted window cannot be read after the action but is still listed,
+    // and an unrelated window of its app appears unreported: that window is
+    // not the action's, so nothing is observed in its place.
+    {
+      const fixture = new OpeningFixture();
+      fixture.opens = [{ ...document, title: "Unrelated" }];
+      fixture.unreadable = true;
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const target = (await backend.targets())[0]!;
+        const observation = await backend.observe(target.id);
+        expect(await backend.dispatch(command(observation))).toBeNull();
+      } finally {
+        await backend.close();
+      }
+    }
+
+    // The controller records the opened window's observation in the receipt.
+    const fixture = new OpeningFixture();
+    fixture.opens = [document];
+    fixture.report = opened("Untitled");
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const computerSessionId = crypto.randomUUID();
+      const controllerGeneration = "controller-fixture";
+      const controller = new ComputerInteractionController({
+        computerSessionId,
+        controllerGeneration,
+        driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+      });
+      const target = (await backend.targets())[0]!;
+      const observation = await controller.observe(target.id);
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        operationId: crypto.randomUUID(),
+        computerSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        action: {
+          type: "semantic",
+          locator: {
+            kind: "ref",
+            ref:
+              observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "",
+          },
+          action: "invoke",
+        },
+      });
+      expect(receipt.state).toBe("completed");
+      expect(receipt.targetId).toBe(target.id);
+      expect(receipt.observation?.target.id).toBe("cua:window:42:2");
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("apps launch in the background by each platform's own app name", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) =>
+      name === "launch_app"
+        ? (fixture.calls.push({ name, args: JSON.parse(json) as Record<string, unknown> }),
+          result({ pid: 42, bundle_id: "com.apple.TextEdit", windows: [] }))
+        : await original(name, json);
+    // These apps open no window here, so the launch need not wait for one.
+    const backend = await CuaComputerBackend.open(fixture, "macos", { launchWindowWaitMs: 50 });
+    try {
+      expect((await backend.capabilities()).appLaunch).toBe(true);
+      const target = (await backend.targets())[0]!;
+      for (const applicationId of ["com.apple.TextEdit", "TextEdit.app", "System Settings"]) {
+        const observation = await backend.observe(target.id);
+        const launch = {
+          ...command(observation),
+          action: { type: "launch" as const, applicationId },
+        };
+        await backend.validate(launch);
+        expect(await backend.dispatch(launch)).not.toBeNull();
+      }
+      expect(
+        fixture.calls.filter((call) => call.name === "launch_app").map((call) => call.args),
+      ).toEqual([
+        { bundle_id: "com.apple.TextEdit" },
+        { name: "TextEdit" },
+        { name: "System Settings" },
+      ]);
+
+      // Once the app runs, the launch succeeded even if listing its windows fails.
+      const observed = await backend.observe(target.id);
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result({ pid: 78 })
+          : name === "list_windows"
+            ? result({ error: { code: "internal", message: "list failed" } }, true)
+            : await original(name, json);
+      await expect(
+        backend.dispatch({
+          ...command(observed),
+          action: { type: "launch", applicationId: "Notes" },
+        }),
+      ).resolves.toBeDefined();
+
+      // A lost response or no reported process may still have launched it.
+      for (const lost of [
+        async () => {
+          throw new Error("lost after delivery");
+        },
+        async () => result({ windows: [] }),
+        async () => result({ error: { code: "internal", message: "launch stalled" } }, true),
+      ]) {
+        fixture.callTool = async (name, json) =>
+          name === "launch_app" ? await lost() : await original(name, json);
+        const before = await backend.observe(target.id);
+        await expect(
+          backend.dispatch({
+            ...command(before),
+            action: { type: "launch", applicationId: "Notes" },
+          }),
+        ).rejects.toMatchObject({ code: "outcome_unknown", dispatched: true });
+      }
+      // An explicit refusal is a definite failure: nothing launched.
+      fixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? result(
+              { effect: "refused", refusal: { code: "unsupported", message: "no such app" } },
+              true,
+            )
+          : await original(name, json);
+      const refusedFrom = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(refusedFrom),
+          action: { type: "launch", applicationId: "Nope" },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+    } finally {
+      await backend.close();
+    }
+    for (const [platform, platformFixture, launches] of [
+      [
+        "windows",
+        new WindowsFixture(),
+        [
+          ["Notepad", { name: "Notepad" }],
+          [
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            {
+              aumid: "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            },
+          ],
+          ["C:\\Program Files\\App\\app.exe", { path: "C:\\Program Files\\App\\app.exe" }],
+          ["\\\\server\\share\\tool.exe", { path: "\\\\server\\share\\tool.exe" }],
+          ["C:\\Tools\\Acme!\\tool.exe", { path: "C:\\Tools\\Acme!\\tool.exe" }],
+          ["\\\\server\\Tools!\\tool.exe", { path: "\\\\server\\Tools!\\tool.exe" }],
+        ],
+      ],
+      [
+        "linux",
+        new LinuxPermissionsFixture(),
+        [
+          ["gedit", { name: "gedit" }],
+          ["org.gnome.Calculator", { name: "org.gnome.Calculator" }],
+        ],
+      ],
+    ] as const) {
+      const platformCall = platformFixture.callTool.bind(platformFixture);
+      platformFixture.callTool = async (name, json) =>
+        name === "launch_app"
+          ? (platformFixture.calls.push({
+              name,
+              args: JSON.parse(json) as Record<string, unknown>,
+            }),
+            // Linux reports the launcher process it started the app through.
+            result(platform === "linux" ? { launcher_pid: 92 } : { pid: 42, windows: [] }))
+          : await platformCall(name, json);
+      const other = await CuaComputerBackend.open(platformFixture, platform, {
+        launchWindowWaitMs: 50,
+      });
+      try {
+        expect((await other.capabilities()).appLaunch).toBe(true);
+        const target = (await other.targets())[0]!;
+        for (const [applicationId] of launches) {
+          const launch = {
+            ...command(await other.observe(target.id)),
+            action: { type: "launch" as const, applicationId },
+          };
+          await other.validate(launch);
+          await other.dispatch(launch);
+        }
+        expect(
+          platformFixture.calls
+            .filter((call) => call.name === "launch_app")
+            .map((call) => call.args),
+        ).toEqual(launches.map(([, args]) => args));
+      } finally {
+        await other.close();
+      }
+    }
+  });
+
+  test("another CUA worker's overlay is not a target", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      if (name !== "list_windows") return response;
+      const data = JSON.parse(response.structuredJson!);
+      data.windows.unshift({
+        pid: 77,
+        window_id: 9,
+        title: "",
+        app_name: "cua-driver",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      });
+      response.structuredJson = JSON.stringify(data);
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      expect((await backend.targets()).map((target) => target.id)).toEqual(["cua:window:42:1"]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("a window that is not on screen says so when it cannot be read", async () => {
+    // CUA lists the window off screen and, as for a hidden window, produces
+    // neither pixels nor a tree for it.
+    class OffScreenFixture extends Fixture {
+      onScreen = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name === "get_window_state" && !this.onScreen)
+          return {
+            ...result({}, true),
+            structuredJson: null,
+            text: "No content produced (neither AX tree nor screenshot succeeded)",
+          } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows") {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of data.windows) window.is_on_screen = this.onScreen;
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const fixture = new OffScreenFixture();
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      expect(target).not.toHaveProperty("offScreen");
+      // The window leaves the screen after it was listed.
+      fixture.onScreen = false;
+      for (const read of [() => backend.observe(target.id), () => backend.capture(target.id)])
+        await expect(read()).rejects.toMatchObject({
+          code: "unsupported",
+          dispatched: false,
+          message: expect.stringContaining("not on screen"),
+        });
+      // Once listed off screen, it is refused without asking CUA to read it.
+      const reads = () => fixture.calls.filter((call) => call.name === "get_window_state").length;
+      const before = reads();
+      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "unsupported" });
+      expect(reads()).toBe(before);
+      // The listing marks it, so a caller need not try it to find out.
+      expect((await backend.targets())[0]).toMatchObject({ id: target.id, offScreen: true });
+      // Back on screen, it is read again.
+      fixture.onScreen = true;
+      expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
+      // The same failure for a window on screen stays a driver failure.
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, argumentsJson) =>
+        name === "get_window_state"
+          ? ({ ...result({}, true), structuredJson: null, text: "No content" } as never)
+          : original(name, argumentsJson);
+      await expect(backend.observe(target.id)).rejects.toMatchObject({ code: "driver_failed" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("macOS lists only windows a person can see and brings minimized ones back to read", async () => {
+    // A minimized window, a headless browser's page window (on no Space), a
+    // popover its app keeps ordered out, and a full-screen window on another
+    // Space, as CUA lists them.
+    class MacFixture extends Fixture {
+      minimized = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name === "get_window_state" && this.minimized)
+          return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "list_windows") return response;
+        const bounds = { x: 0, y: 1079, width: 1280, height: 720 };
+        response.structuredJson = JSON.stringify({
+          windows: [
+            {
+              ...JSON.parse(response.structuredJson!).windows[0],
+              is_on_screen: !this.minimized,
+              space_ids: [1],
+              on_current_space: true,
+            },
+            { pid: 60, window_id: 2, title: "Dashboard", app_name: "Google Chrome", bounds },
+            { pid: 61, window_id: 3, title: "", app_name: "Safari", bounds },
+            { pid: 62, window_id: 4, title: "Notes", app_name: "TextEdit", bounds },
+          ].map((window, index) =>
+            index === 0
+              ? window
+              : {
+                  ...window,
+                  is_on_screen: false,
+                  space_ids: [null, [1], [801]][index - 1],
+                  on_current_space: [null, true, false][index - 1],
+                },
+          ),
+        });
+        return response;
+      }
+    }
+    const fixture = new MacFixture();
+    const asked: number[][] = [];
+    const restored: unknown[] = [];
+    let presenceFails = false;
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      macWindows: {
+        async presence(windows) {
+          if (presenceFails) throw new Error("helper unavailable");
+          asked.push(windows.map((window) => window.processId));
+          return windows.map((window) =>
+            window.processId === 61
+              ? "not_shown"
+              : window.processId === 42 && fixture.minimized
+                ? "minimized"
+                : "unknown",
+          );
+        },
+        async restore(window) {
+          restored.push(window);
+          const before = fixture.minimized ? "minimized" : "unknown";
+          fixture.minimized = false;
+          return before;
+        },
+      },
+    });
+    try {
+      const targets = await backend.targets();
+      // The browser's page window and the popover are never seen, so never
+      // listed; the minimized window is listed as readable; only the window
+      // on another Space is marked.
+      expect(targets.map((target) => [target.id, target.offScreen ?? false])).toEqual([
+        ["cua:window:42:1", false],
+        ["cua:window:62:4", true],
+      ]);
+      // Only windows on this Space are asked about, and a never-shown window
+      // only once.
+      expect(asked).toEqual([[42, 61]]);
+      await backend.targets();
+      expect(asked).toEqual([[42, 61], [42]]);
+
+      // Reading the minimized window restores it first, then reads it.
+      expect((await backend.observe("cua:window:42:1")).nodeCount).toBeGreaterThan(0);
+      expect(restored).toEqual([
+        { processId: 42, title: "Fixture", bounds: { x: 50, y: 50, width: 200, height: 100 } },
+      ]);
+      // A window on another Space is refused without restoring anything.
+      await expect(backend.observe("cua:window:62:4")).rejects.toMatchObject({
+        code: "unsupported",
+        message: expect.stringContaining("not on screen"),
+      });
+      expect(restored).toHaveLength(1);
+
+      // Minimized again, but a restore that does not happen leaves it unread.
+      fixture.minimized = true;
+      await backend.targets();
+      const restore = backend["macWindows"]!.restore;
+      backend["macWindows"]!.restore = async () => "unknown";
+      await expect(backend.observe("cua:window:42:1")).rejects.toMatchObject({
+        code: "unsupported",
+      });
+      backend["macWindows"]!.restore = restore;
+
+      // Without the helper's answer, windows keep their listing: off screen.
+      presenceFails = true;
+      expect(
+        (await backend.targets()).map((target) => [target.id, target.offScreen ?? false]),
+      ).toEqual([
+        ["cua:window:42:1", true],
+        ["cua:window:62:4", true],
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows and Linux still read a window listed off screen", async () => {
+    for (const [platform, fixture] of [
+      ["windows", new WindowsFixture()],
+      ["linux", new LinuxPermissionsFixture()],
+    ] as const) {
+      const original = fixture.callTool.bind(fixture);
+      fixture.callTool = async (name, argumentsJson) => {
+        const response = await original(name, argumentsJson);
+        if (name !== "list_windows") return response;
+        const data = JSON.parse(response.structuredJson!);
+        for (const window of data.windows) window.is_on_screen = false;
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      };
+      const backend = await CuaComputerBackend.open(fixture, platform);
+      try {
+        const target = (await backend.targets())[0]!;
+        expect(target).not.toHaveProperty("offScreen");
+        expect((await backend.observe(target.id)).nodeCount).toBeGreaterThan(0);
+      } finally {
+        await backend.close();
+      }
+    }
+  });
+
   test("unknown/partial delivery stays unknown; explicit refusal alone is safe", async () => {
     const fixture = new Fixture();
     for (const effect of ["partial", "suspected_noop", undefined]) {
@@ -547,6 +2031,48 @@ describe("CUA desktop boundary", () => {
     await expect(callDesktop(fixture, "click", {}, true)).rejects.toMatchObject({
       code: "frame_stale",
       dispatched: false,
+    });
+    // A failure CUA reports only as text keeps CUA's reason.
+    fixture.mutation = {
+      text: "Failed to launch: The system cannot find the file specified.",
+      images: [],
+      isError: true,
+      degraded: false,
+      rawJson: "{}",
+    };
+    await expect(callDesktop(fixture, "launch_app", {}, "caller-settles")).rejects.toMatchObject({
+      code: "outcome_unknown",
+      message:
+        "CUA launch_app did not return a valid result: Failed to launch: The system cannot find the file specified.",
+    });
+    // The failure carries CUA's own reason and hint, not only that it refused.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: {
+          code: "no_text_target",
+          message: "type_text did not synthesize character events",
+        },
+        hint: "Use press_key for single keys.",
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message:
+        "CUA type_text refused the operation: type_text did not synthesize character events Use press_key for single keys.",
+      dispatched: false,
+    });
+    // The reason is passed on exactly as written, trailing whitespace too, so
+    // the driver can still recognize a typed value at its end.
+    fixture.mutation = result(
+      {
+        effect: "refused",
+        refusal: { code: "no_text_target", message: "could not type ab cd \n" },
+      },
+      true,
+    );
+    await expect(callDesktop(fixture, "type_text", {}, true)).rejects.toMatchObject({
+      message: "CUA type_text refused the operation: could not type ab cd \n",
     });
     fixture.callTool = async () => {
       throw new Error("lost after delivery");
@@ -580,5 +2106,340 @@ describe("CUA desktop boundary", () => {
     await backend.close();
     expect(fixture.calls.filter((call) => call.name === "end_session")).toHaveLength(1);
     expect(fixture.stopped).toBe(true);
+  });
+
+  describe("a batch runs as one run_steps call", () => {
+    class BatchFixture extends Fixture {
+      override listToolsJson = async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS });
+      /** What run_steps answers; null runs every step. */
+      reply: Record<string, unknown> | null = null;
+      /** Window-change lines of the last step. */
+      windowChanges: string[] = [];
+      opens: { pid: number; window_id: number; title: string }[] = [];
+      ran = false;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "run_steps") {
+          this.calls.push({ name, args });
+          this.ran = true;
+          const steps = args.steps as unknown[];
+          if (this.reply) return result(this.reply, true);
+          return result({
+            ok: true,
+            total: steps.length,
+            executed: steps.length,
+            failed_step: null,
+            steps: steps.map((_, index) => ({
+              index,
+              ok: true,
+              message: "done",
+              ...(index === steps.length - 1 && this.windowChanges.length
+                ? { window_changes: this.windowChanges }
+                : {}),
+            })),
+          });
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "list_windows" && this.ran) {
+          const data = JSON.parse(response.structuredJson!);
+          for (const window of this.opens)
+            data.windows.push({
+              ...window,
+              app_name: "Fixture",
+              bounds: { x: 300, y: 50, width: 200, height: 100 },
+            });
+          response.structuredJson = JSON.stringify(data);
+        }
+        if (name === "get_window_state" && args.window_id !== 1) {
+          const data = JSON.parse(response.structuredJson!);
+          Object.assign(data, { pid: args.pid, window_id: args.window_id });
+          response.structuredJson = JSON.stringify(data);
+        }
+        return response;
+      }
+    }
+    const batch = (observation: ComputerBackendObservation): ComputerBackendActionCommand => ({
+      ...command(observation),
+      action: {
+        type: "batch",
+        actions: [
+          {
+            type: "semantic",
+            locator: { kind: "ref", ref: observation.roots[0]!.ref },
+            action: "invoke",
+          },
+          { type: "keyboard", action: "type", value: "hello" },
+          { type: "keyboard", action: "press", value: "enter" },
+        ],
+      },
+    });
+    const open = async (fixture: BatchFixture) => {
+      const backend = await CuaComputerBackend.open(fixture);
+      const target = (await backend.targets())[0]!;
+      return { backend, observation: await backend.observe(target.id) };
+    };
+    const mutations = (fixture: Fixture) =>
+      fixture.calls.filter((call) =>
+        ["click", "type_text", "press_key", "hotkey", "set_value"].includes(call.name),
+      );
+
+    test("every action is checked against the batch's observation and sent at once", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        expect(backend.initialCapabilities.actionBatches).toBe(true);
+        expect((await backend.capabilities()).actionBatches).toBe(true);
+        await backend.validate(batch(observation));
+        const after = await backend.dispatch(batch(observation));
+        expect(after?.target.id).toBe("cua:window:42:1");
+        const calls = fixture.calls.filter((call) => call.name === "run_steps");
+        expect(calls).toHaveLength(1);
+        expect(mutations(fixture)).toHaveLength(0);
+        const { steps, ...window } = calls[0]!.args as {
+          steps: { tool: string; args: Record<string, unknown> }[];
+        };
+        // A stale token stops the batch: CUA does not act on a lookalike.
+        expect(window).toMatchObject({ pid: 42, window_id: 1, refind_stale: false });
+        expect(steps.map((step) => step.tool)).toEqual(["click", "type_text", "press_key"]);
+        expect(steps[0]!.args.element_token).toBe(
+          `${observation.observationId.split(":").pop()}:0`,
+        );
+        // Earlier actions may have moved the focus: later keys go where it is.
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+        expect(steps[1]!.args.text).toBe("hello");
+        expect(steps[2]!.args).toMatchObject({ key: "return", modifiers: [] });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a CUA whose run_steps cannot stop at a stale token runs batches one action at a time", async () => {
+      for (const listToolsJson of [
+        async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+        undefined,
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.listToolsJson = listToolsJson as BatchFixture["listToolsJson"];
+        const backend = await CuaComputerBackend.open(fixture);
+        try {
+          expect(backend.initialCapabilities.actionBatches).toBe(false);
+          expect((await backend.capabilities()).actionBatches).toBe(false);
+        } finally {
+          await backend.close();
+        }
+      }
+    });
+
+    test("a batch whose last action opened a window observes that window", async () => {
+      const fixture = new BatchFixture();
+      fixture.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      fixture.windowChanges = ['🪟 Action opened new window(s): Fixture ("Untitled").'];
+      const { backend, observation } = await open(fixture);
+      try {
+        expect((await backend.dispatch(batch(observation)))?.target.id).toBe("cua:window:42:2");
+      } finally {
+        await backend.close();
+      }
+      // Without CUA's report, a window that appeared is not the batch's.
+      const unreported = new BatchFixture();
+      unreported.opens = [{ pid: 42, window_id: 2, title: "Untitled" }];
+      const second = await open(unreported);
+      try {
+        expect((await second.backend.dispatch(batch(second.observation)))?.target.id).toBe(
+          "cua:window:42:1",
+        );
+      } finally {
+        await second.backend.close();
+      }
+    });
+
+    test("an action that fails the batch's checks sends nothing", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const invalid = batch(observation);
+        if (invalid.action.type !== "batch") throw new Error("not a batch");
+        invalid.action.actions[1] = {
+          type: "semantic",
+          locator: { kind: "ref", ref: "s404:404" },
+          action: "invoke",
+        };
+        const failure = await backend.dispatch(invalid).catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toStartWith("Action 2 of the batch: ");
+        expect(fixture.ran).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a batch CUA stopped says how far it got", async () => {
+      const step = (index: number, fields: Record<string, unknown>) => ({
+        ok: true,
+        total: 3,
+        executed: index + 1,
+        failed_step: index,
+        steps: [
+          ...Array.from({ length: index }, (_, done) => ({ index: done, ok: true, message: "ok" })),
+          { index, ok: false, ...fields },
+        ],
+      });
+      for (const { reply, expected, details } of [
+        // Nothing ran: refused before the first step.
+        {
+          reply: { ok: false, code: "invalid_batch", executed: 0, failed_step: 1, detail: "bad" },
+          expected: { code: "invalid_action", dispatched: false },
+          details: undefined,
+        },
+        // The first step's element was never found: nothing ran.
+        {
+          reply: step(0, { phase: "find", code: "not_found", message: "no such element" }),
+          expected: { code: "driver_failed", dispatched: false },
+          details: undefined,
+        },
+        // The first step was refused with a refusal code: nothing ran.
+        {
+          reply: step(0, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: false },
+          details: undefined,
+        },
+        // A later action failed without proof it did nothing.
+        {
+          reply: step(1, { phase: "action", message: "did not confirm" }),
+          expected: { code: "outcome_unknown", dispatched: true },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        },
+        // A later action was refused: the earlier ones still ran.
+        {
+          reply: step(2, { phase: "action", code: "stale_element_token", message: "stale" }),
+          expected: { code: "observation_stale", dispatched: true },
+          details: { batchActionsCompleted: 2, batchStoppedActionState: "failed" },
+        },
+      ]) {
+        const fixture = new BatchFixture();
+        fixture.reply = reply;
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend.dispatch(batch(observation)).catch((error) => error);
+          expect(failure).toMatchObject(expected);
+          expect(failure.details).toEqual(details);
+        } finally {
+          await backend.close();
+        }
+      }
+    });
+
+    test("the receipt of a stopped batch keeps how many actions completed", async () => {
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 3,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message: "did not confirm" },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: "hello" },
+              { type: "keyboard", action: "press", value: "enter" },
+            ],
+          },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error).toMatchObject({
+          code: "outcome_unknown",
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+        });
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a stopped batch's message does not show a typed secret CUA clipped", async () => {
+      const secret = `synthetic-${"0123456789".repeat(44)}`;
+      // CUA keeps the first 300 characters of a step's text, marks the cut
+      // and adds its own advice after it.
+      const message = `${`Typed ${secret}`.slice(0, 300)}... To run it, send the batch again.`;
+      const fixture = new BatchFixture();
+      fixture.reply = {
+        ok: false,
+        total: 2,
+        executed: 2,
+        failed_step: 1,
+        steps: [
+          { index: 0, ok: true, message: "ok" },
+          { index: 1, ok: false, phase: "action", message, hint: `Check ${secret}` },
+        ],
+      };
+      const backend = await CuaComputerBackend.open(fixture);
+      try {
+        const computerSessionId = crypto.randomUUID();
+        const controllerGeneration = "controller-fixture";
+        const controller = new ComputerInteractionController({
+          computerSessionId,
+          controllerGeneration,
+          driver: new ComputerDriver({ computerSessionId, controllerGeneration, client: backend }),
+        });
+        const target = (await backend.targets())[0]!;
+        const observation = await controller.observe(target.id);
+        const ref =
+          observation.semantic?.kind === "snapshot" ? observation.semantic.roots[0]!.ref : "";
+        const raw = "{{secret:Desk/token}}";
+        const receipt = await controller.run({
+          protocolVersion: 1,
+          operationId: crypto.randomUUID(),
+          computerSessionId,
+          controllerGeneration,
+          targetId: target.id,
+          expectedTargetGeneration: observation.target.targetGeneration,
+          expectedObservationId: observation.observationId,
+          expectedFrameId: null,
+          actor: { kind: "agent", subjectId: "agent:fixture" },
+          action: {
+            type: "batch",
+            actions: [
+              { type: "semantic", locator: { kind: "ref", ref }, action: "invoke" },
+              { type: "keyboard", action: "type", value: raw },
+            ],
+          },
+          secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+        });
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.message).toBe(
+          "CUA stopped the batch at action 2: Typed [secret]... To run it, send the batch again. Check [secret]",
+        );
+        expect(JSON.stringify(receipt)).not.toContain(secret.slice(0, 12));
+      } finally {
+        await backend.close();
+      }
+    });
   });
 });

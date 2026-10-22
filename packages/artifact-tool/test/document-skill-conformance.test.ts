@@ -27,7 +27,7 @@ describe("document skill public-workflow conformance", () => {
       now: () => new Date("2026-01-02T03:04:05.000Z"),
     });
     const firstSection = document.sections.items[0]!;
-    firstSection.headers.default.addParagraph("OpenGeni brief");
+    firstSection.headers.default.addParagraph("Opengeni brief");
     firstSection.footers.default.addParagraph("Confidential");
 
     document.blocks.addHeading("Launch decision", 1);

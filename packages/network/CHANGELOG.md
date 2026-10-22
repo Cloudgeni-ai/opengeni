@@ -1,5 +1,49 @@
 # @opengeni/network
 
+## 4.3.1
+
+### Patch Changes
+
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+
+## 4.2.0
+
+## 4.1.3
+
+## 4.1.1
+
+## 4.0.4
+
+### Patch Changes
+
+- 35dcfa0: Use Azure's API-key header for configured API-key credentials on HTTP and Responses WebSocket connections, while preserving Entra bearer authentication and explicit header overrides. Treat a redirected WebSocket upgrade as a refusal and use the existing turn-scoped HTTP fallback without following credential-bearing redirects.
+- b1b51e2: Report HTTP response-reader cancellation separately from transport failure. A consumer that stops reading after a successful model terminal event no longer produces a false transport-failure metric.
+- 1d24639: Reserve persistent Responses sockets for explicitly scoped conversation requests so title side requests cannot displace a warmed main connection or continuation chain. Add immutable request-receipt snapshots of local dispatch/socket timing and allowlisted response-scoped server timing, without changing model request content, prewarming, retries, or custody.
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+## 3.4.0
+
+## 3.3.0
+
+## 3.2.2
+
+## 3.1.2
+
+## 3.0.0
+
+## 2.0.1
+
+## 2.0.0
+
 ## 1.4.4
 
 ## 1.4.3

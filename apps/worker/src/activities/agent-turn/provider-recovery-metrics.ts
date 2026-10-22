@@ -7,7 +7,7 @@ export type ProviderRecoveryObservation = {
 
 export function providerRecoveryCause(code: unknown): ProviderRecoveryObservation["cause"] | null {
   if (code === "provider_rate_limited") return "rate_limited";
-  if (code === "provider_unavailable") return "unavailable";
+  if (code === "provider_unavailable" || code === "provider_overloaded") return "unavailable";
   if (code === "upstream_connectivity_unavailable") return "connectivity";
   return null;
 }

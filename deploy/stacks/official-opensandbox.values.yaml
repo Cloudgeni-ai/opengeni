@@ -22,7 +22,7 @@ opensandbox-controller:
         cpu: 500m
         memory: 256Mi
     snapshot:
-      # Native snapshots are not an OpenGeni v1 persistence authority.
+      # Native snapshots are not an Opengeni v1 persistence authority.
       imageCommitterImage: ""
       containerdSocketPath: ""
       commitJobTimeout: ""

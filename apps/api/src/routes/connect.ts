@@ -8,10 +8,13 @@ import {
   ConnectOperationRequest,
   ConnectProvider,
   ConnectAccount,
+  preparedMcpHeaders,
 } from "@opengeni/contracts/connect";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
+  OPENGENI_DESKTOP_APP_HEADER,
+  desktopAppReturnUrl,
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
@@ -45,6 +48,7 @@ import {
   isFikenConnection,
   isOpenGeniSlackBotConnection,
   prepareCapabilityEnable,
+  prepareMcpConnectionActivation,
   buildCapabilityCatalog,
   integrationKeyForConnectProvider,
   type ApiRouteDeps,
@@ -85,9 +89,11 @@ import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
+import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
 
 /** Shared durable setup entry. Provider completion is distinct from
  * subsequent preview/install; never report an OAuth token as a ready integration. */
@@ -209,7 +215,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Slack workspace bot",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || !hasPermission(authorization.grant.permissions, "capabilities:manage")
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
@@ -622,21 +628,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, { message: "Verified Connect authority required" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
     // Reject invalid caller selections before taking a durable operation claim.
     // Older revisions still go through the receipt-aware claim path for replay.
     const stored = await getConnectAttempt(deps.db, scope, c.req.param("attemptId"));
     const before = stored.attempt;
+    assertAgentPreparedConnect(actor, before);
     const advancePermission =
       before.providerId === "mcp-install" ? "capabilities:manage" : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
       throw new HTTPException(403, { message: `${advancePermission} required` });
+    if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
+      throw new HTTPException(403, { message: "capabilities:manage required" });
     if (before.providerId === "mcp-install") {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "Choose an MCP capability" });
@@ -868,26 +872,38 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (["mcp-bearer", "mcp-headers"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP credentials required" });
-      const values =
-        before.providerId === "mcp-headers"
-          ? z
-              .object({
-                mcpUrl: z.string().url().max(4096),
-                headers: z.string().min(2).max(65_536),
-              })
-              .strict()
-              .parse(action.values)
-          : z
-              .object({
-                mcpUrl: z.string().url().max(4096),
-                token: z
-                  .string()
-                  .min(1)
-                  .max(16_384)
-                  .regex(/^[^\u0000-\u0020\u007f]+$/),
-              })
-              .strict()
-              .parse(action.values);
+      let values: { mcpUrl: string; headers: string } | { mcpUrl: string; token: string };
+      if (before.mcpSetup) {
+        try {
+          values = {
+            mcpUrl: before.mcpSetup.endpointUrl,
+            headers: JSON.stringify(preparedMcpHeaders(before.mcpSetup, action.values)),
+          };
+        } catch {
+          throw new HTTPException(422, { message: "Supply exactly the requested secret fields" });
+        }
+      } else {
+        values =
+          before.providerId === "mcp-headers"
+            ? z
+                .object({
+                  mcpUrl: z.string().url().max(4096),
+                  headers: z.string().min(2).max(65_536),
+                })
+                .strict()
+                .parse(action.values)
+            : z
+                .object({
+                  mcpUrl: z.string().url().max(4096),
+                  token: z
+                    .string()
+                    .min(1)
+                    .max(16_384)
+                    .regex(/^[^\u0000-\u0020\u007f]+$/),
+                })
+                .strict()
+                .parse(action.values);
+      }
       let credentialHeaders: Record<string, string>;
       try {
         credentialHeaders =
@@ -903,9 +919,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const destination = new URL(values.mcpUrl);
       if (
-        [WORKSPACE_OPENROUTER_CONNECTION_DOMAIN, VERCEL_AI_GATEWAY_CONNECTION_DOMAIN].some(
-          (domain) => domain === destination.hostname,
-        )
+        [
+          WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+          VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          WORKSPACE_OPPER_CONNECTION_DOMAIN,
+        ].some((domain) => domain === destination.hostname)
       )
         throw new HTTPException(422, {
           message: "Use the dedicated workspace provider credential flow",
@@ -929,11 +947,43 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           expectedRevision: input.expectedRevision,
           operationId: input.idempotencyKey,
           inputDigest: createHmac("sha256", encryptionKey).update(stableJson(input)).digest("hex"),
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
+          beforeOperation: actor.beforeOperation,
+          authorize: async (tx, attempt, origin) => {
+            await requireConnectOwnerAuthority(tx, scope, "connections:write", origin);
+            if (attempt.mcpSetup)
+              await requireConnectOwnerAuthority(tx, scope, "capabilities:manage", origin);
+          },
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload the current credential setup" });
+            let activation: Awaited<ReturnType<typeof prepareMcpConnectionActivation>> | undefined;
+            if (attempt.mcpSetup) {
+              try {
+                activation = await prepareMcpConnectionActivation({
+                  grant: actor.grant,
+                  settings: deps.settings,
+                  setup: attempt.mcpSetup,
+                  ownership: attempt.ownership,
+                  headers: credentialHeaders,
+                  ...(deps.mcpCapabilityProbe ? { probe: deps.mcpCapabilityProbe } : {}),
+                });
+              } catch {
+                // No credential/catalog write has occurred. Settle this exact
+                // operation without recording provider text or secret values.
+                return {
+                  commit: async (_tx, current) => ({
+                    ...current,
+                    revision: current.revision + 1,
+                    error: {
+                      code: "mcp_verification_failed",
+                      message:
+                        "Could not verify the MCP connection. Check the key and server, then submit again.",
+                      retryable: false,
+                    },
+                  }),
+                };
+              }
+            }
             const credentialEncrypted = encryptEnvironmentValue(
               encryptionKey,
               JSON.stringify({ headers: credentialHeaders }),
@@ -990,11 +1040,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                       createdBySubjectId: scope.subjectId,
                     });
                 if (!connection) throw new HTTPException(409, { message: "MCP account changed" });
+                if (activation) await activation.commit(tx, connection);
+                const { error: _error, ...settled } = current;
                 return {
-                  ...current,
+                  ...settled,
                   revision: current.revision + 1,
                   state: "complete",
                   credentialsCommitted: true,
+                  ...(activation
+                    ? {
+                        integrationInstalled: true,
+                        completionRequirement: "integration" as const,
+                        mcpCapabilityId: activation.capabilityId,
+                      }
+                    : {}),
                   nextAction: { type: "none" },
                   account: {
                     id: connection.id,
@@ -1052,7 +1111,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 mcpUrl: values.mcpUrl,
                 ownership: attempt.ownership,
                 returnUrl: stored.returnUrl,
-                ...(attempt.account ? { connectionId: attempt.account.id } : {}),
+                ...(attempt.account
+                  ? { connectionId: attempt.account.id }
+                  : { newAccount: true as const }),
               },
             });
             const authorizationUrl = started.authorizationUrl;
@@ -1209,16 +1270,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const input = await parseRequestJson(c, ConnectOperationRequest);
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const continuation = externalActorContinuationForAuthorization(authorization);
-    if (!authorization.contextIntegrity)
-      throw new HTTPException(403, { message: "Verified Connect authority required" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
     return c.json(
       await executeConnectOperation({
         db: deps.db,
@@ -1230,7 +1283,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           .update(stableJson({ ...input, action: "cancel" }))
           .digest("hex"),
         purpose: "cancellation",
+        beforeOperation: actor.beforeOperation,
         authorize: async (tx, attempt, origin) => {
+          assertAgentPreparedConnect(actor, attempt);
           const permission =
             attempt.providerId === "mcp-install"
               ? "capabilities:manage"
@@ -1242,7 +1297,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ? "github:manage"
                   : attempt.providerId === "github-lens"
                     ? "workspace:admin"
-                    : "connections:write";
+                    : attempt.providerId === "slack-bot"
+                      ? "capabilities:manage"
+                      : "connections:write";
           if (
             !hasPermission(authorization.grant.permissions, permission) ||
             (attempt.providerId === "github-lens" &&
@@ -1268,7 +1325,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
     const workspaceId = c.req.param("workspaceId");
-    const input = await parseRequestJson(c, BeginConnectRequest);
+    const requested = await parseRequestJson(c, BeginConnectRequest);
+    // A sign-in started in the desktop app finishes in the person's browser;
+    // return that browser to the console's hand-back page, which reopens the
+    // app. The browser's Origin names the console that made this request.
+    const input = c.req.header(OPENGENI_DESKTOP_APP_HEADER)
+      ? {
+          ...requested,
+          returnUrl: desktopAppReturnUrl(requested.returnUrl, c.req.header("origin") ?? null),
+        }
+      : requested;
     const setupPermission =
       input.providerId === "mcp-install"
         ? "capabilities:manage"
@@ -1280,7 +1346,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             ? "github:manage"
             : input.providerId === "github-lens"
               ? "workspace:admin"
-              : "connections:write";
+              : // The workspace Slack bot configures the whole workspace, so installing it is
+                // integration administration even though Members hold connections:write.
+                input.providerId === "slack-bot"
+                ? "capabilities:manage"
+                : "connections:write";
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -1292,6 +1362,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Verified Connect authority required",
       });
+    if (input.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
+      throw new HTTPException(403, { message: "capabilities:manage required" });
     if (input.providerId === "atlassian")
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     if (input.providerId === "gmail" && input.ownership !== "personal")
@@ -1309,13 +1381,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       /[\u0000-\u0020\u007f]/.test(input.returnUrl)
     )
       throw new HTTPException(400, { message: "invalid return URL" });
-    const scope = {
-      accountId: authorization.grant.accountId,
-      workspaceId,
-      subjectId: authorization.grant.subjectId,
-      personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-      ...(continuation ? { externalContinuation: continuation } : {}),
-    };
+    const actor = await connectRequestActor(deps, authorization);
+    const scope = actor.scope;
+    assertAgentPreparedConnect(actor, input);
     return c.json(
       await (async () => {
         // Remote setup preparation stays outside the policy and actor transactions.
@@ -1323,12 +1391,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         const tx = deps.db;
         const admit = () =>
           withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            await actor.beforeOperation?.(policyTx);
             return withWorkspaceSubjectRls(
               policyTx,
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
                 await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                if (input.mcpSetup)
+                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 const replay = await getConnectBeginReplay(actorTx, scope, {
                   idempotencyKey: input.idempotencyKey,
                   requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
@@ -1352,12 +1423,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           attemptInput: Parameters<typeof persistConnectAttempt>[2],
         ) =>
           withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            await actor.beforeOperation?.(policyTx);
             return withWorkspaceSubjectRls(
               policyTx,
               workspaceId,
               scope.subjectId,
               async (actorTx) => {
                 await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                if (input.mcpSetup)
+                  await requireConnectOwnerAuthority(actorTx, scope, "capabilities:manage");
                 return persistConnectAttempt(actorTx, scope, {
                   ...attemptInput,
                   authorizeAcquisition: async () => {
@@ -1549,7 +1623,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (["openapi", "graphql"].includes(input.providerId)) {
           if (input.reconnectAccountId)
             throw new HTTPException(422, { message: "Select the service connection during setup" });
-          if (input.ownership === "personal" && !isPersonalConnectionOwnerPrincipal(authorization))
+          if (input.ownership === "personal" && !scope.personalOwnerVerified)
             throw new HTTPException(403, { message: "personal ownership unavailable" });
           const choices = hasPermission(authorization.grant.permissions, "connections:read")
             ? (await listConnectionsMetadata(tx, workspaceId, scope.subjectId))
@@ -1673,7 +1747,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               (existing.subjectId === null ? "workspace" : "personal") !== input.ownership)
           )
             throw new HTTPException(404, { message: "MCP account not found for this ownership" });
-          if (input.ownership === "personal" && !isPersonalConnectionOwnerPrincipal(authorization))
+          if (input.ownership === "personal" && !scope.personalOwnerVerified)
             throw new HTTPException(403, { message: "personal ownership unavailable" });
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
@@ -1689,7 +1763,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               state: "credential_input",
               credentialsCommitted: false,
               integrationInstalled: false,
-              completionRequirement: "connection",
+              completionRequirement: input.mcpSetup ? "integration" : "connection",
+              ...(input.mcpSetup ? { mcpSetup: input.mcpSetup } : {}),
               ...(existing
                 ? {
                     account: {
@@ -1704,50 +1779,57 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : {}),
               nextAction: {
                 type: "credentials",
-                fields: ["slack-personal", "gmail"].includes(input.providerId)
-                  ? []
-                  : input.providerId === "fiken-token"
-                    ? [
-                        {
-                          name: "apiToken",
-                          label: "Fiken API token",
-                          required: true,
-                          secret: true,
-                        },
-                        {
-                          name: "defaultCompanySlug",
-                          label: "Default company slug (optional)",
-                          required: false,
-                          secret: false,
-                        },
-                      ]
-                    : [
-                        {
-                          name: "mcpUrl",
-                          label: "MCP server URL",
-                          required: true,
-                          secret: false,
-                        },
-                        ...(input.providerId === "mcp-bearer"
-                          ? [
-                              {
-                                name: "token",
-                                label: "Bearer credential",
-                                required: true,
-                                secret: true,
-                              },
-                            ]
-                          : input.providerId === "mcp-headers"
+                fields: input.mcpSetup
+                  ? input.mcpSetup.secretFields.map((field) => ({
+                      name: field.id,
+                      label: field.label,
+                      required: true,
+                      secret: true,
+                    }))
+                  : ["slack-personal", "gmail"].includes(input.providerId)
+                    ? []
+                    : input.providerId === "fiken-token"
+                      ? [
+                          {
+                            name: "apiToken",
+                            label: "Fiken API token",
+                            required: true,
+                            secret: true,
+                          },
+                          {
+                            name: "defaultCompanySlug",
+                            label: "Default company slug (optional)",
+                            required: false,
+                            secret: false,
+                          },
+                        ]
+                      : [
+                          {
+                            name: "mcpUrl",
+                            label: "MCP server URL",
+                            required: true,
+                            secret: false,
+                          },
+                          ...(input.providerId === "mcp-bearer"
                             ? [
                                 {
-                                  name: "headers",
-                                  label: "Credential headers (JSON)",
+                                  name: "token",
+                                  label: "Bearer credential",
                                   required: true,
                                   secret: true,
                                 },
                               ]
-                            : []),
-                      ],
+                            : input.providerId === "mcp-headers"
+                              ? [
+                                  {
+                                    name: "headers",
+                                    label: "Credential headers (JSON)",
+                                    required: true,
+                                    secret: true,
+                                  },
+                                ]
+                              : []),
+                        ],
               },
               expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
             },
@@ -1912,25 +1994,24 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    const { grant } = actor;
     return c.json(
-      (
-        await listPendingConnectAttempts(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-        })
-      ).filter((attempt) => canReadAttempt(grant.permissions, attempt.providerId)),
+      (await listPendingConnectAttempts(deps.db, actor.scope)).filter(
+        (attempt) =>
+          canReadAttempt(grant.permissions, attempt.providerId) &&
+          (!actor.preparedOnly || (attempt.providerId === "mcp-headers" && attempt.mcpSetup)),
+      ),
     );
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts/:attemptId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const { attempt } = await getConnectAttempt(
-      deps.db,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      c.req.param("attemptId"),
-    );
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const actor = await connectRequestActor(deps, authorization);
+    const { grant } = actor;
+    const { attempt } = await getConnectAttempt(deps.db, actor.scope, c.req.param("attemptId"));
+    assertAgentPreparedConnect(actor, attempt);
     if (!canReadAttempt(grant.permissions, attempt.providerId))
       throw new HTTPException(403, { message: "Connect read permission required" });
     return c.json(attempt);

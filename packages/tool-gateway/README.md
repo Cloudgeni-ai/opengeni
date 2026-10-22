@@ -1,6 +1,6 @@
 # `@opengeni/tool-gateway`
 
-Protocol-neutral catalog validation, authorization, and execution for OpenGeni
+Protocol-neutral catalog validation, authorization, and execution for Opengeni
 tools. Runtime composition supplies already-admitted first-party and integration
 definitions; this package gives model MCP, Codemode, HTTP/SDK, external MCP, and
 Site adapters one canonical identity and execution path.
@@ -67,6 +67,13 @@ authorization checks without invoking the supplied executor. Attempt transports
 use that seam before crossing their durable side-effect marker, then invoke the
 returned execution closure. Ordinary `call` remains the compatible
 combined preflight-plus-execution API.
+
+Input and output validators compile together on the first call to a tool,
+before authorization or execution, against private preparation-time copies of
+its schemas. Unused tools do not compile. A malformed schema fails only calls to
+that tool; a retained `ToolGatewaySchemaCompilationError` keeps the compiler
+failure as its cause and is not an argument repair error. Catalog structure and
+digest checks remain eager.
 
 Argument validation enforces the entry's advertised input schema, including
 `required`, for every caller. A rejected call throws

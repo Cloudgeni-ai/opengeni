@@ -25,7 +25,7 @@ import {
   SessionAuthorizationUnavailableError,
   type SessionAuthorizationDependencies,
 } from "../session-authorization";
-import { requireVariableSetEncryption } from "../domain/environments";
+import { requireEnvironmentEncryption } from "../domain/encryption-key";
 import { normalizedSessionMcpCredentialHeaders } from "../domain/sessions";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 import {
@@ -76,7 +76,7 @@ export async function rotateSessionMcpCredentialsForRequest(
   const parsed = RotateSessionMcpCredentialsRequest.safeParse(raw);
   if (!parsed.success)
     throw new HTTPException(422, { message: "invalid credential rotation request" });
-  const encryptionKey = requireVariableSetEncryption(deps.settings);
+  const encryptionKey = requireEnvironmentEncryption(deps.settings);
   let request: RotateSessionMcpCredentialsRequest;
   try {
     request = {

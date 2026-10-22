@@ -286,6 +286,9 @@ export function registerUsageAllowanceRoutes(app: Hono, deps: ApiRouteDeps): voi
                         : { member: request.thresholds.member }),
                     },
                   }),
+              ...(request.unbilledUsage === undefined
+                ? {}
+                : { unbilledUsage: request.unbilledUsage }),
             }),
           ),
         ),

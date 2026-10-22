@@ -3,7 +3,7 @@ import type { ModelRequest } from "@openai/agents";
 import type { ClaudeSubscriptionIdentity } from "@opengeni/config";
 
 // Pinned to locally inspected Claude Code 2.1.285 / Agent SDK 0.3.276 captures.
-// These are compatibility wire values, not a claim about OpenGeni's host runtime.
+// These are compatibility wire values, not a claim about Opengeni's host runtime.
 export const CLAUDE_CODE_HEADERS = {
   "user-agent": "claude-cli/2.1.285 (external, sdk-ts, agent-sdk/0.3.276)",
   "x-app": "cli",
@@ -78,7 +78,6 @@ export function applyClaudeCodeIdentity(
     betas.add("thinking-token-count-2026-05-13");
     betas.add("effort-2025-11-24");
     betas.add("thinking-display-updates-2026-08-18");
-    body.thinking.display = "summarized";
   }
   if (
     [

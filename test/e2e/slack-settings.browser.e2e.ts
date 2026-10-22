@@ -2,17 +2,17 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import {
+  slackFixtureResponse,
+  workspaceId,
+  siblingId,
+  type SlackFixtureState,
+} from "./fixtures/slack-settings";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidence = `${repoRoot}/.agent/evidence/slack-settings`;
-const workspaceId = "00000000-0000-4000-8000-000000000811";
-const siblingId = "00000000-0000-4000-8000-000000000812";
-const accountId = "00000000-0000-4000-8000-000000000813";
-const connectionId = "00000000-0000-4000-8000-000000000814";
-const now = "2026-09-07T00:00:00.000Z";
 let browser: Browser;
 let web: StartedProcess;
 let baseUrl: string;
@@ -48,12 +48,12 @@ test("connected page is compact, accessible, and keeps real routing and disconne
     await page.goto(`${baseUrl}/workspaces/${workspaceId}/plugins?integration=slack`);
     // The legacy link opens the Slack page, not a sheet.
     const sheet = page.locator(slackPage);
-    // A connected page carries no Connected badge; its routing settings say it.
-    await sheet.getByRole("heading", { name: "Where work starts", exact: true }).waitFor();
+    await sheet.getByRole("heading", { name: "Opengeni bot", exact: true }).waitFor();
     expect(await sheet.locator("h1").textContent()).toBe("Slack");
+    await sheet.getByRole("button", { name: "Cloudgeni", exact: true }).click();
     expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
     expect(await page.getByRole("dialog").count()).toBe(0);
-    await sheet.getByRole("heading", { name: "Where work starts", exact: true }).waitFor();
+    await sheet.getByRole("heading", { name: "Work started from Slack", exact: true }).waitFor();
     expect(await sheet.getByRole("button", { name: "Reconnect", exact: true }).isVisible()).toBe(
       false,
     );
@@ -68,13 +68,14 @@ test("connected page is compact, accessible, and keeps real routing and disconne
       expect(accessibility.violations).toEqual([]);
       await page.screenshot({ path: `${evidence}/connected-${theme}.png` });
     }
-    await sheet.getByRole("button", { name: "Choose channel workspaces" }).click();
-    const routing = page.getByRole("dialog", { name: "Where Slack channels start work" });
+    await sheet.getByRole("button", { name: "Channels" }).click();
+    const routing = page.locator("main");
+    await page.getByRole("heading", { name: "Slack channels", exact: true }).waitFor();
     await routing.getByRole("combobox").selectOption(siblingId);
     await routing.getByRole("button", { name: "Save", exact: true }).click();
-    await routing.waitFor({ state: "hidden" });
+    await sheet.getByRole("heading", { name: "Work started from Slack", exact: true }).waitFor();
     expect(state.routingSaves).toBe(1);
-    await sheet.getByRole("button", { name: "More actions for Slack", exact: true }).click();
+    await sheet.getByRole("button", { name: "More actions for Cloudgeni", exact: true }).click();
     await page.getByRole("menuitem", { name: "Disconnect", exact: true }).click();
     const confirmation = page.getByRole("dialog", { name: "Disconnect the Opengeni Slack bot?" });
     await confirmation.getByText(/whole organization/).waitFor();
@@ -94,45 +95,28 @@ test("connected page is compact, accessible, and keeps real routing and disconne
   }
 }, 90_000);
 
-test("sibling workspace finds the verified connection and opens its home settings", async () => {
+test("sibling workspace opens the same bot settings without changing workspace", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
     await installApi(page, { installed: true, routingSaves: 0, disconnects: 0 });
     await page.goto(`${baseUrl}/workspaces/${siblingId}/plugins?integration=slack`);
     const sheet = page.locator(slackPage);
-    await sheet.getByRole("button", { name: "Open Slack settings" }).waitFor();
-    expect(
-      await sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true }).count(),
-    ).toBe(0);
-    await sheet.getByRole("button", { name: "Open Slack settings" }).click();
-    await page.waitForURL(
-      (url) =>
-        url.pathname === `/workspaces/${workspaceId}/plugins` &&
-        (url.searchParams.get("open") === "integration:slack" ||
-          url.searchParams.get("integration") === "slack"),
-    );
-    await page
-      .locator(slackPage)
-      .getByRole("heading", { name: "Where work starts", exact: true })
-      .waitFor();
+    await sheet.getByRole("button", { name: "Cloudgeni", exact: true }).click();
+    await sheet.getByRole("heading", { name: "Work started from Slack", exact: true }).waitFor();
+    expect(new URL(page.url()).pathname).toBe(`/workspaces/${siblingId}/plugins`);
+    await sheet.getByRole("heading", { name: "Available in Opengeni", exact: true }).waitFor();
+    expect(await sheet.getByRole("button", { name: "Open Slack settings" }).count()).toBe(0);
   } finally {
     await context.close();
   }
 }, 60_000);
 
-test("OAuth conflict returns to a visible recovery message that survives reload", async () => {
+test("OAuth conflict stays visible after reload without blocking another workspace", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
-  const state = {
-    installed: false,
-    routingSaves: 0,
-    disconnects: 0,
-    connectionsReady: undefined as Promise<void> | undefined,
-  };
-  let releaseConnections = () => {};
   try {
-    await installApi(page, state);
+    await installApi(page, { installed: false, routingSaves: 0, disconnects: 0 });
     await page.goto(
       `${baseUrl}/workspaces/${workspaceId}/capabilities?slack=error&reason=http_409`,
     );
@@ -140,233 +124,227 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
-    const redirected = new URL(page.url());
-    expect(redirected.pathname).toBe(`/workspaces/${workspaceId}/plugins`);
-    expect(redirected.searchParams.get("slack")).toBe("error");
-    expect(redirected.searchParams.get("reason")).toBe("http_409");
-    expect(redirected.searchParams.get("open")).toBe("integration:slack");
-    state.connectionsReady = new Promise<void>((resolve) => {
-      releaseConnections = resolve;
-    });
     await page.reload();
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
-    const setup = sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true });
-    await setup.waitFor();
-    expect(await setup.isDisabled()).toBe(true);
-    releaseConnections();
-    await sheet
-      .getByText(
-        "Your organization owner needs to resolve the existing Slack installation before setup can continue.",
-        { exact: true },
-      )
-      .waitFor();
-    expect(await setup.count()).toBe(0);
+    await sheet.getByRole("button", { name: "Add Slack workspace", exact: true }).waitFor();
     await sheet.getByRole("button", { name: "Dismiss", exact: true }).click();
     expect(new URL(page.url()).searchParams.has("slack")).toBe(false);
-    await sheet.getByRole("button", { name: "Add Opengeni to Slack", exact: true }).waitFor();
   } finally {
-    releaseConnections();
     await context.close();
   }
 }, 60_000);
 
-async function installApi(
-  page: Page,
-  state: {
-    installed: boolean;
-    routingSaves: number;
-    disconnects: number;
-    connectionsReady?: Promise<void>;
-  },
-) {
+test("multiple bot installations keep access changes on the selected workspace", async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  const state: SlackFixtureState = {
+    installed: true,
+    multiple: true,
+    routingSaves: 0,
+    disconnects: 0,
+  };
+  try {
+    await installApi(page, state);
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/plugins?integration=slack`);
+    const sheet = page.locator(slackPage);
+    await sheet.getByRole("button", { name: "Community", exact: true }).waitFor();
+    await sheet.getByText("Alex · Cloudgeni", { exact: true }).waitFor();
+    await page.screenshot({ path: `${evidence}/inventory.png` });
+    await sheet.getByRole("button", { name: "Community", exact: true }).click();
+    expect(
+      await sheet.getByText("Publish important decisions to Slack", { exact: true }).count(),
+    ).toBe(0);
+    await sheet.getByRole("button", { name: "Edit access", exact: true }).click();
+    await sheet.getByRole("combobox", { name: "Bot workspace access" }).click();
+    await page.getByRole("option", { name: "Selected workspaces", exact: true }).click();
+    await sheet.getByRole("checkbox", { name: "Analytics", exact: true }).click();
+    await sheet.getByRole("button", { name: "Save", exact: true }).click();
+    await sheet.getByRole("button", { name: "Edit access", exact: true }).waitFor();
+    expect(state.access?.["00000000-0000-4000-8000-000000000818"]).toMatchObject({
+      enabled: true,
+      workspaceIds: [siblingId],
+    });
+    expect(state.access?.["00000000-0000-4000-8000-000000000814"]).toBeUndefined();
+    expect(new URL(page.url()).pathname).toBe(`/workspaces/${siblingId}/plugins`);
+    await page.screenshot({ path: `${evidence}/community-access.png` });
+    await page.goto(`${baseUrl}/workspaces/${workspaceId}/plugins?integration=slack`);
+    await sheet.getByRole("button", { name: /^Workspace automation/ }).click();
+    await sheet
+      .getByText(
+        "Settings for the Cloudgeni Opengeni workspace. Reaction settings apply to all bots installed here.",
+        { exact: true },
+      )
+      .waitFor();
+    await sheet.getByText(/Posts as Cloudgeni · #dev/).waitFor();
+  } finally {
+    await context.close();
+  }
+}, 60_000);
+
+test("schedule keeps the task and timing visible with secondary settings collapsed", async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+  const page = await context.newPage();
+  try {
+    await installApi(page, { installed: true, multiple: true, routingSaves: 0, disconnects: 0 });
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/schedules/new`);
+    await page.getByRole("heading", { name: "New schedule", exact: true }).waitFor();
+    await page
+      .getByRole("textbox", { name: "Message", exact: true })
+      .fill(
+        "Review yesterday’s customer conversations and post a short summary to #usage-analytics in the internal Slack workspace as the Opengeni bot.",
+      );
+    await page
+      .getByRole("textbox", { name: "NameOptional" })
+      .fill("Daily customer conversation outcomes");
+    const settings = page.getByRole("button", { name: /^Settings / });
+    expect(await settings.getAttribute("aria-expanded")).toBe("false");
+    expect((await new AxeBuilder({ page }).include("form").analyze()).violations).toEqual([]);
+    await page.screenshot({ path: `${evidence}/schedule.png` });
+    await settings.click();
+    expect(await page.getByRole("combobox", { name: "Where it runs" }).textContent()).toContain(
+      "Workspace default",
+    );
+    expect(
+      await page
+        .getByText("Currently: Managed sandbox. Follows changes to the workspace default.")
+        .count(),
+    ).toBe(1);
+    await page.screenshot({ path: `${evidence}/schedule-machine-default.png` });
+    expect(await page.getByText("Post to Slack", { exact: true }).count()).toBe(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+    await page.screenshot({ path: `${evidence}/schedule-mobile.png` });
+  } finally {
+    await context.close();
+  }
+}, 60_000);
+
+test("workspace default machine saves once and schedules show its current name", async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+  const page = await context.newPage();
+  const machineId = "00000000-0000-4000-8000-000000000831";
+  const state: SlackFixtureState = {
+    installed: true,
+    routingSaves: 0,
+    disconnects: 0,
+    machines: [
+      {
+        sandboxId: machineId,
+        enrollmentId: "shared-build",
+        workspaceId: siblingId,
+        kind: "selfhosted",
+        scope: "workspace",
+        name: "Build Mac",
+        state: "online",
+        os: "macos",
+        arch: "arm64",
+      },
+      {
+        sandboxId: "personal",
+        enrollmentId: "personal",
+        workspaceId: siblingId,
+        kind: "selfhosted",
+        scope: "user",
+        name: "Personal laptop",
+        state: "online",
+        os: "macos",
+        arch: "arm64",
+      },
+    ],
+  };
+  try {
+    await installApi(page, state);
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/settings?section=general`);
+    const picker = page.getByRole("combobox", { name: "Default machine", exact: true });
+    await picker.click();
+    await page.getByRole("option", { name: "Build Mac", exact: true }).waitFor();
+    expect(await page.getByRole("option", { name: "Personal laptop" }).count()).toBe(0);
+    await page.getByRole("option", { name: "Build Mac", exact: true }).click();
+    await page.waitForFunction(() =>
+      document.querySelector('[role="combobox"]')?.textContent?.includes("Build Mac"),
+    );
+    expect(state.defaultExecutionTarget).toEqual({ kind: "machine", targetSandboxId: machineId });
+    await page.screenshot({ path: `${evidence}/workspace-default-machine.png` });
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/sessions`);
+    await page.getByRole("textbox", { name: "Message the agent" }).waitFor();
+    const savedDraft = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/new-session-draft") && response.request().method() === "PUT",
+    );
+    await page
+      .getByRole("textbox", { name: "Message the agent" })
+      .fill("Check the workspace default machine.");
+    await savedDraft;
+    await page.getByRole("button", { name: "More composer actions" }).click();
+    await page.getByRole("menuitem", { name: /Runs on.*Build Mac/ }).waitFor();
+    expect(state.draft?.options).toMatchObject({ targetSandboxId: machineId });
+    await page.screenshot({ path: `${evidence}/new-chat-default-machine.png` });
+    await page.goto(`${baseUrl}/workspaces/${siblingId}/schedules/new`);
+    await page.getByRole("button", { name: /^Settings / }).click();
+    await page
+      .getByText("Currently: Build Mac. Follows changes to the workspace default.")
+      .waitFor();
+    await page
+      .getByRole("combobox", { name: "Where it runs" })
+      .evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await page.waitForTimeout(200);
+    await page.screenshot({ path: `${evidence}/schedule-shared-machine.png` });
+    state.machines = [];
+    await page.reload();
+    await page.getByRole("button", { name: /^Settings / }).click();
+    await page.getByText("Machine unavailable. Choose a replacement or reconnect it.").waitFor();
+    expect(
+      await page.getByRole("button", { name: "Create schedule", exact: true }).isDisabled(),
+    ).toBe(true);
+    state.sessions = [
+      {
+        id: "00000000-0000-4000-8000-000000000841",
+        workspaceId: siblingId,
+        title: "Customer conversation analysis",
+        status: "idle",
+        resources: [],
+        tools: [],
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: [],
+        visibility: "workspace",
+        model: "gpt-5.6-sol",
+        createdAt: "2026-10-20T00:00:00Z",
+        updatedAt: "2026-10-20T00:00:00Z",
+      },
+    ];
+    await page.reload();
+    await page.getByRole("combobox", { name: "Chat", exact: true }).click();
+    await page.getByRole("option", { name: /Use an existing chat/ }).click();
+    await page.getByRole("combobox", { name: "Send to", exact: true }).click();
+    await page.getByRole("option", { name: /Customer conversation analysis/ }).click();
+    await page.getByRole("button", { name: /Uses this chat’s settings/ }).click();
+    await page.getByRole("link", { name: "Open chat settings" }).waitFor();
+    await page
+      .getByRole("link", { name: "Open chat settings" })
+      .evaluate((element) => element.scrollIntoView({ block: "center" }));
+    await page.screenshot({ path: `${evidence}/schedule-inherited-settings.png` });
+  } finally {
+    await context.close();
+  }
+}, 60_000);
+
+async function installApi(page: Page, state: SlackFixtureState) {
   await page.route("http://127.0.0.1:9/**", async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    const path = url.pathname;
-    const json = (body: unknown, status = 200) =>
-      route.fulfill({
-        status,
-        contentType: "application/json",
-        headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
-        body: JSON.stringify(body),
-      });
-    if (path === "/v1/config/client")
-      return json({
-        deploymentRevision: "slack-settings-test",
-        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
-        defaultModel: "gpt-5.6-sol",
-        allowedModels: ["gpt-5.6-sol"],
-        models: [],
-        defaultReasoningEffort: "low",
-        allowedReasoningEfforts: ["low"],
-        mcpServers: [],
-        fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
-        productAccessMode: "configured",
-        auth: { mode: "none" },
-        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
-      });
-    if (path === "/v1/access/me")
-      return json({
-        mode: "configured",
-        subjectId: "slack-test",
-        subjectLabel: "Slack test",
-        accountGrants: [],
-        workspaceGrants: [workspaceId, siblingId].map((id) => ({
-          workspaceId: id,
-          accountId,
-          subjectId: "slack-test",
-          permissions: [
-            "workspace:admin",
-            "connections:read",
-            "connections:write",
-            "capabilities:read",
-            "sessions:create",
-          ],
-        })),
-        defaultAccountId: accountId,
-        defaultWorkspaceId: workspaceId,
-      });
-    if (path === "/v1/workspaces")
-      return json([workspace(workspaceId, "Cloudgeni"), workspace(siblingId, "Analytics")]);
-    // Keep provider readiness independent of the connection lookup held during reload.
-    if (path.endsWith("/connect/catalog"))
-      return json([
-        {
-          id: "slack-bot",
-          label: "Opengeni Slack bot",
-          family: "slack",
-          readiness: "available",
-          ownership: ["workspace"],
-          setup: ["oauth"],
-        },
-      ]);
-    if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
-    if (path.endsWith("/connections")) {
-      await state.connectionsReady;
-      return json({ connections: state.installed && path.includes(workspaceId) ? [bot()] : [] });
-    }
-    if (path.endsWith("/connections/slack-bot/bindings"))
-      return json({ bindings: state.installed && path.includes(workspaceId) ? [binding()] : [] });
-    if (path.endsWith("/channel-routes")) {
-      if (request.method() === "PUT") {
-        state.routingSaves++;
-        return json({ routes: [], routingEnabled: true });
-      }
-      return json({ routes: [], routingEnabled: true });
-    }
-    if (path.endsWith("/reaction-channels"))
-      return json({ channels: [{ id: "CDEV", name: "dev", isPrivate: false }], nextCursor: null });
-    if (request.method() === "DELETE" && path.endsWith(connectionId)) {
-      state.disconnects++;
-      return json({});
-    }
-
-    if (path.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
-    if (path.endsWith("/skills")) return json({ skills: [] });
-    if (path.endsWith("/skills/content")) return json({ skills: [], nextCursor: null });
-    if (path.endsWith("/capabilities/discovery/plugins"))
-      return json({ items: [], total: 0, nextOffset: null });
-    if (path.endsWith("/plugins")) return json({ plugins: [] });
-    if (path.endsWith("/integrations/definitions")) return json({ definitions: [] });
-    if (path.endsWith("/integrations")) return json({ integrations: [] });
-    if (path.endsWith("/sessions"))
-      return json({
-        sessions: [],
-        pinned: [],
-        pinnedTruncated: false,
-        nextCursor: null,
-        filtersApplied: true,
-        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
-        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
-        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
-        ...(url.searchParams.get("includeTotals") === "true"
-          ? { totals: { needsYouCount: 0, groups: [] } }
-          : {}),
-      });
-    if (path.endsWith("/channels") || path.endsWith("/rigs") || path.endsWith("/variable-sets"))
-      return json([]);
-    if (path.endsWith("/github/app"))
-      return json({ configured: false, missing: [], installUrl: null });
-    return json({});
+    const response = await slackFixtureResponse(
+      new Request(route.request().url(), {
+        method: route.request().method(),
+        ...(route.request().postData() ? { body: route.request().postData()! } : {}),
+      }),
+      state,
+    );
+    await route.fulfill({
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+      body: await response.text(),
+    });
   });
-}
-
-function workspace(id: string, name: string) {
-  return {
-    id,
-    accountId,
-    kind: "shared",
-    name,
-    slug: name.toLowerCase(),
-    externalSource: null,
-    externalId: null,
-    agentInstructions: null,
-    settings: {},
-    inferenceControl: {
-      state: "active",
-      revision: 0,
-      reason: null,
-      changedBy: null,
-      changedAt: null,
-    },
-    defaultRigId: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-function bot() {
-  return {
-    id: connectionId,
-    accountId,
-    workspaceId,
-    subjectId: null,
-    providerDomain: "slack.com",
-    kind: "app_install",
-    status: "active",
-    grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
-    expiresAt: null,
-    lastRefreshAt: now,
-    lastUsedAt: now,
-    lastError: null,
-    version: 1,
-    verifiedInstallAt: now,
-    verifiedInstallVersion: 1,
-    metadata: {
-      credentialRole: "opengeni_slack_bot",
-      credentialLabel: "OpenGeni Slack bot",
-      slackTeamId: "TACME",
-      slackTeamName: "Cloudgeni",
-      botId: "BACME",
-      botUserId: "UACME",
-      botDisplayName: "OpenGeni",
-    },
-    createdBySubjectId: "slack-test",
-    updatedBySubjectId: "slack-test",
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-function binding() {
-  return {
-    id: "00000000-0000-4000-8000-000000000815",
-    accountId,
-    accountName: "Cloudgeni",
-    workspaceId,
-    workspaceName: "Cloudgeni",
-    connectionId,
-    connectionStatus: "active",
-    connectionVersion: 1,
-    slackTeamId: "TACME",
-    slackTeamName: "Cloudgeni",
-    botId: "BACME",
-    botUserId: "UACME",
-    botDisplayName: "OpenGeni",
-    state: "active",
-    quarantineReason: null,
-    version: 1,
-    createdAt: now,
-    updatedAt: now,
-  };
 }

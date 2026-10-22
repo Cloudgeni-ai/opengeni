@@ -1,12 +1,15 @@
 import { Fragment, type ReactNode } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useConnectionAccess } from "@/components/connection-access-settings";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRowSkeleton } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { NOT_IN_USE, organizationReachLabel } from "./models-ui";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRowSkeleton } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import {
+  NOT_IN_USE,
+  organizationReachLabel,
+} from "@opengeni/react/app/components/models/models-ui";
 import { reachesWorkspace } from "./organization-codex-models";
-import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
 import type { SubscriptionAccountPlaces } from "./subscription-account-detail";
 import {
   subscriptionAccountName,
@@ -67,7 +70,7 @@ export function SubscriptionAccountPoolRows<T extends Account>({
   kind: "supergrok" | "claude_subscription";
   providerName: string;
   plan: (account: T) => string;
-  renderRow: (account: T, onOpen: () => void, scopeLabel?: string) => ReactNode;
+  renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
   pendingRow?: ReactNode;
 }) {
   if (pool.unavailable) return null;
@@ -154,7 +157,7 @@ function SharedRow<T extends Account>({
   provider: "supergrok" | "claude_subscription";
   kind: "supergrok" | "claude_subscription";
   plan: (account: T) => string;
-  renderRow: (account: T, onOpen: () => void, scopeLabel?: string) => ReactNode;
+  renderRow: (account: T, onOpen: () => void, scopeLabel?: ReactNode) => ReactNode;
 }) {
   const access = useConnectionAccess({
     client: organization.pool.client,
@@ -165,23 +168,37 @@ function SharedRow<T extends Account>({
   const scopeLabel = organizationReachLabel(places.scope, access.data);
   if (inUse) return renderRow(account, () => organization.openAccount(account.id), scopeLabel);
   const reaches = reachesWorkspace(access.data, organization.workspace);
+  // Unread, its reach and use here are unknown: no guessed tag or usage, and a
+  // failed read says so in the tag's place, with the way to read it again.
+  const failed = Boolean(access.error) && !access.data;
   return (
     <SubscriptionAccountRow
       provider={provider}
       title={subscriptionAccountName(account)}
       email={account.email}
-      meta={[
-        scopeLabel,
-        plan(account),
-        access.error
-          ? "Couldn't check availability"
-          : reaches === false
-            ? `Not available in ${places.scopeName}`
-            : ownInUse
-              ? "Set aside while this workspace has its own"
-              : null,
-      ]}
-      cells={{ usage: NOT_IN_USE }}
+      meta={
+        failed
+          ? ["Couldn't check who can use it", plan(account)]
+          : !access.data
+            ? [plan(account)]
+            : [
+                scopeLabel,
+                // Before the plan, so it stays readable on a phone.
+                reaches === false ? "Not available here" : ownInUse ? "Set aside" : null,
+                plan(account),
+              ]
+      }
+      cells={access.data ? { usage: NOT_IN_USE } : undefined}
+      control={
+        failed ? (
+          <RowButton
+            aria-label={`Try again for ${subscriptionAccountName(account)}`}
+            onClick={() => void access.reload()}
+          >
+            Try again
+          </RowButton>
+        ) : undefined
+      }
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

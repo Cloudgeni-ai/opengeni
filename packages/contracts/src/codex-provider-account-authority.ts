@@ -1,6 +1,9 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-const PositiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const PositiveSafeInteger = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+);
 
 /**
  * Opaque authority frozen at a Codex provider-account acceptance boundary.
@@ -10,21 +13,23 @@ const PositiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTE
  * activation slice may use the user generation only together with separately
  * authorized durable state; this value is never sufficient authority alone.
  */
-export const CodexProviderAccountAuthoritySnapshotV1 = z.discriminatedUnion("scope", [
-  z
-    .object({
-      version: z.literal(1),
-      scope: z.literal("workspace"),
-    })
-    .strict(),
-  z
-    .object({
-      version: z.literal(1),
-      scope: z.literal("user"),
-      authorityGeneration: PositiveSafeInteger,
-    })
-    .strict(),
-]);
+export const CodexProviderAccountAuthoritySnapshotV1 = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("scope", [
+    z
+      .object({
+        version: z.literal(1),
+        scope: z.literal("workspace"),
+      })
+      .strict(),
+    z
+      .object({
+        version: z.literal(1),
+        scope: z.literal("user"),
+        authorityGeneration: PositiveSafeInteger,
+      })
+      .strict(),
+  ]),
+);
 
 export type CodexProviderAccountAuthoritySnapshotV1 = z.infer<
   typeof CodexProviderAccountAuthoritySnapshotV1

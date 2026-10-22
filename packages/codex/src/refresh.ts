@@ -135,14 +135,24 @@ export function accessTokenExpiry(accessToken: string): Date | null {
 /** id_token -> {chatgptAccountId, planType, isFedramp}. server.rs:827-832; token_data.rs:71-99 */
 export function parseIdToken(idToken: string): {
   chatgptAccountId: string | null;
+  /**
+   * The signed-in person within that ChatGPT account. Every member of a
+   * ChatGPT Team/Business/Enterprise workspace shares `chatgptAccountId`, so
+   * this is what tells two people's logins apart.
+   */
+  chatgptUserId: string | null;
   planType: string | null;
   isFedramp: boolean;
   email: string | null;
 } {
   const payload = decodeJwtPayload(idToken);
   const auth = (payload?.[CODEX_ID_TOKEN_AUTH_CLAIM] ?? {}) as Record<string, unknown>;
+  const userId = [auth.chatgpt_user_id, auth.user_id, payload?.sub].find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
   return {
     chatgptAccountId: typeof auth.chatgpt_account_id === "string" ? auth.chatgpt_account_id : null,
+    chatgptUserId: userId ?? null,
     planType: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : null,
     isFedramp: auth.chatgpt_account_is_fedramp === true,
     // The user's own email (standard OIDC `email` claim on the id_token); a

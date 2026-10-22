@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
@@ -12,8 +13,8 @@ import {
   creditsModelForCheckout,
   includedDefaultModel,
   preferredConnectedModelId,
-} from "./model-access-onboarding";
-import { isPaymentRequiredError } from "./model-access";
+} from "@opengeni/react/app/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@opengeni/react/app/lib/model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,
@@ -80,7 +81,7 @@ describe("preferredConnectedModelId", () => {
       ]),
     ).toBe("free");
   });
-  test("prefers a selectable connected subscription over OpenGeni credits", () => {
+  test("prefers a selectable connected subscription over Opengeni credits", () => {
     expect(
       preferredConnectedModelId([
         catalogModel({
@@ -175,6 +176,15 @@ const OPENROUTER = catalogModel({
   billing: { upstreamPayer: "workspace", metering: "external" },
 });
 
+const OPPER = catalogModel({
+  id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+  provider: "workspace-opper",
+  providerLabel: "Your Opper",
+  source: undefined,
+  cost: "workspace",
+  billing: { upstreamPayer: "workspace", metering: "external" },
+});
+
 describe("preferredConnectedModelId after a specific connect", () => {
   const catalog = [
     FREE_DEFAULT,
@@ -184,6 +194,7 @@ describe("preferredConnectedModelId after a specific connect", () => {
     SUPERGROK,
     GATEWAY,
     OPENROUTER,
+    OPPER,
   ];
 
   test("the generic order puts any connected service ahead of the free default", () => {
@@ -207,6 +218,9 @@ describe("preferredConnectedModelId after a specific connect", () => {
     expect(preferredConnectedModelId(catalog, "supergrok")).toBe("supergrok/model");
     expect(preferredConnectedModelId(catalog, "vercel_gateway")).toBe("gateway/model");
     expect(preferredConnectedModelId(catalog, "openrouter")).toBe("openrouter-byok/model");
+    expect(preferredConnectedModelId(catalog, "opper")).toBe(
+      "workspace-opper/aws/claude-sonnet-4-6-eu",
+    );
   });
 
   test("a credit purchase prefers the first operator-ordered credits model", () => {
@@ -345,7 +359,8 @@ describe("credit checkout return", () => {
 });
 
 describe("resolved default in the composer and after a credit purchase", () => {
-  const rows = (models: WorkspaceModelCatalogModel[]) => sortPickerRows(projectPickerRows(models));
+  const rows = (models: WorkspaceModelCatalogModel[]) =>
+    sortPickerRows(projectPickerRows(t, models));
 
   test("the composer fallback takes the server-resolved default first", () => {
     const models = [FREE_DEFAULT, CREDITS_FIRST, CREDITS_SECOND];
@@ -603,13 +618,13 @@ describe("isPaymentRequiredError", () => {
             error: {
               status: 402,
               code: "payment_required",
-              message: "insufficient OpenGeni credits",
+              message: "insufficient Opengeni credits",
               retryable: false,
             },
           }),
         ),
       ),
     ).toBe(true);
-    expect(isPaymentRequiredError(new Error("insufficient OpenGeni credits"))).toBe(false);
+    expect(isPaymentRequiredError(new Error("insufficient Opengeni credits"))).toBe(false);
   });
 });

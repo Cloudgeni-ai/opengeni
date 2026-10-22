@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import type postgres from "postgres";
 import {
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
@@ -13,6 +14,8 @@ import {
   createConnection,
   createDb,
   getWorkspaceProviderApiKeyConnectionMetadata,
+  getWorkspaceConnectionModelRestrictions,
+  listConnectionsMetadata,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceProviderCustomModels,
   organizationModelProviderConnectionActiveForWorkspace,
@@ -21,11 +24,8 @@ import {
   type DbClient,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadWorkspaceModelSelectionInput } from "../src/default-session-model";
 import { resolveWorkspaceCatalogSettings } from "../src/model-catalog";
 
@@ -47,11 +47,21 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let scope: { accountId: string; workspaceId: string };
 let otherScope: typeof scope;
+const directQueries: string[] = [];
+let capturedStatements: string[] | null = null;
+let directModelIds: string[];
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("model-selection-batched-reads");
   if (!shared) throw new Error("model selection batched reads require PostgreSQL");
   client = createDb(shared.appUrl);
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  driver.options.debug = (_id, query) => {
+    capturedStatements?.push(query);
+    if (query.includes('from "connections"') && query.includes("direct_azure_openai")) {
+      directQueries.push(query);
+    }
+  };
   const bootstrap = async (suffix: string) => {
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -118,6 +128,50 @@ beforeAll(async () => {
       }
     }
   }
+  const direct = async (
+    target: typeof scope,
+    overrides: Partial<Parameters<typeof createConnection>[1]> = {},
+  ) =>
+    await createConnection(client.db, {
+      ...target,
+      subjectId: null,
+      providerDomain: "api.openai.com",
+      kind: "api_key",
+      credentialEncrypted: "fixture-ciphertext-not-a-key",
+      metadata: {
+        credentialRole: "direct_openai",
+        directModelProvider: { provider: "openai", model: "fixture-openai" },
+      },
+      createdBySubjectId: actor,
+      ...overrides,
+    });
+  const openai = await direct(scope);
+  const azure = await direct(scope, {
+    providerDomain: "fixture.openai.azure.com",
+    metadata: {
+      credentialRole: "direct_azure_openai",
+      directModelProvider: {
+        provider: "azure_openai",
+        model: "fixture-azure",
+        endpoint: "https://fixture.openai.azure.com",
+      },
+    },
+  });
+  directModelIds = [
+    `workspace-openai-${openai.id}/${openai.version}/fixture-openai`,
+    `workspace-azure-openai-${azure.id}/${azure.version}/fixture-azure`,
+  ].sort();
+  await direct(otherScope);
+  await direct(scope, { subjectId: actor });
+  await direct(scope, { status: "revoked" });
+  await direct(scope, { kind: "oauth2" });
+  await direct(scope, { providerDomain: "wrong.example" });
+  await direct(scope, {
+    metadata: {
+      credentialRole: "openrouter",
+      directModelProvider: { provider: "openai", model: "wrong-role" },
+    },
+  });
 }, 180_000);
 
 afterAll(async () => {
@@ -245,9 +299,11 @@ test("the loader reads the catalog families in three transactions instead of fou
     ]),
   );
   expect(perProvider).toBe(14);
-  // 13 non-catalog reads (restrictions, readiness, policy, Codex) plus the
-  // three catalog-family reads. The per-provider loader took 13 + 14 = 27.
-  expect(batched).toBeLessThanOrEqual(16);
+  // 13 non-catalog reads (restrictions, readiness, policy, Codex), one Claude
+  // route receipt read, and the three catalog-family reads. Claude shares one
+  // readiness projection with the restriction loader rather than rereading
+  // its route there. The per-provider loader took 13 + 14 = 27.
+  expect(batched).toBeLessThanOrEqual(17);
 });
 
 test("workspace catalog settings expose the same active and retained custom models", async () => {
@@ -319,4 +375,144 @@ test("workspace catalog settings expose the same active and retained custom mode
       `${claudeProviderId("claude_subscription", "workspace")}/fixture/claude_subscription-a`,
     ),
   ).toBe(false);
+});
+
+test("repeated session models read each retained Claude model only once per response", async () => {
+  const models = CLAUDE_CONNECTION_KINDS.flatMap((kind) => [
+    `${claudeProviderId(kind)}/fixture/${kind}-org-retired`,
+    `${claudeProviderId(kind, "workspace")}/fixture/${kind}-retired`,
+  ]);
+  const [single, singleTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      retainedProductModelIds: models,
+    }),
+  );
+  const started = performance.now();
+  capturedStatements = [];
+  const [repeated, repeatedTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      // A response page can contain many sessions using the same model.
+      // The singular compatibility field must not add another read either.
+      retainedProductModelIds: Array.from(
+        { length: 50 },
+        (_, index) => models[index % models.length],
+      ),
+      retainedProductModelId: models[0],
+    }),
+  );
+  const statements = capturedStatements;
+  capturedStatements = null;
+  const retainedReads = statements.filter(
+    (query) =>
+      /from "(?:organization_model_provider_custom_models|workspace_gateway_custom_models)"/.test(
+        query,
+      ) &&
+      query.includes('"upstream_model_id" =') &&
+      query.includes("limit"),
+  );
+  console.log(
+    JSON.stringify({
+      retainedModelBudget: {
+        singleTransactions,
+        repeatedTransactions,
+        statements: statements.length,
+        retainedReads: retainedReads.length,
+        elapsedMs: performance.now() - started,
+      },
+    }),
+  );
+  expect(JSON.stringify(repeated)).toBe(JSON.stringify(single));
+  expect(singleTransactions).toBe(3 + models.length);
+  expect(repeatedTransactions).toBe(singleTransactions);
+  expect(retainedReads).toHaveLength(models.length);
+
+  // This is input normalization, not a catalog cache. A later request must
+  // observe a retained model's updated metadata through the ordinary read.
+  await shared!.admin`
+    update organization_model_provider_custom_models set label = 'Updated retained model'
+    where account_id = ${scope.accountId} and provider_kind = 'anthropic'
+      and upstream_model_id = 'fixture/anthropic-org-retired'`;
+  const updated = await resolveWorkspaceCatalogSettings(client.db, settings, {
+    ...scope,
+    retainedProductModelIds: [models[0], models[0]],
+  });
+  expect(configuredModels(updated.settings).find((model) => model.id === models[0])?.label).toBe(
+    "Updated retained model",
+  );
+});
+
+const directRestrictions = (restrictions: Record<string, string[] | null>) =>
+  Object.entries(restrictions)
+    .filter(([prefix]) => /^workspace-(?:openai|azure-openai)-/.test(prefix))
+    .flatMap(([, models]) => models ?? [])
+    .sort();
+
+test("model selection reuses public metadata instead of reading the direct-provider subset again", async () => {
+  directQueries.length = 0;
+  const loaded = await loadWorkspaceModelSelectionInput(
+    client.db,
+    settings,
+    {
+      ...scope,
+      subjectId: actor,
+    },
+    { observeAvailability: false },
+  );
+  expect(directRestrictions(loaded.connectionModelRestrictions!)).toEqual(directModelIds);
+  expect(directQueries).toHaveLength(0);
+});
+
+test("request-local metadata equals the scoped direct read and never includes personal or foreign connections", async () => {
+  directQueries.length = 0;
+  const [original, originalTransactions] = await transactionsDuring(() =>
+    getWorkspaceConnectionModelRestrictions(client.db, scope.workspaceId, actor),
+  );
+  expect(directQueries).toHaveLength(1);
+  expect(directRestrictions(original)).toEqual(directModelIds);
+  // The production caller passes public rows only. Deliberately include own
+  // private metadata and another workspace here to pin the projection fence.
+  const metadata = [
+    ...(await listConnectionsMetadata(client.db, scope.workspaceId, actor)),
+    ...(await listConnectionsMetadata(client.db, otherScope.workspaceId, null)),
+  ];
+  directQueries.length = 0;
+  const [reused, reusedTransactions] = await transactionsDuring(() =>
+    getWorkspaceConnectionModelRestrictions(
+      client.db,
+      scope.workspaceId,
+      actor,
+      undefined,
+      undefined,
+      Promise.resolve(metadata),
+    ),
+  );
+  expect(originalTransactions - reusedTransactions).toBe(1);
+  expect(reused).toEqual(original);
+  expect(directQueries).toHaveLength(0);
+});
+
+test("an empty snapshot is authoritative while an unavailable snapshot retains the standalone read", async () => {
+  directQueries.length = 0;
+  const empty = await getWorkspaceConnectionModelRestrictions(
+    client.db,
+    scope.workspaceId,
+    actor,
+    undefined,
+    undefined,
+    Promise.resolve([]),
+  );
+  expect(directRestrictions(empty)).toEqual([]);
+  expect(directQueries).toHaveLength(0);
+  const fallback = await getWorkspaceConnectionModelRestrictions(
+    client.db,
+    scope.workspaceId,
+    actor,
+    undefined,
+    undefined,
+    Promise.reject(new Error("metadata read unavailable")),
+  );
+  expect(directRestrictions(fallback)).toEqual(directModelIds);
+  expect(directQueries).toHaveLength(1);
 });

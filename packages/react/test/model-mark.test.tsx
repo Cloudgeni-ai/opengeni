@@ -48,3 +48,17 @@ test("catalog logo failures fall back and a new URL renders without remounting",
     false,
   );
 });
+
+test("Opper EU routes show the maker's mark, not the gateway's", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  mounted = { root, container };
+  const vendorOf = async (id: string) => {
+    await act(async () => root.render(<ModelMark model={{ id }} aria-label="Model" />));
+    return container.querySelector("[data-model-vendor]")?.getAttribute("data-model-vendor");
+  };
+  expect(await vendorOf("opper/vertexai/gemini-3.8-flash-eu")).toBe("google");
+  expect(await vendorOf("workspace-opper/aws/claude-sonnet-4-6-eu")).toBe("anthropic");
+  expect(await vendorOf("organization-opper/gemini-3.8-flash")).toBe("google");
+});

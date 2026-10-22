@@ -1,15 +1,16 @@
 import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { mcpAccountBindingsFromVisibleConnections } from "./mcp-account-bindings";
-import { createHash } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   boundMcpResponseBody,
   MCP_MAX_RESPONSE_BYTES,
   assertMcpToolListWithinBounds,
 } from "@opengeni/runtime/mcp-network";
+import {
+  legacyMcpClientError,
+  withMcpStreamableHttpClient,
+  type McpStreamableHttpClient,
+} from "./mcp-streamable-http-client";
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import type {
@@ -19,7 +20,11 @@ import type {
   UpdateConnectorToolPermissionsRequest,
   ConnectionMetadata,
   McpServerConnectionRef,
+  SessionMcpToolPermissionsQuery,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "@opengeni/contracts";
+import { mcpToolRecommendsApproval } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
@@ -40,6 +45,7 @@ import {
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
+  sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
 import {
@@ -51,6 +57,12 @@ import {
   settingsWithMcpCapabilityServers,
   settingsWithApiIntegrationServers,
 } from "./capabilities";
+
+export class ConnectorConnectionRequiredError extends HTTPException {
+  constructor() {
+    super(409, { message: "Connect an account to manage its tool permissions" });
+  }
+}
 
 type Input = {
   db: Database;
@@ -73,6 +85,7 @@ type ListedTool = {
         title?: string | undefined;
       }
     | undefined;
+  _meta?: Record<string, unknown> | undefined;
 };
 
 export function connectorToolGroup(tool: ListedTool): "read" | "write" | "other" {
@@ -121,7 +134,7 @@ async function resolveTarget(input: Input) {
     ).filter((integration) => integration.capabilityId === input.capabilityId);
     const accountId = (integration: (typeof integrations)[number]) =>
       integration.connectionRef?.connectionId ??
-      `session-mcp:${integration.serverId}:${createHash("sha256").update(integration.baseUrl, "utf8").digest("hex")}`;
+      sessionMcpApprovalConnectionId(integration.serverId, integration.baseUrl);
     const integration = integrations.find(
       (candidate) =>
         (!input.instanceKey || candidate.instanceKey === input.instanceKey) &&
@@ -229,16 +242,13 @@ async function resolveTarget(input: Input) {
   );
   const connection = visible.find((candidate) => candidate.id === binding?.connectionId) ?? null;
   if (ref && !connection) {
-    throw new HTTPException(409, { message: "Reconnect this connector to manage its tools" });
+    throw new ConnectorConnectionRequiredError();
   }
   if (connection?.subjectId && !input.personalOwnerVerified)
     throw new HTTPException(403, {
       message: "Only the authenticated connection owner may manage personal tool permissions",
     });
-  // Same secret-free target identity used by runtime sessionMcpApprovalConnectionId.
-  const connectionId =
-    connection?.id ??
-    `session-mcp:${server.id}:${createHash("sha256").update(server.url, "utf8").digest("hex")}`;
+  const connectionId = connection?.id ?? sessionMcpApprovalConnectionId(server.id, server.url);
   if (input.connectionId && input.connectionId !== connectionId)
     throw new HTTPException(409, {
       message: "Connector account unavailable. Reload its permissions.",
@@ -314,12 +324,12 @@ async function listTools(
   }
   const pinned = createPinnedIntegrationTransport({ network: input.settings });
   const deadline = AbortSignal.timeout(15_000);
-  const client = new Client(
-    { name: "opengeni-tool-permissions", version: "0.1.0" },
-    { capabilities: {} },
-  );
-  try {
-    const transport = new StreamableHTTPClientTransport(new URL(target.server.url), {
+  const tools = await withMcpStreamableHttpClient(
+    {
+      url: target.server.url,
+      clientName: "opengeni-tool-permissions",
+      clientVersion: "0.1.0",
+      timeoutMs: 15_000,
       requestInit: { headers },
       fetch: async (url, init) =>
         boundMcpResponseBody(
@@ -329,23 +339,20 @@ async function listTools(
           }),
           MCP_MAX_RESPONSE_BYTES,
         ),
-    });
-    await client.connect(transport as unknown as Transport, {
-      timeout: 15_000,
-      maxTotalTimeout: 15_000,
-    });
-    const tools = await collectConnectorToolPages(client, deadline);
-    return tools.filter(
-      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
-    );
-  } finally {
-    await client.close().catch(() => undefined);
-  }
+    },
+    (client) =>
+      collectConnectorToolPages(client, deadline).catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      }),
+  );
+  return tools.filter(
+    (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
+  );
 }
 
 /** Collect discovery pages without changing the caller's connection or authority. */
 export async function collectConnectorToolPages(
-  client: Pick<Client, "listTools">,
+  client: Pick<McpStreamableHttpClient, "listTools">,
   deadline: AbortSignal,
 ): Promise<ListedTool[]> {
   const tools: ListedTool[] = [];
@@ -422,7 +429,8 @@ export async function getConnectorToolPermissions(
           defaultDecision:
             target.server.requireApproval === true ||
             (Array.isArray(target.server.requireApproval) &&
-              target.server.requireApproval.includes(tool.name))
+              target.server.requireApproval.includes(tool.name)) ||
+            mcpToolRecommendsApproval(tool)
               ? "ask"
               : "allow",
         }),
@@ -488,6 +496,78 @@ export async function updateConnectorToolPermissions(
         ? { expectedRevision: input.payload.expectedRevision }
         : {}),
       policy: input.payload.permission,
+    });
+  } catch (error) {
+    if (error instanceof ConnectorToolPermissionConflictError)
+      throw new HTTPException(409, { message: error.message });
+    throw error;
+  }
+}
+
+/**
+ * Same secret-free identity the runtime derives for a credential-free session MCP server.
+ * Keyed to the exact URL: a different URL string gets different rules.
+ */
+export function sessionMcpToolPermissionConnectionId(serverId: string, url: string): string {
+  return sessionMcpApprovalConnectionId(serverId, url);
+}
+
+type SessionMcpInput = {
+  db: Database;
+  workspaceId: string;
+  grant: AccessGrant;
+};
+
+/**
+ * Saved Allow/Ask/Block choices for a host-attached session MCP server. The
+ * host owns the tool catalog; Opengeni owns the rules and enforces them on the
+ * next attempt of every session in this workspace that attaches the same
+ * server id and exact URL.
+ */
+export async function getSessionMcpToolPermissions(
+  input: SessionMcpInput & { query: SessionMcpToolPermissionsQuery },
+): Promise<SessionMcpToolPermissionsResponse> {
+  const { serverId, url } = input.query;
+  const connectionId = sessionMcpToolPermissionConnectionId(serverId, url);
+  const policies = await listConnectorToolPermissionPolicies(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.workspaceId,
+    connectionId,
+  });
+  const serverPolicies = policies.filter(
+    (row) => row.serverId === serverId && row.actionName === "*",
+  );
+  return {
+    connectionId,
+    serverId,
+    defaultPermission: serverPolicies.find((row) => row.toolName === "*")?.policy ?? null,
+    tools: serverPolicies
+      .filter((row) => row.toolName !== "*")
+      .map((row) => ({ toolName: row.toolName, permission: row.policy }))
+      .sort((left, right) => left.toolName.localeCompare(right.toolName)),
+    revision: connectorToolPolicyRevision(policies, connectionId, serverId),
+    canManage: canManageConnectorPermissions(input.grant),
+    appliesTo: "next_attempt",
+  };
+}
+
+/** Agents and service principals cannot change the permissions that bound them. */
+export async function updateSessionMcpToolPermissions(
+  input: SessionMcpInput & { payload: UpdateSessionMcpToolPermissionsRequest },
+): Promise<void> {
+  if (!canManageConnectorPermissions(input.grant))
+    throw new HTTPException(403, { message: "Connector management permission required" });
+  const { payload } = input;
+  try {
+    await updateConnectorToolPermissionPolicies(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      connectionId: sessionMcpToolPermissionConnectionId(payload.serverId, payload.url),
+      serverId: payload.serverId,
+      toolNames: payload.target === "default" ? ["*"] : payload.toolNames,
+      ...(payload.expectedRevision ? { expectedRevision: payload.expectedRevision } : {}),
+      policy: payload.permission,
     });
   } catch (error) {
     if (error instanceof ConnectorToolPermissionConflictError)

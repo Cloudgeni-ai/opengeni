@@ -1,8 +1,12 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
+  // Session list notifications reference the final imported/archive/site fields.
+  "0888_session_list_invalidation.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -37,6 +41,9 @@ export const embeddingMigrationTail = [
   // Compiles against the Knowledge tables and visibility helper from 0461.
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
+  // Patches the read function from withheld 0461; replay after its creation.
+  "0640_knowledge_entry_created_since.sql",
+  ...knowledgeActorMigrationTail,
   "0478_sender_owned_connections.sql",
   // Replayed 0402/0433 still consume historical Pack tables. Remove them only
   // after those earlier accepted-work and Skill cutovers have completed.
@@ -57,6 +64,13 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // The plan catalog uses 0521's immutable-revision guard; its maintenance
+  // routines require that catalog. Replay both after the withheld guard.
+  "0797_subscription_plan_foundation.sql",
+  "0798_subscription_plan_maintenance.sql",
+  // Replaces 0797's catalog setter and plan routines; replay after 0797 so the
+  // withheld CREATE FUNCTION does not collide with the newer definition.
+  "0801_subscription_plan_legacy_prices.sql",
   // Reuses the revision guard installed by withheld 0521; its validation
   // follow-up must run after the original promotional-credit routines.
   "0613_model_scoped_promotional_credits.sql",
@@ -71,6 +85,7 @@ export const embeddingMigrationTail = [
   // from withheld 0345; replay after it.
   "0547_idle_command_containment.sql",
   "0599_paused_recovery_command_containment.sql",
+  "0687_human_wait_command_containment.sql",
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,
@@ -90,6 +105,17 @@ export const embeddingMigrationTail = [
   "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // Hourly rollups consume 0604's usage-payer and scoped reader functions.
+  "0815_insights_usage_hourly.sql",
+  "0816_insights_usage_hourly_queue.sql",
+  "0817_insights_usage_hourly_backfill.sql",
+  "0818_insights_usage_hourly_reader.sql",
+  // 0793 backfills while disabling the fence trigger introduced by withheld
+  // 0345. 0794 patches 0604's two scoped readers and requires all nine;
+  // 0795 extends 0793's audience predicate. Replay the dependency chain intact.
+  "0793_private_site_sessions.sql",
+  "0794_site_ai_insights.sql",
+  "0795_site_lifecycle_cancellation.sql",
   // Patches the sender-owned capture from withheld 0478 and reads the frozen
   // subscription authority installed by withheld 0598; replay after both.
   "0608_receiver_execution_context.sql",
@@ -99,4 +125,250 @@ export const embeddingMigrationTail = [
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
   "0622_organization_slack_bot_delivery.sql",
+  // M2 extends the membership finalizer to revoke legacy Claude rows; replay
+  // only after the deliberately withheld 0598 Claude tables are restored.
+  "0642_shared_subscription_core.sql",
+  // Reclaims capabilities from withheld 0642; replay after that table exists.
+  "0807_subscription_rls_admin_once_per_statement.sql",
+  "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
+  "0645_subscription_core_runtime.sql",
+  "0646_subscription_core_people_assignment_read.sql",
+  // The session storage lifecycle extends the withheld 0560 import guards and
+  // reads the 0402 input wait; replay after them.
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
+  "0652_session_archive_guard_search_path.sql",
+  "0653_session_archive_tenancy_fence.sql",
+  "0657_session_archive_purge_retained_evidence.sql",
+  "0660_session_archive_preference_snapshot_export.sql",
+  // The inbox person resolver compiles against scheduled_tasks.owner_subject_id
+  // from withheld 0478; replay after it.
+  "0661_inbox_subagent_goals_and_schedules.sql",
+  // Takes the session-tenancy fence inventory helpers from withheld 0345.
+  "0662_session_first_party_default_intent.sql",
+  // Replaces the inbox projection trigger from withheld 0661; replay after it
+  // so the replayed 0661 body does not overwrite the newer one.
+  "0663_inbox_paused_goal_setting.sql",
+  // Each rewrites the inbox projection trigger and reads inbox_settings.paused_goals
+  // from 0663; replay them after it, in order, so the newest trigger body wins.
+  "0664_inbox_rich_notifications.sql",
+  "0665_inbox_replies.sql",
+  "0666_inbox_reply_current_turn.sql",
+  "0667_subscription_authority_refresh_contract.sql",
+  "0668_subscription_core_codex_chat_authority.sql",
+  "0669_subscription_core_codex_waits.sql",
+  "0670_subscription_core_codex_apps.sql",
+  "0671_subscription_core_codex_operations.sql",
+  // session_hands_back_v1 compiles against sessions.input_wait_turn_id from
+  // withheld 0402; replay after it.
+  "0674_inbox_reply_hands_back.sql",
+  // Redefines 0661's inbox person resolver, which reads
+  // scheduled_tasks.owner_subject_id from withheld 0478; replay after 0661.
+  "0677_local_human_inbox_recipient.sql",
+
+  // Rewrites the inbox projection and push triggers after 0674 and resolves
+  // the session's person through 0661; replay after both so its bodies win.
+  "0678_inbox_mute_session_replies.sql",
+  // Redefines 0674's session_hands_back_v1, which reads sessions.input_wait_turn_id
+  // from withheld 0402; replay after 0674 so its body wins.
+  "0694_inbox_skip_live_call_replies.sql",
+  // Extends the shared connection table created by withheld 0642.
+  "0679_codex_extra_credit_consent.sql",
+  "0688_subscription_core_codex_writers.sql",
+  "0689_subscription_core_codex_cutover.sql",
+  // Disconnect patches the cutover routine; catalog observations and retry
+  // admission extend its tables and guards. Replay after those prerequisites.
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
+  "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
+  // Patches the request guard after 0697.
+  "0699_codex_recovery_after_interrupted_attempt.sql",
+  // Completes ownerless refresh authorization in withheld 0667.
+  "0700_codex_ownerless_person_refresh.sql",
+  // Extends the shared connection table created by withheld 0642 and replaces
+  // its scope guard; replay after the cutover it edits.
+  "0702_subscription_codex_access_editor.sql",
+  // Patches the capture function installed by withheld 0264/0275/0478 and
+  // patched by withheld 0608; replay after them.
+  "0704_inactive_inherited_personal_connections.sql",
+  // Patches the interaction reaper by its post-0345/0391 anchors; replay
+  // after the fence graph it edits.
+  "0705_idle_interaction_release.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0707_subscription_core_neutral_routines.sql",
+  // Rewrites the inbox projection, list and push routines from withheld
+  // 0664/0678 and reads their columns; replay after them so its bodies win.
+  "0708_inbox_member_notifications.sql",
+  // Rewrites the operation-lease constraints and guard that withheld 0691
+  // defines; replay after it.
+  "0711_subscription_codex_completion_operations.sql",
+  // Records the provider cutover receipts over withheld 0689, restricts the
+  // shared core tables from withheld 0642 and patches the capture function
+  // installed by withheld 0264/0275/0478; replay after them.
+  "0712_subscription_core_generic_precursor.sql",
+  // Keys the auto-assignment table by provider and redefines the trigger and
+  // reach routines withheld 0689 and 0702 create; replay after them.
+  "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates; replay after it.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
+  // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
+  // replay after them.
+  "0715_subscription_core_api_key_connections.sql",
+  // Builds on 0712's receipts, adds a marker to the session and scheduled
+  // carrier tables and patches the personal helpers 0712 patched; replay
+  // after it.
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines and patches fences earlier migrations define.
+  "0717_subscription_authority_fences.sql",
+  // Redefines enqueue_native_push_v2 from withheld 0664 and extends the inbox
+  // settings 0663 and 0665 grow; replay after them.
+  "0718_inbox_time_sensitive_needs_you.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
+  // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
+  "0726_subscription_personal_acceptance_reads.sql",
+  // Patches the operation-lease guard withheld 0671 and 0711 define; replay
+  // after them.
+  "0727_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0728_subscription_core_personal_connect_format.sql",
+  // Adds owner policies on the person preferences table from withheld 0642.
+  "0729_subscription_person_preferences_owner.sql",
+  // Built from the owner reader withheld 0715 rewrites; it follows 0715.
+  "0730_subscription_core_personal_connection_versions.sql",
+  // Rekeys the session bindings table from withheld 0642.
+  "0733_subscription_session_bindings_per_provider.sql",
+  // Reads withheld 0707/0712's registry/receipt and patches 0691's guard.
+  "0746_subscription_failover_readiness_and_request_fence.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0749_subscription_shared_personal_choice.sql",
+  // Reads the Knowledge claim installed by withheld 0461 (and the title/site
+  // claims in historical lifecycle fixtures); preserve its full-name identity.
+  "0730_maintenance_work_probes.sql",
+  // Reads browser/outbox claim routines withheld by historical lifecycle fixtures.
+  "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0735_subscription_core_owned_connection_usage.sql",
+  "0747_subscription_core_xai_cutover.sql",
+  "0748_subscription_core_claude_cutover.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0750_subscription_waiter_candidates.sql",
+  // The drained retirement requires both cutovers; it runs after them.
+  "0751_subscription_core_legacy_retirement.sql",
+  "0752_subscription_personal_sharing.sql",
+  // Rewrite the scheduled authority ledger and accepted-account fences above.
+  "0753_schedule_live_connector_accounts.sql",
+  "0754_schedule_connectors_follow_workspace_defaults.sql",
+  "0755_turn_connection_account_intent.sql",
+  "0756_turn_connection_account_intent_schema.sql",
+  "0758_connection_account_intent_grants.sql",
+  // Reads the subscription, binding and provider-snapshot columns of
+  // session_system_updates added by withheld migrations above.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+  "0760_terminal_turn_run_state_cleanup.sql",
+  "0761_exhausted_scheduled_tasks.sql",
+  // Rewrites the quiescence and visibility routines 0759 and 0761 extend.
+  "0768_private_visibility_ignores_leftovers.sql",
+  // Rewrites the same quiescence and visibility routines again.
+  "0769_private_visibility_never_blocks.sql",
+  "0763_queue_steer_admission_recheck_repair.sql",
+  "0764_interrupted_turn_recovery.sql",
+  // Replaces the recovery inventory 0764 rewrote; replay after it.
+  "0880_quiescence_repair_skips_parked_waits.sql",
+  // Reads shared-core tables and the own-membership helper from withheld 0729.
+  "0757_subscription_people_picker_reads.sql",
+  // Rewrites the visibility transition and fork routines from withheld 0501
+  // (and 0502/0513) by exact text; replay after them.
+  "0738_private_sessions_share_sandboxes.sql",
+  // Replaces the 0585 cursor trigger routine over its withheld column.
+  "0775_session_usage_limit_attention_cursor.sql",
+  // Patches the semantic projection in the cursor trigger restored by 0775.
+  "0877_single_semantic_event_projection.sql",
+  // Reads subscription_connections and the owner-capability routine from
+  // withheld 0645/0707 and later subscription-core migrations.
+  "0777_workspace_admin_subscription_connections.sql",
+  // Installs an inventory read policy with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0792_scheduled_task_blocker_reviews.sql",
+  // Rewrites the session-tenancy fence registry and its capability routines
+  // from withheld 0345; replay after it.
+  "0800_session_tenancy_fence_registry_schema_name.sql",
+  // The history repair runner uses the tenancy trigger and workspace fences
+  // installed by withheld 0345, including its historical 0809 compatibility SQL.
+  "0809_session_open_settlement_index.sql",
+  "0811_session_events_usage_source_key_backfill.sql",
+  "0821_session_history_owner_backfill_repair.sql",
+  // The schedule-defaults repair takes workspace fences through the inventory
+  // helpers installed by withheld 0345; replay after it.
+  "0832_schedule_defaults_and_turn_notifications.sql",
+  // Replaces the 0345 tenancy fence and adds a WHEN clause over the 0275
+  // scheduled-run accepted execution snapshot; replay after both.
+  "0836_cheaper_session_write_fences.sql",
+  // Sets statistics options on the cursor table from 0374, withheld by these
+  // historical fixtures; replay after it.
+  "0837_hot_session_tables_analyze_cadence.sql",
+  // Empties the capability table from withheld 0642 and rewrites the reclaim
+  // routine from 0807; replay after both.
+  "0838_reclaim_exited_backend_runtime_capabilities.sql",
+  // Replaces the containment inventory from 0687, which uses the session
+  // tenancy fence helper from withheld 0345; replay after it.
+  "0839_docker_local_command_containment.sql",
+  // Derives the versioned retained-process claim from the body 0345 repaired
+  // and turns the original claim into a wrapper; replay after 0345.
+  "0840_retained_process_reconciler_version.sql",
+  // The Site chat-access grant policy reads the sessions.site_access_root_id
+  // column added by withheld 0793; replay after it.
+  "0842_site_session_access.sql",
+  // Patches the withheld provenance fences and subscription compatibility readers.
+  "0843_indexed_inbox_lineage.sql",
+  // Both extend the scoped-credit constraint from withheld 0613 and plan
+  // routines from withheld 0797; replay only after those prerequisites.
+  "0844_free_plan_credit_scope.sql",
+  "0845_signup_eligibility_without_bonus.sql",
+  "0846_independent_session_titles.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Temporarily disables the sessions fence trigger installed by withheld 0345.
+  "0853_connected_machine_root_working_dirs.sql",
+  // Replaces the file ownership trigger from withheld 0461 and reads the file
+  // read-capability table from withheld 0499.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines that withheld 0738 rewrites; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and temporarily disables the sessions fence
+  // trigger installed by withheld 0345.
+  "0856_session_fork_workflow_identity.sql",
+  // Replaces the Slack message routine and alters the access table created by
+  // withheld 0622; replay after it.
+  "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
+  // Usage history routines live in the subscription schema from withheld
+  // shared-core migrations; the seed reads them. Replay both after them.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501 and the
+  // trigger from withheld 0836; replay after both.
+  "0873_mcp_binding_delegation_revocation.sql",
+  // Rewrites the resolver installed by withheld 0478; replay after it.
+  "0876_connection_validation_shared_locks.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
+  // after the fence graph it edits.
+  "0883_retired_instance_interactions.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites the subscription and vault routines and 0777's policies; replay
+  // after all of them.
+  "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
 ];

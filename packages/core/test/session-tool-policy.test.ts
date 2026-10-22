@@ -3,6 +3,7 @@ import {
   defaultSessionMcpServerIds,
   resolveSessionToolPolicy,
   resolveTurnToolPolicy,
+  scheduledTurnFirstPartyMcpTools,
   type SessionToolPolicyInput,
 } from "../src/domain/session-tool-policy";
 import type { ToolRef } from "@opengeni/contracts";
@@ -12,6 +13,19 @@ const mcp = (id: string, optional?: boolean, eager?: boolean): ToolRef => ({
   id,
   ...(optional ? { optional: true } : {}),
   ...(eager ? { eager: true } : {}),
+});
+
+test("scheduled built-in snapshots preserve empty selections and reject malformed authority", () => {
+  expect(scheduledTurnFirstPartyMcpTools({ metadata: {} })).toBeNull();
+  expect(
+    scheduledTurnFirstPartyMcpTools({ metadata: { scheduledFirstPartyMcpTools: [] } }),
+  ).toEqual([]);
+  expect(
+    scheduledTurnFirstPartyMcpTools({ metadata: { scheduledFirstPartyMcpTools: ["session_get"] } }),
+  ).toEqual(["session_get"]);
+  expect(() =>
+    scheduledTurnFirstPartyMcpTools({ metadata: { scheduledFirstPartyMcpTools: ["unknown"] } }),
+  ).toThrow();
 });
 
 test("ordinary turn projections and execution retain session refs, including optional/eager", () => {

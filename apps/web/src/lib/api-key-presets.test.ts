@@ -43,11 +43,14 @@ describe("workspace API key presets", () => {
       "members:manage",
       "api_keys:manage",
       "secrets:read",
-      "variable-sets:read",
     ]) {
       expect(all.permissions).toContain(permission);
       expect(presetById("full_automation").permissions).not.toContain(permission);
     }
+    // New keys offer only secrets:*; stored variable-sets:* grants still alias (Q-16).
+    expect(all.permissions.some((permission) => permission.startsWith("variable-sets:"))).toBe(
+      false,
+    );
   });
 
   test("recognises a preset by its exact permissions, otherwise Custom", () => {

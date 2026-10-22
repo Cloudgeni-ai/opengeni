@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an improvement for OpenGeni
+about: Suggest an improvement for Opengeni
 title: ""
 labels: enhancement
 assignees: ""

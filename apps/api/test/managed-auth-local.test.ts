@@ -44,6 +44,36 @@ describe("managed auth email verification posture", () => {
     ).toBeUndefined();
   });
 
+  test("explicit overrides preserve admission boundaries", () => {
+    const disabled = { environment: "production", managedAuthRequireEmailVerification: false };
+    const user = { id: "user-1", email: "member@example.test", emailVerified: false };
+    expect(managedAuthRequiresEmailVerification(disabled)).toBe(false);
+    expect(
+      managedAuthRequiresEmailVerification({
+        environment: "local",
+        managedAuthRequireEmailVerification: true,
+      }),
+    ).toBe(true);
+    expect(managedAuthUserCreateAdmission(disabled, user, "credential")).toEqual({
+      data: { ...user, emailVerified: true },
+    });
+    expect(managedAuthUserCreateAdmission(disabled, user, "google")).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        { ...disabled, managedAuthNewSignupsEnabled: false },
+        user,
+        "credential",
+      ),
+    ).toBe(false);
+    expect(
+      managedAuthUserCreateAdmission(
+        { ...disabled, allowedUserEmails: ["other@example.test"] },
+        user,
+        "credential",
+      ),
+    ).toBe(false);
+  });
+
   test("rejects an unverified social identity before creating its managed user", () => {
     expect(
       managedAuthUserCreateAdmission(

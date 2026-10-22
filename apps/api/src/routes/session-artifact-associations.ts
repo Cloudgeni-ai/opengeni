@@ -6,6 +6,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
   getGeneratedImageArtifact,
@@ -82,6 +83,7 @@ export function registerSessionArtifactAssociationRoutes(app: Hono, deps: ApiRou
                 : await hasWorkspaceArtifactSessionLink(
                     deps.db,
                     workspaceId,
+                    await siteViewerForGrant(deps.db, grant),
                     sessionId,
                     artifactId,
                   );
@@ -150,6 +152,7 @@ async function hasRetainedArtifactSessionLink(
           limit: 100,
         },
         kinds: ["file", "image"],
+        siteViewer: { subjectId: null },
         snapshotAt: new Date().toISOString(),
         limit: 201,
       },

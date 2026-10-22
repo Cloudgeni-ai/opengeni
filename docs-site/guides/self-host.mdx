@@ -63,7 +63,7 @@ Outside local development, `configured` mode needs either `OPENGENI_DELEGATION_S
 
 With Stripe billing enabled, customers redeem promotion codes in the console. You create and manage the codes in your own Stripe account. Scoped offers redeem their fixed credit amount through a $0 checkout; customers buy additional credits separately. Set `OPENGENI_WEB_BASE_URL` if the console and API use different origins.
 
-Signup and coupon credits can share an editable model list, with overrides per offer. The model picker shows which credits a model uses; billing shows current coverage. Operators can update that coverage for existing promotional balances without restarting services. Follow the [promotional credit setup](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/scoped-promotional-credits.md) for activation and the policy command.
+Signup and coupon credits can share an editable model list, with overrides per offer. The model picker shows which credits a model uses and marks models the remaining credits do not cover; billing shows the models each grant covers. Operators can update that coverage for existing promotional balances without restarting services. Follow the [promotional credit setup](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/scoped-promotional-credits.md) for activation and the policy command.
 
 ## Before you expose it
 

@@ -1,7 +1,12 @@
-import { deleteWorkspaceIfQuiescent, nestedPostgresSqlState } from "@opengeni/db";
+import {
+  deleteWorkspaceIfQuiescent,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
+} from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 
+import { dropSiteSqlDatabases, siteSqlSitesOfWorkspace } from "./site-sql/service";
 import { processTemporalScheduleCleanupClaims } from "./temporal-schedule-cleanup";
 import { workspaceDeleteObserver } from "./workspace-delete-observability";
 
@@ -14,6 +19,9 @@ export async function deleteWorkspaceForRequest(
   },
 ): Promise<void> {
   const observer = workspaceDeleteObserver(deps.observability, input);
+  // Site SQL rows in Postgres cascade with the workspace; the Durable Objects
+  // holding the data do not, so note them first and drop them after.
+  const siteSqlSites = await siteSqlSitesOfWorkspace(deps, input);
   let deleted;
   try {
     deleted = await deleteWorkspaceIfQuiescent(deps.db, {
@@ -32,9 +40,15 @@ export async function deleteWorkspaceForRequest(
       // Retention and linked-record FKs are intentional deletion boundaries.
       // The failed transaction has rolled back: do not erase history, retry
       // the cascade, or dispatch any external schedule cleanup.
+      // Editable documents, spreadsheets, and presentations keep immutable
+      // version history that only the organization retention lifecycle may
+      // erase, so name that cause without exposing the constraint itself.
+      const constraint = safeDatabaseErrorFacts(error).constraint ?? "";
+      const retainedRecords = constraint.startsWith("editable_artifact")
+        ? "the workspace's editable documents, spreadsheets, or presentations, whose version history is retained"
+        : "retained or linked records";
       throw new HTTPException(409, {
-        message:
-          "workspace deletion is blocked by retained or linked records; keep the workspace, revoke access, and disable scheduled work instead",
+        message: `workspace deletion is blocked by ${retainedRecords}; keep the workspace, revoke access, and disable scheduled work instead`,
       });
     }
     throw error;
@@ -70,4 +84,5 @@ export async function deleteWorkspaceForRequest(
     },
     deleted.temporalScheduleCleanups,
   );
+  await dropSiteSqlDatabases(deps, siteSqlSites, { workspaceId: input.workspaceId });
 }

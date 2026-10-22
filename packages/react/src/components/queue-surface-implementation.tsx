@@ -38,6 +38,7 @@ import {
 } from "react";
 
 import { DropdownMenu } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
@@ -47,9 +48,22 @@ import {
   usePortalTokenStyle,
 } from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
+import {
+  projectPendingQueueMove,
+  QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
+  QUEUE_REPLACE_DRAFT_COPY,
+  QUEUE_ROW_PREVIEW_CHARACTERS,
+  queueContentPreview,
+  queueMovePlan,
+  queuePromptPreview,
+  queueTurnPreview,
+} from "../queue-presentation-model";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const DropdownMenuContainedPortal = containedPortal(DropdownMenu.Portal);
 
 // Queued prompts can be long; menu rows wrap instead of truncating.
 const QUEUE_MENU_ITEM_CLASS = `${MENU_ITEM_CLASS} whitespace-normal break-words`;
@@ -86,6 +100,7 @@ export function QueueSurface({
   readOnly = false,
   onRequestComposerFocus,
 }: QueueSurfaceProps) {
+  const t = useOpenGeniText();
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -113,12 +128,13 @@ export function QueueSurface({
   const collapsedPreview = useMemo(() => {
     const firstTurn = queue.queue[0];
     return firstTurn
-      ? queueTurnPreview(firstTurn, QUEUE_COLLAPSED_PREVIEW_CHARACTERS)
+      ? queueTurnPreview(t, firstTurn, QUEUE_COLLAPSED_PREVIEW_CHARACTERS)
       : queuePromptPreview(
+          t,
           queue.pendingInputs[0]?.summary ?? "",
           QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
         );
-  }, [queue.pendingInputs, queue.queue]);
+  }, [queue.pendingInputs, queue.queue, t]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
@@ -127,51 +143,42 @@ export function QueueSurface({
       if (oldIndex < 0) return queue.queue;
       return arrayMove(queue.queue, oldIndex, keyboardDrag.projectedIndex);
     }
-    if (
-      !pendingMove ||
-      pendingMove.baseVersion === null ||
-      queue.snapshot?.version !== pendingMove.baseVersion
-    ) {
-      return queue.queue;
-    }
-    const byId = new Map(queue.queue.map((turn) => [turn.id, turn]));
-    const projected = pendingMove.turnIds.map((turnId) => byId.get(turnId));
     // Never let an optimistic ordering projection omit or invent a row. Any
     // concurrent authoritative membership change wins immediately.
-    if (projected.some((turn) => !turn) || projected.length !== queue.queue.length) {
-      return queue.queue;
-    }
-    return projected as SessionTurn[];
-  }, [keyboardDrag, pendingMove, queue.queue, queue.snapshot?.version]);
+    return projectPendingQueueMove(queue.queue, pendingMove, queue.snapshot);
+  }, [keyboardDrag, pendingMove, queue.queue, queue.snapshot]);
 
   const ids = useMemo(() => displayedQueue.map((turn) => turn.id), [displayedQueue]);
   const moveToIndex = useCallback(
     async (turnId: string, nextIndex: number): Promise<void> => {
       if (queue.mutating || pendingMove) return;
-      const oldIndex = queue.queue.findIndex((turn) => turn.id === turnId);
-      if (oldIndex < 0) return;
-      const boundedIndex = Math.max(0, Math.min(nextIndex, queue.queue.length - 1));
-      if (oldIndex === boundedIndex) return;
-      const ordered = arrayMove(queue.queue, oldIndex, boundedIndex);
-      const beforeTurnId = ordered[boundedIndex + 1]?.id ?? null;
+      const plan = queueMovePlan(queue.queue, turnId, nextIndex);
+      if (!plan) return;
+      const { beforeTurnId, index: boundedIndex } = plan;
       setPendingMove({
         baseVersion: queue.snapshot?.version ?? null,
-        turnIds: ordered.map((turn) => turn.id),
+        turnIds: plan.turnIds,
       });
-      setAnnouncement(`Saving queued prompt at position ${boundedIndex + 1}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.savingQueuedPromptAtPosition", {
+          boundedIndex: boundedIndex + 1,
+        }),
+      );
       try {
         const moved = await queue.moveTurn(turnId, beforeTurnId);
         setAnnouncement(
           moved
-            ? `Queued prompt moved to position ${boundedIndex + 1}.`
-            : "The queue changed before that prompt could be moved. Refreshed server order.",
+            ? t("queueSurfaceImplementation.queuedPromptMovedToPosition", {
+                boundedIndex: boundedIndex + 1,
+              })
+            : t("queueSurfaceImplementation.theQueueChangedBeforeThat"),
         );
         if (moved) focusQueueTurn(surfaceRef.current, turnId);
       } finally {
         setPendingMove(null);
       }
     },
-    [pendingMove, queue, surfaceRef],
+    [pendingMove, queue, surfaceRef, t],
   );
 
   const onDragEnd = useCallback(
@@ -180,13 +187,13 @@ export function QueueSurface({
       const activeId = String(event.active.id);
       const overId = event.over ? String(event.over.id) : null;
       if (!overId || activeId === overId) {
-        setAnnouncement("Queued prompt returned to its original position.");
+        setAnnouncement(t("queueSurfaceImplementation.queuedPromptReturnedToIts"));
         return;
       }
       const nextIndex = queue.queue.findIndex((turn) => turn.id === overId);
       if (nextIndex >= 0) void moveToIndex(activeId, nextIndex);
     },
-    [moveToIndex, queue.queue],
+    [moveToIndex, queue.queue, t],
   );
 
   const onDragStart = useCallback(
@@ -195,9 +202,14 @@ export function QueueSurface({
       const turnId = String(event.active.id);
       const position = queue.queue.findIndex((turn) => turn.id === turnId) + 1;
       setDraggedTurnId(turnId);
-      setAnnouncement(`Dragging queued prompt ${position} of ${queue.queue.length}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.draggingQueuedPromptPositionOf", {
+          position,
+          length: queue.queue.length,
+        }),
+      );
     },
-    [queue.queue],
+    [queue.queue, t],
   );
 
   const onHandleKeyDown = useCallback(
@@ -210,7 +222,10 @@ export function QueueSurface({
         event.preventDefault();
         setKeyboardDrag({ turnId, projectedIndex: canonicalIndex });
         setAnnouncement(
-          `Lifted queued prompt ${canonicalIndex + 1} of ${count}. Use arrow keys to move it, then press Space to drop.`,
+          t("queueSurfaceImplementation.liftedQueuedPromptCanonicalindexOf", {
+            canonicalIndex: canonicalIndex + 1,
+            countValue: count,
+          }),
         );
         return;
       }
@@ -219,13 +234,17 @@ export function QueueSurface({
       if (event.key === "Escape") {
         event.preventDefault();
         setKeyboardDrag(null);
-        setAnnouncement("Queue reorder cancelled.");
+        setAnnouncement(t("queueSurfaceImplementation.queueReorderCancelled"));
         return;
       }
       if (event.key === " ") {
         event.preventDefault();
         const targetIndex = keyboardDrag.projectedIndex;
-        setAnnouncement(`Moving queued prompt to position ${targetIndex + 1}.`);
+        setAnnouncement(
+          t("queueSurfaceImplementation.movingQueuedPromptToPosition", {
+            targetIndex: targetIndex + 1,
+          }),
+        );
         void moveToIndex(turnId, targetIndex).finally(() => setKeyboardDrag(null));
         return;
       }
@@ -239,26 +258,31 @@ export function QueueSurface({
         Math.min(edge ?? keyboardDrag.projectedIndex + direction, count - 1),
       );
       setKeyboardDrag({ turnId, projectedIndex });
-      setAnnouncement(`Queued prompt projected to position ${projectedIndex + 1} of ${count}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.queuedPromptProjectedToPosition", {
+          projectedIndex: projectedIndex + 1,
+          countValue: count,
+        }),
+      );
     },
-    [count, keyboardDrag, moveToIndex, queue.queue],
+    [count, keyboardDrag, moveToIndex, queue.queue, t],
   );
 
   const edit = useCallback(
     async (turn: SessionTurn, replaceDraft: boolean) => {
       if (!composer || !canEditInComposer) return;
-      setAnnouncement("Moving queued prompt to the composer…");
+      setAnnouncement(t("queueSurfaceImplementation.movingQueuedPromptToThe"));
       const restored = await queue.editTurn(turn.id, {
         expectedDraftRevision: composer.draftRevision,
         replaceDraft,
       });
       if (!restored) {
-        setAnnouncement("That prompt changed before it could be moved to the composer.");
+        setAnnouncement(t("queueSurfaceImplementation.thatPromptChangedBeforeIt"));
         return;
       }
       composer.applyDraft(restored);
       setReplaceDraftFor(null);
-      setAnnouncement("Queued prompt moved back to the composer for editing.");
+      setAnnouncement(t("queueSurfaceImplementation.queuedPromptMovedBackTo"));
       window.requestAnimationFrame(() => {
         if (onRequestComposerFocus) {
           onRequestComposerFocus();
@@ -271,7 +295,7 @@ export function QueueSurface({
         input?.focus();
       });
     },
-    [canEditInComposer, composer, onRequestComposerFocus, queue],
+    [canEditInComposer, composer, onRequestComposerFocus, queue, t],
   );
 
   const requestEdit = useCallback(
@@ -303,26 +327,34 @@ export function QueueSurface({
           onClick={() => setOpen((value) => !value)}
           aria-description={!open && totalCount > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
-          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${
+          aria-label={[
             pendingInputCount > 0
-              ? ` and ${pendingInputCount} pending machine input${pendingInputCount === 1 ? "" : "s"}`
-              : ""
-          }${readOnly ? " Read-only" : ""}`}
+              ? t("queueSurfaceImplementation.queuedPromptsAndPendingInputs", {
+                  count,
+                  pending: t("queueSurfaceImplementation.pendingMachineInputs", {
+                    count: pendingInputCount,
+                  }),
+                })
+              : t("queueSurfaceImplementation.queuedPrompts", { count }),
+            readOnly ? t("queueSurfaceImplementation.readOnly") : null,
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
           <ChevronDownIcon
             aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
           <span className="text-og-control font-medium text-fg">
-            {count > 0 ? `${count} queued prompt${count === 1 ? "" : "s"}` : null}
+            {count > 0 ? t("queueSurfaceImplementation.queuedPrompts", { count }) : null}
             {count > 0 && pendingInputCount > 0 ? " · " : null}
             {pendingInputCount > 0
-              ? `${pendingInputCount} incoming update${pendingInputCount === 1 ? "" : "s"}`
+              ? t("queueSurfaceImplementation.incomingUpdates", { count: pendingInputCount })
               : null}
           </span>
           {readOnly ? (
             <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-og-xs text-fg-subtle">
-              Read-only
+              {t("queueSurfaceImplementation.readOnly")}
             </span>
           ) : null}
           {!open && totalCount > 0 ? (
@@ -349,7 +381,7 @@ export function QueueSurface({
         {open && count > 0 && readOnly ? (
           <ol
             className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
-            aria-label="Queued prompts"
+            aria-label={t("queueSurfaceImplementation.queuedPrompts2")}
             data-testid="queue-list"
           >
             {queue.queue.map((turn, index) => (
@@ -362,7 +394,12 @@ export function QueueSurface({
                 }
                 onDisclosureChange={(expanded) =>
                   setAnnouncement(
-                    `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                    t(
+                      expanded
+                        ? "queueSurfaceImplementation.fullContentForQueuedPromptShown"
+                        : "queueSurfaceImplementation.fullContentForQueuedPromptHidden",
+                      { index: index + 1 },
+                    ),
                   )
                 }
               />
@@ -378,14 +415,14 @@ export function QueueSurface({
             onDragStart={onDragStart}
             onDragCancel={() => {
               setDraggedTurnId(null);
-              setAnnouncement("Queue reorder cancelled.");
+              setAnnouncement(t("queueSurfaceImplementation.queueReorderCancelled"));
             }}
             onDragEnd={onDragEnd}
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
               <ol
                 className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
-                aria-label="Queued prompts"
+                aria-label={t("queueSurfaceImplementation.queuedPrompts2")}
                 data-testid="queue-list"
               >
                 {displayedQueue.map((turn, index) => (
@@ -408,12 +445,12 @@ export function QueueSurface({
                     onConfirmReplace={() => void edit(turn, true)}
                     onCancelReplace={() => setReplaceDraftFor(null)}
                     onSteer={() => {
-                      setAnnouncement("Requesting this queued prompt as the next direction…");
+                      setAnnouncement(t("queueSurfaceImplementation.requestingThisQueuedPromptAs"));
                       void queue.steerTurn(turn.id).then((steered) => {
                         setAnnouncement(
                           steered
-                            ? "Queued prompt is now the next direction."
-                            : "That prompt changed before it could be steered.",
+                            ? t("queueSurfaceImplementation.queuedPromptIsNowThe")
+                            : t("queueSurfaceImplementation.thatPromptChangedBeforeIt2"),
                         );
                         if (steered) {
                           focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
@@ -421,12 +458,12 @@ export function QueueSurface({
                       });
                     }}
                     onDelete={() => {
-                      setAnnouncement("Deleting queued prompt…");
+                      setAnnouncement(t("queueSurfaceImplementation.deletingQueuedPrompt"));
                       void queue.removeTurn(turn.id).then((removed) => {
                         setAnnouncement(
                           removed
-                            ? "Queued prompt deleted."
-                            : "That prompt changed before it could be deleted.",
+                            ? t("queueSurfaceImplementation.queuedPromptDeleted")
+                            : t("queueSurfaceImplementation.thatPromptChangedBeforeIt3"),
                         );
                         if (removed) {
                           focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
@@ -435,7 +472,12 @@ export function QueueSurface({
                     }}
                     onDisclosureChange={(expanded) =>
                       setAnnouncement(
-                        `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                        t(
+                          expanded
+                            ? "queueSurfaceImplementation.fullContentForQueuedPromptShown"
+                            : "queueSurfaceImplementation.fullContentForQueuedPromptHidden",
+                          { index: index + 1 },
+                        ),
                       )
                     }
                   />
@@ -455,6 +497,7 @@ export function QueueSurface({
                   >
                     {
                       queueTurnPreview(
+                        t,
                         queue.queue.find((turn) => turn.id === draggedTurnId),
                         QUEUE_ROW_PREVIEW_CHARACTERS,
                       ).summary
@@ -484,12 +527,13 @@ function PendingMachineInputs({
   inputs: SessionPendingInputPreview[];
   attached?: boolean;
 }) {
+  const t = useOpenGeniText();
   return (
     <section className="border-t border-border px-3 py-2">
       <p className="text-og-xs font-medium text-fg-subtle">
         {attached
-          ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
-          : "Incoming updates waiting to run"}
+          ? t("queueSurfaceImplementation.updatesWillJoinThisPrompt", { count: inputs.length })
+          : t("queueSurfaceImplementation.incomingUpdatesWaitingToRun")}
       </p>
       <ol className="mt-1 space-y-1">
         {inputs.map((input) => (
@@ -510,327 +554,6 @@ function PendingMachineInputs({
   );
 }
 
-const QUEUE_ROW_PREVIEW_CHARACTERS = 360;
-const QUEUE_COLLAPSED_PREVIEW_CHARACTERS = 180;
-const QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS = 32;
-const QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS = 32;
-const QUEUE_VISIBLE_END_IDENTITY_CHARACTERS = 18;
-const QUEUE_PREVIEW_SEPARATOR = " … ";
-const queuePreviewSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-const queuePromptNonRenderingCodePoint =
-  /[\p{White_Space}\p{Control}\p{Default_Ignorable_Code_Point}]/u;
-
-type BoundedPromptSample = {
-  value: string;
-  characters: number;
-  truncated: boolean;
-};
-
-type QueuePromptPreview = {
-  summary: string;
-  collapsedVisual: string;
-  visibleStart: string;
-  visibleIdentity: string | null;
-  visibleIdentityLabel: "End" | "Safe boundary" | null;
-  isFallback: boolean;
-};
-
-function labelQueuePreview(summary: string): QueuePromptPreview {
-  return {
-    summary,
-    collapsedVisual: summary,
-    visibleStart: summary,
-    visibleIdentity: null,
-    visibleIdentityLabel: null,
-    isFallback: false,
-  };
-}
-
-function queueTurnPreview(
-  turn: SessionTurn | undefined,
-  maxCharacters: number,
-): QueuePromptPreview {
-  if (!turn) return queuePromptPreview("", maxCharacters);
-  return queueContentPreview(turn.prompt, turn.annotations?.length ?? 0, maxCharacters);
-}
-
-function queueContentPreview(
-  prompt: string,
-  annotationCount: number,
-  maxCharacters: number,
-): QueuePromptPreview {
-  switch (queueItemContent(prompt, annotationCount)) {
-    case "text":
-      return queuePromptPreview(prompt, maxCharacters);
-    case "annotations":
-      return labelQueuePreview(
-        `${annotationCount} timeline ${annotationCount === 1 ? "annotation" : "annotations"}`,
-      );
-    case "unavailable":
-      return labelQueuePreview(QUEUE_ITEM_CONTENT_UNAVAILABLE);
-  }
-}
-
-/**
- * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
- * both ends distinguishes prompts with equal long prefixes. Each sampled edge
- * has a small amount of grapheme context so ordinary emoji/combining sequences
- * can be retained whole. A cluster that exceeds that context is omitted rather
- * than fragmented, and malformed UTF-16 is replaced only in the summary. The
- * durable prompt remains exact and no operation scans or copies it in full.
- */
-function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptPreview {
-  const wholePromptProbe = samplePromptStart(prompt, maxCharacters + 1);
-  if (!wholePromptProbe.truncated && wholePromptProbe.characters <= maxCharacters) {
-    const summary = replaceLoneSurrogates(wholePromptProbe.value);
-    return hasVisiblePromptContent(summary)
-      ? {
-          summary,
-          collapsedVisual: summary,
-          visibleStart: summary,
-          visibleIdentity: null,
-          visibleIdentityLabel: null,
-          isFallback: false,
-        }
-      : fallbackPromptPreview(prompt.length, wholePromptProbe.value, wholePromptProbe.value);
-  }
-
-  const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
-  const prefixCharacters =
-    maxCharacters - codePointLength(QUEUE_PREVIEW_SEPARATOR) - suffixCharacters;
-  const prefixSample = samplePromptStart(
-    prompt,
-    prefixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
-  );
-  const suffixSample = samplePromptEnd(
-    prompt,
-    suffixCharacters + QUEUE_PREVIEW_GRAPHEME_CONTEXT_CHARACTERS,
-  );
-  const prefixSegments = segmentPromptSample(prefixSample.value);
-  const suffixSegments = segmentPromptSample(suffixSample.value);
-
-  // A cluster at a truncated sampling edge may continue outside the sample.
-  // Prefix sampling starts at the true source start, so only its last segment
-  // is ambiguous. Suffix sampling ends at the true source end, so its first is.
-  if (prefixSample.truncated) prefixSegments.pop();
-  if (suffixSample.truncated) {
-    let ambiguousSegment = suffixSegments.shift();
-    // A locally segmented leading fragment ending in ZWJ can join the next
-    // pictographic segment when omitted left context supplies its base. Keep
-    // backing off until that uncertainty no longer propagates to the right.
-    while (ambiguousSegment?.endsWith("\u200d") && suffixSegments.length > 0) {
-      ambiguousSegment = suffixSegments.shift();
-    }
-    // Regional Indicator pairing depends on the parity of the preceding run.
-    // If that run reaches the unknown sample boundary, omit all of its visible
-    // leading segments rather than potentially recombining halves of flags.
-    while (suffixSegments[0] && startsWithRegionalIndicator(suffixSegments[0])) {
-      suffixSegments.shift();
-    }
-  }
-
-  const prefix = takeWholeGraphemesFromStart(prefixSegments, prefixCharacters);
-  const suffix = takeWholeGraphemesFromEnd(suffixSegments, suffixCharacters);
-  const reference = boundedPromptSampleReference(
-    prompt.length,
-    prefixSample.value,
-    suffixSample.value,
-  );
-
-  if (!hasVisiblePromptContent(prefix) && !hasVisiblePromptContent(suffix)) {
-    return fallbackPromptPreview(prompt.length, prefixSample.value, suffixSample.value);
-  }
-
-  const safeSuffix = hasVisiblePromptContent(suffix)
-    ? suffix
-    : promptPreviewFallbackLabel(reference);
-  const summary = `${prefix}${QUEUE_PREVIEW_SEPARATOR}${safeSuffix}`;
-  if (!hasVisiblePromptContent(prefix)) {
-    return {
-      summary,
-      collapsedVisual: summary,
-      visibleStart: safeSuffix,
-      visibleIdentity: null,
-      visibleIdentityLabel: null,
-      isFallback: false,
-    };
-  }
-
-  const endIdentity = takeWholeGraphemesFromEnd(
-    suffixSegments,
-    QUEUE_VISIBLE_END_IDENTITY_CHARACTERS,
-  );
-  return {
-    summary,
-    collapsedVisual: summary,
-    visibleStart: prefix,
-    visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
-    visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
-    isFallback: false,
-  };
-}
-
-function fallbackPromptPreview(
-  promptLength: number,
-  startSample: string,
-  endSample: string,
-): QueuePromptPreview {
-  const reference = boundedPromptSampleReference(promptLength, startSample, endSample);
-  const summary = promptPreviewFallbackLabel(reference);
-  return {
-    summary,
-    collapsedVisual: `Omitted · ${reference}`,
-    // The complete fallback remains the canonical accessible summary. Narrow
-    // collapsed/row layouts paint the bounded reference in a compact truthful
-    // form so ellipsis cannot hide the only identifying portion.
-    visibleStart: `Omitted · ${reference}`,
-    visibleIdentity: null,
-    visibleIdentityLabel: null,
-    isFallback: true,
-  };
-}
-
-function promptPreviewFallbackLabel(reference: string): string {
-  return `Content omitted at safe boundary · ref ${reference}`;
-}
-
-function boundedPromptSampleReference(
-  promptLength: number,
-  startSample: string,
-  endSample: string,
-): string {
-  const head = samplePromptStart(startSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
-  const tail = samplePromptEnd(endSample, QUEUE_PREVIEW_REFERENCE_SAMPLE_CHARACTERS).value;
-  let hash = 0x811c9dc5;
-  for (const value of [String(promptLength), head, tail]) {
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
-    }
-    hash ^= 0xffff;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0").toUpperCase();
-}
-
-function hasVisiblePromptContent(value: string): boolean {
-  // Callers pass only the already-bounded whole/head/tail preview samples.
-  // Default-ignorables and controls can survive trim() while painting no row
-  // identity at all (for example ZWJ, VS16, bidi controls, and tag characters).
-  for (const character of value) {
-    if (!queuePromptNonRenderingCodePoint.test(character)) return true;
-  }
-  return false;
-}
-
-function samplePromptStart(prompt: string, maxCharacters: number): BoundedPromptSample {
-  let end = 0;
-  let characters = 0;
-  while (end < prompt.length && characters < maxCharacters) {
-    const first = prompt.charCodeAt(end);
-    end +=
-      isHighSurrogate(first) &&
-      end + 1 < prompt.length &&
-      isLowSurrogate(prompt.charCodeAt(end + 1))
-        ? 2
-        : 1;
-    characters += 1;
-  }
-  return { value: prompt.slice(0, end), characters, truncated: end < prompt.length };
-}
-
-function samplePromptEnd(prompt: string, maxCharacters: number): BoundedPromptSample {
-  let start = prompt.length;
-  let characters = 0;
-  while (start > 0 && characters < maxCharacters) {
-    start -= 1;
-    if (
-      isLowSurrogate(prompt.charCodeAt(start)) &&
-      start > 0 &&
-      isHighSurrogate(prompt.charCodeAt(start - 1))
-    ) {
-      start -= 1;
-    }
-    characters += 1;
-  }
-  return { value: prompt.slice(start), characters, truncated: start > 0 };
-}
-
-function segmentPromptSample(sample: string): string[] {
-  return Array.from(
-    queuePreviewSegmenter.segment(replaceLoneSurrogates(sample)),
-    ({ segment }) => segment,
-  );
-}
-
-function replaceLoneSurrogates(value: string): string {
-  let sanitized = "";
-  for (let index = 0; index < value.length; index += 1) {
-    const current = value.charCodeAt(index);
-    if (
-      isHighSurrogate(current) &&
-      index + 1 < value.length &&
-      isLowSurrogate(value.charCodeAt(index + 1))
-    ) {
-      sanitized += value.slice(index, index + 2);
-      index += 1;
-    } else if (isHighSurrogate(current) || isLowSurrogate(current)) {
-      sanitized += "�";
-    } else {
-      sanitized += value[index];
-    }
-  }
-  return sanitized;
-}
-
-function takeWholeGraphemesFromStart(segments: string[], maxCharacters: number): string {
-  const selected: string[] = [];
-  let characters = 0;
-  for (const segment of segments) {
-    const segmentCharacters = codePointLength(segment);
-    if (characters + segmentCharacters > maxCharacters) break;
-    selected.push(segment);
-    characters += segmentCharacters;
-  }
-  while (selected.at(-1)?.trim().length === 0) selected.pop();
-  return selected.join("");
-}
-
-function takeWholeGraphemesFromEnd(segments: string[], maxCharacters: number): string {
-  const selected: string[] = [];
-  let characters = 0;
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index];
-    if (!segment) continue;
-    const segmentCharacters = codePointLength(segment);
-    if (characters + segmentCharacters > maxCharacters) break;
-    selected.unshift(segment);
-    characters += segmentCharacters;
-  }
-  while (selected[0]?.trim().length === 0) selected.shift();
-  while (selected.at(-1)?.trim().length === 0) selected.pop();
-  return selected.join("");
-}
-
-function codePointLength(value: string): number {
-  let characters = 0;
-  for (const _character of value) characters += 1;
-  return characters;
-}
-
-function startsWithRegionalIndicator(value: string): boolean {
-  const codePoint = value.codePointAt(0);
-  return codePoint !== undefined && codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
-}
-
-function isHighSurrogate(codeUnit: number): boolean {
-  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
-}
-
-function isLowSurrogate(codeUnit: number): boolean {
-  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
-}
-
 function QueuePrompt({
   prompt,
   annotations,
@@ -842,19 +565,23 @@ function QueuePrompt({
   index: number;
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const [expanded, setExpanded] = useState(false);
   const fullContentId = useId();
   const content = queueItemContent(prompt, annotations.length);
   const preview = useMemo(
-    () => queueContentPreview(prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
-    [annotations.length, prompt],
+    () => queueContentPreview(t, prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
+    [annotations.length, prompt, t],
   );
 
   return (
     <div className="w-full min-w-0 max-w-full">
       {prompt ? (
         <div
-          aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
+          aria-label={t("queueSurfaceImplementation.queuedPromptIndexSummarySummary", {
+            index: index + 1,
+            summary: preview.summary,
+          })}
           className="max-w-full overflow-hidden text-og-control leading-5 text-fg"
           data-testid={`queue-prompt-preview-${index + 1}`}
           dir="auto"
@@ -902,7 +629,7 @@ function QueuePrompt({
           className="text-og-control leading-5 text-fg-muted italic"
           data-testid={`queue-prompt-unavailable-${index + 1}`}
         >
-          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE(t)}
         </p>
       ) : null}
       {prompt ? (
@@ -910,7 +637,11 @@ function QueuePrompt({
           type="button"
           aria-controls={fullContentId}
           aria-expanded={expanded}
-          aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
+          aria-label={
+            expanded
+              ? t("queueSurfaceImplementation.hideFullContentForPrompt", { number: index + 1 })
+              : t("queueSurfaceImplementation.showFullContentForPrompt", { number: index + 1 })
+          }
           className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-og-xs font-medium text-fg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           data-testid={`queue-prompt-disclosure-${index + 1}`}
           onClick={() => {
@@ -923,14 +654,18 @@ function QueuePrompt({
             aria-hidden="true"
             className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
           />
-          {expanded ? "Hide full prompt" : "View full prompt"}
+          {expanded
+            ? t("queueSurfaceImplementation.hideFullPrompt")
+            : t("queueSurfaceImplementation.viewFullPrompt")}
         </button>
       ) : null}
       {expanded && prompt ? (
         <pre
           id={fullContentId}
           role="region"
-          aria-label={`Full content for queued prompt ${index + 1}`}
+          aria-label={t("queueSurfaceImplementation.fullContentForQueuedPrompt2", {
+            index: index + 1,
+          })}
           className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-og-control leading-5 text-fg [unicode-bidi:plaintext]"
           data-testid={`queue-prompt-full-${index + 1}`}
           dir="auto"
@@ -954,6 +689,7 @@ function ReadOnlyQueueRow({
   attachedInputs: SessionPendingInputPreview[];
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
       <span className="mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">{index + 1}</span>
@@ -970,12 +706,12 @@ function ReadOnlyQueueRow({
         <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
-              {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
+              {t("queueSurfaceImplementation.resources", { count: turn.resources.length })}
             </span>
           ) : null}
           {turn.tools.length > 0 ? (
             <span className="shrink-0">
-              {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
+              {t("queueSurfaceImplementation.tools", { count: turn.tools.length })}
             </span>
           ) : null}
           <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
@@ -1023,6 +759,7 @@ function SortableQueueRow({
   onDelete: () => void;
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const sortable = useSortable({
     id: turn.id,
     disabled: reorderDisabled || keyboardDragging,
@@ -1047,8 +784,10 @@ function SortableQueueRow({
           onKeyDown={onHandleKeyDown}
           disabled={reorderDisabled}
           className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
-          aria-label={`Reorder queued prompt ${index + 1}`}
-          title="Drag to reorder. Press Space, arrows, then Space to drop."
+          aria-label={t("queueSurfaceImplementation.reorderQueuedPromptIndex", {
+            index: index + 1,
+          })}
+          title={t("queueSurfaceImplementation.dragToReorderPressSpace")}
         >
           <GripVerticalIcon className="size-3.5" />
         </button>
@@ -1068,12 +807,12 @@ function SortableQueueRow({
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">
-                {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
+                {t("queueSurfaceImplementation.resources", { count: turn.resources.length })}
               </span>
             ) : null}
             {turn.tools.length > 0 ? (
               <span className="shrink-0">
-                {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
+                {t("queueSurfaceImplementation.tools", { count: turn.tools.length })}
               </span>
             ) : null}
             <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
@@ -1090,7 +829,7 @@ function SortableQueueRow({
                 aria-hidden="true"
                 className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
               />
-              {queueMutationPendingLabel(pending)}
+              {queueMutationPendingLabel(t, pending)}
             </div>
           ) : null}
         </div>
@@ -1099,9 +838,11 @@ function SortableQueueRow({
             type="button"
             disabled={pending !== null}
             onClick={onSteer}
-            aria-label={`Steer queued prompt ${index + 1}`}
+            aria-label={t("queueSurfaceImplementation.steerQueuedPromptIndex", {
+              index: index + 1,
+            })}
             data-analytics-action="steer"
-            title="Steer — interrupt the current turn and send this message now"
+            title={t("queueSurfaceImplementation.steerInterruptTheCurrentTurn")}
             className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-og-control font-medium text-fg outline-hidden transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (
@@ -1109,14 +850,16 @@ function SortableQueueRow({
             ) : (
               <ZapIcon className="size-3.5" />
             )}
-            <span className="hidden sm:inline">Steer</span>
+            <span className="hidden sm:inline">{t("queueSurfaceImplementation.steer")}</span>
           </button>
           <button
             type="button"
             disabled={pending !== null}
             onClick={onDelete}
-            aria-label={`Delete queued prompt ${index + 1}`}
-            title="Delete this queued prompt"
+            aria-label={t("queueSurfaceImplementation.deleteQueuedPromptIndex", {
+              index: index + 1,
+            })}
+            title={t("queueSurfaceImplementation.deleteThisQueuedPrompt")}
             className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-hidden transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
           >
             {pending === "delete" ? (
@@ -1130,7 +873,9 @@ function SortableQueueRow({
               <button
                 type="button"
                 disabled={pending !== null}
-                aria-label={`More actions for queued prompt ${index + 1}`}
+                aria-label={t("queueSurfaceImplementation.moreActionsForQueuedPrompt", {
+                  index: index + 1,
+                })}
                 className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-hidden transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
               >
                 {pending && pending !== "steer" && pending !== "delete" ? (
@@ -1140,19 +885,21 @@ function SortableQueueRow({
                 )}
               </button>
             </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
+            <DropdownMenuContainedPortal>
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
                 collisionPadding={8}
-                className={`${MENU_SURFACE_CLASS} og-root z-50 max-h-(--radix-dropdown-menu-content-available-height) w-52 max-w-[calc(100vw-16px)] overflow-x-hidden overflow-y-auto`}
+                className={t("queueSurfaceImplementation.menuSurfaceClassOgRoot", {
+                  MENU_SURFACE_CLASS,
+                })}
                 style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
                 {onEdit ? (
                   <>
                     <DropdownMenu.Item className={QUEUE_MENU_ITEM_CLASS} onSelect={onEdit}>
-                      <PencilIcon /> Edit in composer
+                      <PencilIcon /> {t("queueSurfaceImplementation.editInComposer")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className={MENU_SEPARATOR_CLASS} />
                   </>
@@ -1162,55 +909,52 @@ function SortableQueueRow({
                   disabled={index === 0}
                   onSelect={() => onMove(0)}
                 >
-                  <ArrowUpToLineIcon /> Move to top
+                  <ArrowUpToLineIcon /> {t("queueSurfaceImplementation.moveToTop")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(index - 1)}
                 >
-                  Move up
+                  {t("queueSurfaceImplementation.moveUp")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(index + 1)}
                 >
-                  Move down
+                  {t("queueSurfaceImplementation.moveDown")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(count - 1)}
                 >
-                  <ArrowDownToLineIcon /> Move to bottom
+                  <ArrowDownToLineIcon /> {t("queueSurfaceImplementation.moveToBottom")}
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
-            </DropdownMenu.Portal>
+            </DropdownMenuContainedPortal>
           </DropdownMenu.Root>
         </div>
       </div>
       {confirmingReplace ? (
         <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-og-control text-fg">
-          <p>Your composer already has a draft. Replace it with this queued prompt?</p>
-          <p className="mt-0.5 text-fg-muted">
-            The current draft will be permanently discarded; this queued prompt is preserved until
-            you confirm.
-          </p>
+          <p>{QUEUE_REPLACE_DRAFT_COPY(t).title}</p>
+          <p className="mt-0.5 text-fg-muted">{QUEUE_REPLACE_DRAFT_COPY(t).detail}</p>
           <div className="mt-2 flex justify-end gap-1.5">
             <button
               type="button"
               className="rounded-md px-2 py-1 font-medium hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onCancelReplace}
             >
-              Keep current draft
+              {QUEUE_REPLACE_DRAFT_COPY(t).keep}
             </button>
             <button
               type="button"
               className="rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onConfirmReplace}
             >
-              Replace and edit
+              {QUEUE_REPLACE_DRAFT_COPY(t).replace}
             </button>
           </div>
         </div>
@@ -1219,16 +963,16 @@ function SortableQueueRow({
   );
 }
 
-function queueMutationPendingLabel(kind: QueueMutationKind): string {
+function queueMutationPendingLabel(t: OpenGeniText, kind: QueueMutationKind): string {
   switch (kind) {
     case "move":
-      return "Saving new position…";
+      return t("queueSurfaceImplementation.savingNewPosition");
     case "edit":
-      return "Moving to composer…";
+      return t("queueSurfaceImplementation.movingToComposer");
     case "steer":
-      return "Changing direction…";
+      return t("queueSurfaceImplementation.changingDirection");
     case "delete":
-      return "Deleting…";
+      return t("queueSurfaceImplementation.deleting");
   }
 }
 

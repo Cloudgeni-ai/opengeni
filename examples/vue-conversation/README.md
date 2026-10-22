@@ -13,9 +13,9 @@ Harbor's, not Opengeni's. For a React product, mount `OpenGeniChat` from
 
 ## Install and run
 
-Requirements: Bun 1.3.10+, Node 22.12+ on `PATH` (`bun run` executes the
-Vite and `vue-tsc` CLIs with Node; `vue-tsc` does not typecheck `.vue` files
-under the Bun runtime), and an existing managed Opengeni deployment with a
+Requirements: pinned Bun 1.4.3, Node 22.12+ on `PATH` (the Vite, tsrs and Vue mapper
+launchers use Node), a supported tsrs native host (Linux x64/arm64 or macOS arm64),
+and an existing managed Opengeni deployment with a
 server-held full-access organization API key.
 The deployment needs agent configuration admission and human input enabled,
 session tenancy/private chats activated, and an available model/credits for the

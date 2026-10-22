@@ -1,11 +1,15 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { expect, test } from "bun:test";
 import { act } from "react";
 import type { Session, SessionEvent, SessionQueueSnapshot, SessionTurn } from "@opengeni/sdk";
 import { buildTimeline, type ComposerState, type TimelineItem } from "@opengeni/react/session";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 import { registerDom, renderComponent, flush } from "../../../../packages/react/test/render-hook";
-import { SessionStartupProvider } from "./session-startup";
-import { sessionStartupTimeline, useSessionStartupTimeline } from "./session-startup-timeline";
+import { SessionStartupProvider } from "@opengeni/react/app/lib/session-startup";
+import {
+  sessionStartupTimeline,
+  useSessionStartupTimeline,
+} from "@opengeni/react/app/lib/session-startup-timeline";
 registerDom();
 const start = new Date(Date.now() - 35_000).toISOString();
 const session = {
@@ -81,7 +85,7 @@ test("accepted receipt and durable replay share one startup identity and accepta
   expect(pending.kind).toBe("startup-phase");
   expect(pending.occurredAt).toBe(start);
   const started = event("turn.started", "turn", {}, new Date().toISOString());
-  const durable = buildTimeline([accepted, started]);
+  const durable = buildTimeline(t, [accepted, started]);
   expect(durable[0]?.id).toBe(pending.id);
   expect(
     project(
@@ -214,7 +218,7 @@ test("worker claim and preparation retain the same orb, open disclosure and full
       (r.container.querySelector(".og-genie-details") as HTMLButtonElement).click(),
     );
     const started = event("turn.started", "turn", {}, new Date().toISOString());
-    const phases = buildTimeline([older, started]);
+    const phases = buildTimeline(t, [older, started]);
     await r.rerender(
       <MessageTimeline items={[message, ...phases]} turnSummary={{ rolling: true }} />,
     );
@@ -340,7 +344,7 @@ test("stale queued detail cannot add a second orb after newer start, completion 
     event("session.queue.changed", "turn", { operation: "delete" }),
   ]) {
     const events = [accepted, next];
-    const items = buildTimeline(events);
+    const items = buildTimeline(t, events);
     expect(project({ events, fallbackStartedAt: start }, items)).toBe(items);
   }
 });
@@ -492,7 +496,11 @@ test("SSE claim before queued detail refresh keeps exactly one existing orb", as
     const started = { ...event("turn.started"), sequence: 2 };
     const events = [accepted, started];
     await r.rerender(
-      <StartupView value={session} events={events} items={[message, ...buildTimeline(events)]} />,
+      <StartupView
+        value={session}
+        events={events}
+        items={[message, ...buildTimeline(t, events)]}
+      />,
     );
     expect(r.container.querySelectorAll("canvas")).toHaveLength(1);
     expect(r.container.querySelector("canvas")).toBe(orb);
@@ -568,7 +576,7 @@ test("a fresh queue snapshot cannot promote a second prompt while newer events p
   const queued = event("turn.queued", "next", { routing: "queued_for_execution" });
   const started = { ...event("turn.started"), sequence: 2 };
   const events = [accepted, queued, started];
-  const items = buildTimeline(events);
+  const items = buildTimeline(t, events);
   expect(project({ events, queue: queue(["next"], 3), fallbackStartedAt: start }, items)).toBe(
     items,
   );

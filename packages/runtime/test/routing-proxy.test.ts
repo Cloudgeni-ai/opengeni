@@ -42,6 +42,7 @@ import {
   type RoutableSandbox,
   type RoutingSandboxSessionDeps,
 } from "../src/sandbox";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -131,6 +132,40 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("a move during connection authorization re-resolves before any dispatch", async () => {
+    const pointer = mutablePointer({ activeSandboxId: "personal", activeEpoch: 1 });
+    const home: RoutableBackendSession = { exec: async () => ({ stdout: "home", exitCode: 0 }) };
+    const seen: Array<string | null> = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async (route) => {
+        seen.push(route.activeSandboxId);
+        if (route.activeSandboxId === "personal") {
+          pointer.swap(null);
+          throw new Error("personal machine authority is no longer live");
+        }
+        return { session: home, sandboxId: null, kind: "modal" };
+      },
+    });
+    expect(await proxy.exec({ cmd: "hostname" })).toMatchObject({ stdout: "home" });
+    expect(seen).toEqual(["personal", null]);
+  });
+
+  test("an unchanged route never retries revoked machine authority", async () => {
+    const pointer = mutablePointer({ activeSandboxId: "personal", activeEpoch: 1 });
+    let resolutions = 0;
+    const denied = new Error("personal machine authority is no longer live");
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async () => {
+        resolutions += 1;
+        throw denied;
+      },
+    });
+    await expect(proxy.exec({ cmd: "hostname" })).rejects.toBe(denied);
+    expect(resolutions).toBe(1);
+  });
+
   test("tool-scoped finalization preserves reached backends for other durable results", async () => {
     const acknowledgments: Array<{ backend: string; callIds?: readonly string[] }> = [];
     const backend = (name: string): RoutableBackendSession => ({
@@ -756,7 +791,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
       async exec(args) {
         calls.push(`exec:${(args as { cmd: string }).cmd}`);
-        return { exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -790,14 +825,29 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
 
   test("streams placement-private bytes to the exact routed backend when it has no file API", async () => {
     const calls: Array<{ kind: string; value: unknown }> = [];
+    const output = synchronousNativeOutputFixture();
+    // Isolate routing and stdin staging behind the native collector's trusted
+    // page contract; an SDK-formatted Output body alone is not that contract.
     const backend: RoutableBackendSession = {
+      getSynchronousCommandOutput: output.getSynchronousCommandOutput,
       async exec(args) {
         calls.push({ kind: "exec", value: args });
-        return { sessionId: 41 };
+        return output.record(
+          { stdout: "", stderr: "", sessionId: 41, exitCode: null },
+          "",
+          "",
+          null,
+          41,
+        );
       },
       async writeStdin(args) {
         calls.push({ kind: "stdin", value: args });
-        return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+        return output.record(
+          "Process exited with code 0\n\nOutput:\npresentation only",
+          "__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__",
+          "transfer diagnostic",
+          0,
+        );
       },
     };
     const proxy = new RoutingSandboxSession({
@@ -826,6 +876,25 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       sessionId: 41,
       chars: Buffer.from("signed-url-is-private").toString("base64"),
     });
+
+    // Removing the trusted contract must not turn a status/marker banner into
+    // complete separate output, nor replay the already-started private write.
+    backend.getSynchronousCommandOutput = undefined;
+    backend.writeStdin = async (args) => {
+      calls.push({ kind: "stdin", value: args });
+      return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+    };
+    await expect(
+      proxy.writePlacementPrivate({
+        path: "/tmp/opengeni-private/workspace-imports/grant",
+        content: "signed-url-is-private",
+        createParents: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "synchronous_command_outcome_unknown",
+      output: { stdout: "", stderr: "" },
+    });
+    expect(calls.map((call) => call.kind)).toEqual(["exec", "stdin", "exec", "stdin"]);
   });
 
   test("cleans private import authority on its admitted backend and rejects output after a swap", async () => {
@@ -1592,7 +1661,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
   });
 
   test("process-local provider locators cannot become session background commands", async () => {
-    for (const kind of ["local", "docker", "opensandbox"] as const) {
+    // `unix_local` is the local backend's SDK client id, which is what the
+    // worker routes by.
+    for (const kind of ["local", "unix_local", "docker", "opensandbox"] as const) {
       let backgroundAdoptions = 0;
       const backend: RoutableBackendSession = {
         async execCommand() {
@@ -1616,6 +1687,125 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       );
       expect(backgroundAdoptions).toBe(0);
     }
+  });
+
+  test("supervised Docker and local handles become session background commands", async () => {
+    for (const kind of ["local", "unix_local", "docker"] as const) {
+      let backgroundAdoptions = 0;
+      const backend = {
+        [Symbol.for("opengeni.durable-shell-process")]: true,
+        isDurableProcessHandle: (id: number) => id >= 1_000_000,
+        stopDurableProcess: async () => true,
+        async execCommand() {
+          return "Process running with session ID 1234567\n\nOutput:\nstarted";
+        },
+      } as RoutableBackendSession;
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        adoptProcessAsBackgroundCommand: async () => {
+          backgroundAdoptions += 1;
+        },
+      });
+
+      await proxy.execCommand({ cmd: "bash" });
+      expect(proxy.canAdoptRetainedProcessAsBackgroundCommand(1_234_567)).toBe(true);
+      await proxy.adoptRetainedProcessAsBackgroundCommand(1_234_567);
+      expect(backgroundAdoptions).toBe(1);
+    }
+  });
+
+  test("a later turn attaches a session background command by its handle", async () => {
+    const writes: unknown[] = [];
+    const lookups: number[] = [];
+    const stops: number[] = [];
+    const home = {
+      [Symbol.for("opengeni.durable-shell-process")]: true,
+      isDurableProcessHandle: (id: number) => id >= 1_000_000,
+      stopDurableProcess: async (id: number) => {
+        stops.push(id);
+        return true;
+      },
+      async writeStdin(args: unknown) {
+        writes.push(args);
+        return "Process running with session ID 1234567\n\nOutput:\nhi";
+      },
+    } as RoutableBackendSession;
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: {
+        session: home,
+        sandboxId: null,
+        kind: "docker",
+        leaseEpoch: 3,
+        providerInstanceId: "container-1",
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: home, sandboxId: null, kind: "docker" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      adoptProcessAsBackgroundCommand: async () => {
+        throw new Error("an attached command is already session-owned");
+      },
+      findSessionProcess: async (id) => {
+        lookups.push(id);
+        return id === 1_234_567
+          ? {
+              process: { id: "66666666-6666-4666-8666-666666666666", providerSessionId: id },
+              backend: {
+                sandboxId: null,
+                leaseEpoch: 3,
+                providerInstanceId: "container-1",
+                activeEpoch: 0,
+              },
+            }
+          : null;
+      },
+    });
+
+    expect(await proxy.attachSessionProcess(7_654_321)).toBe(false);
+    expect(proxy.hasRetainedProcess(7_654_321)).toBe(false);
+    const output = await proxy.writeStdin({ sessionId: 1_234_567, chars: "echo hi\n" });
+    expect(output).toContain("hi");
+    expect(writes).toHaveLength(1);
+    expect(proxy.hasRetainedProcess(1_234_567)).toBe(true);
+    expect(proxy.retainedProcessIdentity(1_234_567)?.id).toBe(
+      "66666666-6666-4666-8666-666666666666",
+    );
+    // Already session-owned: adoption is a no-op, never a second transfer.
+    await proxy.adoptRetainedProcessAsBackgroundCommand(1_234_567);
+    expect(await proxy.attachSessionProcess(1_234_567)).toBe(true);
+    expect(lookups).toEqual([7_654_321, 1_234_567]);
+    expect(await proxy.cancelSupervisedCommand(1_234_567, "explicit_stop")).toBe(true);
+    expect(stops).toEqual([1_234_567]);
+  });
+
+  test("a supervised handle this session does not own is reported lost without a provider read", async () => {
+    let writes = 0;
+    const home = {
+      [Symbol.for("opengeni.durable-shell-process")]: true,
+      isDurableProcessHandle: (id: number) => id >= 1_000_000,
+      stopDurableProcess: async () => true,
+      async writeStdin() {
+        writes += 1;
+        return "Process running with session ID 2345678\n\nOutput:\nsettled bytes";
+      },
+    } as RoutableBackendSession;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: home, sandboxId: null, kind: "local" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      findSessionProcess: async () => null,
+    });
+    const output = await proxy.writeStdin({ sessionId: 2_345_678, chars: "" });
+    expect(output).toContain("Process exited with code 1");
+    expect(output).toContain("write_stdin failed: session not found: 2345678");
+    expect(writes).toBe(0);
+    // The SDK's own small in-memory handles keep their ordinary route.
+    await proxy.writeStdin({ sessionId: 3, chars: "" });
+    expect(writes).toBe(1);
   });
 
   test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {
@@ -2626,6 +2816,37 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.session).toBe(defaultBackend);
   });
 
+  test("a machine shared from another workspace is addressed in its own workspace", async () => {
+    const machineWorkspace = "22222222-2222-2222-2222-222222222222";
+    const responder = new MockAgentResponder();
+    const subjects: string[] = [];
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      resolveSelfhostedConnection: async () => ({
+        ...(await resolveSelfhostedConnection()),
+        workspaceId: machineWorkspace,
+      }),
+      controlRpcFactory: () => ({
+        request: async (subject, request, options) => {
+          subjects.push(subject);
+          return await responder.request(subject, request, options);
+        },
+      }),
+      relay: RELAY,
+    });
+    const r = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 1 });
+    await (r.session as SandboxSessionLike)
+      .readFile({ path: "/home/user/project/x" })
+      .catch(() => undefined);
+    expect(subjects.length).toBeGreaterThan(0);
+    for (const subject of subjects) {
+      expect(subject.startsWith(`agent.${machineWorkspace}.`)).toBe(true);
+    }
+  });
+
   test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
     const original = new FakeBackend("group-before-repair");
     const replacement = new FakeBackend("group-after-repair");
@@ -2758,7 +2979,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     // per-turn provided-session manifest apply throws "Live sandbox sessions cannot
     // change manifest environment variables." The resolver must thread its
     // `environment` into the SelfhostedSession's manifest so it equals the turn's.
-    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const env = { GIT_AUTHOR_NAME: "Opengeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),

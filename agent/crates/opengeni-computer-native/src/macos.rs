@@ -1129,7 +1129,8 @@ impl ComputerAdapter for AxComputerAdapter {
                 .await
                 .map_err(|error| {
                     driver_failure(format!("macOS old live-capture shutdown failed: {error}"))
-                })?;
+                })?
+                .map_err(map_ffi_pre_dispatch)?;
         }
         Ok(())
     }
@@ -1200,7 +1201,26 @@ impl ComputerAdapter for AxComputerAdapter {
                 .await
                 .map_err(|error| {
                     driver_failure(format!("macOS live-capture shutdown task failed: {error}"))
-                })?;
+                })?
+                .map_err(map_ffi_pre_dispatch)?;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> NativeAdapterResult<()> {
+        let targets = self
+            .live_captures
+            .lock()
+            .map_err(|_| driver_failure("macOS live-capture registry lock is poisoned"))?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failed = false;
+        for target in targets {
+            failed |= self.stop_capture_stream(&target).await.is_err();
+        }
+        if failed || !opengeni_agent_macos_ffi::capture_cleanup_is_settled() {
+            return Err(driver_failure("macOS capture cleanup remains unsettled"));
         }
         Ok(())
     }

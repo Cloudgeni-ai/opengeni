@@ -27,21 +27,22 @@ capabilities: { from: "none", webSearch: true, knowledge: true }
 capabilities: { from: "all", browser: false, workspaceAdmin: false }
 ```
 
-| Capability            | Lets the agent                                                      | In `"none"` |
-| --------------------- | ------------------------------------------------------------------- | ----------- |
-| `humanInput`          | Pause and ask the person for a decision or missing detail           | On          |
-| `webSearch`           | Search the public web                                               | Off         |
-| `media`               | Generate images and videos                                          | Off         |
-| `goals`               | Work toward a goal across many turns                                | Off         |
-| `subagents`           | Start, message, and follow other sessions; list models              | Off         |
-| `skills`              | `"read"` installed Skills, or `"manage"` them too                   | `"read"`    |
-| `artifacts`           | Publish files, documents, and Sites people can open                 | Off         |
-| `browser`             | Use a browser or desktop computer                                   | Off         |
-| `schedules`           | Create and manage scheduled tasks                                   | Off         |
-| `knowledge`           | Search and save workspace knowledge, task notes, and instructions   | Off         |
-| `workspaceFiles`      | Read files uploaded to the workspace                                | Off         |
-| `workspaceConnectors` | Use the workspace's connected apps and integrations                 | Off         |
-| `workspaceAdmin`      | Manage variable sets, projects, rigs, machines, and connector setup | Off         |
+| Capability            | Lets the agent                                                                                    | In `"none"` |
+| --------------------- | ------------------------------------------------------------------------------------------------- | ----------- |
+| `humanInput`          | Pause and ask the person for a decision or missing detail                                         | On          |
+| `webSearch`           | Search the public web                                                                             | Off         |
+| `media`               | Generate images and videos                                                                        | Off         |
+| `goals`               | Work toward a goal across many turns                                                              | Off         |
+| `subagents`           | Start, message, and follow other sessions; list models                                            | Off         |
+| `skills`              | `"read"` installed Skills, or `"manage"` them too                                                 | `"read"`    |
+| `artifacts`           | Publish files, documents, and Sites people can open                                               | Off         |
+| `browser`             | Use a browser or desktop computer                                                                 | Off         |
+| `secrets`             | Use saved secrets by `{{secret:…}}` reference, save new ones, and ask for them with a secure card | Off         |
+| `schedules`           | Create and manage scheduled tasks                                                                 | Off         |
+| `knowledge`           | Search and save workspace knowledge, task notes, and instructions                                 | Off         |
+| `workspaceFiles`      | Read files uploaded to the workspace                                                              | Off         |
+| `workspaceConnectors` | Use the workspace's connected apps and integrations                                               | Off         |
+| `workspaceAdmin`      | Manage projects, rigs, machines, and connector setup                                              | Off         |
 
 Your own MCP servers and the integrations you name in `tools` stay available under `"none"`. `"none"` adds no bundled Opengeni guides unless `bundledSkillIds` lists them, so it needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists. Shell, file, and background-command tools come with the sandbox or a Connected Machine; `sandboxBackend: "none"` removes them.
 

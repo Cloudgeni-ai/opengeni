@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.3
 FROM python:3.12-slim AS checkov-runtime
 
 ARG CHECKOV_VERSION=3.2.526
@@ -23,7 +23,7 @@ COPY --from=xx / /
 # selects the requested OCI target and configures clang/lld for its glibc ABI;
 # `xx-verify` fails closed if the copied helper is not actually target-native.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends clang lld \
+    && apt-get install -y --no-install-recommends clang lld bash-builtins \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/agent
@@ -49,10 +49,12 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
-    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \
+    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
-    xx-verify /out/opengeni-computer-native
+    xx-verify /out/opengeni-computer-native; \
+    install -m 0755 "target/${rust_target}/release/opengeni-agent" /out/opengeni-agent; \
+    xx-verify /out/opengeni-agent
 
 # The command supervisor shares the existing native cross-toolchain and target
 # ABI verification. It has no runtime beyond libc and never routes user output
@@ -62,7 +64,23 @@ RUN set -eux; \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor; \
     xx-verify /out/opengeni-command-supervisor
 
-FROM oven/bun:${BUN_VERSION} AS bun-runtime
+# Bash 5.2's loadable ABI is compiled against its packaged headers. Both target
+# architectures must additionally pass the final-runtime PTY smoke below.
+RUN set -eux; \
+    xx-clang -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -Wl,-z,noexecstack \
+      -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins \
+      native/terminal-ready/terminal-ready.c -o /out/opengeni-terminal-ready.so; \
+    xx-verify /out/opengeni-terminal-ready.so
+
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-runtime
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
 
@@ -93,6 +111,8 @@ WORKDIR /src
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
+COPY apps/site-gateway/package.json apps/site-gateway/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
@@ -100,6 +120,7 @@ COPY examples/northstar-support/package.json examples/northstar-support/package.
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY examples/tool-server/package.json examples/tool-server/package.json
+COPY packages/agent-host/package.json packages/agent-host/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -115,28 +136,38 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/decisions/package.json packages/decisions/package.json
 COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react-native/package.json packages/react-native/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
+COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
+COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
+COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
+COPY packages/testing/src/acquisition-diagnostics.ts packages/testing/src/acquisition-diagnostics.ts
 # The cache mount only holds Bun's download cache; the exact lock-resolved
 # node_modules tree still lands in the layer and is byte-identical without it.
 # Each stage owns its own cache id so concurrently building stages never share
 # one writer.
 RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/cache,sharing=locked \
-    bun install --frozen-lockfile
+    bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 COPY . .
 
 # Unreleased local work only. Deployed Sites install exact registry versions.
@@ -192,6 +223,7 @@ RUN set -eux; \
 RUN cd packages/ogtool && bun run build
 
 FROM oven/bun:${BUN_VERSION} AS browserd-build
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 WORKDIR /src
 COPY --from=browserd-source-build /src /src
@@ -202,8 +234,8 @@ ARG TARGETARCH
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
-      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49; lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
-      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1; lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
+      amd64) lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
+      arm64) lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
       *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
@@ -211,8 +243,6 @@ RUN set -eux; \
       packages/browserd/src/main.ts \
       --outfile /out/opengeni-browserd; \
     chmod 0755 /out/opengeni-browserd; \
-    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
-    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
     install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda; \
     test "$(sha256sum /out/lightpanda | awk '{print $1}')" = "$lightpanda_expected"; \
     install -m 0644 /lightpanda-assets/lightpanda-0.3.5-source.tar.gz /out/lightpanda-0.3.5-source.tar.gz; \
@@ -221,14 +251,23 @@ RUN set -eux; \
     test "$(sha256sum /out/lightpanda-LICENSE | awk '{print $1}')" = 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef; \
     { \
       printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
-      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
       printf '%s  %s\n' "$lightpanda_expected" /usr/local/lib/opengeni/lightpanda; \
       printf '%s  %s\n' a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 /usr/local/share/source/lightpanda-0.3.5.tar.gz; \
       printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
     } > /out/SHA256SUMS
 
+# The compiled controller embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check \
+  /opt/opengeni-docker/distrusted-roots.pem /out/opengeni-browserd
+
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
+COPY --from=computer-native-build /out/opengeni-agent /out/opengeni-agent
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-terminal-ready.so | awk '{print $1}')" \
+      /usr/local/lib/opengeni/opengeni-terminal-ready.so >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
       /usr/local/bin/opengeni-command-supervisor \
@@ -237,10 +276,21 @@ RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
       >> /out/SHA256SUMS
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-agent | awk '{print $1}')" \
+      /usr/local/bin/opengeni-agent \
+      >> /out/SHA256SUMS
 
-FROM node:22.22.0-bookworm-slim AS node-runtime
+# Node also trusts roots compiled into its binary (as PEM). Distrust them the same
+# way, natively, for the target architecture's Node (never executed here).
+FROM node:22.22.0-bookworm-slim AS node-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS node-runtime
+COPY --from=node-target /usr/local/bin/node /out/node
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/node
 
 FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
@@ -266,7 +316,7 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 
 WORKDIR /src
 COPY . .
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /out/node /usr/local/bin/node
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -277,7 +327,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},ta
     && input="/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE/$TARGETARCH/installation.json" \
     && if [ -f "$input" ]; then \
       test "$(node --version)" = "v22.22.0"; \
-      bun install --frozen-lockfile; \
+      bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile; \
       bun scripts/verify-artifact-runtime-container-inputs.ts \
         --root "/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE" \
         --source-sha "$OPENGENI_SOURCE_SHA" \
@@ -299,12 +349,14 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
+# certifi 2026.10.19 drops the compromised emSign ECC Root CA - G3. It is newer
+# than the shared PyPI cutoff, so it alone gets a later one.
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6 openpyxl==3.1.5 python-docx==1.2.0 python-pptx==1.0.2"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20260809T010020Z
+ARG OPENGENI_CHROMIUM_VERSION=155.0.8059.79-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261015T173155Z
 
 RUN set -eux; \
     printf '%s\n' \
@@ -370,8 +422,8 @@ RUN set -eux; \
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 RUN test "$(node --version)" = "v22.22.0"
 
 # Pinned native document-to-Markdown parser. The lock contains the registry
@@ -493,9 +545,10 @@ RUN set -eux; \
     test "$(uv cache dir)" = /var/cache/uv; \
     test "$(python3 -m pip cache dir)" = /var/cache/pip; \
     uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
-      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
+      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" \
+      --exclude-newer-package certifi=2026-10-21T00:00:00Z ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'; \
     python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
@@ -529,18 +582,32 @@ ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 ENV OPENGENI_BROWSERD_PORT=7682
-ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
 ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+# The image ships opengeni-computer-native as its desktop driver and stages no
+# CUA runtime, so it selects that driver explicitly: an isolated Linux seat
+# otherwise defaults to CUA.
+ENV OPENGENI_BROWSERD_COMPUTER_BACKEND=native
+# The sandbox VM's network belongs to its browsers already; the per-browser
+# network namespace used on people's own machines is not needed here.
+ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
-COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
+COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+# The machine agent an Opengeni compute sandbox runs as its guest agent
+# (`opengeni-agent run --compute`). It sits beside opengeni-browserd so its
+# browser controller finds the sidecar, and the image pins its version.
+COPY --from=browserd-build /out/opengeni-agent /usr/local/bin/opengeni-agent
+COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
+COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
+RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
+    && rm /tmp/opengeni-terminal-ready-test.py
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
@@ -559,9 +626,11 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
-               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
+               /usr/local/bin/opengeni-browserd \
                /usr/local/lib/opengeni/lightpanda \
-               /usr/local/lib/opengeni/opengeni-computer-native; \
+               /usr/local/lib/opengeni/opengeni-computer-native \
+               /usr/local/bin/opengeni-agent; \
+    opengeni-agent --version; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \

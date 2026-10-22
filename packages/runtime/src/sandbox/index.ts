@@ -31,14 +31,27 @@ export {
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
+export {
+  sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
+  workspaceArchiveDownloadTemporaryDirectory,
+} from "./host-archive-temporary";
+export type { DockerHostWorkspaceRelease } from "./providers/docker-workspace-drain";
 export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
+export {
+  isInSandboxSupervisedProcess,
+  SUPERVISED_STOP_KILL_AFTER_SECONDS,
+} from "./durable-shell-process";
 export type {
   ModalRawOutputPage,
   ModalRawOutputStreams,
   ModalRawOutputExit,
 } from "./providers/modal-command-raw-page";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
-import { restoreHostWorkspaceArchive } from "./host-archive-spool";
+import {
+  convertHostWorkspaceArchiveToTar,
+  restoreHostWorkspaceArchive,
+  type PortableWorkspaceTar,
+} from "./host-archive-spool";
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
@@ -84,16 +97,30 @@ import {
   decodeNativeSnapshotRef,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
+  verifyRestoredWorkspaceContents,
+  workspaceArchiveExcludedPaths,
   WorkspaceArchiveIntegrityError,
   type VerifiedWorkspaceArchive,
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { instrumentSandboxClientSessionOperations } from "./operation-purpose";
+export {
+  currentSandboxOperationPurpose,
+  instrumentSandboxClientSessionOperations,
+  instrumentSandboxSessionOperations,
+  SANDBOX_OPERATION_PURPOSES,
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+  type SandboxOperationPurpose,
+  type SandboxSetupOperationObservation,
+} from "./operation-purpose";
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
+import type { ComputeCreateIdentity } from "./compute/session";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -108,6 +135,10 @@ export {
 } from "./materialization-verification-error";
 export { sendCommandInput, type CommandInputSession } from "./command-input";
 export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-stream";
+export {
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
+} from "./selfhosted/terminal-replay";
 
 export {
   repairSerializedRunStateExposedPorts,
@@ -133,6 +164,7 @@ export {
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
   SandboxProviderUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,
@@ -146,6 +178,8 @@ export {
   providerSupportsImmutableImageBuild,
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
@@ -186,6 +220,11 @@ export {
   type WorkspaceTreeFingerprint,
 } from "./workspace-archive";
 export {
+  ToolCallCommandNotStartedError,
+  toolCallCommandNotStartedCallIds,
+  withCommandNotStartedCallProof,
+} from "./tool-call-command-not-started";
+export {
   ensureModalRegistryImage,
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,
@@ -198,6 +237,7 @@ export {
   findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBindingForSession,
+  modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,
@@ -344,6 +384,10 @@ export {
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserWorkingCopyAdoption,
+  type PlacementBrowserWorkingCopyAuthority,
+  type PlacementBrowserWorkingCopyInspection,
+  type PlacementBrowserWorkingCopyRefusal,
   type ComputerControlFrame,
   type ComputerControlFrameMetadata,
   type ComputerFrameEvidenceMismatchReason,
@@ -373,6 +417,27 @@ export {
   type RunCredentialSessionReady,
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
+
+// Secret references delivered at the physical exec boundary (W1). Values ride
+// an in-memory carry to the provider call; recorders keep references.
+export {
+  SECRET_ENV_TOTAL_MAX_BYTES,
+  SECRET_ENV_VALUE_MAX_BYTES,
+  SECRET_FILE_ROOT,
+  clearSecretFilesCommand,
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretLiteralText,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  secretExecCarryFor,
+  secretFilePath,
+  secretScopeFor,
+  type SecretCarry,
+  type SecretExecCarry,
+  type SecretStdinCarry,
+} from "./secret-delivery";
 
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
@@ -442,6 +507,7 @@ export {
 // (FileSystem + Git + Terminal) over a live, resumed-by-id session handle. The
 // API constructs one per request around the box it just resumed; no ownership.
 // Agent-loop-free, so the API-direct control plane imports it from this leaf.
+export { SynchronousCommandOutcomeUnknownError } from "./synchronous-command";
 export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
@@ -486,6 +552,7 @@ export {
   NatsControlRpc,
   SelfhostedControlError,
   agentErrorToControlError,
+  parseAgentRpcSubject,
   subjectFor,
   offlineControlResponse,
   timeoutControlResponse,
@@ -496,9 +563,22 @@ export {
   drainingMessage,
   execDeadlineHint,
   NEVER_SENT_DETAIL_KEY,
+  CONNECTION_REPLACED_DETAIL_KEY,
+  AGENT_UNANSWERED_DETAIL_KEY,
+  agentNotAnsweredReason,
+  isAgentNotAnswered,
+  requestWithoutWaking,
+  withoutWaking,
+  type NoWakeReply,
+  connectionReplacedAgentError,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export {
+  AGENT_LINK_LOST_HEADER,
+  AGENT_UNANSWERED_HEADER,
+  NO_WAKE_HEADER,
+} from "./selfhosted/control-replay";
 // The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
 // + machine.* events; the op-engine's op-stream client emits through this too).
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
@@ -554,6 +634,7 @@ export {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
   isConnectedMachineAbsolutePath,
+  isUnusableConnectedMachineWorkspace,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
   relativeConnectedMachinePath,
@@ -562,6 +643,46 @@ export {
   type ConnectedMachineOs,
 } from "./selfhosted/workspace-path";
 export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
+// Opengeni compute: managed microVM sandboxes whose provider session is the
+// Connected Machine agent inside the box (docs/compute-backend.md).
+export {
+  ComputeControlClient,
+  ComputeControlError,
+  isComputeSandboxNotFound,
+  type ComputeCreateRequest,
+  type ComputeSandboxView,
+  type ComputeWokenView,
+} from "./compute/control";
+export {
+  getComputeAgentPlane,
+  setComputeAgentPlane,
+  usesAgentTransport,
+  type ComputeAgentConnection,
+  type ComputeAgentPlane,
+} from "./compute/plane";
+export {
+  COMPUTE_WORKSPACE_ROOT,
+  ComputeSandboxClient,
+  ComputeSandboxSession,
+  ComputeWakeGate,
+  ComputeWakingControlRpc,
+  deleteComputeBox,
+  wakeComputeSandboxOnNoResponders,
+  type ComputeCreateIdentity,
+  type ComputeSessionState,
+  type ComputeTurnDeps,
+} from "./compute/session";
+export {
+  COMPUTE_METADATA,
+  createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
+  sweepComputeOrphans,
+  type ComputeOrphanSweepProgress,
+  type StaleComputeEnrollment,
+  type StaleComputeEnrollmentPage,
+  type ComputeOrphanSweepResult,
+  type ComputeSandboxIdentity,
+} from "./compute/orphans";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`
@@ -578,11 +699,14 @@ export {
 } from "./selfhosted/op-transport";
 export {
   cancelSelfhostedOp,
+  isOpTombstone,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  OP_START_RESEND_HORIZON_MS,
   querySelfhostedOp,
+  releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,
@@ -741,15 +865,20 @@ export function createSandboxClientForBackend(
     exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
-  const raw = withProviderExactResumeContract(
-    registration,
-    registration.build({
-      settings,
-      environment,
-      exposedPorts,
-      ...(metrics ? { metrics } : {}),
-    }),
-  );
+  const built = registration.build({
+    settings,
+    environment,
+    exposedPorts,
+    ...(metrics ? { metrics } : {}),
+  });
+  if (metrics?.onSandboxSetupOperation) {
+    instrumentSandboxClientSessionOperations(
+      built,
+      registration.backend,
+      metrics.onSandboxSetupOperation,
+    );
+  }
+  const raw = withProviderExactResumeContract(registration, built);
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
@@ -856,11 +985,17 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
     ...(exactResume
       ? {
           // Docker's ordinary SDK resume creates a replacement when the exact
-          // container is absent. Preserve OpenGeni's non-replacing attach path
+          // container is absent. Preserve Opengeni's non-replacing attach path
           // through the network decorator; dropping it would turn an exact
           // recovery probe into a provider mutation.
           resumeExact: async (state: SandboxSessionState) =>
             await wrapSession(await exactResume.call(client, state)),
+        }
+      : {}),
+    ...("attachWorkspaceForDrain" in client && typeof client.attachWorkspaceForDrain === "function"
+      ? {
+          // A drain handle has no networking or normal execution capability.
+          attachWorkspaceForDrain: client.attachWorkspaceForDrain.bind(client),
         }
       : {}),
     ...(client.delete
@@ -937,7 +1072,15 @@ async function connectDockerNetwork(network: string, containerId: string): Promi
  * for storage decoupled from the RunState blob (issue #35). Encapsulates the
  * underscore-internal `_sandbox` read in exactly one place.
  */
-export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
+export function sandboxStateEntryFromRunState(
+  state: unknown,
+  options: {
+    /** W1 defensive strip: when set, persisted manifest/state env keeps only
+     *  names this predicate accepts (deployment constants), so a legacy box
+     *  whose live state still carries user values never re-persists them. */
+    keepEnvironmentName?: (name: string) => boolean;
+  } = {},
+): Record<string, unknown> | null {
   const sandboxState = (state as any)?._sandbox;
   if (!sandboxState) {
     return null;
@@ -955,10 +1098,50 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
+  const persisted = sandboxEntryForPersistence(entry as Record<string, unknown>);
   return normalizeProtocolJsonValue(
-    sandboxEntryForPersistence(entry as Record<string, unknown>),
+    options.keepEnvironmentName
+      ? sandboxEntryWithConstantEnvironment(persisted, options.keepEnvironmentName)
+      : persisted,
     '$["sandboxSessionEnvelope"]',
   ) as Record<string, unknown>;
+}
+
+function filterEnvironmentRecord(value: unknown, keep: (name: string) => boolean): unknown {
+  if (!isObjectRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([name]) => keep(name)));
+}
+
+/** Copy of a persisted entry whose `sessionState.manifest.environment`,
+ *  `sessionState.environment` and `sessionState.providerState.environment` keep
+ *  only accepted names. Values are never inspected. */
+export function sandboxEntryWithConstantEnvironment(
+  entry: Record<string, unknown>,
+  keep: (name: string) => boolean,
+): Record<string, unknown> {
+  const sessionState = entry.sessionState;
+  if (!isObjectRecord(sessionState)) return entry;
+  const next: Record<string, unknown> = { ...sessionState };
+  const manifest = sessionState.manifest;
+  if (isObjectRecord(manifest) && Object.hasOwn(manifest, "environment")) {
+    const plain =
+      Object.getPrototypeOf(manifest) === Object.prototype ||
+      Object.getPrototypeOf(manifest) === null
+        ? manifest
+        : (serializeSdkManifestForEnvelope(manifest) as Record<string, unknown>);
+    next.manifest = { ...plain, environment: filterEnvironmentRecord(plain.environment, keep) };
+  }
+  if (Object.hasOwn(sessionState, "environment")) {
+    next.environment = filterEnvironmentRecord(sessionState.environment, keep);
+  }
+  const providerState = sessionState.providerState;
+  if (isObjectRecord(providerState) && Object.hasOwn(providerState, "environment")) {
+    next.providerState = {
+      ...providerState,
+      environment: filterEnvironmentRecord(providerState.environment, keep),
+    };
+  }
+  return { ...entry, sessionState: next };
 }
 
 /**
@@ -967,7 +1150,7 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
  * `Manifest` instance at `sessionState.providerState.manifest`; the SDK restore
  * path always overlays the canonical outer value, so the duplicate is neither
  * read nor JSON-protocol-safe. Remove only that known redundant field before the
- * envelope crosses OpenGeni's durable canonical-JSON boundary.
+ * envelope crosses Opengeni's durable canonical-JSON boundary.
  */
 function sandboxEntryForPersistence(entry: Record<string, unknown>): Record<string, unknown> {
   const sessionState = entry.sessionState;
@@ -1096,7 +1279,7 @@ export async function deserializeSandboxSessionStateEnvelope(
     if (!observedInstanceId) {
       const instanceIdField = PROVIDER_REGISTRY[backend as SandboxBackend]?.instanceIdFields[0];
       if (instanceIdField) {
-        // New envelopes persist one provider-neutral OpenGeni identity. SDK
+        // New envelopes persist one provider-neutral Opengeni identity. SDK
         // deserializers still require their legacy provider-specific address,
         // so materialize it into a cloned payload at this adapter boundary.
         // The live resumed handle is independently identity-checked before use.
@@ -1479,7 +1662,7 @@ type ResumeCapableClient = {
   backendId: string;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   resume?: (state: unknown, options?: unknown) => Promise<unknown>;
-  /** OpenGeni extension implemented by providers whose ordinary SDK resume may
+  /** Opengeni extension implemented by providers whose ordinary SDK resume may
    * create a replacement. This method must either return the addressed wrapper
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
@@ -1546,7 +1729,7 @@ function legacySandboxProviderInstanceIdFromEnvelope(
   return resolvedBackend ? liveProviderInstanceIdFromState(resolvedBackend, providerState) : null;
 }
 
-/** Resolve the stable OpenGeni identity first, then legacy SDK provider keys.
+/** Resolve the stable Opengeni identity first, then legacy SDK provider keys.
  * The fallback is compatibility-only: new envelopes always persist the stable
  * top-level identity, so downstream lease/reaper code remains provider-neutral. */
 export function sandboxProviderInstanceIdFromEnvelope(
@@ -1559,7 +1742,7 @@ export function sandboxProviderInstanceIdFromEnvelope(
 }
 
 /** Validate rolling-format envelopes before addressing a provider. The stable
- * OpenGeni identity is authoritative, but a disagreeing legacy SDK address is
+ * Opengeni identity is authoritative, but a disagreeing legacy SDK address is
  * corruption/staleness—not evidence that the provider disappeared. */
 export function assertConsistentSandboxProviderIdentity(
   backend: SandboxBackend | string,
@@ -1703,7 +1886,7 @@ export async function resumeExactSandboxSession(
   const actualInstanceId = readInstanceId(backend, session);
   if (!actualInstanceId) {
     // Do not tear down an unidentifiable handle: it may be the requested live
-    // provider. The adapter must expose a stable identity before OpenGeni can
+    // provider. The adapter must expose a stable identity before Opengeni can
     // safely command, publish, snapshot, or delete it.
     throw new SandboxResumeIdentityUnavailableError(backend, expectedInstanceId);
   }
@@ -1884,6 +2067,9 @@ export async function establishSandboxSessionFromEnvelope(
     loadHostWorkspaceArchive?: (ref: WorkspaceArchiveObjectRef) => Promise<WorkspaceArchiveSpool>;
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
+    /** The lease a created box belongs to. A compute sandbox's agent is
+     * enrolled under it, so creating one requires it; other backends ignore it. */
+    createIdentity?: ComputeCreateIdentity;
     onSandboxCreated?: SandboxCreatedCallback;
     /** Durable lease owners fence the attempt before invoking a provider create.
      * Called for each physical attempt, including logical-image fallback. A
@@ -1999,18 +2185,21 @@ export async function establishSandboxSessionFromEnvelope(
       objectDescriptor.workspace.projection === "sdk_local_archive_v1" &&
       opts.loadHostWorkspaceArchive
     ) {
+      // Local/Docker restore a host-backed archive natively. Any other backend
+      // hydrates a portable tar converted from it, so a deployment that changes
+      // sandbox backend can still continue chats archived before the change.
       if (
-        (backend !== "local" && backend !== "docker") ||
         objectRef.sha256 !== objectDescriptor.archiveSha256 ||
         objectRef.bytes !== objectDescriptor.archiveBytes
       ) {
         throw new WorkspaceArchiveIntegrityError(
           "archive_metadata_invalid",
-          "Host archive object reference does not match its provider and descriptor",
+          "Host archive object reference does not match its descriptor",
         );
       }
       workspaceArchive = { kind: "host_spool", descriptor: objectDescriptor, ref: objectRef };
     }
+    const hostBackedBackend = backend === "local" || backend === "docker";
     if (objectRef && !workspaceArchive) {
       throw new WorkspaceArchiveIntegrityError(
         "archive_hydration_failed",
@@ -2105,6 +2294,12 @@ export async function establishSandboxSessionFromEnvelope(
         // Non-Modal providers and isolated client-factory fixtures retain their
         // ordinary admission hook. Production Modal requires the wire intent.
         await opts.onBeforeSandboxCreate?.(createSettings);
+        if (backend === "compute") {
+          return await candidate.create!(
+            { manifest: createManifest },
+            opts.createIdentity ? { opengeniCreateIdentity: opts.createIdentity } : undefined,
+          );
+        }
         return await candidate.create!({ manifest: createManifest });
       };
       const createStarted = Date.now();
@@ -2224,12 +2419,16 @@ export async function establishSandboxSessionFromEnvelope(
         }
       }
       let hydrationApplied = false;
+      // A host-backed archive hydrated into a remote sandbox: what the converted
+      // tar materializes, verified after hydration instead of the archive's
+      // host-only fingerprint projection.
+      let portableContents: PortableWorkspaceTar["contents"] | null = null;
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
         if (
           !createdFromFilesystemSnapshot &&
-          workspaceArchive.kind !== "host_spool" &&
+          (workspaceArchive.kind !== "host_spool" || !hostBackedBackend) &&
           typeof hydrate !== "function"
         ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
@@ -2250,7 +2449,7 @@ export async function establishSandboxSessionFromEnvelope(
             );
           }
           // Directory/tar hydration operates on the attributed destination.
-          if (workspaceArchive.kind === "host_spool") {
+          if (workspaceArchive.kind === "host_spool" && hostBackedBackend) {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
             // descriptor-relative filesystem access alone is not writer isolation.
@@ -2264,6 +2463,27 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
+          } else if (workspaceArchive.kind === "host_spool") {
+            const portable = await convertHostWorkspaceArchiveToTar(hostSpool!, {
+              excludedPaths: workspaceArchiveExcludedPaths(restored),
+              mtimeSeconds: Date.parse(workspaceArchive.descriptor.capturedAt) / 1000,
+            });
+            // The descriptor was fingerprinted from the source tree when it was
+            // captured; the archive must still be exactly that tree.
+            const expected = workspaceArchive.descriptor.workspace;
+            if (
+              portable.fingerprint.sha256 !== expected.sha256 ||
+              portable.fingerprint.entryCount !== expected.entryCount ||
+              portable.fingerprint.fileCount !== expected.fileCount ||
+              portable.fingerprint.totalFileBytes !== expected.totalFileBytes
+            ) {
+              throw new WorkspaceArchiveIntegrityError(
+                "archive_hash_mismatch",
+                `workspace archive revision ${workspaceArchive.descriptor.revision} does not match its recorded fingerprint`,
+              );
+            }
+            await hydrate!.call(restored, portable.bytes);
+            portableContents = portable.contents;
           } else if (!createdFromFilesystemSnapshot) {
             await hydrate!.call(restored, workspaceArchive.bytes);
           }
@@ -2325,12 +2545,20 @@ export async function establishSandboxSessionFromEnvelope(
           }
         }
         // Native provider snapshots are restored by their exact opaque receipt.
-        // OpenGeni verifies receipt identity/hash before hydration, but it must not
+        // Opengeni verifies receipt identity/hash before hydration, but it must not
         // impose a tar/inode equivalence contract on the provider's filesystem
         // image. Tar archives remain content-verified after hydration.
         if (workspaceArchive.kind === "tar" || workspaceArchive.kind === "host_spool") {
           try {
-            await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            if (portableContents) {
+              await verifyRestoredWorkspaceContents(
+                restored,
+                portableContents,
+                workspaceArchive.descriptor.revision,
+              );
+            } else {
+              await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            }
           } catch (error) {
             await terminateCreatedSandbox(
               createdClient,
@@ -2379,8 +2607,8 @@ export async function establishSandboxSessionFromEnvelope(
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
   // restorable archive (cold lease)? Archive-only state is not resumable: the
-  // provider's deserialize/resume path would reject it before OpenGeni could
-  // cold-restore. New envelopes use the stable OpenGeni identity; legacy SDK
+  // provider's deserialize/resume path would reject it before Opengeni could
+  // cold-restore. New envelopes use the stable Opengeni identity; legacy SDK
   // provider keys remain readable during rollout.
   const persistedInstanceId = assertConsistentSandboxProviderIdentity(backend, envelope);
   const hasResumableInstance = persistedInstanceId !== null;

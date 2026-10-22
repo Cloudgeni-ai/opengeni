@@ -51,6 +51,8 @@ export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
   sites?: boolean;
   schedules?: boolean;
+  /** Secret references and the `secret_*` tools (capability `secrets`). */
+  secrets?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -125,13 +127,14 @@ export function loadNativeToolSkillArtifacts(
   if (nativeTools.schedules) directories.push("bundled_schedule_skills");
   if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
   if (nativeTools.sites) directories.push("bundled_site_skills");
+  if (nativeTools.secrets) directories.push("bundled_secret_skills");
   if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
   return directories.flatMap((directory) => {
     const root = packagedSkillDirectory(directory);
     return skillDirNames(root).map((name) => {
       const artifact = readSkillLibraryArtifact(join(root, name));
       const files = [...artifact.files];
-      if (name === "opengeni-sites") {
+      if (name === "sites") {
         const generatedPath = "package-versions.json";
         const existing = files.findIndex((entry) => entry.path === generatedPath);
         if (existing !== -1) files.splice(existing, 1);
@@ -397,6 +400,12 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_schedule_skills")),
       reason: "native scheduled-task tool surface",
+    });
+  }
+  if (nativeTools.secrets) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_secret_skills")),
+      reason: "native secrets tool surface",
     });
   }
   if (nativeTools.videoGeneration) {

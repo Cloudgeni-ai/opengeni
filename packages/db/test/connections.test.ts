@@ -3,11 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createConnectionIdempotently, ConnectionCreateIdempotencyError } from "../src/index";
 import {
@@ -1517,6 +1514,16 @@ describe("buildConnectionTokenResolver", () => {
       connectionId: "slack-personal",
       grantedScopes: ["channels:history", "channels:read", "chat:write"],
     });
+    // Private bytes for a files.info result use the same reviewed user grant.
+    for (const destinationUrl of [
+      "https://slack.com/api/files.info",
+      "https://files.slack.com/files-pri/T123-F123/download/report.pdf",
+    ]) {
+      await expect(resolver({ ...request, destinationUrl })).resolves.toMatchObject({
+        status: "ok",
+        connectionId: "slack-personal",
+      });
+    }
     const used = counts.recordUsed;
     for (const destinationUrl of [
       "https://slack.com/api/admin.users.remove",
@@ -1526,6 +1533,12 @@ describe("buildConnectionTokenResolver", () => {
       "http://slack.com/api/chat.postMessage",
       "https://slack.com:444/api/chat.postMessage",
       "https://attacker@slack.com/api/chat.postMessage",
+      "https://files.slack.com/other/T123-F123/report.pdf",
+      "https://files.slack.com.evil.test/files-pri/T123-F123/report.pdf",
+      "http://files.slack.com/files-pri/T123-F123/report.pdf",
+      "https://files.slack.com:444/files-pri/T123-F123/report.pdf",
+      "https://attacker@files.slack.com/files-pri/T123-F123/report.pdf",
+      "https://slack-files.com/files-pri/T123-F123/report.pdf",
     ]) {
       await expect(resolver({ ...request, destinationUrl })).resolves.toMatchObject({
         status: "auth_needed",

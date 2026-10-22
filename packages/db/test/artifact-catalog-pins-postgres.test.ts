@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { ArtifactCatalogListQuery } from "@opengeni/contracts";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   createSession,
@@ -101,7 +101,10 @@ postgresTest(
             const pins = posture.privateTables.find(
               (table) => table.name === "artifact_catalog_pins",
             )!;
-            expect(pins[privilegeFlags[privilege]]).toBe(true);
+            // The inspector preserves table/column ACL identity; the evaluator
+            // still emits the exact known pin-capability denial below.
+            expect(pins[privilegeFlags[privilege]]).toBe(false);
+            expect(pins.columnPrivileges).toContain(privilege);
             expect(evaluateRuntimeDatabasePosture(posture, postureOptions)).toContain(
               "runtime role has forbidden direct artifact pin authority",
             );
@@ -302,6 +305,7 @@ postgresTest(
             const page = await listArtifactCatalogCandidates(client!.db, scope, {
               query: ArtifactCatalogListQuery.parse({ sort }),
               kinds: ["file", "site", "image", "document", "spreadsheet", "presentation"],
+              siteViewer: { subjectId: null },
               snapshotAt,
               ...(after ? { after } : {}),
               limit: 50,
@@ -333,6 +337,7 @@ postgresTest(
         const first = await listArtifactCatalogCandidates(client!.db, scope, {
           query: ArtifactCatalogListQuery.parse({ sort: "title" }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           limit: 1,
         });
@@ -340,6 +345,7 @@ postgresTest(
         const next = await listArtifactCatalogCandidates(client!.db, scope, {
           query: ArtifactCatalogListQuery.parse({ sort: "title" }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           after: { key: first[0]!.sort_key, kind: "file", id: sharedId, pinned: true },
           limit: 1,
@@ -352,6 +358,7 @@ postgresTest(
             sourceSessionId: source.id,
           }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           limit: 100,
         });

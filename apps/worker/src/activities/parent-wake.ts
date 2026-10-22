@@ -1,17 +1,15 @@
-import { getSessionParentClaudeProviderAccountAuthority } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
-  getSessionParentPersonalConnectionDelegations,
-  getSessionParentMcpAccountBindings,
-  getSessionParentXaiProviderAccountAuthority,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
   repairPendingChildTerminalResultWakes,
   type ChildTerminalWakeRepairCursor,
+  repairMissingQuiescenceReceiptWakes,
+  type QuiescenceReceiptWakeRepairCursor,
   childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
@@ -43,9 +41,11 @@ export type ReconcileParentSystemUpdateOverrides = Partial<{
 export type ReconcileSessionWorkflowWakeOverrides = Partial<{
   claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
   repairPendingChildTerminalResultWakes: typeof repairPendingChildTerminalResultWakes;
+  repairMissingQuiescenceReceiptWakes: typeof repairMissingQuiescenceReceiptWakes;
 }>;
 
 const childTerminalRepairCursors = new WeakMap<Database, ChildTerminalWakeRepairCursor>();
+const quiescenceRepairCursors = new WeakMap<Database, QuiescenceReceiptWakeRepairCursor>();
 
 export type ReconcileAutomaticSessionTitleFanoutOverrides = Partial<{
   claimAutomaticSessionTitleFanout: typeof claimAutomaticSessionTitleFanout;
@@ -69,54 +69,26 @@ export async function notifyParentOfChildIdle(
     if (!child || !child.parentSessionId) {
       return;
     }
-    const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
     const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
+    const committed = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
+      accountId: child.accountId,
+      workspaceId,
+      dedupeKey: clientEventId,
+    });
+    if (!committed) throw new Error("Committed idle child-result outbox disappeared");
+    if (committed.status === "delivered") return;
+    const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
     // The idle settlement committed this row with the child's frozen final
     // answer. This adds the goal facts; the upsert keeps the frozen content.
     const payload = childCompletionPayload(child, goal);
-    const personalConnectionDelegations = await getSessionParentPersonalConnectionDelegations(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const mcpAccountBindings = await getSessionParentMcpAccountBindings(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const xaiAuthority = await getSessionParentXaiProviderAccountAuthority(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const claudeAuthority = await getSessionParentClaudeProviderAccountAuthority(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
-      accountId: child.accountId,
-      workspaceId,
-      sourceSessionId: child.id,
-      targetSessionId: child.parentSessionId,
+      // Lifecycle settlement owns the complete accepted authority. Enrichment
+      // changes only goal facts, never reconstructs or drops frozen lineage.
+      ...committed,
       kind: "child_terminal_result",
       classification: goal?.status === "paused" ? "action_required" : "success",
-      sourceId: child.id,
-      dedupeKey: clientEventId,
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
-      lineage: {
-        ...(claudeAuthority.subjectId
-          ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
-          : {}),
-        childSessionId: child.id,
-        parentSessionId: child.parentSessionId,
-        ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
-      },
-      personalConnectionDelegations,
-      mcpAccountBindings,
-      xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
-      claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
       return;
@@ -127,7 +99,7 @@ export async function notifyParentOfChildIdle(
     // reaper retries it; child terminal settlement never depends on this turn.
     svc.observability.error("Failed to wake parent session on worker idle boundary", {
       childSessionId,
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }
@@ -164,7 +136,7 @@ export async function deliverChildLifecycleOutboxToParent(
     svc.observability.error("Failed to deliver committed child-lifecycle notice", {
       childSessionId,
       dedupeKey,
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }
@@ -236,6 +208,7 @@ async function deliverParentSystemUpdateOutbox(
         mcpAccountBindings: outbox.mcpAccountBindings,
         xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
         claudeProviderAccountAuthoritySnapshot: outbox.claudeProviderAccountAuthoritySnapshot,
+        subscriptionAuthority: outbox.subscriptionAuthority,
       },
       async (tx) => {
         await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);
@@ -373,6 +346,67 @@ export type WorkflowWakeReconciliationResult = {
   >;
 };
 
+/**
+ * Register durable wakes that a producer committed work for but never woke:
+ * pending child results on an idle parent, and recovering sessions still
+ * owed a physical-quiescence receipt. Registration is idempotent and lock
+ * fenced, writes only when it finds a real repair, and never delivers. The
+ * dispatcher activity runs it before claiming, and the worker's maintenance
+ * cadence runs it before checking for due wakes, so an idle tick needs no
+ * workflow execution to keep this repair cadence.
+ */
+export async function repairMissedSessionWorkflowWakes(
+  svc: Pick<NotifyServices, "db" | "observability">,
+  limit = 100,
+  overrides: Pick<
+    ReconcileSessionWorkflowWakeOverrides,
+    "repairPendingChildTerminalResultWakes" | "repairMissingQuiescenceReceiptWakes"
+  > = {},
+): Promise<void> {
+  const repairChildren =
+    overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
+  const inventory = await repairChildren(
+    svc.db,
+    limit,
+    childTerminalRepairCursors.get(svc.db) ?? null,
+  );
+  if (inventory.cursor) childTerminalRepairCursors.set(svc.db, inventory.cursor);
+  else childTerminalRepairCursors.delete(svc.db);
+  if (inventory.failed > 0) {
+    svc.observability.error("Pending child-result wake repair failed", {
+      examined: inventory.examined,
+      registered: inventory.registered,
+      failed: inventory.failed,
+    });
+  }
+  const repairQuiescence =
+    overrides.repairMissingQuiescenceReceiptWakes ?? repairMissingQuiescenceReceiptWakes;
+  // Repair discovery must never block delivery of already-pending wakes.
+  try {
+    const quiescenceInventory = await repairQuiescence(
+      svc.db,
+      limit,
+      quiescenceRepairCursors.get(svc.db) ?? null,
+    );
+    if (quiescenceInventory.cursor) {
+      quiescenceRepairCursors.set(svc.db, quiescenceInventory.cursor);
+    } else {
+      quiescenceRepairCursors.delete(svc.db);
+    }
+    if (quiescenceInventory.failed > 0) {
+      svc.observability.error("Missing quiescence-receipt wake repair failed", {
+        examined: quiescenceInventory.examined,
+        registered: quiescenceInventory.registered,
+        failed: quiescenceInventory.failed,
+      });
+    }
+  } catch (error) {
+    svc.observability.error("Missing quiescence-receipt wake repair failed", {
+      error,
+    });
+  }
+}
+
 export async function reconcilePendingSessionWorkflowWakes(
   svc: NotifyServices,
   limit = 1_000,
@@ -391,22 +425,7 @@ export async function reconcilePendingSessionWorkflowWakes(
       pendingAdmissionBlockers: {},
     };
   }
-  const repairChildren =
-    overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
-  const inventory = await repairChildren(
-    svc.db,
-    Math.min(100, limit),
-    childTerminalRepairCursors.get(svc.db) ?? null,
-  );
-  if (inventory.cursor) childTerminalRepairCursors.set(svc.db, inventory.cursor);
-  else childTerminalRepairCursors.delete(svc.db);
-  if (inventory.failed > 0) {
-    svc.observability.error("Pending child-result wake repair failed", {
-      examined: inventory.examined,
-      registered: inventory.registered,
-      failed: inventory.failed,
-    });
-  }
+  await repairMissedSessionWorkflowWakes(svc, Math.min(100, limit), overrides);
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
   let signaled = 0;
   let pendingAdmission = 0;

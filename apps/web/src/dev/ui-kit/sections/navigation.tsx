@@ -19,30 +19,30 @@ import {
   SparklesIcon,
   SquarePenIcon,
   UsersIcon,
-  VariableIcon,
+  LockKeyholeIcon,
   type LucideIcon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { Section, SectionStack, type SectionVariant } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow } from "@/components/ui/setting-row";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { Section, SectionStack, type SectionVariant } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import {
   NavGroup,
   NavItem,
   NavItemSkeleton,
   SettingsNav,
   type NavItemSize,
-} from "@/components/ui/settings-nav";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/settings-nav";
+import { Switch } from "@opengeni/react/ui/switch";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   chats,
@@ -109,10 +109,10 @@ const SETTINGS: Destination[] = [
 
 const RUNTIME: Destination[] = [
   {
-    id: "variable-sets",
-    label: "Variable sets",
-    icon: VariableIcon,
-    description: "Environment variables and secrets your agents get in their sandbox.",
+    id: "secrets",
+    label: "Secrets",
+    icon: LockKeyholeIcon,
+    description: "Vaults of passwords, keys and logins agents use by reference.",
   },
   {
     id: "sandbox-environments",
@@ -239,15 +239,15 @@ function AccessBody() {
   );
 }
 
-function VariableSetsBody() {
+function SecretsBody() {
   return (
-    <RowList label="Variable sets" variant="resource">
+    <RowList label="Vaults" variant="resource">
       {variableSets.slice(0, 4).map((set) => (
         <ListRow
           key={set.id}
-          leading={<LogoTile name={set.name} icon={<VariableIcon />} />}
+          leading={<LogoTile name={set.name} icon={<LockKeyholeIcon />} />}
           title={set.name}
-          meta={[set.variablesLabel, set.usageLabel, `Updated ${set.updatedLabel}`]}
+          meta={[set.usageLabel, `Updated ${set.updatedLabel}`]}
           onOpen={() => undefined}
           indicator="open"
         />
@@ -259,7 +259,7 @@ function VariableSetsBody() {
 function PageBody({ page, variant }: { page: string; variant: SectionVariant }) {
   if (page === "general") return <GeneralBody variant={variant} />;
   if (page === "access") return <AccessBody />;
-  if (page === "variable-sets") return <VariableSetsBody />;
+  if (page === "secrets") return <SecretsBody />;
   return null;
 }
 
@@ -271,11 +271,11 @@ function PageActions({ page }: { page: string }) {
         Add people
       </Button>
     );
-  if (page === "variable-sets")
+  if (page === "secrets")
     return (
       <Button>
         <PlusIcon aria-hidden="true" />
-        New variable set
+        New vault
       </Button>
     );
   return null;

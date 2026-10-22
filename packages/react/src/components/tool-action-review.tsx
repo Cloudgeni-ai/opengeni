@@ -10,6 +10,8 @@ import {
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
 import type { ToolActionReview, ToolReviewDetailsPage, ToolReviewStatus } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
+import { SecretRefText } from "./secret-ref-chip";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ToolReviewDetailsLoader = (
   review: ToolActionReview,
@@ -17,32 +19,32 @@ export type ToolReviewDetailsLoader = (
   offset: number,
 ) => Promise<ToolReviewDetailsPage>;
 
-const statusText: Record<ToolReviewStatus, string> = {
-  pending: "Approval needed",
-  approved: "Approved",
-  executing: "Approved · running",
-  completed: "Approved · done",
-  partial: "Partly done",
-  unknown: "Outcome unknown",
-  rejected: "Declined",
-  cancelled: "Cancelled",
-  expired: "Expired",
-  revoked: "Access unavailable",
-  blocked: "Blocked",
-  stale: "No longer valid",
-  failed: "Failed",
-  unavailable: "Details unavailable",
-};
-const statusDetail: Partial<Record<ToolReviewStatus, string>> = {
-  unknown: "It may have run. Check the result before trying again.",
-  rejected: "This action did not run.",
-  cancelled: "This action did not run.",
-  expired: "This action did not run. Ask the agent to prepare it again.",
-  revoked: "This action did not run. Reconnect the account, then ask the agent to try again.",
-  stale: "The tool or account changed after this was prepared, so it did not run.",
-  partial: "Some of it ran. Check the result before continuing.",
-  failed: "The action ran but returned an error.",
-};
+const statusText = (t: OpenGeniText): Record<ToolReviewStatus, string> => ({
+  pending: t("toolActionReview.approvalNeeded"),
+  approved: t("toolActionReview.approved"),
+  executing: t("toolActionReview.approvedRunning"),
+  completed: t("toolActionReview.approvedDone"),
+  partial: t("toolActionReview.partlyDone"),
+  unknown: t("toolActionReview.outcomeUnknown"),
+  rejected: t("toolActionReview.declined"),
+  cancelled: t("toolActionReview.cancelled"),
+  expired: t("toolActionReview.expired"),
+  revoked: t("toolActionReview.accessUnavailable"),
+  blocked: t("toolActionReview.blocked"),
+  stale: t("toolActionReview.noLongerValid"),
+  failed: t("toolActionReview.failed"),
+  unavailable: t("toolActionReview.detailsUnavailable"),
+});
+const statusDetail = (t: OpenGeniText): Partial<Record<ToolReviewStatus, string>> => ({
+  unknown: t("toolActionReview.itMayHaveRunCheck"),
+  rejected: t("toolActionReview.thisActionDidNotRun"),
+  cancelled: t("toolActionReview.thisActionDidNotRun"),
+  expired: t("toolActionReview.thisActionDidNotRun2"),
+  revoked: t("toolActionReview.thisActionDidNotRun3"),
+  stale: t("toolActionReview.theToolOrAccountChanged"),
+  partial: t("toolActionReview.someOfItRanCheck"),
+  failed: t("toolActionReview.theActionRanButReturned"),
+});
 type Tone = "waiting" | "ok" | "failed" | "muted";
 const statusTone: Record<ToolReviewStatus, Tone> = {
   pending: "waiting",
@@ -76,8 +78,7 @@ const selectionPaths = new Set([
   "/labelIds",
 ]);
 /** Shown when an older request's saved values are gone: approval is impossible, decline is not. */
-export const UNRECOVERABLE_TEXT =
-  "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.";
+export const UNRECOVERABLE_TEXT = (t: OpenGeniText) => t("toolActionReview.theDetailsOfThisOlder");
 /** Long argument lists stay readable; the full set is one click away in details. */
 const VISIBLE_FIELDS = 6;
 
@@ -206,6 +207,7 @@ function ReviewFacts({
   onViewDetails?: ((path: string) => void) | undefined;
   showStatusDetail: boolean;
 }) {
+  const t = useOpenGeniText();
   const canOpen = Boolean(onViewDetails && review.detailsAvailable);
   const selection =
     review.selectionCount === undefined
@@ -225,8 +227,10 @@ function ReviewFacts({
   const note =
     (showStatusDetail
       ? review.status === "blocked"
-        ? `${review.reason || "Your permission settings block this action."} It did not run.`
-        : statusDetail[review.status]
+        ? t("toolActionReview.reasonItDidNotRun", {
+            reason: review.reason || t("toolActionReview.yourPermissionSettingsBlockThis"),
+          })
+        : statusDetail(t)[review.status]
       : undefined) ?? review.consequence;
   const samples = review.samples ?? [];
   const count = review.selectionCount ?? 0;
@@ -245,7 +249,7 @@ function ReviewFacts({
     <div className="flex min-w-0 flex-col gap-3 text-og-sm">
       {note ? <p className="m-0 leading-relaxed text-og-fg-muted">{note}</p> : null}
       {effects.length > 0 ? (
-        <ul className="m-0 list-none space-y-1 p-0" aria-label="Also changes">
+        <ul className="m-0 list-none space-y-1 p-0" aria-label={t("toolActionReview.alsoChanges")}>
           {effects.map((effect) => (
             <li key={effect} className="flex items-start gap-2 text-og-fg">
               <span
@@ -261,7 +265,9 @@ function ReviewFacts({
         <div className="min-w-0">
           {samples.length > 0 ? (
             <>
-              <p className="m-0 mb-1 text-og-xs text-og-fg-muted">Includes</p>
+              <p className="m-0 mb-1 text-og-xs text-og-fg-muted">
+                {t("toolActionReview.includes")}
+              </p>
               <ul className="m-0 list-none divide-y divide-og-border rounded-og-md border border-og-border bg-og-surface-1 p-0">
                 {samples.map((sample) => (
                   <li key={sample.id} className="min-w-0 px-3 py-2">
@@ -275,7 +281,8 @@ function ReviewFacts({
                 ))}
                 {count > samples.length ? (
                   <li className="px-3 py-2 text-og-xs text-og-fg-muted">
-                    and {(count - samples.length).toLocaleString()} more
+                    {t("toolActionReview.and")} {(count - samples.length).toLocaleString(t.locale)}{" "}
+                    {t("toolActionReview.more")}
                   </li>
                 ) : null}
               </ul>
@@ -288,7 +295,12 @@ function ReviewFacts({
               data-review-path={selection.path}
               onClick={() => onViewDetails!(selection.path)}
             >
-              {count === 1 ? `View the ${noun}` : `View all ${count.toLocaleString()} ${noun}`}
+              {count === 1
+                ? t("toolActionReview.viewTheNoun", { noun })
+                : t("toolActionReview.viewAllLocalestringNoun", {
+                    localeString: count.toLocaleString(t.locale),
+                    noun,
+                  })}
               <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
             </button>
           ) : null}
@@ -306,22 +318,25 @@ function ReviewFacts({
               </dt>
               <dd className="m-0 min-w-0 whitespace-pre-wrap break-words text-og-fg [overflow-wrap:anywhere]">
                 {field.protected ? (
-                  <span className="text-og-fg-muted">Hidden</span>
+                  <span className="text-og-fg-muted">{t("toolActionReview.hidden")}</span>
                 ) : field.truncated && canOpen ? (
                   <button
                     type="button"
                     data-review-path={field.path}
-                    aria-label={`View ${field.label}: ${field.preview}`}
+                    aria-label={t("toolActionReview.viewLabelPreview", {
+                      label: field.label,
+                      preview: field.preview,
+                    })}
                     onClick={() => onViewDetails!(field.path)}
                     className={cn(linkButton, "max-w-full")}
                   >
                     <span className="line-clamp-4 min-w-0 break-words [overflow-wrap:anywhere]">
-                      {field.preview}
+                      <SecretRefText text={field.preview} linkable={false} />
                     </span>
                     <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                   </button>
                 ) : (
-                  field.preview
+                  <SecretRefText text={field.preview} />
                 )}
               </dd>
             </div>
@@ -330,7 +345,10 @@ function ReviewFacts({
       ) : null}
       {hiddenFields > 0 ? (
         <p className="m-0 text-og-xs text-og-fg-muted">
-          {hiddenFields === 1 ? "1 more value" : `${hiddenFields} more values`} in details
+          {hiddenFields === 1
+            ? t("toolActionReview.n1MoreValue")
+            : t("toolActionReview.hiddenfieldsMoreValues", { hiddenFields })}{" "}
+          {t("toolActionReview.inDetails")}
         </p>
       ) : null}
     </div>
@@ -348,6 +366,7 @@ export function DeclineButton({
   label?: string | undefined;
   onClick: () => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <button
       type="button"
@@ -355,7 +374,7 @@ export function DeclineButton({
       onClick={onClick}
       className="inline-flex min-h-9 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:border-og-border-strong hover:bg-og-hover disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
     >
-      {submitting ? "Declining…" : (label ?? "Decline")}
+      {submitting ? t("toolActionReview.declining") : (label ?? t("toolActionReview.decline"))}
     </button>
   );
 }
@@ -383,6 +402,7 @@ export function ToolActionReviewCard({
   /** Render without card chrome, e.g. inside an expanded timeline row. */
   bare?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const titleId = useId();
   const canApprove = review.availableActions.includes("approve") && !!onApprove;
   const canReject = review.availableActions.includes("reject") && !!onReject;
@@ -391,11 +411,11 @@ export function ToolActionReviewCard({
   const tone: Tone = statusTone[review.status];
   const eyebrow = submitting
     ? submitting === "approve"
-      ? "Approving…"
-      : "Declining…"
+      ? t("toolActionReview.approving")
+      : t("toolActionReview.declining")
     : review.status === "pending"
-      ? (pendingLabel ?? statusText.pending)
-      : statusText[review.status];
+      ? (pendingLabel ?? statusText(t).pending)
+      : statusText(t)[review.status];
   const detailsLink =
     review.detailsAvailable && onViewDetails ? (
       <button
@@ -404,7 +424,7 @@ export function ToolActionReviewCard({
         data-review-path=""
         onClick={() => onViewDetails("")}
       >
-        Details
+        {t("toolActionReview.details")}
       </button>
     ) : null;
   const reason = review.reason.trim();
@@ -450,7 +470,7 @@ export function ToolActionReviewCard({
                   {submitting === "approve" ? (
                     <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
                   ) : null}
-                  {submitting === "approve" ? "Approving…" : review.approveLabel}
+                  {submitting === "approve" ? t("toolActionReview.approving") : review.approveLabel}
                 </button>
               ) : null}
             </div>
@@ -459,7 +479,7 @@ export function ToolActionReviewCard({
       }
     >
       {actionable && !canApprove ? (
-        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">{UNRECOVERABLE_TEXT}</p>
+        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">{UNRECOVERABLE_TEXT(t)}</p>
       ) : null}
       <ReviewFacts
         review={review}
@@ -486,6 +506,7 @@ export function ToolActionReviewDetails({
   /** Hosts rendering simultaneous previews can retain their own focus. */
   manageFocus?: boolean;
 }) {
+  const t = useOpenGeniText();
   const [path, setPath] = useState(initialPath);
   const [trail, setTrail] = useState<Array<{ path: string; label: string }>>([]);
   const [offset, setOffset] = useState(0);
@@ -548,7 +569,7 @@ export function ToolActionReviewDetails({
         className="mb-4 inline-flex min-h-11 items-center gap-2 rounded-og-md pr-2 text-og-sm text-og-fg-muted hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
       >
         <ArrowLeftIcon className="size-4" aria-hidden="true" />
-        Back to review
+        {t("toolActionReview.backToReview")}
       </button>
       <h2
         ref={heading}
@@ -561,7 +582,7 @@ export function ToolActionReviewDetails({
         <p className="m-0 mt-1 text-og-sm text-og-fg-muted">{review.accountLabel}</p>
       ) : null}
       <p className="m-0 mt-2 text-og-xs text-og-fg-subtle">
-        The exact values saved for this action. Passwords and keys stay hidden.
+        {t("toolActionReview.theExactValuesSavedFor")}
       </p>
       {trail.length > 0 ? (
         <button
@@ -570,23 +591,23 @@ export function ToolActionReviewDetails({
           onClick={up}
         >
           <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
-          Back to {trail.at(-1)?.label ?? "all values"}
+          {t("toolActionReview.backTo")} {trail.at(-1)?.label ?? t("toolActionReview.allValues")}
         </button>
       ) : null}
       {error ? (
         <div role="alert" className="mt-4 py-4 text-og-sm">
-          Couldn't load these details.{" "}
+          {t("toolActionReview.couldnTLoadTheseDetails")}{" "}
           <button
             type="button"
             onClick={() => setRetry((value) => value + 1)}
             className="min-h-11 underline underline-offset-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
           >
-            Try again
+            {t("toolActionReview.tryAgain")}
           </button>
         </div>
       ) : !page ? (
         <p role="status" className="mt-4 py-4 text-og-sm text-og-fg-muted">
-          Loading details…
+          {t("toolActionReview.loadingDetails")}
         </p>
       ) : (
         <>
@@ -598,25 +619,30 @@ export function ToolActionReviewDetails({
                   {item.truncated && item.path ? (
                     <button
                       type="button"
-                      aria-label={`Open ${item.label}`}
+                      aria-label={t("toolActionReview.openLabel", { label: item.label })}
                       className={cn(linkButton, "max-w-full")}
                       onClick={() => open(item.path!, item.label)}
                     >
                       <span className="min-w-0 break-words focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40">
-                        {item.value}
+                        <SecretRefText text={item.value} linkable={false} />
                       </span>
                       <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                     </button>
                   ) : (
-                    item.value
+                    <SecretRefText text={item.value} />
                   )}
+                  {item.detail ? (
+                    <span className="mt-0.5 block text-og-xs text-og-fg-muted">
+                      <SecretRefText text={item.detail} linkable={false} />
+                    </span>
+                  ) : null}
                 </dd>
               </div>
             ))}
           </dl>
           {page.total > page.items.length || offset > 0 ? (
             <nav
-              aria-label="Detail pages"
+              aria-label={t("toolActionReview.detailPages")}
               className="mt-4 flex flex-wrap items-center justify-between gap-3 text-og-sm"
             >
               <button
@@ -625,12 +651,12 @@ export function ToolActionReviewDetails({
                 onClick={() => setOffset(Math.max(0, offset - 25))}
                 className="min-h-11 rounded-og-md border border-og-border px-3 hover:bg-og-hover disabled:opacity-40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
               >
-                Previous
+                {t("toolActionReview.previous")}
               </button>
               <span className="text-og-fg-muted tabular-nums">
                 {page.total === 0
-                  ? "No items"
-                  : `${(offset + 1).toLocaleString()}–${(offset + page.items.length).toLocaleString()} of ${page.total.toLocaleString()}`}
+                  ? t("toolActionReview.noItems")
+                  : `${(offset + 1).toLocaleString(t.locale)}–${(offset + page.items.length).toLocaleString(t.locale)} of ${page.total.toLocaleString(t.locale)}`}
               </span>
               <button
                 type="button"
@@ -638,7 +664,7 @@ export function ToolActionReviewDetails({
                 onClick={() => setOffset(page.nextOffset ?? offset)}
                 className="min-h-11 rounded-og-md border border-og-border px-3 hover:bg-og-hover disabled:opacity-40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
               >
-                Next
+                {t("toolActionReview.next")}
               </button>
             </nav>
           ) : null}

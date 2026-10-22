@@ -70,6 +70,220 @@ fn create_sheet_transaction() -> CollaborationTransaction {
     )
 }
 
+#[test]
+fn dimensions_persist_replay_converge_and_selectively_undo() {
+    let mut seed = CollaborativeWorkbook::new(55).unwrap();
+    seed.apply_transaction(create_sheet_transaction()).unwrap();
+    let old_bytes = encode_collaboration_snapshot(&seed).unwrap();
+    assert_eq!(
+        encode_collaboration_snapshot(&decode_collaboration_snapshot(&old_bytes).unwrap()).unwrap(),
+        old_bytes
+    );
+    let resize = |tx, op, replica, index, pixels| {
+        transaction(
+            tx,
+            replica,
+            1,
+            &[(1, 1)],
+            vec![operation(
+                op,
+                CollaborationCommand::SetDimension {
+                    sheet: generation(sheet_id(10), 1),
+                    axis: DimensionAxis::Row,
+                    index,
+                    pixels,
+                },
+            )],
+        )
+    };
+    let a = resize(2, 2, 2, 3, Some(40));
+    let b = resize(3, 3, 3, 3, Some(80));
+    let c = resize(4, 4, 4, 4, Some(100));
+    let mut left = seed.clone();
+    let mut right = seed;
+    for edit in [&a, &b, &c] {
+        left.apply_transaction(edit.clone()).unwrap();
+    }
+    for edit in [&c, &b, &a] {
+        right.apply_transaction(edit.clone()).unwrap();
+    }
+    assert_eq!(left.workbook(), right.workbook());
+    let bytes = encode_collaboration_snapshot(&left).unwrap();
+    assert_eq!(bytes, encode_collaboration_snapshot(&right).unwrap());
+    assert_ne!(Sha256::digest(&bytes), Sha256::digest(&old_bytes));
+    let restored = decode_collaboration_snapshot(&bytes).unwrap();
+    assert_eq!(left.workbook(), restored.workbook());
+    assert_eq!(bytes, encode_collaboration_snapshot(&restored).unwrap());
+    let before_replay = bytes;
+    left.apply_transaction(a.clone()).unwrap();
+    assert_eq!(before_replay, encode_collaboration_snapshot(&left).unwrap());
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Row, 3),
+        80
+    );
+    let undo = transaction(
+        5,
+        2,
+        2,
+        &[(1, 1), (2, 1), (3, 1), (4, 1)],
+        vec![operation(
+            5,
+            CollaborationCommand::Undo {
+                target: b.operations()[0].id(),
+            },
+        )],
+    );
+    left.apply_transaction(undo).unwrap();
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Row, 3),
+        40
+    );
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Row, 4),
+        100
+    );
+    let reset = transaction(
+        6,
+        2,
+        3,
+        &[(1, 1), (2, 2), (3, 1), (4, 1)],
+        vec![operation(
+            6,
+            CollaborationCommand::SetDimension {
+                sheet: generation(sheet_id(10), 1),
+                axis: DimensionAxis::Row,
+                index: 3,
+                pixels: None,
+            },
+        )],
+    );
+    left.apply_transaction(reset).unwrap();
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Row, 3),
+        24
+    );
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_entries(DimensionAxis::Row)
+            .collect::<Vec<_>>(),
+        vec![(4, 100)]
+    );
+    left.apply_transaction(transaction(
+        7,
+        2,
+        4,
+        &[(1, 1), (2, 3), (3, 1), (4, 1)],
+        vec![operation(
+            7,
+            CollaborationCommand::Undo {
+                target: OperationId::from_stable_id(StableId::from_parts(91, 6)),
+            },
+        )],
+    ))
+    .unwrap();
+    assert_eq!(
+        left.workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Row, 3),
+        40
+    );
+    let snapshot = encode_collaboration_snapshot(&left).unwrap();
+    assert_eq!(
+        decode_collaboration_snapshot(&snapshot).unwrap().workbook(),
+        left.workbook()
+    );
+}
+
+#[test]
+fn dimension_batch_validation_is_atomic_and_sheet_delete_undo_restores_geometry() {
+    let mut workbook = CollaborativeWorkbook::new(55).unwrap();
+    workbook
+        .apply_transaction(create_sheet_transaction())
+        .unwrap();
+    let before = encode_collaboration_snapshot(&workbook).unwrap();
+    let resize = |pixels| CollaborationCommand::SetDimension {
+        sheet: generation(sheet_id(10), 1),
+        axis: DimensionAxis::Column,
+        index: u32::MAX,
+        pixels,
+    };
+    for pixels in [Some(0), Some(4097), Some(96)] {
+        assert_eq!(
+            workbook
+                .apply_transaction(transaction(
+                    2,
+                    2,
+                    1,
+                    &[(1, 1)],
+                    vec![operation(2, resize(pixels))]
+                ))
+                .unwrap_err(),
+            CollaborationError::InvalidDimension
+        );
+        assert_eq!(before, encode_collaboration_snapshot(&workbook).unwrap());
+    }
+    workbook
+        .apply_transaction(transaction(
+            2,
+            2,
+            1,
+            &[(1, 1)],
+            vec![operation(2, resize(Some(150)))],
+        ))
+        .unwrap();
+    workbook
+        .apply_transaction(transaction(
+            3,
+            2,
+            2,
+            &[(1, 1), (2, 1)],
+            vec![operation(
+                3,
+                CollaborationCommand::DeleteSheet {
+                    sheet: generation(sheet_id(10), 1),
+                },
+            )],
+        ))
+        .unwrap();
+    workbook
+        .apply_transaction(transaction(
+            4,
+            2,
+            3,
+            &[(1, 1), (2, 2)],
+            vec![operation(
+                4,
+                CollaborationCommand::Undo {
+                    target: OperationId::from_stable_id(StableId::from_parts(91, 3)),
+                },
+            )],
+        ))
+        .unwrap();
+    assert_eq!(
+        workbook
+            .workbook()
+            .sheet(sheet_id(10))
+            .unwrap()
+            .dimension_pixels(DimensionAxis::Column, u32::MAX),
+        150
+    );
+}
+
 fn set_cell_transaction(
     transaction_id: u64,
     operation_id: u64,

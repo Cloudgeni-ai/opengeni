@@ -1,6 +1,6 @@
 # `@opengeni/artifact-kernel-wasm-spreadsheet`
 
-Exact, capability-scoped WebAssembly runtime for the OpenGeni spreadsheet editor.
+Exact, capability-scoped WebAssembly runtime for the Opengeni spreadsheet editor.
 It is generated from the safe Rust artifact kernel and loaded only in the SDK's
 dedicated module Worker. It performs no runtime download or version discovery.
 

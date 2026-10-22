@@ -32,7 +32,7 @@ describe("native Codex subscription realtime call", () => {
         sdp: offer,
         version: "v3",
         sessionId: "11111111-1111-4111-8111-111111111111",
-        instructions: "Help with the current OpenGeni session.",
+        instructions: "Help with the current Opengeni session.",
         initialItems: [
           { role: "developer", text: "Use the ordinary session context." },
           { role: "user", text: "What did we decide?" },
@@ -65,7 +65,7 @@ describe("native Codex subscription realtime call", () => {
     expect(await request.json()).toEqual({
       sdp: offer,
       session: {
-        instructions: "Help with the current OpenGeni session.",
+        instructions: "Help with the current Opengeni session.",
         audio: { output: { voice: "juniper" } },
         delegation: { type: "client" },
         model: "gpt-live-1-codex",

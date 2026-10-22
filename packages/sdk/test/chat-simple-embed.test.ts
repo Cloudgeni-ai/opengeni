@@ -2,7 +2,7 @@
 // Workspaces are created on first use, the organization comes from the key,
 // and membership is left to the API (no client-side external-member calls).
 import { describe, expect, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import { createSessionProxyHandler } from "../src/session-proxy";
 
 const API = "https://api.example.test";
@@ -72,7 +72,7 @@ function actorOf(request: Recorded): unknown {
 describe("simple embed path", () => {
   test("organizationId is optional and derived once from the key", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     expect(og.organizationId).toBe("");
     const [a, b] = await Promise.all([
       og.workspaceId({ tenant: "acme" }),
@@ -90,7 +90,7 @@ describe("simple embed path", () => {
 
   test("an explicit organizationId skips the lookup", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       organizationId: ORGANIZATION_ID,
       baseUrl: API,
@@ -108,14 +108,14 @@ describe("simple embed path", () => {
       effectiveWorkspacePermissions: [],
       note: "",
     });
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     await expect(og.workspaceId({ tenant: "acme" })).rejects.toThrow("organization API key");
     expect(api.ensures()).toHaveLength(0);
   });
 
   test("blank env values fall back to the hosted API and the key's organization", async () => {
     const seen: string[] = [];
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       // What `process.env.X` yields for `OPENGENI_API_BASE_URL=` in a copied .env.example.
       baseUrl: "",
@@ -132,7 +132,7 @@ describe("simple embed path", () => {
 
   test("workspaceId translates tenant, user and explicit ids; only per-user workspaces add their owner", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     const tenant = await og.workspaceId({ tenant: "acme" });
     const alice = await og.workspaceId({ user: "alice" });
     const bob = await og.workspaceId({ user: "bob" });
@@ -167,7 +167,7 @@ describe("simple embed path", () => {
     "chat() with %s acts as the user in the mapped workspace",
     async (_label, target, owners) => {
       const api = fakeApi();
-      const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+      const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
       const expected = await og.workspaceId({ ...target, user: "alice" });
       const chat = await og.chat({ ...target, user: "alice", conversation: "c1" });
       expect(chat.workspaceId).toBe(expected);
@@ -183,7 +183,7 @@ describe("simple embed path", () => {
 
   test("the proxy's client config names the resolved workspace for a baseUrl-only browser", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     const handler = createSessionProxyHandler(og, { resolve: () => ({ user: "alice" }) });
     const response = await handler(
       new Request("https://product.test/api/opengeni/v1/config/client"),
@@ -195,7 +195,7 @@ describe("simple embed path", () => {
 
   test("chat() without tenant, workspaceId or user is refused", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     // The type requires user, tenant or workspaceId; check the runtime guard too.
     await expect(og.chat({ conversation: "c1" } as never)).rejects.toThrow(
       "tenant, user, or workspaceId",
@@ -210,7 +210,7 @@ describe("simple embed path", () => {
     "the session proxy resolves %s to the same workspace as og.workspaceId",
     async (_label, target, owners) => {
       const api = fakeApi();
-      const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+      const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
       const handler = createSessionProxyHandler(og, {
         resolve: () => ({ ...target, user: "alice" }),
         createSession: (input) => input,
@@ -244,7 +244,7 @@ describe("simple embed path", () => {
     ["empty workspaceId", { workspaceId: "" }],
   ] as const)("the session proxy refuses a resolve with an %s", async (_label, target) => {
     const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const og = new Opengeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     const handler = createSessionProxyHandler(og, {
       resolve: () => ({ ...target, user: "alice" }) as never,
     });

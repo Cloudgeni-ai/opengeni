@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import type {
+  ConnectionAccountIntent,
   McpConnectionAccountBinding,
   McpPersonalConnectionDelegation,
   SessionEventType,
@@ -9,7 +10,10 @@ import type {
   SessionRealtimeModel,
 } from "@opengeni/contracts";
 import { McpPersonalConnectionDelegations } from "@opengeni/contracts";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -74,6 +78,8 @@ export type BeginSessionRealtimeInput = {
   model: SessionRealtimeModel;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+  /** The voice owner's account intent, carried by the turns this lease admits. */
+  connectionAccountIntent?: ConnectionAccountIntent | null;
   now?: Date;
   leaseMs?: number;
 };
@@ -98,6 +104,8 @@ export type RenewSessionRealtimeInput = {
 
 export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs" | "extendLease"> & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
+  /** The ending person's own label (their email), so the flushed tail names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
 };
 
 export type AssertSessionRealtimeOwnerInput = Omit<
@@ -279,6 +287,7 @@ async function endWithEvent(
   row: RealtimeRow,
   reason: SessionRealtimeEndReason,
   now: Date,
+  ownerSubjectLabel?: string | null,
 ): Promise<{
   mode: SessionRealtimeMode;
   eventId: string;
@@ -315,6 +324,7 @@ async function endWithEvent(
     sessionId: session.id,
     realtimeId: ended.id,
     ownerSubjectId: ended.ownerSubjectId,
+    ownerSubjectLabel,
     now,
   });
   const workflowWakeRevision = await registerNormalModeWake(db, session, `realtime_${reason}`);
@@ -441,6 +451,7 @@ export async function beginSessionRealtimeInTransaction(
         input.personalConnectionDelegations ?? [],
       ),
       mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+      connectionAccountIntent: parseConnectionAccountIntent(input.connectionAccountIntent),
       model: input.model,
       state: "active",
       version: 1,
@@ -666,7 +677,7 @@ export async function endSessionRealtimeInTransaction(
   }
   const reason: SessionRealtimeEndReason =
     row.leaseExpiresAt <= now ? "lease_expired" : input.reason;
-  const ended = await endWithEvent(db, session, row, reason, now);
+  const ended = await endWithEvent(db, session, row, reason, now, input.ownerSubjectLabel);
   return {
     mode: ended.mode,
     replay: false,
@@ -685,4 +696,27 @@ export async function settleExpiredSessionRealtimeInTransaction(
   if (!row || row.leaseExpiresAt > now) return session;
   const expired = await endWithEvent(db, session, row, "lease_expired", now);
   return expired.session;
+}
+
+/**
+ * End the chat's voice session because the chat became Only me: whoever
+ * started it, its delegations and account bindings stop applying. An
+ * already-expired lease ends as `lease_expired`, exactly as it would lazily.
+ * Callers hold the session-event write locks.
+ */
+export async function endSessionRealtimeForPrivateTransitionInTransaction(
+  db: SessionActivityDatabase,
+  session: SessionRow,
+  now = new Date(),
+): Promise<{ eventId: string; workflowWakeRevision: number } | null> {
+  const row = await loadActiveRowForUpdate(db, session.workspaceId, session.id);
+  if (!row) return null;
+  const ended = await endWithEvent(
+    db,
+    session,
+    row,
+    row.leaseExpiresAt <= now ? "lease_expired" : "authority_revoked",
+    now,
+  );
+  return { eventId: ended.eventId, workflowWakeRevision: ended.workflowWakeRevision };
 }

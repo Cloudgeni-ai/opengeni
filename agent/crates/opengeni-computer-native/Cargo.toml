@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-computer-native"
-description = "Native AX/AT-SPI computer adapter used by the placement-local OpenGeni computer controller."
+description = "Native AX/AT-SPI computer adapter used by the placement-local Opengeni computer controller."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,6 +30,7 @@ async-lock = { workspace = true }
 async-signal = { workspace = true }
 image = { workspace = true }
 indexmap = { workspace = true }
+opengeni-agent-pipewire-ffi = { path = "../opengeni-agent-pipewire-ffi" }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 proc-macro-crate = { workspace = true }

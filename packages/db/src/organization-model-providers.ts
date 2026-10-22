@@ -1,29 +1,47 @@
 import { createHash } from "node:crypto";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  CLAUDE_DEFAULT_CONNECTION_MODEL_IDS,
+  environmentsEncryptionKeyBytes,
+  type Settings,
+} from "@opengeni/config";
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
-import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
-import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
+import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
+import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
+import {
+  subscriptionCoreClaudeCustomModelAdmitted,
+  type SubscriptionCoreClaudeAdmissionCarrier,
+} from "./subscription-core-claude-reads";
+import { readSubscriptionCoreProviderRoute } from "./subscription-core/provider-route";
 import { decryptEnvironmentValue } from "./environment-crypto";
+import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
 
-export type OrganizationModelProviderKind =
+/** Providers whose organization key runs models, with custom models to choose. */
+export type OrganizationModelCatalogProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper"
+  | "openai"
+  | "azure_openai";
+/** Every organization provider key, including ElevenLabs for realtime voice. */
+export type OrganizationModelProviderKind = OrganizationModelCatalogProviderKind | "elevenlabs";
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
   version: number;
+  /** Azure OpenAI only: the non-secret resource endpoint; null for every other kind. */
+  endpoint: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
 export type OrganizationModelProviderCustomModel = {
   id: string;
   accountId: string;
-  providerKind: OrganizationModelProviderKind;
+  providerKind: OrganizationModelCatalogProviderKind;
   upstreamModelId: string;
   label: string | null;
   version: number;
@@ -35,7 +53,35 @@ export type OrganizationModelProviderCustomModel = {
 /** Exact accepted source; never resolve the caller's current pool at this fence. */
 export type OrganizationClaudeModelAdmissionAuthority =
   | { sessionId: string }
-  | { authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 };
+  | {
+      authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+      /**
+       * The scheduled task an update re-admits. On Claude's core route its
+       * accepted authority (the task's compatibility record) decides instead
+       * of the v1 snapshot; ignored on the legacy route.
+       */
+      scheduledTaskId?: string;
+      /**
+       * The accepted source a fresh prompt copies: an edit's source turn, or
+       * the receiving session of agent-submitted work. On Claude's core
+       * route its accepted authority decides; ignored on the legacy route
+       * (the snapshot already carries it). Absent for a human's own new work
+       * and for service actors, which resolve the current source.
+       */
+      acceptedSource?:
+        | { kind: "session_turn"; turnId: string }
+        | { kind: "receiving_session"; sessionId: string };
+    };
+
+/** The carrier whose accepted authority Claude's core route reads for an admission. */
+function claudeAdmissionCarrier(
+  authority: OrganizationClaudeModelAdmissionAuthority,
+): SubscriptionCoreClaudeAdmissionCarrier | null {
+  if ("sessionId" in authority) return { kind: "session_initial", sessionId: authority.sessionId };
+  if (authority.scheduledTaskId !== undefined)
+    return { kind: "scheduled_task", scheduledTaskId: authority.scheduledTaskId };
+  return authority.acceptedSource ?? null;
+}
 
 export class OrganizationModelProviderConflictError extends Error {}
 export class OrganizationModelProviderLimitError extends Error {}
@@ -75,6 +121,7 @@ function mapConnection(
     providerKind: row.providerKind,
     status: row.status,
     version: row.version,
+    endpoint: row.endpoint ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -87,6 +134,7 @@ function mapConnectionOperation(
     providerKind: row.providerKind,
     status: row.resultStatus,
     version: row.resultVersion,
+    endpoint: row.resultEndpoint ?? null,
     createdAt: row.resultCreatedAt,
     updatedAt: row.resultUpdatedAt,
   };
@@ -108,12 +156,13 @@ async function recordConnectionOperation(
     requestHash: input.requestHash,
     resultStatus: input.connection.status,
     resultVersion: input.connection.version,
+    resultEndpoint: input.connection.endpoint,
     resultCreatedAt: input.connection.createdAt,
     resultUpdatedAt: input.connection.updatedAt,
   });
 }
 
-function mapModel(
+export function mapOrganizationModelProviderCustomModel(
   row: typeof schema.organizationModelProviderCustomModels.$inferSelect,
 ): OrganizationModelProviderCustomModel {
   return {
@@ -128,6 +177,8 @@ function mapModel(
     updatedAt: row.updatedAt,
   };
 }
+
+const mapModel = mapOrganizationModelProviderCustomModel;
 
 export async function getOrganizationModelProviderConnection(
   db: Database,
@@ -160,10 +211,20 @@ export async function upsertOrganizationModelProviderConnection(
     providerKind: OrganizationModelProviderKind;
     credentialEncrypted: string;
     credentialDigest: string;
+    /**
+     * Required for `azure_openai` and refused for every other kind: the
+     * normalized non-secret resource endpoint. The request hash binds it with
+     * the key digest, so a replay naming another endpoint conflicts and an
+     * endpoint change is a new connection version.
+     */
+    endpoint?: string | null;
     operationId: string;
     expectedVersion?: number;
   },
 ): Promise<OrganizationModelProviderConnection> {
+  const endpoint = input.endpoint ?? null;
+  if ((input.providerKind === "azure_openai") !== (endpoint !== null))
+    throw new Error("an organization Azure OpenAI connection needs exactly its resource endpoint");
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider:${input.organizationId}:${input.providerKind}`}, 0))`,
@@ -172,6 +233,8 @@ export async function upsertOrganizationModelProviderConnection(
       operation: "upsert",
       expectedVersion: input.expectedVersion,
       credentialDigest: input.credentialDigest,
+      // Present only for Azure, so every pre-existing kind keeps its hash.
+      ...(endpoint === null ? {} : { endpoint }),
     });
     const [replay] = await scopedDb
       .select()
@@ -207,6 +270,7 @@ export async function upsertOrganizationModelProviderConnection(
           .set({
             status: "active",
             credentialEncrypted: input.credentialEncrypted,
+            endpoint,
             version: existing.version + 1,
             operationId: input.operationId,
             requestHash,
@@ -221,6 +285,7 @@ export async function upsertOrganizationModelProviderConnection(
             accountId: input.organizationId,
             providerKind: input.providerKind,
             credentialEncrypted: input.credentialEncrypted,
+            endpoint,
             operationId: input.operationId,
             requestHash,
             updatedBySubjectId: input.actorSubjectId,
@@ -334,9 +399,20 @@ export async function loadOrganizationModelProviderApiKey(
   db: Database,
   settings: Settings,
   input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  prepared?: {
+    loadOrganizationCredentials: boolean;
+    encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  },
 ): Promise<string | null> {
   const key = environmentsEncryptionKeyBytes(settings);
+  if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
+    throw new Error("Prepared provider credentials do not match encryption settings");
+  }
   if (!key) return null;
+  if (prepared) {
+    const encrypted = prepared.encryptedCredentials[input.providerKind];
+    return encrypted === undefined ? null : decryptEnvironmentValue(key, encrypted);
+  }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
@@ -355,12 +431,130 @@ export async function loadOrganizationModelProviderApiKey(
   });
 }
 
+/** Execution metadata only, under the same tenant scope as the credential loader. */
+export async function getOrganizationModelProviderExecutionConnectionId(
+  db: Database,
+  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+): Promise<string | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.organizationModelProviderConnections.id })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row?.id ?? null;
+  });
+}
+
+/**
+ * The decrypted key and non-secret endpoint of an active organization
+ * connection, read under the workspace's RLS scope (personal workspaces never
+ * see API-key provider rows). Null when there is no active connection or no
+ * encryption key; callers then fail closed and never fall back to deployment
+ * credentials.
+ */
+export async function loadOrganizationModelProviderCredential(
+  db: Database,
+  settings: Settings,
+  input: { accountId: string; workspaceId: string; providerKind: "openai" | "azure_openai" },
+  prepared?: {
+    loadOrganizationCredentials: boolean;
+    encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+    organizationEndpoints: Partial<Record<"azure_openai", string>>;
+  },
+): Promise<{ apiKey: string; endpoint: string | null } | null> {
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
+    throw new Error("Prepared provider credentials do not match encryption settings");
+  }
+  if (!key) return null;
+  if (prepared) {
+    const encrypted = prepared.encryptedCredentials[input.providerKind];
+    if (encrypted === undefined) return null;
+    return {
+      apiKey: decryptEnvironmentValue(key, encrypted),
+      endpoint:
+        input.providerKind === "azure_openai"
+          ? (prepared.organizationEndpoints.azure_openai ?? null)
+          : null,
+    };
+  }
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
+        endpoint: schema.organizationModelProviderConnections.endpoint,
+      })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row
+      ? {
+          apiKey: decryptEnvironmentValue(key, row.credentialEncrypted),
+          endpoint: row.endpoint ?? null,
+        }
+      : null;
+  });
+}
+
+/**
+ * The administrator's view of an active organization connection credential,
+ * for a setup check (Azure deployment verification) before a custom model is
+ * saved. Never returned to a client.
+ */
+export async function loadOrganizationModelProviderCredentialForAdministrator(
+  db: Database,
+  settings: Settings,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    providerKind: OrganizationModelProviderKind;
+  },
+): Promise<{ apiKey: string; endpoint: string | null } | null> {
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (!key) return null;
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
+        endpoint: schema.organizationModelProviderConnections.endpoint,
+      })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.organizationId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row
+      ? {
+          apiKey: decryptEnvironmentValue(key, row.credentialEncrypted),
+          endpoint: row.endpoint ?? null,
+        }
+      : null;
+  });
+}
+
 export async function listOrganizationModelProviderCustomModelsForWorkspace(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     includeRetired?: boolean;
   },
 ): Promise<OrganizationModelProviderCustomModel[]> {
@@ -381,33 +575,45 @@ export async function listOrganizationModelProviderCustomModelsForWorkspace(
   });
 }
 
+export type OrganizationModelProviderCatalogEntry = {
+  active: boolean;
+  models: OrganizationModelProviderCustomModel[];
+  /** Azure OpenAI only: the connection's non-secret endpoint (null when never connected). */
+  endpoint?: string | null;
+};
+
 /** Read provider readiness and active model definitions without credential material. */
 export async function getOrganizationModelProviderCatalogForWorkspace(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
-    providerKinds: readonly OrganizationModelProviderKind[];
+    providerKinds: readonly OrganizationModelCatalogProviderKind[];
   },
-): Promise<
-  Record<
-    OrganizationModelProviderKind,
-    { active: boolean; models: OrganizationModelProviderCustomModel[] }
-  >
-> {
+): Promise<Record<OrganizationModelCatalogProviderKind, OrganizationModelProviderCatalogEntry>> {
   const catalog: Record<
-    OrganizationModelProviderKind,
-    { active: boolean; models: OrganizationModelProviderCustomModel[] }
+    OrganizationModelCatalogProviderKind,
+    OrganizationModelProviderCatalogEntry
   > = {
     vercel_gateway: { active: false, models: [] },
     openrouter: { active: false, models: [] },
     anthropic: { active: false, models: [] },
     claude_subscription: { active: false, models: [] },
+    opper: { active: false, models: [] },
+    openai: { active: false, models: [] },
+    azure_openai: { active: false, models: [], endpoint: null },
   };
   if (input.providerKinds.length === 0) return catalog;
   return await withRlsContext(db, input, async (scopedDb) => {
+    // Every row of a requested kind: readiness comes from active rows only,
+    // while Azure's non-secret endpoint is kept from a revoked row too, so its
+    // curated deployments stay listed (not ready) instead of vanishing.
     const connections = await scopedDb
-      .select({ providerKind: schema.organizationModelProviderConnections.providerKind })
+      .select({
+        providerKind: schema.organizationModelProviderConnections.providerKind,
+        status: schema.organizationModelProviderConnections.status,
+        endpoint: schema.organizationModelProviderConnections.endpoint,
+      })
       .from(schema.organizationModelProviderConnections)
       .where(
         and(
@@ -415,7 +621,6 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
           inArray(schema.organizationModelProviderConnections.providerKind, [
             ...input.providerKinds,
           ]),
-          eq(schema.organizationModelProviderConnections.status, "active"),
         ),
       );
     const models = await scopedDb
@@ -430,7 +635,12 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
           isNull(schema.organizationModelProviderCustomModels.retiredAt),
         ),
       );
-    for (const connection of connections) catalog[connection.providerKind].active = true;
+    for (const connection of connections) {
+      if (connection.providerKind === "elevenlabs") continue;
+      const entry = catalog[connection.providerKind];
+      if (connection.status === "active") entry.active = true;
+      if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
+    }
     for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
     return catalog;
   });
@@ -441,7 +651,7 @@ export async function getOrganizationModelProviderCustomModelForExecution(
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
   },
 ): Promise<OrganizationModelProviderCustomModel | null> {
@@ -467,7 +677,11 @@ export async function getOrganizationModelProviderCustomModelForExecution(
 
 export async function withOrganizationModelProviderCustomModelReadLock<T>(
   db: Database,
-  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: OrganizationModelCatalogProviderKind;
+  },
   use: (scopedDb: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -483,7 +697,7 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   input: {
     accountId: string;
     workspaceId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
     claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
   },
@@ -491,44 +705,25 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   return await withOrganizationModelProviderCustomModelReadLock(db, input, async (scopedDb) => {
     if (input.providerKind === "claude_subscription") {
       if (!input.claudeAuthority) return null;
-      let snapshot: unknown;
-      if ("sessionId" in input.claudeAuthority) {
-        const [session] = await scopedDb
-          .select({ snapshot: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot })
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.claudeAuthority.sessionId),
-            ),
-          )
-          .limit(1);
-        snapshot = session?.snapshot;
-      } else {
-        snapshot = input.claudeAuthority.authoritySnapshot;
-      }
-      const authority = ClaudeProviderAccountAuthoritySnapshotV1.safeParse(snapshot);
-      if (!authority.success || authority.data.scope !== "organization") return null;
-      // The admission caller already established this transaction's subject.
-      // Do not borrow a session creator or infer a human for a service actor.
-      const [scope] = await rawRows<{ subjectId: string | null }>(
-        scopedDb,
-        sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
-      );
-      if (
-        !scope?.subjectId ||
-        !(await workspaceClaudeSubscriptionActiveForAuthority(
-          scopedDb,
-          { claudeSubscriptionEnabled: true },
-          {
+      // Claude's provider route (design 5.3, C2a): legacy keeps the v1
+      // admission; maintenance admits nothing; the core admits from the
+      // organization pool and never reads a v1 snapshot.
+      const route = await readSubscriptionCoreProviderRoute(scopedDb, {
+        accountId: input.accountId,
+        provider: SUBSCRIPTION_CORE_CLAUDE_PROVIDER,
+      });
+      if (route !== "core") return null;
+      if (route === "core") {
+        if (
+          !(await subscriptionCoreClaudeCustomModelAdmitted(scopedDb, {
+            accountId: input.accountId,
             workspaceId: input.workspaceId,
-            subjectId: scope.subjectId,
-            authoritySnapshot: authority.data,
-          },
-        ))
-      )
-        return null;
+            upstreamModelId: input.upstreamModelId,
+            carrier: claudeAdmissionCarrier(input.claudeAuthority),
+          }))
+        )
+          return null;
+      }
     }
     const [row] = await scopedDb
       .select()
@@ -568,7 +763,7 @@ export async function listOrganizationModelProviderCustomModels(
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
   },
 ): Promise<OrganizationModelProviderCustomModel[]> {
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
@@ -586,12 +781,55 @@ export async function listOrganizationModelProviderCustomModels(
   });
 }
 
+/**
+ * First connection of a Claude account for the organization: offer the
+ * default models. Does nothing once the organization has any Claude model
+ * record of this kind, active or removed, so a configured or trimmed list is
+ * never changed. Returns how many models were added.
+ */
+export async function seedOrganizationClaudeDefaultModels(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    providerKind: "anthropic" | "claude_subscription";
+  },
+): Promise<number> {
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider-models:${input.organizationId}:${input.providerKind}`}, 0))`,
+    );
+    const [existing] = await scopedDb
+      .select({ value: count() })
+      .from(schema.organizationModelProviderCustomModels)
+      .where(
+        and(
+          eq(schema.organizationModelProviderCustomModels.accountId, input.organizationId),
+          eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
+        ),
+      );
+    if (Number(existing?.value ?? 0) > 0) return 0;
+    await scopedDb.insert(schema.organizationModelProviderCustomModels).values(
+      CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.map((upstreamModelId) => ({
+        accountId: input.organizationId,
+        providerKind: input.providerKind,
+        upstreamModelId,
+        label: null,
+        createOperationId: crypto.randomUUID(),
+        createRequestHash: defaultModelRequestHash(upstreamModelId),
+        createdBySubjectId: input.actorSubjectId,
+      })),
+    );
+    return CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.length;
+  });
+}
+
 export async function createOrganizationModelProviderCustomModel(
   db: Database,
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     upstreamModelId: string;
     label?: string;
     operationId: string;
@@ -672,7 +910,7 @@ export async function retireOrganizationModelProviderCustomModel(
   input: {
     organizationId: string;
     actorSubjectId: string;
-    providerKind: OrganizationModelProviderKind;
+    providerKind: OrganizationModelCatalogProviderKind;
     customModelId: string;
     expectedVersion: number;
     operationId: string;

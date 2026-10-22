@@ -8,7 +8,7 @@ import {
   type ModelCatalogDocument,
 } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { canonicalConfiguredModel } from "../src/domain/sessions";
 import {
   isWorkspaceGatewayCustomModelId,
@@ -243,7 +243,7 @@ describe("model catalog source resolution", () => {
       expect(listCustom).toHaveBeenCalledWith(expect.anything(), {
         accountId,
         workspaceId,
-        providerKinds: ["vercel_gateway", "openrouter"],
+        providerKinds: ["vercel_gateway", "openrouter", "opper"],
       });
       expect(policy).toMatchObject({
         providerId: "workspace-gateway",

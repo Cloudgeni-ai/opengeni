@@ -2,7 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION, type SandboxRecoveryProjection } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
@@ -56,6 +57,41 @@ beforeAll(async () => {
 afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 });
+
+for (const width of [1440, 390]) {
+  test(`incompatible Knowledge scope shows a new-message remedy without Retry at ${width}px`, async () => {
+    const page = await browser.newPage({ viewport: { width, height: 960 } });
+    const retries: unknown[] = [];
+    const reason =
+      "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.";
+    try {
+      await installApi(page, false, retries, true, true, null, {
+        code: "knowledge_learning_scope_changed",
+        error: reason,
+        retryable: false,
+      });
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const banner = page.getByTestId("failed-session-banner");
+      await banner.waitFor({ timeout: 45_000 });
+      expect(await banner.textContent()).toBe(reason);
+      expect(await banner.getByRole("button").count()).toBe(0);
+      const composer = page.getByPlaceholder("Send a follow-up…");
+      await composer.fill("Continue with the current settings");
+      expect(await composer.inputValue()).toBe("Continue with the current settings");
+      expect(retries).toHaveLength(0);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+      ).toBeLessThanOrEqual(1);
+      if (evidenceDir)
+        await page.screenshot({
+          path: `${evidenceDir}/knowledge-scope-${width}.png`,
+          fullPage: true,
+        });
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+}
 
 for (const unsupported of [true, false]) {
   test(`real desktop session shows compact ${unsupported ? "unsupported model" : "retry"} recovery`, async () => {
@@ -333,6 +369,7 @@ async function installApi(
   retainedTurn = true,
   canControl = true,
   automaticLane: "checkpoint" | "fresh_workspace" | null = null,
+  failurePayload?: { code: string; error: string; retryable: boolean },
 ) {
   const workspace = {
     id: workspaceId,
@@ -422,6 +459,7 @@ async function installApi(
         ...(automaticLane
           ? { failureCategory: "archive_recovery", failureCode: "restore_degraded" }
           : {}),
+        ...failurePayload,
       },
     },
   };

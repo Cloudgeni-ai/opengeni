@@ -1,4 +1,10 @@
-import type { OpenGeniRequestOptions } from "./client";
+import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+export type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
+} from "@opengeni/contracts";
+import type { InteractionSessionListOptions, OpenGeniRequestOptions } from "./client";
 import { browserSessionStorageMode } from "@opengeni/contracts/browser-storage";
 import type {
   BrowserDomReadRequest,
@@ -66,7 +72,7 @@ export type InteractionControlFailure = {
   message: string;
 };
 
-/** Decodes the bounded typed control-failure details emitted by OpenGeni. Raw
+/** Decodes the bounded typed control-failure details emitted by Opengeni. Raw
  * provider/OS detail is intentionally absent; both correlation ids are opaque. */
 export function interactionControlFailureFromError(
   error: unknown,
@@ -330,36 +336,14 @@ export type NetworkRouteMutationResponse = {
   replayed: boolean;
 };
 
-export type SiteAuthFieldPurpose = "identifier" | "password" | "secret" | "totp";
-export type SiteAuthAuthority =
-  | {
-      id: string;
-      kind: "connection_fields";
-      label: string;
-      credential: InteractionCredentialAuthorityRef;
-      fields: Array<{
-        id: string;
-        purpose: SiteAuthFieldPurpose;
-        credentialKey: string;
-        digits?: number | undefined;
-        periodSeconds?: number | undefined;
-        algorithm?: "sha1" | "sha256" | "sha512" | undefined;
-      }>;
-    }
-  | {
-      id: string;
-      kind: "human";
-      label: string;
-      fields: Array<{ id: string; purpose: SiteAuthFieldPurpose }>;
-    }
-  | {
-      id: string;
-      kind: "external_provider";
-      label: string;
-      adapterId: string;
-      connectionId: string;
-      credential: InteractionCredentialAuthorityRef | null;
-    };
+export type SiteAuthAuthority = {
+  id: string;
+  kind: "external_provider";
+  label: string;
+  adapterId: string;
+  connectionId: string;
+  credential: InteractionCredentialAuthorityRef | null;
+};
 
 export type SiteAuthMethod = {
   id: string;
@@ -445,14 +429,12 @@ export type AuthRun = {
   state:
     | "discovering"
     | "awaiting_choice"
-    | "awaiting_secret"
     | "awaiting_external_action"
     | "working"
     | "verified"
     | "failed"
     | "cancelled";
   choices: Array<{ id: string; label: string; methodId: string }>;
-  pendingFields: Array<{ id: string; label: string; purpose: SiteAuthFieldPurpose }>;
   externalAction: {
     kind: "push" | "security_key" | "passkey" | "device" | "human" | "other";
     label: string;
@@ -486,36 +468,10 @@ export type ReportAuthRunRequest = {
   expectedVersion: number;
   methodId?: string | undefined;
   authorityId?: string | undefined;
-  state:
-    | "awaiting_choice"
-    | "awaiting_secret"
-    | "awaiting_external_action"
-    | "working"
-    | "failed"
-    | "cancelled";
+  state: "awaiting_choice" | "awaiting_external_action" | "working" | "failed" | "cancelled";
   choices?: AuthRun["choices"] | undefined;
-  pendingFields?: AuthRun["pendingFields"] | undefined;
   externalAction?: AuthRun["externalAction"] | undefined;
   failureCode?: string | null | undefined;
-};
-export type ProtectedAuthFillRequest = {
-  operationId: string;
-  expectedVersion: number;
-  expectedTargetGeneration: string;
-  expectedDocumentGeneration: string | null;
-  expectedFrameId: string | null;
-  authorityId: string;
-  fields: Array<{ fieldId: string; locator: BrowserLocator }>;
-  submit:
-    | { type: "none" }
-    | { type: "click"; locator: BrowserLocator }
-    | { type: "press"; key: string; locator?: BrowserLocator | undefined };
-};
-export type ProtectedAuthFillResponse = {
-  run: AuthRun;
-  status: "submitted" | "working" | "needs_human" | "stale" | "failed";
-  operationId: string;
-  replayed: boolean;
 };
 export type ExternalAuthRunRequest = {
   operationId: string;
@@ -753,6 +709,41 @@ export type BrowserDownloadSaveResponse = {
   replayed: boolean;
 };
 
+/** One browser recording as its controller reports it. */
+export type BrowserRecordingSummary = {
+  recordingId: string;
+  state: "recording" | "stopped";
+  startedAt: string;
+  stoppedAt: string | null;
+  stopReason: "requested" | "duration_limit" | "size_limit" | "session_ended" | null;
+  durationMs: number;
+  frameCount: number;
+  frameBytes: number;
+  actionCount: number;
+  bundle: { sizeBytes: number; sha256: string } | null;
+  streamError: string | null;
+};
+
+export type BrowserRecordingSaveRequest = {
+  operationId: string;
+  /** Workspace-relative .mp4 path; the action log is saved beside it. */
+  destinationPath?: string | undefined;
+};
+
+export type BrowserRecordingSaveResponse = {
+  recording: BrowserRecordingSummary;
+  video: {
+    path: string;
+    artifactId: string;
+    sizeBytes: number;
+    durationMs: number;
+    width: number;
+    height: number;
+    frameCount: number;
+  };
+  actionLogPath: string;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
@@ -783,6 +774,7 @@ export type InteractionSemanticSnapshot = {
   kind: "snapshot";
   roots: InteractionSemanticNode[];
   nodeCount: number;
+  incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
 };
 
 export type InteractionSemanticDiff = {
@@ -903,7 +895,13 @@ export type BrowserAction =
   | { type: "double_click"; locator: BrowserLocator }
   | { type: "hover"; locator: BrowserLocator }
   | { type: "fill"; locator: BrowserLocator; value: string }
-  | { type: "type"; locator?: BrowserLocator | undefined; text: string }
+  | {
+      type: "type";
+      locator?: BrowserLocator | undefined;
+      text: string;
+      /** `keys` sends one key press per character (split one-time-code boxes). */
+      mode?: "insert" | "keys" | undefined;
+    }
   | { type: "press"; locator?: BrowserLocator | undefined; key: string }
   | { type: "select"; locator: BrowserLocator; values: string[] }
   | { type: "check"; locator: BrowserLocator; checked: boolean }
@@ -972,11 +970,14 @@ export type InteractionError = {
     | "unsupported"
     | "permission_denied"
     | "machine_locked"
+    | "capacity_exhausted"
     | "attempt_stale"
     | "operation_conflict"
     | "outcome_unknown"
     | "invalid_action"
     | "timeout"
+    | "tab_not_responding"
+    | "tab_crashed"
     | "controller_lost"
     | "driver_failed";
   message: string;
@@ -1027,9 +1028,84 @@ export type BrowserSessionListResponse = {
 export type BrowserSessionMutationResponse = {
   session: BrowserSession;
   operation: InteractionLifecycleOperationReceipt;
+  /** Present only on a create that launched the browser in this request. */
+  initialView?:
+    | { targets: BrowserTarget[]; observation: BrowserObservation; notice?: string | undefined }
+    | undefined;
 };
 
 export type BrowserSessionLifecycleRequest = { operationId: string };
+
+/** Why a browser's preserved working copy cannot be adopted as it is. */
+export type BrowserWorkingCopyRefusal =
+  | "unsupported_platform"
+  | "unsupported_browser"
+  | "browser_running"
+  | "working_copy_invalid"
+  | "receipt_not_adoptable"
+  | "authority_changed"
+  | "process_state_unknown"
+  | "adoption_not_needed"
+  | "adoption_unresolved";
+
+/** One adoption of a copied working directory, as its controller recorded it. */
+export type BrowserWorkingCopyAdoption = {
+  operationId: string;
+  browserSessionId: string;
+  controllerGeneration: string;
+  manifestDigest: string;
+  phase:
+    | "intent"
+    | "copied"
+    | "receipt"
+    | "source_preserved"
+    | "adopted"
+    | "interrupted"
+    | "failed"
+    | "collision"
+    | "reverting"
+    | "reverted";
+  failureCode: string | null;
+  retainedDirectories: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Evidence about a browser's preserved working copy after its controller lost
+ * it. Freshness is never machine-proven. */
+export type BrowserWorkingCopyInspection = {
+  browserSessionId: string;
+  controllerGeneration: string;
+  adoptable: boolean;
+  refusal: BrowserWorkingCopyRefusal | null;
+  explanation: string;
+  /** `excluded` lists the controller-owned derived entries left out of the
+   * copy (journal shared-memory indexes and the per-launch launcher folder). */
+  manifest: { digest: string; entries: number; bytes: number; excluded: string[] } | null;
+  platformSupported: boolean;
+  profileIdentityMatches: boolean;
+  profileInUse: boolean | null;
+  receipt: {
+    operationId: string;
+    intent: "launch" | "suspend" | "retire" | "adopt";
+    state: string;
+    directoryLaunchAllowed: boolean;
+    authorityMatches: boolean;
+    launchedFromCheckpoint: boolean;
+    adoption: { operationId: string; manifestDigest: string } | null;
+  } | null;
+  freshness: { status: "unknown"; latestCheckpointAt: string | null };
+  activeAdoption: BrowserWorkingCopyAdoption | null;
+};
+
+export type BrowserWorkingCopyAdoptionRequest = { operationId: string; manifestDigest: string };
+
+export type BrowserWorkingCopyAdoptionResponse = {
+  inFlight: boolean;
+  adoption: BrowserWorkingCopyAdoption | null;
+  explanation: string;
+};
+
 export type BrowserOpenTargetRequest = { url?: string | undefined };
 
 export type BrowserTargetListResponse = {
@@ -1077,9 +1153,11 @@ export type BrowserSessionAttachmentRequest = {
 export type BrowserActionRequest = {
   operationId: string;
   targetId: string;
-  expectedTargetGeneration: string;
-  expectedDocumentGeneration: string | null;
-  expectedFrameId: string | null;
+  /** Omit the three fences to act on the target's current state; the API reads
+   * them from the live controller in the same request. */
+  expectedTargetGeneration?: string | undefined;
+  expectedDocumentGeneration?: string | null | undefined;
+  expectedFrameId?: string | null | undefined;
   /** `input` is negotiated by focusedInputObservations on a live attachment.
    * It returns optional native-select metadata after a pointer click, and null
    * for ordinary input. Use full for agent observations. */
@@ -1098,6 +1176,17 @@ export type BrowserActionReceipt = {
   settledAt: string | null;
   observation: BrowserObservation | null;
   error: InteractionError | null;
+  /** Elements the action's locators resolved to, in dispatch order. */
+  targets?: BrowserActionResolvedTarget[] | undefined;
+};
+
+export type BrowserActionResolvedTarget = {
+  actionIndex: number;
+  ref: string | null;
+  role: string;
+  name: string | null;
+  /** Nearest dialog, landmark, menu or toolbar around the element. */
+  container: { role: string; name: string | null } | null;
 };
 
 export type BrowserSessionHeartbeatResponse = {
@@ -1121,6 +1210,8 @@ export type ComputerSessionCapabilities = {
   backgroundActions: boolean;
   /** Raw window input stays in the background. Absent means foreground-only. */
   backgroundInput?: boolean | undefined;
+  /** Accepts a ComputerActionBatch as one operation. Absent means unsupported. */
+  actionBatches?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1232,6 +1323,16 @@ export type ComputerAction =
   | { type: "focus"; targetId: string }
   | { type: "launch"; applicationId: string };
 
+/** Semantic and keyboard actions run in order on one target as one operation,
+ * stopping at the first failure; the receipt observes the target once, after
+ * the last action. A batch stopped part way names how many actions completed
+ * in its error's details (`batchActionsCompleted`). Send it only to a session
+ * whose capabilities include actionBatches. */
+export type ComputerActionBatch = {
+  type: "batch";
+  actions: Extract<ComputerAction, { type: "semantic" | "keyboard" }>[];
+};
+
 export type CreateComputerSessionRequest = {
   operationId: string;
   sessionId: string;
@@ -1296,7 +1397,7 @@ export type ComputerActionRequest = {
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
   expectedFrameId: string | null;
-  action: ComputerAction;
+  action: ComputerAction | ComputerActionBatch;
 };
 
 export type ComputerActionReceipt = {
@@ -1386,13 +1487,6 @@ export interface InteractionTransport {
     request: ReportAuthRunRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<AuthRunMutationResponse>;
-  protectedBrowserAuthFill(
-    workspaceId: string,
-    browserSessionId: string,
-    authRunId: string,
-    request: ProtectedAuthFillRequest,
-    options?: OpenGeniRequestOptions,
-  ): Promise<ProtectedAuthFillResponse>;
   advanceExternalBrowserAuthRun(
     workspaceId: string,
     browserSessionId: string,
@@ -1470,7 +1564,7 @@ export interface InteractionTransport {
   ): Promise<BrowserRevisionListResponse>;
   listBrowserSessions(
     workspaceId: string,
-    options?: OpenGeniRequestOptions,
+    options?: OpenGeniRequestOptions | InteractionSessionListOptions,
   ): Promise<BrowserSessionListResponse>;
   getBrowserSession(
     workspaceId: string,
@@ -1516,6 +1610,13 @@ export interface InteractionTransport {
     request?: BrowserOpenTargetRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  /** Optional for custom transports predating metadata-only tab opening. */
+  openBrowserTargetWithInventory?(
+    workspaceId: string,
+    browserSessionId: string,
+    request?: BrowserOpenTargetRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserTargetListResponse>;
   selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -1609,7 +1710,7 @@ export interface InteractionTransport {
   ): Promise<BrowserSessionMutationResponse>;
   listComputerSessions(
     workspaceId: string,
-    options?: OpenGeniRequestOptions,
+    options?: OpenGeniRequestOptions | InteractionSessionListOptions,
   ): Promise<ComputerSessionListResponse>;
   getComputerSession(
     workspaceId: string,
@@ -1648,12 +1749,24 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerFrame>;
+  callNativeComputerTool?(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerNativeCallRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   actInComputer(
     workspaceId: string,
     computerSessionId: string,
     request: ComputerActionRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerActionReceipt>;
+  getNativeComputerToolReceipt?(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerNativeReceipt>;
   getComputerActionReceipt(
     workspaceId: string,
     computerSessionId: string,
@@ -1937,19 +2050,6 @@ export class AuthRunResource {
     );
   }
 
-  async protectedFill(
-    request: ProtectedAuthFillRequest,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<ProtectedAuthFillResponse> {
-    return await this.transport.protectedBrowserAuthFill(
-      this.workspaceId,
-      this.browserSessionId,
-      this.id,
-      request,
-      options,
-    );
-  }
-
   async advanceExternal(
     request: ExternalAuthRunRequest,
     options: OpenGeniRequestOptions = {},
@@ -2122,7 +2222,7 @@ export class BrowserSessionCollection {
 
   async list(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<BrowserSessionListResponse> {
     return await this.transport.listBrowserSessions(workspaceId, options);
   }
@@ -2478,7 +2578,7 @@ export class ComputerSessionCollection {
 
   async list(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<ComputerSessionListResponse> {
     return await this.transport.listComputerSessions(workspaceId, options);
   }
@@ -2547,11 +2647,34 @@ export class ComputerSessionResource {
     return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
+  async callNativeTool(
+    request: ComputerNativeCallRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.callNativeComputerTool)
+      throw new Error("Native CUA tools require a current interaction transport");
+    return await this.transport.callNativeComputerTool(this.workspaceId, this.id, request, options);
+  }
+
   async act(
     request: ComputerActionRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerActionReceipt> {
     return await this.transport.actInComputer(this.workspaceId, this.id, request, options);
+  }
+
+  async nativeReceipt(
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerNativeReceipt> {
+    if (!this.transport.getNativeComputerToolReceipt)
+      throw new Error("Native CUA receipts require a current interaction transport");
+    return await this.transport.getNativeComputerToolReceipt(
+      this.workspaceId,
+      this.id,
+      operationId,
+      options,
+    );
   }
 
   async receipt(

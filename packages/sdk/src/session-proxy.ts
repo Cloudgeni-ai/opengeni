@@ -1,3 +1,4 @@
+import { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
@@ -43,7 +44,7 @@ export {
 
 type ProxyClient = OpenGeniEmbeddingClient;
 
-/** The `@opengeni/sdk/chat` `OpenGeni` facade, structurally. */
+/** The `@opengeni/sdk/chat` `Opengeni` facade, structurally. */
 type ProxyFacade = {
   readonly client: ProxyClient;
   readonly source: string;
@@ -55,7 +56,7 @@ type ProxyFacade = {
  * Who the authenticated request acts as, in your own ids. Never derive any of
  * it from the request body or path. `{ user, tenant }`: one workspace per
  * tenant. `{ user }`: one workspace per user. `{ user, workspaceId }`: your
- * own workspace. Tenant and per-user mapping require the `OpenGeni` facade
+ * own workspace. Tenant and per-user mapping require the `Opengeni` facade
  * from `@opengeni/sdk/chat`; workspaces are created on first use and Opengeni
  * adds the user on their first request.
  */
@@ -68,6 +69,13 @@ export type SessionProxyResolution = (
   user: string;
   /** External identity source. Defaults to the facade's `source`, else `"default"`. */
   source?: string | undefined;
+  /**
+   * The user is an anonymous visitor your product has not signed in, for
+   * example a website visitor keyed by a cookie. Visitors cannot upload
+   * composer file attachments unless the handler sets `visitorUploads: true`;
+   * everything else is unchanged.
+   */
+  visitor?: boolean | undefined;
 };
 
 /** Host auth hook: return the resolution, or a `Response` (for example 401) to reject. */
@@ -93,7 +101,10 @@ export type SessionProxyContext = {
  * to refuse an input.
  */
 export type SessionProxyCreateInput = {
+  /** Empty for a voice-first session; no initial user message is fabricated. */
   initialMessage: string;
+  /** Available only while the proxy permits realtime voice. */
+  startMode?: "realtime" | undefined;
   /** Browser retry key; replay is scoped to the acting user by the API. */
   idempotencyKey?: string | undefined;
   /** Files attached to the first message (uploaded through this proxy). */
@@ -110,6 +121,8 @@ export type SessionProxyCreateInput = {
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
+  /** An empty voice-first session shell, not an initial model-producing turn. */
+  startMode?: "realtime" | undefined;
   /**
    * `realtime` is live voice: once when a call starts (refuse it, or rotate
    * MCP credentials), and before each batch of finalized transcripts and spoken
@@ -158,6 +171,13 @@ export type SessionProxyToolServer = {
    * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
    */
   approvals?: { ask: string[] | true } | undefined;
+  /**
+   * Tools the agent has from the first model request, so everyday reads (for
+   * example search and get-by-id) need no `tool_search` round trip: unprefixed
+   * MCP tool names, or `true` for every tool. Other tools stay searchable. Keep
+   * the list short and stable: every listed schema is part of each request.
+   */
+  eager?: string[] | true | undefined;
   /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
   secret?: string | undefined;
   /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
@@ -180,7 +200,7 @@ export type SessionProxyHandlerOptions = {
   authorizeMutation?: ((request: Request) => boolean | Promise<boolean>) | undefined;
   /**
    * Optional product-level session check (for example "this ticket's session
-   * belongs to this user"). OpenGeni still enforces membership and private
+   * belongs to this user"). Opengeni still enforces membership and private
    * visibility on every call.
    */
   authorizeSession?:
@@ -218,9 +238,9 @@ export type SessionProxyHandlerOptions = {
   /**
    * Attach your product's MCP tool server to every session the `createSession`
    * hook creates, authenticated as the resolved user. The proxy mints the
-   * token, adds the `mcpServers` entry (plus an eager ref when the hook lists
-   * explicit `tools`), and rotates the token on every send, steer, submit,
-   * approval decision, and human-input answer.
+   * token, adds the `mcpServers` entry (with its `eager` tools, or every tool
+   * when the hook lists explicit `tools`), and rotates the token on every send,
+   * steer, submit, approval decision, and human-input answer.
    */
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
@@ -233,13 +253,21 @@ export type SessionProxyHandlerOptions = {
    * computer screenshots, published sandbox files, and generated video
    * playback. Workspace-level artifact reads must name their session in the
    * `x-opengeni-session-id` header (`SessionConversation` does this); the proxy
-   * runs `authorizeSession` and only forwards an artifact OpenGeni proves that
+   * runs `authorizeSession` and only forwards an artifact Opengeni proves that
    * session produced. Defaults to true.
    */
   files?: boolean | undefined;
   /**
+   * Let anonymous visitors (`resolve` returned `visitor: true`) upload composer
+   * file attachments. Defaults to false: for a visitor the client config reports
+   * file uploads off, so stock UIs hide the attach button, and the upload routes
+   * are refused. Agent-produced media stays readable under `files`. Signed-in
+   * users follow `files` alone.
+   */
+  visitorUploads?: boolean | undefined;
+  /**
    * Forward composer voice input (`POST .../transcriptions`, one recording per
-   * request) as the resolved user; OpenGeni still requires that user's
+   * request) as the resolved user; Opengeni still requires that user's
    * `sessions:create` permission and the workspace's voice-input setting.
    * `false` reports voice input unavailable in the client config so stock UIs
    * hide the microphone. Defaults to true.
@@ -251,16 +279,18 @@ export type SessionProxyHandlerOptions = {
    * `.../sessions/{id}/realtime`. Opengeni still requires that user's
    * `sessions:control` permission, binds the call to that user and browser,
    * runs spoken requests as ordinary steers of the chat, and meters
-   * deployment-funded voice against the organization's credits. The stock
-   * composer shows the voice button only when a voice model is available.
-   * `false` reports `realtimeVoice: false` in the client config so stock UIs
-   * hide it, and refuses the routes. Defaults to true.
+   * deployment-funded voice against the organization's credits. Defaults to
+   * true. The stock conversation's voice button is opt-in: explicit `true`
+   * reports `realtimeVoice: true` in the client config so `SessionConversation`
+   * and `OpenGeniChat` show it (when a voice model is available), as does their
+   * own `realtimeVoice` prop. `false` reports `realtimeVoice: false` so stock
+   * UIs hide it, and refuses the routes.
    */
   realtimeVoice?: boolean | undefined;
   /**
    * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
    * so `sandbox:` links in agent replies can be downloaded. Only `path`,
-   * `encoding`, and `maxBytes` are forwarded; OpenGeni still requires the
+   * `encoding`, and `maxBytes` are forwarded; Opengeni still requires the
    * user's `files:read` permission on that session. Explicit opt-in, default
    * false. Reads are confined to its working directory, including on Connected
    * Machines; symlinked paths are refused.
@@ -273,12 +303,12 @@ export type SessionProxyHandlerOptions = {
    *
    * Every request must name its session in the `x-opengeni-session-id` header
    * (`SessionArtifactViewer` and `SessionConversation` do this). The proxy
-   * runs `authorizeSession`, then only forwards an artifact OpenGeni associates with
+   * runs `authorizeSession`, then only forwards an artifact Opengeni associates with
    * that session, so the browser cannot open other workspace artifacts through
    * it. Editing still requires the user's own `artifacts:publish` grant. Site
    * tool calls are not proxied.
    *
-   * The editor's live socket is ticket-authenticated and connects to OpenGeni
+   * The editor's live socket is ticket-authenticated and connects to Opengeni
    * directly; the ticket binds the source session and the API revalidates its
    * authority while connected. `editableLiveUrl` overrides the derived URL.
    * Site HTML streams with backpressure and cancellation, with a 25 MiB
@@ -288,9 +318,30 @@ export type SessionProxyHandlerOptions = {
    */
   artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
   /**
+   * Read the workspace's Sites without naming a session: list, detail,
+   * content and HTML of published artifacts the signed-in user may read, for
+   * pages that belong to the workspace rather than to one chat (for example a
+   * page several sessions keep up to date, shown with `SiteDetail`). Read-only:
+   * publishing, rollback and status changes stay closed. Requests that send
+   * `x-opengeni-session-id` keep the session-scoped `artifacts` checks.
+   * Explicit opt-in, default false.
+   */
+  sites?: boolean | undefined;
+  /**
+   * Let the product's Excel add-in connect the open workbook for the signed-in
+   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
+   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
+   * user in the resolved workspace; agents working for them there reach it with
+   * `excel_run`. The ticket authenticates the add-in's WebSocket to
+   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
+   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
+   * Explicit opt-in, default false.
+   */
+  office?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
-   * lists every session OpenGeni lets that user read in the workspace (shared
+   * lists every session Opengeni lets that user read in the workspace (shared
    * chats included); `false` disables listing.
    */
   sessionList?: "mine" | "visible" | false | undefined;
@@ -332,6 +383,7 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "initialMessage",
   "idempotencyKey",
   "resources",
+  "startMode",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 /** The API's single-recording ceiling (25 MiB) plus multipart framing. */
@@ -389,6 +441,8 @@ export function createSessionProxyHandler(
   const realtimeVoiceEnabled = options.realtimeVoice ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
+  const sitesEnabled = options.sites === true;
+  const officeEnabled = options.office === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -486,6 +540,9 @@ export function createSessionProxyHandler(
           "resolve must return a workspaceId (or a tenant or a user alone when given the Opengeni facade).",
         );
       }
+      // Visitors upload only when the host opts them in; reads stay under `files`.
+      const uploadsEnabled =
+        filesEnabled && (resolved.visitor !== true || options.visitorUploads === true);
       const client = service.asUser(resolved.user, { source });
       const context: SessionProxyContext = {
         request,
@@ -627,13 +684,21 @@ export function createSessionProxyHandler(
       // Unknown additive query parameters on allowlisted reads pass through, so a
       // newer browser SDK keeps working; the route and method allowlist is exact.
       const query = Object.fromEntries(url.searchParams);
-      const read = async (path: string) =>
-        json(await client.requestJson("GET", path, undefined, query, call));
+      const read = async (path: string) => {
+        const body = await client.requestJson("GET", path, undefined, query, call);
+        // Keep the projection's read-consistency sequence for the browser hooks.
+        const sequence = observedSessionSequence(body);
+        return json(
+          body,
+          200,
+          sequence === undefined ? {} : { [SESSION_SEQUENCE_HEADER]: String(sequence) },
+        );
+      };
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
           // The browser speaks this proxy's contract, not the upstream deployment's:
-          // report the server SDK's revision so an OpenGeni deploy never makes the
+          // report the server SDK's revision so an Opengeni deploy never makes the
           // embedded page look stale (and never triggers a host reload).
           const config = await client.requestJson<Record<string, unknown>>(
             "GET",
@@ -661,7 +726,13 @@ export function createSessionProxyHandler(
             }
           }
           // Upstream proxy capabilities never authorize this host's routes.
-          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
+          // Task usage limits are set by this host's server, never through the
+          // browser boundary, so the producer capability is not forwarded.
+          const {
+            artifacts: _upstreamArtifacts,
+            sessionUsageLimits: _upstreamUsageLimits,
+            ...conversationConfig
+          } = config;
           const upstreamVoice = config.voiceInput;
           if (upstreamVoice && typeof upstreamVoice === "object") {
             // Only one-shot recordings are forwarded, never resumable chunk uploads.
@@ -669,6 +740,14 @@ export function createSessionProxyHandler(
             conversationConfig.voiceInput = voiceInputEnabled
               ? voice
               : { ...voice, available: false };
+          }
+          const upstreamUploads = config.fileUploads;
+          if (!uploadsEnabled) {
+            // The browser cannot upload through this proxy: stock UIs hide the attach control.
+            conversationConfig.fileUploads = {
+              ...(upstreamUploads && typeof upstreamUploads === "object" ? upstreamUploads : {}),
+              enabled: false,
+            };
           }
           return json({
             ...conversationConfig,
@@ -683,7 +762,13 @@ export function createSessionProxyHandler(
             // Whether the stock "New chat" and "Archive" actions can succeed.
             sessionCreation: options.createSession !== undefined,
             archive: archiveEnabled,
-            ...(realtimeVoiceEnabled ? {} : { realtimeVoice: false }),
+            // Explicit true also tells stock UIs to show the voice button, which
+            // is otherwise opt-in on the embedded conversation.
+            ...(realtimeVoiceEnabled
+              ? options.realtimeVoice === true
+                ? { realtimeVoice: true }
+                : {}
+              : { realtimeVoice: false }),
             // Explicit true also tells stock UIs to offer end users the model picker.
             ...(modelSelection
               ? options.modelSelection === true
@@ -735,7 +820,20 @@ export function createSessionProxyHandler(
         return json(await client.requestJson("POST", `${base}/inference-control`, body));
       }
 
+      if (area === "office" && officeEnabled && tail.length === 1) {
+        if (tail[0] === "workbook-tickets" && method === "POST") {
+          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
+        }
+        if (tail[0] === "workbooks" && method === "GET") {
+          return await read(`${base}/office/workbooks`);
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
+      }
+
       if (area === "files" && filesEnabled && method === "POST") {
+        if (tail[0] === "uploads" && !uploadsEnabled) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
         if (tail.length === 1 && tail[0] === "uploads") {
           const body = await readJsonBody(request, maxBodyBytes);
           return json(
@@ -762,7 +860,7 @@ export function createSessionProxyHandler(
       }
 
       if (area === "artifacts") {
-        // Retained media a session produced: only an artifact OpenGeni proves
+        // Retained media a session produced: only an artifact Opengeni proves
         // that session produced, never an arbitrary workspace artifact.
         const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
@@ -814,6 +912,59 @@ export function createSessionProxyHandler(
       }
 
       if (area === "editable-artifacts" || area === "published-artifacts") {
+        if (
+          area === "published-artifacts" &&
+          sitesEnabled &&
+          !request.headers.get(SESSION_SCOPE_HEADER)
+        ) {
+          // Workspace Sites under Opengeni's own read authorization for this user.
+          const [siteId, ...siteOp] = tail as [string | undefined, ...string[]];
+          const op = siteOp.join("/");
+          if (method !== "GET") return errorJson(404, "route_not_allowed", "Not found.");
+          if (siteId === undefined) {
+            return json(
+              await client.requestJson(
+                "GET",
+                `${base}/published-artifacts`,
+                undefined,
+                pick(query, SITE_LIST_FIELDS) as Record<string, string>,
+                call,
+              ),
+            );
+          }
+          if (!SEGMENT.test(siteId) || (op !== "" && op !== "content" && op !== "html")) {
+            return errorJson(404, "route_not_allowed", "Not found.");
+          }
+          const versionId = query.versionId;
+          if (
+            versionId !== undefined &&
+            (typeof versionId !== "string" || !SEGMENT.test(versionId))
+          ) {
+            reject(400, "version_invalid", "versionId is invalid.");
+          }
+          if (op === "html") {
+            if (typeof versionId !== "string") {
+              reject(400, "version_required", "versionId is required.");
+            }
+            const html = await downloadSessionProxySiteHtml(client, workspaceId, siteId, {
+              versionId: versionId as string,
+              signal: request.signal,
+            });
+            return new Response(boundedSiteHtml(html.body, request.signal), {
+              headers: SITE_HTML_HEADERS,
+            });
+          }
+          const item = `${base}/published-artifacts/${siteId}`;
+          return json(
+            await client.requestJson(
+              "GET",
+              op === "content" ? `${item}/content` : item,
+              undefined,
+              op === "content" && typeof versionId === "string" ? { versionId } : {},
+              call,
+            ),
+          );
+        }
         if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
         const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
@@ -905,13 +1056,19 @@ export function createSessionProxyHandler(
           return errorJson(404, "route_not_allowed", "Not found.");
         }
         const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
+        if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
         const created = withBrowserCreateChoices(
           toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
           input,
         );
-        const extras = await messageExtras({ delivery: "create" });
+        const extras = await messageExtras({
+          delivery: "create",
+          ...(input.startMode ? { startMode: input.startMode } : {}),
+        });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(extras?.modelContext, created.modelContext);
         return json(
@@ -999,6 +1156,30 @@ export function createSessionProxyHandler(
             reject(400, "invalid_body", "Only { title } may be updated.");
           }
           return json(await client.requestJson("PATCH", session, { title }));
+        }
+        case "PUT attention": {
+          // Only "I have read this", for the resolved user's own read state:
+          // an open conversation acknowledges replies the person watched.
+          const through = body?.acknowledgedThroughSequence;
+          const keys = Object.keys(body ?? {});
+          if (
+            body?.unread !== false ||
+            keys.some((key) => key !== "unread" && key !== "acknowledgedThroughSequence") ||
+            (through !== undefined &&
+              (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0))
+          ) {
+            reject(
+              400,
+              "invalid_body",
+              "Only { unread: false, acknowledgedThroughSequence? } may be set.",
+            );
+          }
+          return json(
+            await client.requestJson("PUT", `${session}/attention`, {
+              unread: false,
+              ...(through !== undefined ? { acknowledgedThroughSequence: through } : {}),
+            }),
+          );
         }
         case "GET events":
           return await listEvents(client, `${session}/events`, query, call);
@@ -1133,7 +1314,12 @@ const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
-const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set(["webrtc", "gateway", "supergrok"]);
+const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set([
+  "webrtc",
+  "websocket",
+  "gateway",
+  "supergrok",
+]);
 /** Ledger entries that become (or join) messages and so accept `modelContext`. */
 const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "delegation_call",
@@ -1213,7 +1399,7 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
     );
   }
   if (url.protocol !== "https:") {
-    // OpenGeni calls the tool server from its own network; use a tunnel locally.
+    // Opengeni calls the tool server from its own network; use a tunnel locally.
     throw new TypeError("toolServer.url must be an absolute https:// URL.");
   }
   const id = toolServer.id ?? "app";
@@ -1223,6 +1409,10 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
   const ask = toolServer.approvals?.ask;
   if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
     throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
+  }
+  const eager = toolServer.eager;
+  if (eager !== undefined && eager !== true && !(Array.isArray(eager) && eager.every(isToolName))) {
+    throw new TypeError("toolServer.eager must be true or a list of tool names.");
   }
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
@@ -1250,6 +1440,12 @@ function withToolServer(
     );
   }
   const ask = toolServer.approvals?.ask;
+  const eager =
+    toolServer.eager === true
+      ? true
+      : toolServer.eager?.length
+        ? [...new Set(toolServer.eager)]
+        : undefined;
   const tools = created.tools;
   return {
     ...created,
@@ -1261,19 +1457,23 @@ function withToolServer(
         url: toolServer.url,
         headers: { Authorization: `Bearer ${token}` },
         ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
+        ...(eager !== undefined ? { eager } : {}),
       },
     ],
     // Omitted tools keep workspace defaults; the attachment alone selects the
-    // server. An explicit allow-list gets the server's tools on the first request.
+    // server, and its `eager` marker names the first-request tools. An explicit
+    // allow-list without an `eager` choice gets every server tool on the first
+    // request, as before.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
-          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: eager ?? true }],
         }
       : {}),
   };
 }
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
+const SITE_LIST_FIELDS = ["limit", "cursor", "status"] as const;
 const TICKET_FIELDS = [
   "replicaId",
   "modality",
@@ -1284,7 +1484,7 @@ const TICKET_FIELDS = [
   "commandProtocolVersion",
   "committedTransactionProtocolVersion",
 ] as const;
-// Same delivery contract as OpenGeni's own route: the browser fetches the
+// Same delivery contract as Opengeni's own route: the browser fetches the
 // HTML and renders it in a sandboxed frame; opening the URL downloads it.
 const SITE_HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
@@ -1620,13 +1820,27 @@ function createInput(
   }
   const initialMessage = body?.initialMessage;
   const idempotencyKey = body?.idempotencyKey;
-  if (typeof initialMessage !== "string" || !initialMessage.trim()) {
+  const startMode = body?.startMode;
+  if (startMode !== undefined && startMode !== "realtime") {
+    reject(400, "invalid_start_mode", "startMode must be realtime when supplied.");
+  }
+  if (startMode === "realtime" && initialMessage !== undefined && initialMessage !== "") {
+    reject(
+      400,
+      "initial_message_not_allowed",
+      "Voice-first creation does not send an initial message.",
+    );
+  }
+  if (startMode !== "realtime" && (typeof initialMessage !== "string" || !initialMessage.trim())) {
     reject(400, "initial_message_required", "initialMessage is required.");
   }
   if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
     reject(400, "invalid_idempotency_key", "idempotencyKey must be a non-empty string.");
   }
   const resources = createResources(body?.resources);
+  if (startMode === "realtime" && resources.length > 0) {
+    reject(400, "resource_not_allowed", "Keep attachments in the draft until a message is sent.");
+  }
   const policy: Pick<SessionProxyCreateInput, "model" | "reasoningEffort" | "latencyMode"> = {};
   for (const field of MODEL_FIELDS) {
     const value = body?.[field];
@@ -1637,7 +1851,8 @@ function createInput(
     (policy as Record<string, string>)[field] = value;
   }
   return {
-    initialMessage,
+    initialMessage: startMode === "realtime" ? "" : (initialMessage as string),
+    ...(startMode === "realtime" ? { startMode } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(resources.length > 0 ? { resources } : {}),
     ...policy,
@@ -1686,6 +1901,12 @@ function withBrowserCreateChoices(
   const added = (input.resources ?? []).filter((resource) => !attached.has(resource.fileId));
   return {
     ...created,
+    // Preserve browser retry identity even when a simple host hook omits it;
+    // an explicit server-owned key continues to take precedence.
+    ...(created.idempotencyKey === undefined && input.idempotencyKey
+      ? { idempotencyKey: input.idempotencyKey }
+      : {}),
+    ...(input.startMode === "realtime" ? { startMode: "realtime", initialMessage: undefined } : {}),
     ...(added.length > 0 ? { resources: [...existing, ...added] } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
@@ -1705,9 +1926,13 @@ async function transcriptionInput(request: Request): Promise<{
     reject(415, "unsupported_media_type", "Send multipart/form-data.");
   }
   const bytes = await readBoundedBytes(request, MAX_TRANSCRIPTION_BODY_BYTES);
-  let form: FormData;
+  // Only the fields this route reads; structural, so DOM and React Native
+  // typings of FormData both satisfy it.
+  let form: { get(name: string): File | string | null };
   try {
-    form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+    form = (await new Response(bytes, {
+      headers: { "Content-Type": contentType },
+    }).formData()) as unknown as { get(name: string): File | string | null };
   } catch {
     reject(400, "invalid_audio", "The recording could not be read.");
   }
@@ -1865,7 +2090,7 @@ function workspaceLiveStream(
       const event = next.value;
       controller.enqueue(
         encoder.encode(
-          `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          `${"sequence" in event ? `id: ${event.sequence}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
         ),
       );
     },
@@ -1900,7 +2125,7 @@ function warnRejectedApiKey(error: OpenGeniApiError, notice: { sent: boolean }):
   );
 }
 
-/** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
+/** Preserve Opengeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
 function errorResponse(error: unknown, rejectedKeyNotice: { sent: boolean }): Response {
   if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
   if (error instanceof OpenGeniSetupError) {

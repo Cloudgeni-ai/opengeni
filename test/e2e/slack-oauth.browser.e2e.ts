@@ -9,7 +9,8 @@ import {
   type ConnectionMetadata,
 } from "@opengeni/contracts";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000217";
@@ -185,7 +186,7 @@ describe("Slack OAuth browser acceptance", () => {
       await expectVisible(sheet.getByRole("button", { name: "Reconnect", exact: true }));
       expect(state.personalDeleteRequests).toEqual([personalConnectionId]);
 
-      // A workspace admin sees the OpenGeni bot instead, through the same sheet.
+      // A workspace admin sees the Opengeni bot instead, through the same sheet.
       state.role = "admin";
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       sheet = await openSlackSheet(page, "Not connected");
@@ -541,7 +542,7 @@ function sharedSlackBotConnection() {
       slackTeamName: "Slack Browser Workspace",
       botUserId: "U_BROWSER_BOT",
       botId: "B_BROWSER",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "slack-browser-subject",
@@ -565,7 +566,7 @@ function slackBotBinding() {
     slackTeamName: "Slack Browser Workspace",
     botId: "B_BROWSER",
     botUserId: "U_BROWSER_BOT",
-    botDisplayName: "OpenGeni",
+    botDisplayName: "Opengeni",
     state: "active",
     quarantineReason: null,
     version: 1,

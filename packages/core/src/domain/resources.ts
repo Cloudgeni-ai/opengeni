@@ -4,6 +4,7 @@ import {
   gitCredentialProviderForRepository,
   defaultRepositoryMountPath,
   mergeResourceRefs as mergeContractResourceRefs,
+  mergeToolRefEager,
   mergeToolRefs,
   normalizeRepositorySubpath,
   normalizeRepositoryTransportUri,
@@ -16,6 +17,7 @@ import {
   stableJson,
   type RepositoryResourceRef,
   type ResourceRef,
+  type ScheduledTaskToolPolicy,
   type ToolRef,
   type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
@@ -57,7 +59,12 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       kind: "mcp",
       id: tool.id,
       ...(optional ? { optional: true } : {}),
-      ...(tool.eager === true ? { eager: true } : {}),
+      ...(tool.eager === true
+        ? { eager: true }
+        : Array.isArray(tool.eager) && tool.eager.length > 0
+          ? { eager: [...new Set(tool.eager)] }
+          : {}),
+      ...(tool.allowedTools !== undefined ? { allowedTools: [...new Set(tool.allowedTools)] } : {}),
     });
   }
   return mergeToolRefs([], out);
@@ -121,6 +128,32 @@ export function withWorkspaceDefaultMcpTools(
   );
 }
 
+/**
+ * The tools a run of a schedule that starts its own session gets now. A
+ * schedule that follows the workspace defaults gets the defaults as they are
+ * at this moment (never a copy saved earlier), minus the connectors a person
+ * turned off, plus its own tools. Without a policy it gets exactly its tools.
+ * The Opengeni carrier is never excluded.
+ */
+export function scheduledTaskRunTools(input: {
+  agentConfig: { tools: ToolRef[]; toolPolicy?: ScheduledTaskToolPolicy | undefined };
+  settings: McpSettings;
+  runtimeSettings: McpSettings;
+  workspaceDefaults: WorkspaceSessionToolDefaults | null;
+}): ToolRef[] {
+  const policy = input.agentConfig.toolPolicy;
+  if (!policy) return [...input.agentConfig.tools];
+  const excluded = new Set(policy.excludedMcpServerIds);
+  const kept = (tool: ToolRef) =>
+    tool.kind !== "mcp" || tool.id === "opengeni" || !excluded.has(tool.id);
+  return withWorkspaceDefaultMcpTools(
+    input.agentConfig.tools.filter(kept),
+    input.settings,
+    input.runtimeSettings,
+    input.workspaceDefaults,
+  ).filter(kept);
+}
+
 /** Drop stored refs that are no longer present in the current runtime registry. */
 export function availableToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
   const available = new Set(settings.mcpServers.map((server) => server.id));
@@ -133,8 +166,18 @@ export function assertToolRefsSubset(
   allowed: ToolRef[],
   message = "requested tools exceed the session tool policy",
 ): void {
-  const allowedIds = new Set(allowed.map((tool) => `${tool.kind}:${tool.id}`));
-  const widened = requested.find((tool) => !allowedIds.has(`${tool.kind}:${tool.id}`));
+  const allowedById = new Map(
+    mergeToolRefs([], allowed).map((tool) => [`${tool.kind}:${tool.id}`, tool]),
+  );
+  const widened = requested.find((tool) => {
+    const ceiling = allowedById.get(`${tool.kind}:${tool.id}`);
+    return (
+      !ceiling ||
+      (ceiling.allowedTools !== undefined &&
+        (tool.allowedTools === undefined ||
+          tool.allowedTools.some((name) => !ceiling.allowedTools!.includes(name))))
+    );
+  });
   if (widened) {
     throw new HTTPException(403, { message: `${message}: ${widened.id}` });
   }
@@ -511,4 +554,4 @@ function positiveInteger(value: unknown): number | null {
   return null;
 }
 
-export { mergeToolRefs, stableJson };
+export { mergeToolRefEager, mergeToolRefs, stableJson };

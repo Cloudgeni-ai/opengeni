@@ -6,6 +6,10 @@ import { usePolledValue } from "./internal";
 export type UseWorkspaceSessionsOptions = ClientOverride & {
   includeTotals?: boolean | undefined;
   needsYouOnly?: boolean | undefined;
+  /** Only read-only sessions moved to the idle-session archive. */
+  contentArchivedOnly?: boolean | undefined;
+  /** Only workstreams the signed-in person started or messaged. */
+  mineOnly?: boolean | undefined;
   /** Compact list records; detail reads remain full sessions. */
   projection?: "summary" | undefined;
   limit?: number | undefined;
@@ -64,6 +68,8 @@ export function useWorkspaceSessions(
   const projection = options.projection;
   const includeTotals = options.includeTotals;
   const needsYouOnly = options.needsYouOnly;
+  const contentArchivedOnly = options.contentArchivedOnly;
+  const mineOnly = options.mineOnly;
   const limit = options.limit;
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
@@ -82,6 +88,8 @@ export function useWorkspaceSessions(
     projection ?? "full",
     includeTotals ? "totals" : "",
     needsYouOnly ? "needs-you" : "",
+    contentArchivedOnly ? "read-only" : "",
+    mineOnly ? "mine" : "",
     limit ?? "",
     parentSessionId === null ? "null" : (parentSessionId ?? ""),
     cursor ?? "",
@@ -103,6 +111,8 @@ export function useWorkspaceSessions(
       const query = {
         ...(includeTotals ? { includeTotals: true } : {}),
         ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+        ...(mineOnly ? { mineOnly: true } : {}),
         ...(limit !== undefined ? { limit } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(cursor !== undefined ? { cursor } : {}),
@@ -141,6 +151,8 @@ export function useWorkspaceSessions(
       projection,
       includeTotals,
       needsYouOnly,
+      contentArchivedOnly,
+      mineOnly,
       limit,
       parentSessionId,
       cursor,

@@ -1,30 +1,61 @@
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "sonner";
-import { SessionList } from "../src/components/rail/session-list";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { SessionList } from "@opengeni/react/app/components/rail/session-list";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
-} from "../src/lib/session-browse-preferences";
+} from "@opengeni/react/app/lib/session-browse-preferences";
 import { client, evidence, subjectId, workspaceId } from "./session-sidebar-context";
 import "../src/styles.css";
+
+function RequestProfile() {
+  const [snapshot, setSnapshot] = useState("");
+  if (!new URLSearchParams(window.location.search).has("profile")) return null;
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => {
+          const counts: Record<string, number> = {};
+          for (const call of evidence.listCalls) {
+            const key = JSON.stringify(call.options);
+            counts[key] = (counts[key] ?? 0) + 1;
+          }
+          setSnapshot(JSON.stringify({ elapsedMs: performance.now(), counts }, null, 2));
+        }}
+      >
+        Sample request counts
+      </button>
+      <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-left text-xs">{snapshot}</pre>
+    </div>
+  );
+}
 
 writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId(subjectId, workspaceId), {
   // Sparse activity starts ungrouped so project auto-hydration cannot populate
   // additional running roots before the test uses the real Group by menu.
-  groupBy:
-    new URLSearchParams(window.location.search).get("scenario") === "sparse-active"
-      ? "none"
-      : new URLSearchParams(window.location.search).get("scenario") === "keyboard-focus"
-        ? "activity"
-        : "project",
+  groupBy: ["sparse-active", "hover"].includes(
+    new URLSearchParams(window.location.search).get("scenario") ?? "",
+  )
+    ? "none"
+    : new URLSearchParams(window.location.search).get("scenario") === "keyboard-focus"
+      ? "activity"
+      : "project",
   sortBy: "updatedAt",
   status: "active",
+  mineOnly: false,
   showEmptyGroups: false,
 });
 Object.assign(window, { sessionSidebarQa: evidence });
+const previewTheme = new URLSearchParams(window.location.search).get("theme");
+if (previewTheme === "dark" || previewTheme === "light") {
+  document.documentElement.classList.toggle("dark", previewTheme === "dark");
+  document.documentElement.dataset.ogTheme = previewTheme;
+}
 
 const root = createRootRoute({
   component: () => (
@@ -53,6 +84,7 @@ const root = createRootRoute({
                 Your projects and conversations are in the sidebar.
               </p>
               <p className="mt-8 text-xs text-fg-subtle">Real components · Sample workspace data</p>
+              <RequestProfile />
             </div>
           </section>
         </main>

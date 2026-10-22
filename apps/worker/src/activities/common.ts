@@ -29,7 +29,18 @@ export function scheduledUserMessagePayload(
   tools: ToolRef[],
   taskId: string,
   runId: string,
+  degradedAccounts: readonly { serverId: string }[] = [],
 ): Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }> {
+  // Connectors this occurrence runs without because every account a person
+  // pinned for them is unusable. A connector that kept a working pin still has
+  // its tools and is not named.
+  const unavailableConnectors = [
+    ...new Set(
+      degradedAccounts
+        .map((account) => account.serverId)
+        .filter((serverId) => !tools.some((tool) => tool.kind === "mcp" && tool.id === serverId)),
+    ),
+  ].sort();
   return {
     type: "scheduled_occurrence",
     text: prompt,
@@ -37,6 +48,7 @@ export function scheduledUserMessagePayload(
     scheduledTaskRunId: runId,
     ...(resources.length ? { resources } : {}),
     ...(tools.length ? { tools } : {}),
+    ...(unavailableConnectors.length ? { unavailableConnectors } : {}),
   };
 }
 

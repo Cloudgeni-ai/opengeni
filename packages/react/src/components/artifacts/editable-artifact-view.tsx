@@ -16,6 +16,7 @@ import {
   type ArtifactLoadErrorView,
 } from "./artifact-chrome";
 import { EditableArtifactWorkbenchHost } from "./editable-artifact-workbench";
+import { useOpenGeniText } from "../../messages/runtime";
 
 /**
  * The browser kernels an editor needs, one per modality, plus the host-built
@@ -56,6 +57,17 @@ export type EditableArtifactViewProps = Readonly<{
   onTitle?: ((title: string) => void) | undefined;
   /** Loading copy; defaults to the `opening` label. */
   loadingLabel?: string | undefined;
+  /**
+   * Host-authenticated Office export (DOCX, XLSX, or PPTX by modality); omitted
+   * for hosts without export support. Every editor shows Download when set.
+   */
+  downloadArtifact?:
+    | ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>)
+    | undefined;
+  /** Spreadsheet-only XLSX export; `downloadArtifact` takes precedence when both are set. */
+  downloadSpreadsheet?:
+    | ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>)
+    | undefined;
 }>;
 
 type LoadState =
@@ -79,7 +91,10 @@ export function EditableArtifactView({
   describeError,
   onTitle,
   loadingLabel,
+  downloadArtifact,
+  downloadSpreadsheet,
 }: EditableArtifactViewProps) {
+  const t = useOpenGeniText();
   const [loadEpoch, setLoadEpoch] = useState(0);
   const labels = useArtifactLabels();
   const loadKey = JSON.stringify([artifactId, authorityKey, baseUrl.href, workspaceId, loadEpoch]);
@@ -151,7 +166,7 @@ export function EditableArtifactView({
         view={
           describeError
             ? describeError(current.error)
-            : artifactLoadErrorView(current.error, "editable", labels)
+            : artifactLoadErrorView(t, current.error, "editable", labels)
         }
         onRetry={() => setLoadEpoch((value) => value + 1)}
       />
@@ -159,14 +174,18 @@ export function EditableArtifactView({
   }
   const { artifact } = current.value;
   const surface = { title: artifact.title, showHeader };
+  const opened = current.value;
+  const exportFor = (
+    host: ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>) | undefined,
+  ) => (host ? (signal: AbortSignal) => host(opened, signal) : undefined);
   return (
     <div className="h-full min-h-0 bg-og-bg text-og-fg">
       <EditableArtifactWorkbenchHost
         sessionKey={sessionKey}
         createSession={createSession}
-        document={surface}
-        spreadsheet={surface}
-        presentation={surface}
+        document={{ ...surface, download: exportFor(downloadArtifact) }}
+        spreadsheet={{ ...surface, download: exportFor(downloadArtifact ?? downloadSpreadsheet) }}
+        presentation={{ ...surface, download: exportFor(downloadArtifact) }}
       />
     </div>
   );

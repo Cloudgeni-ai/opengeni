@@ -1,4 +1,10 @@
-/** Modality-specific durable semantic/schema versions. */
+/**
+ * Modality-specific durable semantic/schema versions.
+ * Spreadsheet dimensions are an additive current-schema extension: existing
+ * command/operation tags and dimension-free snapshot bytes stay unchanged.
+ * Direct snapshots and private projections advertise their explicit extension
+ * flags; old executables reject new tags/flags, never silently discard them.
+ */
 export const SPREADSHEET_ARTIFACT_MODEL_SCHEMA_VERSION = 2 as const;
 export const DOCUMENT_ARTIFACT_MODEL_SCHEMA_VERSION = 1 as const;
 export const PRESENTATION_ARTIFACT_MODEL_SCHEMA_VERSION = 1 as const;

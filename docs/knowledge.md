@@ -76,6 +76,20 @@ connection owner's accepted human revision authority.
 
 ## Selective retention and discovery
 
+Learning is part of ordinary work under the accepted destination policy. A user
+need not say "remember" or separately approve useful retention in Automatic mode,
+including Slack tasks. Direct user corrections, accepted decisions, product
+preferences, constraints and their reasoning can be learning signals; task-only
+tweaks and unaccepted assistant proposals are not settled reusable decisions.
+Explicit requests not to retain particular information remain authoritative.
+Standing behavioral preferences still follow Instructions/Skills routing and their
+own settings, tools and writable scope.
+
+Retrieve relevant published Knowledge before work that relies on prior decisions
+or requirements; unrelated turns do not require a search. Update one conclusion
+entry per experiment rather than saving every round. For incidents retain settled
+impact, cause, fix/workaround and outcome when known, rather than live status.
+
 A saved entry should help answer a plausible future question. Routine approvals,
 acknowledgments, temporary task instructions and status chatter stay in the
 conversation. Agents inspect screenshots visually and retain a supported
@@ -90,6 +104,14 @@ Exact get, evidence traversal, Files-related inspection, history and review keep
 their existing authority checks. Explicit `includeEvidence: true` searches or
 the browser's **Include supporting evidence** control expose supporting sources.
 Collection membership does not change source purpose or access.
+
+Entry listing and search accept optional `createdSince`, a timezone-qualified ISO
+datetime (for example `2026-10-01T00:00:00Z`). It includes entries whose original
+`createdAt` is at or after the cutoff; editing, revising or publishing an older
+entry does not make it newly created. Rolling migration **0640** applies this
+filter in the authorized database candidate set before keyword/vector ranking
+and pagination, for every view and scope. It grants no access. Omission preserves
+existing behavior, and changing the cutoff invalidates an existing search cursor.
 
 Historical agent-prepared file sources and non-migrated conversation sources are
 classified by typed preparation/provenance identity; migrated reference records
@@ -135,7 +157,7 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
-A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+A create omits `entryId` and passes `expectedVersion: 0`. Opengeni derives the
 id from `operationId` (`knowledgeEntryIdForOperation` in
 `packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
 receipt. A correction passes an existing `entryId` and its current version. The
@@ -151,7 +173,22 @@ and other programmatic callers receive the exact bytes. Only a model tool call
 receives a compact copy, projected in the worker at the per-caller seam
 (`projectAttemptToolResultForCaller` with
 `packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
-It is the same JSON without bookkeeping or repeated text:
+Search returns discovery cards: entry `id`, title, kind, scope, revision outcome,
+and at most 200 Unicode code points of the best content excerpt (or preview when
+there is no excerpt). Nondefault archive/change state is preserved. Search mode,
+fallback reason and a non-null pagination cursor remain visible. Use
+`knowledge_get` to read full text, revision IDs for citations, and the current
+version before updating. A snippet is a relevance hint, not the complete finding.
+Pending results remain explicitly `outcome: "pending"`.
+
+Both MCP search tools default to five results; callers can request up to 50 or
+paginate. This default also applies to Codemode's MCP calls, although their
+result shape stays complete. HTTP/SDK list defaults remain 20. The MCP input
+schema uses UUID/date format annotations without long regex patterns; server
+validation remains the same. Advanced scope, group, date, kind and mode filters
+remain available.
+
+Save preparation retains its existing lossless projection:
 
 - kept: entry and collection IDs, `version` (the `expectedVersion` for an
   update), `revision.id` (for evidence pins), scope, `revision.outcome` and
@@ -178,10 +215,28 @@ contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
 re-rendered. MCP transport bounds the exact result to 1 MiB before this
 projection, so compaction only shrinks results that already fit; a result that
-is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
-(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
-search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
-from 21.7 KB to 14.1 KB (35%).
+is still over 1 MiB for the model spills its exact bytes like any tool. Tests in
+`packages/runtime/test/knowledge-model-projection.test.ts` cover exact Codemode
+results, non-mutating model projection, and the unchanged save-preparation shape.
+
+### Search availability and existing sessions
+
+New configured sessions with Knowledge enabled mark only `knowledge_search`
+eager on their already-selected first-party server (or Docs server when that is
+the available search). Creation saves the normal `ToolRef.eager` selection;
+scheduled occurrences freeze it with their accepted execution. No server,
+permission or disabled capability is added. Other Knowledge tools stay deferred.
+This uses the existing first-request preparation barrier in native OpenAI,
+native Codex and generic-dispatch transports, not a second discovery mechanism.
+
+Existing sessions' selections and accepted scheduled executions are not updated.
+They stay deferred unless already explicitly eager. The compact search schema is
+an ordinary schema update: deferred sessions see it on their next disclosure;
+sessions that already explicitly exposed search eagerly may incur a one-time
+tool-prefix cache miss on their next prepared attempt. New result projections
+apply only at execution; previously stored model inputs and tool outputs are
+never rewritten. No adoption marker, catalog version or compaction rewrite is
+introduced.
 
 ## Personal and shared Knowledge
 
@@ -217,7 +272,8 @@ open Capabilities → Skills. Old Memory and Documents links redirect to Knowled
 a Documents `?authority=` link, and `?scope=` on `/state`, open the Library
 filtered to that scope (Organization identity > Organization documents uses it).
 
-**Agent learning** (Knowledge ⋯ → Agent learning) holds the workspace defaults
+**Agent learning** (Settings → Workspace → Agent learning; Knowledge ⋯ → Agent
+learning opens the same page) holds the workspace defaults
 for shared chats and your private-chat defaults, each row Off / Review first /
 Automatic. Organization owners also see an **Organization identity** row there,
 in the same words, for the separate company-profile agent policy. One chat's own
@@ -266,8 +322,10 @@ All finding types share retrieval, review, permissions and revision history.
 
 ## Agent learning settings
 
-**Knowledge → Learning** groups three destinations together (the old
-Settings → Agent learning URL redirects there):
+**Settings → Agent learning** (`/settings?section=learning`) groups three
+destinations together. Knowledge's ⋯ menu, an empty Review and the chat Agent tab
+link to it, and old `/state?page=learning` links redirect there. The page also
+links to Knowledge → Review, where Review first changes wait:
 
 | Destination | New-workspace default | Storage authority |
 | --- | --- | --- |
@@ -299,9 +357,43 @@ same owner layer the task actually uses, otherwise the write is rejected.
 
 `agent_learning_revisions` stores immutable policy history.
 `agent_learning_snapshots` freezes the effective categories, owner and producer
-context for an accepted logical turn. Scheduled work resolves against its accepted
+context for an accepted logical turn.
+The worker presents the effective modes and Knowledge destination to the agent
+through the governance prompt. It renders stable mode/scope facts, without
+attempt identifiers or personal identities; the database snapshot remains the
+enforcement authority.
+Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
+
+Sharing a private chat preserves the accepted turn's Personal destination for
+that same verified initiating human, including tool operations, provider failover
+and human Retry. It does not promote Personal writes into the workspace or rewrite
+the snapshot or earlier model context. Newly accepted turns use the shared chat's
+current destination. A genuinely incompatible retained scope fails at startup
+with an explanation to send a new message; Retry cannot reopen that same turn.
+
+A personal workspace makes Personal the default destination only for work with a
+verified initiating person. Work with no such person, such as a published Site's
+guest chat or other service-started work, uses the Workspace destination with no
+person, as it does in a shared workspace. Because a personal workspace's
+Workspace layer is not shown in its settings, that work saves no Knowledge,
+Skills or instructions there: all three learning modes are frozen as Off. A
+private chat, or a chat that chose user memory, still requires its verified
+owner.
+
+An agent saves to the destination it explicitly chooses, beyond its chat's
+default. From a chat that learns for its person, saving a workspace instruction,
+changing an existing workspace Skill or Knowledge entry by its id, or creating a
+Skill or entry with scope `workspace` reaches the workspace. From a shared chat,
+changing the initiating person's own personal Skill by its id, or creating a
+Skill with scope `user`, reaches that person. Such a change is governed by the
+stricter of the chat's own mode and the destination owner's mode (the workspace's
+or the person's) for that category, as of acceptance: Off refuses it, and Review
+first leaves a pending proposal in that owner's review. Work with no verified
+initiating person cannot choose a personal destination, nobody else's personal
+Skill is reachable, permanent Skill deletion stays within the chat's own scope,
+and shared Knowledge still cannot point at private evidence.
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,

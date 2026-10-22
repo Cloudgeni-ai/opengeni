@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { OrganizationInvitation } from "@/types";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 
 /**
  * Onboarding connects Codex for the organization: its start and poll go
@@ -566,6 +566,74 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("Opper onboarding saves a workspace key and selects an Opper model", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async () => undefined);
+    const saveNewSessionDraft = mock(async () => emptyNewSessionDraft);
+    const opperModel = {
+      id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      api: "chat",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      credentialReadiness: { status: "ready", reason: null, basis: "connection", checkedAt: null },
+      availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+    };
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [opperModel] })),
+      getNewSessionDraft: mock(async () => emptyNewSessionDraft),
+      saveNewSessionDraft,
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () => providerRow(container, "Opper")!.click());
+      expect(container.textContent).toContain("Create one at platform.opper.ai under API keys.");
+      await enter(container.querySelector("#onboarding-provider-key")!, "opper-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Connect Opper")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledWith(
+        "personal-workspace",
+        expect.objectContaining({
+          providerDomain: "api.opper.ai",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "opper-secret" },
+          metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+        }),
+      );
+      expect(saveNewSessionDraft).toHaveBeenCalledWith(
+        "personal-workspace",
+        expect.objectContaining({
+          model: "workspace-opper/aws/claude-sonnet-4-6-eu",
+          modelProvided: true,
+        }),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("Azure onboarding saves a scoped customer key and deployment, clears the key, and waits for model selection", async () => {
     const onComplete = mock(() => undefined);
     const createConnection = mock(async (_workspace: string, request: Record<string, unknown>) => ({
@@ -1117,6 +1185,134 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("monthly Free credit explains recurring covered funding without calling top-ups a bonus", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={{} as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            billingMode="stripe"
+            startingCredits={{
+              balance: {
+                balanceMicros: 32_000_000,
+                currency: "usd",
+                plan: {
+                  key: "free",
+                  label: "Free",
+                  status: "active",
+                  creditGrantedMicros: 10_000_000,
+                  creditRemainingMicros: 7_000_000,
+                  creditScoped: true,
+                  periodResetAt: "2026-11-19T00:00:00Z",
+                  seatLimit: 5,
+                  seatsUsed: 1,
+                  cancelAtPeriodEnd: false,
+                },
+              },
+              model: { id: "gpt-6-luna", label: "GPT-6 Luna", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("$10 in free credits every month");
+      expect(container.textContent).toContain("For the free-credit models");
+      expect(container.textContent).toContain("Unused credit doesn't roll over");
+      expect(container.textContent).toContain("Monthly Free credit");
+      expect(container.querySelector("[data-slot=credits-prize]")?.textContent).not.toContain("32");
+      expect(container.textContent).not.toContain("You got");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the mounted onboarding revalidates zero funds when monthly maintenance grants credit", async () => {
+    let funded = false;
+    const refreshes: { run: () => void; cancel: () => void }[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((handler: () => void, delay?: number, ...args: unknown[]) => {
+      const timer = originalSetTimeout(handler, delay, ...args);
+      if (delay === 15_000) refreshes.push({ run: handler, cancel: () => clearTimeout(timer) });
+      return timer;
+    }) as typeof setTimeout;
+    const getWorkspaceModelCatalog = mock(async () => ({
+      models: [
+        {
+          ...baseModel,
+          id: "credits-model",
+          label: "Credits Model",
+          cost: "credits",
+          creditFunding: funded ? "promotional" : "unavailable",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        },
+      ],
+      defaultSelection: { model: "credits-model", reasoningEffort: "none", source: "deployment" },
+    }));
+    const getBilling = mock(async () => ({
+      mode: "stripe",
+      balance: {
+        balanceMicros: funded ? 10_000_000 : 0,
+        currency: "usd",
+        plan: funded
+          ? {
+              key: "free",
+              label: "Free",
+              status: "active",
+              creditGrantedMicros: 10_000_000,
+              creditRemainingMicros: 10_000_000,
+              creditScoped: true,
+              periodResetAt: "2026-11-19T00:00:00Z",
+              seatLimit: 5,
+              seatsUsed: 1,
+              cancelAtPeriodEnd: false,
+            }
+          : null,
+      },
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
+            billingMode="stripe"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      await enter(container.querySelector("#organization-onboarding-name")!, "Monthly Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
+      expect(container.textContent).not.toContain("$10 in free credits every month");
+      expect(refreshes).toHaveLength(1);
+      funded = true;
+      refreshes[0]!.cancel();
+      await act(async () => refreshes[0]!.run());
+      await flush();
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(2);
+      expect(getBilling).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("h1")!.textContent).toBe("$10 in free credits every month");
+      expect(container.textContent).toContain("For the free-credit models");
+      expect(refreshes).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      for (const refresh of refreshes) refresh.cancel();
+      globalThis.setTimeout = originalSetTimeout;
+      container.remove();
+    }
+  });
+
   test("an unreadable balance confirms credits without promising a model or amount", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1444,8 +1640,12 @@ describe("organization onboarding UI", () => {
       token,
     }));
     const createWorkspace = mock(async (_request: unknown) => ({ id: "setup-workspace" }));
-    const createVariableSet = mock(async (_workspaceId: string, _request: unknown) => ({
-      id: "variable-set-1",
+    const createVault = mock(async (_request: unknown) => ({ id: "vault-private" }));
+    const createItem = mock(async (_vaultId: string, _request: unknown) => ({ id: "item-1" }));
+    const vaults = mock((_workspaceId: string) => ({
+      listVaults: async () => [],
+      createVault,
+      createItem,
     }));
     const saveNewSessionDraft = mock(
       async (_workspaceId: string, _request: Record<string, unknown>) => undefined,
@@ -1464,7 +1664,7 @@ describe("organization onboarding UI", () => {
                 ...setupClient,
                 createOrganizationApiKey,
                 createWorkspace,
-                createVariableSet,
+                vaults,
                 getNewSessionDraft: async () => emptyNewSessionDraft,
                 saveNewSessionDraft,
               } as never
@@ -1555,10 +1755,13 @@ describe("organization onboarding UI", () => {
       expect(createWorkspace.mock.calls).toEqual([
         [{ accountId: "preview-organization", name: "Opengeni setup" }],
       ]);
-      expect(createVariableSet.mock.calls[0]![0]).toBe("setup-workspace");
-      expect(createVariableSet.mock.calls[0]![1]).toMatchObject({
-        name: "Opengeni developer setup",
-        variables: [{ name: "DEVELOPER_SETUP_API_KEY", value: token }],
+      expect(vaults.mock.calls[0]![0]).toBe("setup-workspace");
+      expect(createVault.mock.calls).toEqual([[{ name: "Private", ownerKind: "user" }]]);
+      expect(createItem.mock.calls[0]![0]).toBe("vault-private");
+      expect(createItem.mock.calls[0]![1]).toEqual({
+        type: "api_key",
+        name: "Opengeni setup API key",
+        fields: [{ name: "value", value: token }],
       });
       // No chat starts yet: its new-chat page opens with the message ready to
       // send, so this works before any model or credits exist.
@@ -1568,20 +1771,19 @@ describe("organization onboarding UI", () => {
         {
           text: string;
           expectedRevision: number;
-          options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+          options: { agent?: { instructions?: string } };
         },
       ];
       expect(draftWorkspaceId).toBe("setup-workspace");
       expect(draft.text).toBe("I want to add AI agents to my product. Help me set it up.");
       expect(draft.expectedRevision).toBe(emptyNewSessionDraft.revision);
-      expect(draft.options.variableSetIds).toEqual(["variable-set-1"]);
       const context = String(draft.options.agent?.instructions);
       expect(context).toContain("I chose to let Opengeni implement it.");
       expect(context).toContain("Organization: Northwind (ID preview-organization)");
       expect(context).toContain("builtin:opengeni-client");
-      expect(context).toContain("DEVELOPER_SETUP_API_KEY");
+      expect(context).toContain("{{secret:Opengeni setup API key}}");
       expect(context).toContain("GitHub");
-      // The key is in the sandbox variable set, never in model-visible history.
+      // The key is in the vault, never in model-visible history.
       expect(JSON.stringify(draft)).not.toContain(token);
       expect(onComplete.mock.calls).toEqual([[{ workspaceId: "setup-workspace" }]]);
     } finally {
@@ -1805,9 +2007,16 @@ describe("organization onboarding UI", () => {
       token: "ogk_retry123_secret",
     }));
     const createWorkspace = mock(async () => ({ id: "setup-workspace" }));
-    const createVariableSet = mock(async () => {
-      throw new Error("variable sets unavailable");
+    const createItem = mock(async () => {
+      throw new Error("vaults unavailable");
     });
+    const vaults = mock((_workspaceId: string) => ({
+      listVaults: async () => [
+        { id: "vault-private", ownerKind: "user", isDefault: true, canWrite: true },
+      ],
+      createVault: async () => ({ id: "unused" }),
+      createItem,
+    }));
     let draftAttempts = 0;
     const saveNewSessionDraft = mock(
       async (_workspaceId: string, _request: Record<string, unknown>) => {
@@ -1827,7 +2036,7 @@ describe("organization onboarding UI", () => {
                 ...setupClient,
                 createOrganizationApiKey,
                 createWorkspace,
-                createVariableSet,
+                vaults,
                 getNewSessionDraft: async () => emptyNewSessionDraft,
                 saveNewSessionDraft,
               } as never
@@ -1859,13 +2068,12 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
       expect(createWorkspace).toHaveBeenCalledTimes(1);
-      expect(createVariableSet).toHaveBeenCalledTimes(1);
+      expect(createItem).toHaveBeenCalledTimes(1);
       expect(saveNewSessionDraft).toHaveBeenCalledTimes(2);
       const second = saveNewSessionDraft.mock.calls[1]![1] as {
-        options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+        options: { agent?: { instructions?: string } };
       };
-      // Without the variable set the chat says so instead of claiming a key.
-      expect(second.options.variableSetIds).toBeUndefined();
+      // Without the saved key the chat says so instead of claiming one.
       expect(String(second.options.agent?.instructions)).toContain(
         "No API key is attached to this chat.",
       );

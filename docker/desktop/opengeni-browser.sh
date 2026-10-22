@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OpenGeni canonical browser launcher — the SINGLE container-safe entrypoint for
+# Opengeni canonical browser launcher — the SINGLE container-safe entrypoint for
 # Chrome, shared by BOTH launch paths:
 #   - the HUMAN path: XFCE panel/menu "Web Browser" -> exo-open --launch WebBrowser
 #     -> (helpers.rc WebBrowser=opengeni-browser) -> this wrapper; AND the
@@ -70,7 +70,7 @@ export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 
 if [ ! -x "$BIN" ]; then
-  echo "OpenGeni browser engine is unavailable" >&2
+  echo "Opengeni browser engine is unavailable" >&2
   exit 127
 fi
 

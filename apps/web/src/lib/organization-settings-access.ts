@@ -5,10 +5,14 @@
 import {
   ORGANIZATION_ADMIN_SECTIONS,
   type OrganizationAdminSection,
-} from "@/lib/organization-admin";
-import { hasAccountPermission } from "@/lib/permissions";
-import { administersOrganization } from "@/lib/workspaces";
-import type { AccessContext, ClientConfig, OrganizationMembershipRole } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
+import type {
+  AccessContext,
+  ClientConfig,
+  OrganizationMembershipRole,
+} from "@opengeni/react/app/types";
 
 export type OrganizationSettingsAccess = {
   actorRole: OrganizationMembershipRole | null;
@@ -101,6 +105,16 @@ export function organizationSettingsAccess(input: {
     visible.add("billing");
   }
   if (canManageOrganizationApiKeys) visible.add("developer");
+  // Connected agents belong to the people who connect them: every signed-in
+  // member of a managed organization connects and manages their own.
+  if (
+    managedHumanSession &&
+    input.clientConfig.productAccessMode === "managed" &&
+    accessContext.subjectId.startsWith("user:") &&
+    actorRole !== null
+  ) {
+    visible.add("agents");
+  }
   // Recovery contacts are members, not only owners and admins: they accept
   // and approve recovery on this page, so every managed person can reach it.
   if (administrator || (managedHumanSession && !singleUser)) visible.add("security");

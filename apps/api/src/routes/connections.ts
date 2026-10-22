@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { verifyDirectModelAccess } from "@opengeni/core";
+import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
@@ -28,6 +29,11 @@ import {
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN,
+  WORKSPACE_ELEVENLABS_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
+  opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -53,6 +59,8 @@ import {
   ListConnectionsResponse,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -83,6 +91,8 @@ import {
   hasPermission,
   listOwnConnectionAccountsForGrant,
   hasReservedFikenMetadata,
+  ONEPASSWORD_CREDENTIAL_ROLE,
+  EXTERNAL_VAULT_CREDENTIAL_ROLE,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
@@ -131,6 +141,7 @@ import {
   isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
+import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
   browseAtlassianSources,
@@ -285,6 +296,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       payload.metadata = { ...payload.metadata, directModelProvider: config.data };
+      // A direct model key is always workspace-owned: refuse before calling the provider.
+      requireWorkspaceIntegrationAdministration(grant);
       if (payload.verifyModelAccess) {
         await verifyDirectModelAccess(
           config.data,
@@ -303,6 +316,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const persist = async (db: Database) => {
       assertNotReservedSlackBotMetadata(payload.metadata);
       assertNotReservedFikenMetadata(payload.metadata);
+      assertNotReservedOnePasswordMetadata(payload.metadata);
       assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
       assertNotReservedPersonalGitHubMetadata(payload.metadata);
       const key = requireEnvironmentEncryption(settings);
@@ -339,6 +353,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      // Workspace model-provider keys decide what every session runs on: a
+      // settings action, unlike a member's own or shared integration credential.
+      if (subjectId === null && (workspaceProviderKind || directModelKey))
+        requireWorkspaceIntegrationAdministration(grant);
+      if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -382,6 +401,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message: `${provider.label} is already connected; reload before replacing its key`,
               });
             }
+            if (workspaceProviderKind === "anthropic")
+              await offerClaudeDefaultModels(deps, {
+                accountId: grant.accountId,
+                workspaceId,
+                actorSubjectId: grant.subjectId,
+                providerKind: "anthropic",
+              });
             return created;
           })()
         : await createConnectionIdempotently(db, {
@@ -452,6 +478,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
+    // Installing the workspace's Slack bot configures the whole workspace.
+    requireWorkspaceIntegrationAdministration(grant);
     const payload = await parseRequestJson(c, OpenGeniSlackBotInstallRequest);
     return c.json(
       await withOrganizationIntegrationAcquisition(
@@ -501,7 +529,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               ...callbackOperation,
               expectedRevision: stored.attempt.revision,
               authorize: (tx, _attempt, origin) =>
-                requireConnectOwnerAuthority(tx, callbackState, "connections:write", origin),
+                requireConnectOwnerAuthority(
+                  tx,
+                  callbackState,
+                  SLACK_BOT_INSTALL_PERMISSION,
+                  origin,
+                ),
               authorizeAcquisition: async () => {
                 // Provider denial/cancellation acquires nothing; completed exact
                 // receipts replay before this callback is invoked.
@@ -534,7 +567,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         await finishConnectOperation(db, state, {
           ...operation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, SLACK_BOT_INSTALL_PERMISSION, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -605,7 +638,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           finishConnectOperation(policyTx, acceptedState, {
             ...acceptedOperation,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, acceptedState, SLACK_BOT_INSTALL_PERMISSION, origin),
             commit: async (tx, current) => {
               assertOrganizationIntegrationAllowed(policy, "slack-bot");
               const connection = await persist(tx);
@@ -718,7 +751,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const payload = await parseRequestJson(c, FikenOAuthStartRequest);
+    const payload = withDesktopAppReturnPath(c, await parseRequestJson(c, FikenOAuthStartRequest));
     requireEnvironmentEncryption(settings);
     return c.json(
       FikenOAuthStartResponse.parse(
@@ -1011,6 +1044,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
           // not take its row first or change that excluded lane's lock order.
+          if (initial?.subjectId === null && workspaceProviderApiKeyConnectionKind(initial))
+            requireWorkspaceIntegrationAdministration(grant);
           if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {
             await db.execute(
               sql`select id from connections where workspace_id = ${workspaceId}::uuid and id = ${c.req.param("connectionId")}::uuid and (subject_id is null or subject_id = ${grant.subjectId}) for update`,
@@ -1018,6 +1053,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
           assertNotReservedSlackBotMetadata(payload.metadata);
           assertNotReservedFikenMetadata(payload.metadata);
+          assertNotReservedOnePasswordMetadata(payload.metadata);
           assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
           assertNotReservedPersonalGitHubMetadata(payload.metadata);
           const existing = await getConnectionMetadata(
@@ -1026,7 +1062,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             c.req.param("connectionId"),
             grant.subjectId,
           );
+          assertNotReservedExternalVaultMetadata(existing?.metadata);
           if (existing && isOpenGeniSlackBotConnection(existing)) {
+            // The workspace Slack bot is workspace configuration, like its install.
+            requireWorkspaceIntegrationAdministration(grant);
             const destination = ConnectorDocumentDestinationSelection.safeParse(
               payload.metadata?.documentDestination,
             );
@@ -1136,10 +1175,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             });
             if (!workspaceProviderApiKeyConnectionKind(existing) && targetWorkspaceProviderKind) {
               throw new HTTPException(422, {
-                message:
-                  targetWorkspaceProviderKind === "vercel_gateway"
-                    ? "use the Vercel AI Gateway connect flow to create this connection"
-                    : "use the OpenRouter connect flow to create this connection",
+                message: `use the ${workspaceProviderApiKeyConnectionSpec(targetWorkspaceProviderKind).label} connect flow to create this connection`,
               });
             }
             assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -1222,6 +1258,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               metadata: existing.metadata,
               credential: payload.credential,
             });
+            if (existingWorkspaceProviderKind === "opper")
+              assertOpperCredential(payload.credential);
             const key = requireEnvironmentEncryption(settings);
             const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
             const expiresAt =
@@ -1338,6 +1376,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
+    assertNotReservedExternalVaultMetadata(existing.metadata);
+    if (
+      existing.subjectId === null &&
+      (workspaceProviderApiKeyConnectionKind(existing) ||
+        existing.metadata.directModelProvider !== undefined ||
+        isOpenGeniSlackBotConnection(existing))
+    )
+      requireWorkspaceIntegrationAdministration(grant);
     const expectedVersion = c.req.query("expectedVersion");
     if (expectedVersion !== undefined) {
       if (!/^[1-9]\d*$/.test(expectedVersion) || !Number.isSafeInteger(Number(expectedVersion))) {
@@ -1473,7 +1519,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: parsed.error.issues[0]?.message ?? "invalid OAuth start request",
       });
     }
-    const payload = parsed.data;
+    const payload = withDesktopAppReturnPath(c, parsed.data);
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
@@ -1514,7 +1560,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
-          payload: parsed.data,
+          payload: withDesktopAppReturnPath(c, parsed.data),
         }),
       ),
     );
@@ -1561,7 +1607,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       IntegrationClientMetadata.parse({
         client_id: metadataUrl,
-        client_name: "OpenGeni",
+        client_name: "Opengeni",
         redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
         token_endpoint_auth_method: "none",
         grant_types: ["authorization_code", "refresh_token"],
@@ -1809,11 +1855,15 @@ function slackInstallErrorReason(error: unknown): string {
   return "installation_failed";
 }
 
+/** Installing the workspace Slack bot is integration administration (see
+ * requireWorkspaceIntegrationAdministration); the callback re-checks the same authority. */
+const SLACK_BOT_INSTALL_PERMISSION = "capabilities:manage";
+
 async function requireSlackInstallCallbackGrant(
   db: ApiRouteDeps["db"],
   state: OpenGeniSlackInstallState,
 ): Promise<void> {
-  await requireConnectOwnerAuthority(db, state, "connections:write");
+  await requireConnectOwnerAuthority(db, state, SLACK_BOT_INSTALL_PERMISSION);
 }
 
 function assertNotDirectPersonalSlackOAuth(providerDomain: string, kind: string): void {
@@ -1905,7 +1955,26 @@ function workspaceProviderApiKeyConnectionKind(input: {
   ) {
     return "openrouter";
   }
+  if (
+    providerDomain === WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_ELEVENLABS_CONNECTION_ROLE
+  ) {
+    return "elevenlabs";
+  }
+  if (
+    providerDomain === WORKSPACE_OPPER_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_OPPER_CONNECTION_ROLE
+  ) {
+    return "opper";
+  }
   return null;
+}
+
+/** Opper management keys are refused by inference routes; never store one as a model key. */
+function assertOpperCredential(credential: Record<string, unknown>): void {
+  const apiKey = typeof credential.apiKey === "string" ? credential.apiKey : "";
+  const problem = opperCredentialProblem(apiKey);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 /**
@@ -1938,6 +2007,28 @@ function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | unde
   }
 }
 
+function assertNotReservedOnePasswordMetadata(metadata: Record<string, unknown> | undefined): void {
+  assertNotReservedExternalVaultMetadata(metadata);
+  if (metadata?.credentialRole === ONEPASSWORD_CREDENTIAL_ROLE) {
+    throw new HTTPException(422, {
+      message: "1Password connections are created by the verified 1Password install flow",
+    });
+  }
+}
+
+function assertNotReservedExternalVaultMetadata(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    metadata?.credentialRole === EXTERNAL_VAULT_CREDENTIAL_ROLE ||
+    metadata?.vaultProvider !== undefined
+  ) {
+    throw new HTTPException(422, {
+      message: "Vault connections are managed through the verified vault connection flow",
+    });
+  }
+}
+
 function assertNotReservedApiIntegrationOAuthMetadata(
   metadata: Record<string, unknown> | undefined,
 ): void {
@@ -1946,6 +2037,20 @@ function assertNotReservedApiIntegrationOAuthMetadata(
       message: "API Integration OAuth metadata is reserved for the dedicated provider flow",
     });
   }
+}
+
+/**
+ * Members hold `connections:write` so they can connect their own accounts and
+ * add shared credentials. What the whole workspace runs on (its model-provider
+ * keys and its Slack bot) stays a settings action, held by workspace admins,
+ * Personal workspace owners and integration-management keys.
+ */
+export function requireWorkspaceIntegrationAdministration(grant: {
+  permissions: Parameters<typeof hasPermission>[0];
+  permissionMode?: Parameters<typeof hasPermission>[2];
+}): void {
+  if (!hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode))
+    throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
 }
 
 function writableSubjectId(
@@ -1990,9 +2095,11 @@ function workspaceProviderCredentialMetadata(
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
-  for (const role of ["anthropic", "claude_subscription"]) {
+  for (const role of ["anthropic", "claude_subscription", "elevenlabs"]) {
     delete effectiveMetadata[`${role}CredentialOperationId`];
     delete effectiveMetadata[`${role}CredentialOperationDigest`];
   }

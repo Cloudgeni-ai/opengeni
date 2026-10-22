@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -404,6 +405,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
         body: JSON.stringify(body),
       });
 
+    if (url.pathname === "/v1/inbox" && request.method() === "GET") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "slack-access-browser-test",

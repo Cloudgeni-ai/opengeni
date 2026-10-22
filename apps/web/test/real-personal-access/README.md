@@ -1,8 +1,7 @@
 # Actual composer review fixture
 
 This fixture imports `ConsoleComposer`, `ChatComposer`, `MessageTimeline`, the model
-and tools pickers, repository pickers, mobile overflow, and the session Variable Set
-picker from production source. It imports the ordinary app stylesheet, including
+and tools pickers, repository pickers and mobile overflow from production source. It imports the ordinary app stylesheet, including
 the shared composer CSS, fonts, tokens, and container-query breakpoints.
 
 The build imports the current checkout's production authorization status surface.

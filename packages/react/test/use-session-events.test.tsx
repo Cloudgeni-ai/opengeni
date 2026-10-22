@@ -21,6 +21,7 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
 import {
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_TYPES,
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -29,11 +30,21 @@ import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
 } from "../src/older-history";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const SESSION_HISTORY_PAGE_SIZE = 1000;
+// Windowed history reads the conversation; a turn's steps load when opened.
+// These fakes have no listEventPage, so they cannot see the server announce
+// its conversation filter: tool calls are read and dropped by the reader.
+const CONVERSATION_READ = {
+  excludeTypes: [...SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES],
+  presentedToolCalls: "include",
+} as const;
 
 function event(
   sequence: number,
@@ -84,7 +95,7 @@ function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEven
   if (options.before !== undefined) {
     const before = options.before;
     candidates = candidates.filter((item) => item.sequence < before);
-    return candidates.slice(-limit);
+    return options.direction === "after" ? candidates.slice(0, limit) : candidates.slice(-limit);
   }
   return options.direction === "before" ? candidates.slice(-limit) : candidates.slice(0, limit);
 }
@@ -205,7 +216,9 @@ describe("useSessionEvents", () => {
         },
       ];
       expect(
-        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+        buildTimeline(englishText, store).some(
+          (item) => item.kind === "user-message" && item.id === "evt-1",
+        ),
       ).toBe(true);
       const { client, listCalls } = scriptedClient({ store });
       const hook = await renderHook(
@@ -345,8 +358,15 @@ describe("useSessionEvents", () => {
           payloadMode: "full",
           mode: "forensic",
         },
-        { before: 9001, limit: 128, compact: true, payloadMode: "full" },
-        { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+        { ...CONVERSATION_READ, before: 9001, limit: 128, compact: true, payloadMode: "full" },
+        {
+          ...CONVERSATION_READ,
+          after: 9000,
+          limit: 128,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
       ]);
       expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(true);
       expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
@@ -859,8 +879,15 @@ describe("useSessionEvents", () => {
     await actRun(async () => expect(await hook.result.current.jumpToSequence(1000)).toBe(true));
     await flush(20);
     expect(listCalls.slice(reads)).toEqual([
-      { before: 1001, limit: 128, compact: true, payloadMode: "full" },
-      { after: 1000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+      { ...CONVERSATION_READ, before: 1001, limit: 128, compact: true, payloadMode: "full" },
+      {
+        ...CONVERSATION_READ,
+        after: 1000,
+        limit: 128,
+        compact: true,
+        direction: "after",
+        payloadMode: "full",
+      },
     ]);
     expect(hook.result.current.events.some((item) => item.sequence === 1000)).toBe(true);
     expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
@@ -1527,6 +1554,7 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -1542,7 +1570,7 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
-  test("foreground resume replays tiny gaps, compacts small message sets, and reloads only complex backlogs", async () => {
+  test("foreground resume replays tiny gaps, appends missed conversation, and reloads only long backlogs", async () => {
     let visibility: DocumentVisibilityState = "visible";
     const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
     Object.defineProperty(document, "visibilityState", {
@@ -1565,7 +1593,7 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
-        if (delayedOlder && options.before === 401) {
+        if (delayedOlder && options.before === 2_501) {
           const page = listPage(store, options);
           await delayedOlder;
           return page;
@@ -1619,12 +1647,9 @@ describe("useSessionEvents", () => {
         visibility = "visible";
         await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
         await actRun(async () => {
-          await Promise.resolve();
-          await Promise.resolve();
-          await Promise.resolve();
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
           jest.advanceTimersByTime(20);
-          await Promise.resolve();
-          await Promise.resolve();
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
         });
       };
 
@@ -1640,6 +1665,7 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       expect(listCalls).toEqual([
         {
+          ...CONVERSATION_READ,
           before: Number.MAX_SAFE_INTEGER,
           limit: SESSION_HISTORY_PAGE_SIZE,
           compact: true,
@@ -1649,56 +1675,94 @@ describe("useSessionEvents", () => {
       expect(streamCalls).toEqual([2, 2]);
       expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4]);
 
-      // A raw gap of 196 rows could still be one visible streaming answer. The
-      // compact probe proves that here, appends it once, and resumes at 200.
+      // A larger gap catches up the conversation up to the durable head (the
+      // steps written meanwhile are not replayed), appends it to the kept
+      // window, and resumes at the head.
       durableHead = 200;
       await suspendAndResume();
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         after: 4,
-        limit: 196,
+        before: 201,
+        limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         direction: "after",
         payloadMode: "full",
       });
       expect(streamCalls).toEqual([2, 2, 200]);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4, 5]);
       expect(hook.result.current.events.at(-1)).toMatchObject({
         sequence: 5,
         coveredThrough: 200,
       });
       expect(hook.result.current.lastSequence).toBe(200);
 
-      // A large raw gap skips the compact probe and reloads one latest tail.
-      // Keep enough history behind that tail for the in-flight older-page
-      // invalidation check below.
+      // Up to two pages of missed conversation are appended: the reader keeps
+      // the history already loaded instead of a replacement tail.
       store = Array.from({ length: 1_400 }, (_, index) => event(index + 1));
       durableHead = 1_400;
       await suspendAndResume();
-
-      expect(listCalls).toEqual([
+      expect(listCalls.slice(-2)).toEqual([
         {
-          before: Number.MAX_SAFE_INTEGER,
+          ...CONVERSATION_READ,
+          after: 200,
+          before: 1_401,
           limit: SESSION_HISTORY_PAGE_SIZE,
-          compact: true,
-          payloadMode: "full",
-        },
-        {
-          after: 4,
-          limit: 196,
           compact: true,
           direction: "after",
           payloadMode: "full",
         },
         {
+          ...CONVERSATION_READ,
+          after: 1_200,
+          before: 1_401,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+      ]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400]);
+      expect(hook.result.current.events[0]?.sequence).toBe(1);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
+      expect(hook.result.current.events).toHaveLength(1_205);
+
+      // A longer backlog reloads one latest tail. Keep enough history behind
+      // that tail for the in-flight older-page invalidation check below.
+      store = Array.from({ length: 3_500 }, (_, index) => event(index + 1));
+      durableHead = 3_500;
+      await suspendAndResume();
+      expect(listCalls.slice(-3)).toEqual([
+        {
+          ...CONVERSATION_READ,
+          after: 1_400,
+          before: 3_501,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        {
+          ...CONVERSATION_READ,
+          after: 2_400,
+          before: 3_501,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        {
+          ...CONVERSATION_READ,
           before: Number.MAX_SAFE_INTEGER,
           limit: SESSION_HISTORY_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
       ]);
-      expect(streamCalls).toEqual([2, 2, 200, 1_400]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(401);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
+      expect(hook.result.current.events[0]?.sequence).toBe(2_501);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
 
       let releaseOlder!: () => void;
       delayedOlder = new Promise<void>((resolve) => {
@@ -1710,8 +1774,7 @@ describe("useSessionEvents", () => {
       });
       expect(hook.result.current.loadingOlder).toBe(true);
 
-      // A gap beyond the bounded one-page probe budget skips the forward
-      // read entirely and goes straight to the latest compact tail.
+      // A gap beyond the catch-up budget reloads the latest compact tail.
       store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
       durableHead = 6_000;
       let releaseTail!: (events: SessionEvent[]) => void;
@@ -1721,8 +1784,8 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       // A foreground replacement is atomic: the prior complete tip remains
       // visible while the bounded latest page is still in flight.
-      expect(hook.result.current.events[0]?.sequence).toBe(401);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
+      expect(hook.result.current.events[0]?.sequence).toBe(2_501);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
       await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
       delayedTail = null;
       await actRun(async () => {
@@ -1731,19 +1794,20 @@ describe("useSessionEvents", () => {
         await Promise.resolve();
       });
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
-      expect(listCalls.some((call) => call.after === 400)).toBe(false);
-      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000]);
+      expect(listCalls.some((call) => call.after === 2_500)).toBe(false);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
       expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // Replacement retires navigation against the discarded window. The old
-      // page must not splice 1–400 onto 5001–6000, leaving an inaccessible gap.
+      // page must not splice 1501–2500 onto 5001–6000, leaving an inaccessible gap.
       expect(hook.result.current.loadingOlder).toBe(false);
       releaseOlder();
       await actRun(() => pendingOlder);
@@ -1752,22 +1816,41 @@ describe("useSessionEvents", () => {
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
       expect(hook.result.current.hasOlder).toBe(true);
 
-      // The head read is only an optimization. A transient failure falls back
-      // to the SDK's exact cursor replay and keeps the existing timeline.
+      // The head read is only an optimization. A transient failure retries
+      // with backoff (the network often returns just after a wake) rather
+      // than replaying a backlog it could not size; one that keeps failing
+      // falls back to the SDK's exact cursor replay and keeps the timeline.
       store = Array.from({ length: 6_002 }, (_, index) => event(index + 1));
       durableHead = 6_002;
       failHeadRead = true;
+      const headReadsBefore = headReadCalls.length;
       await suspendAndResume();
+      expect(headReadCalls).toHaveLength(headReadsBefore + 1);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000]);
+      for (let step = 0; step < 40; step += 1) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(500);
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        });
+      }
+      // Five strict attempts (500 ms to 8 s apart), then one that replays
+      // whatever it finds.
+      expect(headReadCalls).toHaveLength(headReadsBefore + 6);
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
-      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
-      expect(headReadCalls).toHaveLength(5);
+      // One per foreground resume (six for the failing one), plus one for
+      // each freshly loaded window (the first open and the two reloads),
+      // which joins at the durable head.
+      expect(headReadCalls).toHaveLength(14);
       for (const options of headReadCalls) {
         expect(options.fresh).toBe(true);
         expect(options.signal).toBeDefined();
@@ -1964,6 +2047,7 @@ describe("useSessionEvents", () => {
     // refetched with its own turn.
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -1980,6 +2064,7 @@ describe("useSessionEvents", () => {
     // start within the older fetch cap.
     expect(more).toBe(false);
     expect(listCalls[1]).toEqual({
+      ...CONVERSATION_READ,
       before: 500,
       limit: SESSION_HISTORY_PAGE_SIZE,
       compact: true,
@@ -2130,12 +2215,14 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
+        ...CONVERSATION_READ,
         before: 39_001,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -2166,6 +2253,7 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -2218,14 +2306,33 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 4, 6, 8]);
     expect(calls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
-      { before: 8, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 6, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 4, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
+      {
+        ...CONVERSATION_READ,
+        before: 8,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        ...CONVERSATION_READ,
+        before: 6,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        ...CONVERSATION_READ,
+        before: 4,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     const agentText = hook.result.current.timeline
       .filter(
@@ -2240,7 +2347,7 @@ describe("useSessionEvents", () => {
         event(index + 2, "agent.message.delta", { text }),
       ),
     ];
-    const rawText = buildTimeline(rawEquivalent)
+    const rawText = buildTimeline(englishText, rawEquivalent)
       .filter(
         (item): item is Extract<TimelineItem, { kind: "agent-message" }> =>
           item.kind === "agent-message",
@@ -2264,6 +2371,7 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -2670,12 +2778,14 @@ describe("useSessionEvents", () => {
     expect(jumped).toBe(true);
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
+        ...CONVERSATION_READ,
         after: 0,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -2899,7 +3009,7 @@ describe("useSessionEvents", () => {
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 11]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcd" })]),
     );
     expect(hook.result.current.hasNewer).toBe(true);
@@ -2911,7 +3021,7 @@ describe("useSessionEvents", () => {
     expect(
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10, 20, 30]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcdef" })]),
     );
     expect(hook.result.current.hasNewer).toBe(false);
@@ -2992,7 +3102,7 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.events).toEqual(events);
     expect(window.events[1]).toBe(events[1]);
     expect(window.truncated).toBeFalse();
-    expect(buildTimeline(window.events)).toEqual(
+    expect(buildTimeline(englishText, window.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
     );
   });

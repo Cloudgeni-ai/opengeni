@@ -276,7 +276,7 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   }
   // The low-level request adapter supplies no Fetch default user agent. Some
   // providers reject otherwise valid requests without a client identity.
-  if (!headers.has("user-agent")) headers.set("user-agent", "OpenGeni");
+  if (!headers.has("user-agent")) headers.set("user-agent", "Opengeni");
   // Undici request() deliberately does not auto-decompress. Asking providers
   // for identity encoding keeps the returned web Response body truthful.
   if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");
@@ -621,7 +621,7 @@ function responseWithDispatcherLifecycle(
       try {
         const chunk = await reader.read();
         if (chunk.done) {
-          // The dispatcher cannot finish gracefully while OpenGeni still owns
+          // The dispatcher cannot finish gracefully while Opengeni still owns
           // the provider response's reader lock. Release it before teardown;
           // otherwise Undici can wait forever after the complete body arrived.
           releaseReader();

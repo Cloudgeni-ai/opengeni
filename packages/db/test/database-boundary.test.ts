@@ -86,6 +86,8 @@ describe("database foundation boundary", () => {
     const allowedRootConsumers = new Set([
       // Executable entry point; the root does not import it.
       "runtime-posture-cli.ts",
+      // Loaded only by migrate.ts; the root does not re-export it.
+      "interrupted-turn-retirement-migration.ts",
     ]);
 
     const offenders: string[] = [];

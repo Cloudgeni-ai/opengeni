@@ -42,8 +42,10 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  MessageSender,
   KnowledgeItem,
   NoticeItem,
+  SessionUsageLimitStop,
   ReasoningItem,
   SandboxItem,
   StartupPhase,
@@ -53,7 +55,10 @@ export type {
   TimelineItem,
   TimelineAnnotationSourceDescriptor,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
@@ -74,6 +79,7 @@ export type {
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
@@ -103,8 +109,17 @@ export {
 export type { ActivityDisclosureProps, DisclosureChip } from "./shared";
 
 // screenshot lightbox
-export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot-lightbox";
-export type { LightboxControlLabels } from "./screenshot-lightbox";
+export {
+  LightboxProvider,
+  useLightbox,
+  useLightboxGalleryItem,
+  useLightboxOptional,
+} from "./screenshot-lightbox";
+export type {
+  LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
+} from "./screenshot-lightbox";
 
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
@@ -118,6 +133,8 @@ export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids
 
 // session compute label (host-supplied active machine / cloud sandbox name)
 export { TimelineComputeLabelProvider, useTimelineComputeLabel } from "./compute-label";
+
+// host words for generic tool rows (language, product tool names)
 
 // turn-collapse summary chip
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
@@ -154,4 +171,9 @@ export {
 export type { ApplyPatchOperation } from "./parsers";
 
 export { KnowledgeActivityProvider } from "./knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./learning-refusal-row";
+export type { LearningRefusalPlace } from "./learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./knowledge-receipt";

@@ -4,7 +4,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import type { EntitlementsPort } from "@opengeni/contracts";
-import { modelFundingForAdmission } from "./limits";
+import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "./limits";
 import {
   checkWorkspaceAllowance,
   getSpendableCreditBalance,
@@ -29,6 +29,7 @@ export async function agentRunAdmissionDenial(
     requestedAgentRuns: number;
     /** The accepted work's causal human, not the scheduler/service caller. */
     initiatingHumanSubjectId?: string | null;
+    acceptedTurn?: { sessionId: string; turnId: string };
   },
 ): Promise<AgentRunAdmissionDenial | null> {
   const codexBilled = await isCodexBilledTurn({
@@ -36,11 +37,21 @@ export async function agentRunAdmissionDenial(
     settings: services.settings,
     workspaceId: input.workspaceId,
     model: input.model,
+    accountId: input.accountId,
+    subjectId: input.initiatingHumanSubjectId ?? null,
+    ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
   });
   const externallyBilled = modelFundingForAdmission(
     services.settings,
     input.model,
     codexBilled,
+    await coreRoutedSubscriptionFunding(services.db, services.settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      model: input.model,
+      subjectId: input.initiatingHumanSubjectId ?? null,
+      ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+    }),
   ).fundedWithoutCredits;
   if (
     !externallyBilled &&
@@ -63,14 +74,13 @@ export async function agentRunAdmissionDenial(
       if (balance.balanceMicros <= 0) return "insufficient_credits";
     }
   }
-  if (!externallyBilled) {
-    const refusal = await checkWorkspaceAllowance(services.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.initiatingHumanSubjectId ?? null,
-    });
-    if (refusal) return refusal.code;
-  }
+  const refusal = await checkWorkspaceAllowance(services.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.initiatingHumanSubjectId ?? null,
+    ...(externallyBilled ? { fundedWithoutCredits: true } : {}),
+  });
+  if (refusal) return refusal.code;
   if (
     services.settings.usageLimitsMode !== "static" &&
     services.settings.usageLimitsMode !== "managed"

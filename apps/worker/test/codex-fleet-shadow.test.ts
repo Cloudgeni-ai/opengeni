@@ -10,7 +10,7 @@ import {
   codexFleetShadowDecisionMetricLabelsV1,
   codexFleetShadowErrorMetricLabelsV1,
   publishCodexFleetShadowDecisionV1,
-} from "../src/activities/codex-fleet-shadow";
+} from "./fixtures/legacy-codex/fleet-shadow";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 
 const NOW = new Date("2026-07-18T12:00:00.000Z");

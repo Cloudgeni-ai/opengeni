@@ -215,8 +215,8 @@ export async function startE2eWorkerTopology(options: {
     turns,
     logs: () => `[control]\n${control.logs()}\n[turns]\n${turns.logs()}`,
     ready: () =>
-      control.logs().includes("OpenGeni control test worker listening") &&
-      turns.logs().includes("OpenGeni turn test worker listening"),
+      control.logs().includes("Opengeni control test worker listening") &&
+      turns.logs().includes("Opengeni turn test worker listening"),
     stop: async () => {
       await Promise.allSettled([control.stop(), turns.stop()]);
     },

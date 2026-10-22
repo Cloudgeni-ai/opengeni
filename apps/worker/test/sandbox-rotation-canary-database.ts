@@ -1,7 +1,7 @@
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { requireCanary } from "./sandbox-rotation-canary-evidence";
 
 export const NATIVE_CANARY_DATABASE_OPT_IN = "LOCAL_DISPOSABLE_55434";

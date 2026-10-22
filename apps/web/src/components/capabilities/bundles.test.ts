@@ -11,12 +11,12 @@ import {
   sortBundleRows,
   type BundleRow,
 } from "./bundles";
-import { isConnectorCatalogItem } from "@/lib/capabilities";
+import { isConnectorCatalogItem } from "@opengeni/react/app/lib/capabilities";
 import type {
   CapabilityCatalogItem,
   InstalledSkillSummary,
   PluginInstallationSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 describe("bundle rows", () => {
   test("maps installed and curated items onto one uniform row", () => {

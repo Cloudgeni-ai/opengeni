@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
 import * as runAdmission from "../src/billing/agent-run-admission";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   assertGoalResumeAllowed,
@@ -129,6 +129,30 @@ test("Resume preserves policy denials instead of choosing a fallback model", asy
   expect(value.admission).not.toHaveBeenCalled();
 });
 
+test("Resume pauses a credit model when the workspace turned Opengeni credits off", async () => {
+  const value = fixture(testSettings().openaiModel);
+  value.policy.mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  } as never);
+  await expect(value.resume()).rejects.toThrow("Credits are turned off");
+  expect(value.admission).not.toHaveBeenCalled();
+});
+
+test("Resume keeps a subscription model running when Opengeni credits are off", async () => {
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    claude_subscription: { models: [{ upstreamModelId: "claude-fixture" }] },
+  });
+  const value = fixture("organization-claude-subscription/claude-fixture", settings);
+  value.policy.mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  } as never);
+  await expect(value.resume()).resolves.toBeUndefined();
+});
+
 test("a host funding denial is neutral about the host's private balance and policy", async () => {
   const settings = testSettings();
   const value = fixture(settings.openaiModel, settings);
@@ -153,8 +177,8 @@ test("a host funding denial is neutral about the host's private balance and poli
 });
 
 for (const [denial, pausedReason, message] of [
-  ["insufficient_credits", "credits", "Insufficient Opengeni credits"],
-  ["allowance_exhausted", "allowance", "usage allowance exhausted"],
+  ["insufficient_credits", "credits", "Insufficient workspace credits"],
+  ["allowance_exhausted", "allowance", "Usage allowance exhausted"],
   ["monthly_model_cost_limit", "budget", "spending limit reached"],
   ["monthly_agent_run_limit", "usage_limit", "agent run limit reached"],
 ] as const) {

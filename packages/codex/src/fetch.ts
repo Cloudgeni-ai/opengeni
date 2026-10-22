@@ -11,14 +11,28 @@
 // Stream parsing is delegated to the SDK (SSE passthrough; spec §0(d)).
 
 import { randomUUID } from "node:crypto";
+import {
+  withResponsesContinuationAdmission,
+  withModelTransportObservation,
+  markModelSocketFailure,
+  isModelSocketTransportError,
+  MODEL_SOCKET_FAILURE_HEADER,
+  type ModelRequestTransport,
+} from "@opengeni/network/responses-websocket";
 import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
+import {
+  CODEX_TRANSPORT_HEADER,
+  parseCodexRequestTransport,
+  type CodexResponsesTransport,
+} from "./responses-websocket";
 import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
+  type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexResponseTimeoutPolicy,
@@ -239,6 +253,9 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
 }
 
 type RequestAudit = {
+  transport?: ModelRequestTransport;
+  dispatchDelayMs?: number;
+  nextTransportAttempt: () => number;
   ctx: CodexRequestContext;
   requestId: string;
   transportAttempt: number;
@@ -247,9 +264,31 @@ type RequestAudit = {
   attemptStartedAtMonotonic: number;
   policy: CodexResponseTimeoutPolicy;
   terminalOutcome: RequestTerminalOutcome | null;
+  admitted: boolean;
+  settlement: Promise<void> | null;
 };
 
 type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
+
+function settleProviderRequest(
+  audit: RequestAudit,
+  outcome: CodexProviderRequestSettlement["outcome"],
+): Promise<void> {
+  if (!audit.admitted) return Promise.resolve();
+  if (!audit.settlement) {
+    audit.settlement = (async () => {
+      await audit.ctx.onProviderRequestSettled?.({
+        requestId: audit.requestId,
+        transportAttempt: audit.transportAttempt,
+        outcome,
+      });
+    })();
+    // Semantic response observation is synchronous, before bytes reach the
+    // SDK. Its observer is joined by the terminal path, independently of audit.
+    void audit.settlement.catch(() => undefined);
+  }
+  return audit.settlement;
+}
 
 type SemanticTerminalState = {
   phase: "completed" | "failed" | null;
@@ -373,6 +412,10 @@ function requestEventFor(
     durationMs: Math.max(0, performance.now() - audit.attemptStartedAtMonotonic),
     timeoutPolicy: audit.policy,
     ...event,
+    ...(audit.dispatchDelayMs === undefined ? {} : { dispatchDelayMs: audit.dispatchDelayMs }),
+    // The transport fills timing as provider events arrive. Snapshot per receipt
+    // so later frames never mutate an already delivered diagnostic event.
+    ...(audit.transport ? { transport: structuredClone(audit.transport) } : {}),
   };
 }
 
@@ -386,12 +429,23 @@ async function emitRequestEvent(
   const terminalOutcome = terminalOutcomeForPhase(event.phase);
   if (terminalOutcome !== null) {
     if (audit.terminalOutcome !== null) {
+      // Another terminal path may own a still-pending custody write. Its
+      // audit is deduplicated, but every consumer must join that same write.
+      await audit.settlement;
       return false;
     }
     // Fence before invoking either observer. The durable observer may reject,
     // but a later transport callback must never turn that one terminal into a
     // contradictory second terminal.
     audit.terminalOutcome = terminalOutcome;
+    await settleProviderRequest(
+      audit,
+      definiteErrorStatus(event.status)
+        ? "refused"
+        : event.phase === "completed"
+          ? "response_received"
+          : "unknown",
+    );
   }
   const observed = requestEventFor(audit, event);
   try {
@@ -401,6 +455,25 @@ async function emitRequestEvent(
   }
   await audit.ctx.onModelRequestEvent?.(observed);
   return true;
+}
+
+/**
+ * An HTTP error status the provider actually returned is a definite answer:
+ * no model response was produced. That covers 4xx and the 5xx answers of the
+ * provider's edge (for example a 503 after an upstream reset), which the OpenAI
+ * SDK retries as a new request. Timeouts (408, 504) and conflicts (409) stay
+ * ambiguous because the provider may still be processing the request; an
+ * absent response is ambiguous too.
+ */
+function definiteErrorStatus(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 600 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 504
+  );
 }
 
 function providerRequestId(headers: Headers): string | undefined {
@@ -427,7 +500,72 @@ async function fetchBeforeHeaders(
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(externalSignal?.reason);
   externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  const basePromise = base(input, { ...init, signal: controller.signal });
+  // The one-shot admission is the last awaited step before the physical fetch.
+  // Neither a diagnostic `started` nor token loading is dispatch authority.
+  let basePromise: Promise<Response>;
+  let continuationPending: Promise<void> | undefined;
+  try {
+    await audit.ctx.beforeProviderDispatch?.({
+      requestId: audit.requestId,
+      transportAttempt: audit.transportAttempt,
+    });
+    audit.admitted = true;
+    // A cancellation/deadline during DB admission is known pre-dispatch, not
+    // an ambiguous physical request. Do not spend the newly admitted permit.
+    if (
+      controller.signal.aborted ||
+      Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs
+    ) {
+      await settleProviderRequest(audit, "refused");
+      controller.signal.throwIfAborted();
+      throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+    }
+    basePromise = withResponsesContinuationAdmission(
+      (replacementSignal) =>
+        (continuationPending = (async () => {
+          await emitRequestEvent(audit, { phase: "failed", responseObserved: true, status: 400 });
+          replacementSignal.throwIfAborted();
+          controller.signal.throwIfAborted();
+          if (Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs) {
+            throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+          }
+          audit.transportAttempt = audit.nextTransportAttempt();
+          audit.terminalOutcome = null;
+          audit.settlement = null;
+          audit.admitted = false;
+          delete audit.transport;
+          delete audit.dispatchDelayMs;
+          audit.attemptStartedAtMonotonic = performance.now();
+          await emitRequestEvent(audit, { phase: "started", responseObserved: false });
+          replacementSignal.throwIfAborted();
+          controller.signal.throwIfAborted();
+          await audit.ctx.beforeProviderDispatch?.({
+            requestId: audit.requestId,
+            transportAttempt: audit.transportAttempt,
+          });
+          audit.admitted = true;
+          if (controller.signal.aborted || replacementSignal.aborted) {
+            await settleProviderRequest(audit, "refused");
+            controller.signal.throwIfAborted();
+            replacementSignal.throwIfAborted();
+          }
+        })()),
+      () =>
+        withModelTransportObservation(
+          (transport) => {
+            audit.transport = transport;
+            audit.dispatchDelayMs = Math.max(
+              0,
+              performance.now() - audit.attemptStartedAtMonotonic,
+            );
+          },
+          () => base(input, { ...init, redirect: "error", signal: controller.signal }),
+        ),
+    );
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", forwardAbort);
+    throw error;
+  }
   let deadlineError: CodexResponseTimeoutError | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -440,7 +578,11 @@ async function fetchBeforeHeaders(
     return await Promise.race([basePromise, deadline]);
   } catch (error) {
     if (deadlineError) {
+      if (audit.transport?.kind === "websocket") markModelSocketFailure(deadlineError);
       controller.abort(deadlineError);
+      // A timeout may race replacement admission; join its refused settlement
+      // before the enclosing request audit or turn recovery can finish.
+      await continuationPending?.catch(() => undefined);
       void basePromise
         .then((late) => late.body?.cancel(deadlineError ?? undefined))
         .catch(() => undefined);
@@ -495,6 +637,10 @@ async function observedResponse(
         const semanticPhase = semanticTerminal?.phase;
         const phase = semanticPhase ?? "timed_out";
         const error = new CodexResponseTimeoutError(klass, audit.requestId, true);
+        if (
+          parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER))?.kind === "websocket"
+        )
+          markModelSocketFailure(error);
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase,
@@ -585,7 +731,12 @@ async function observedResponse(
         armIdle();
         controller.enqueue(chunk.value);
       } catch (error) {
-        if (terminal) return;
+        // EOF sets terminal before awaiting the durable observer. If that
+        // observer rejects, do not leave the consumer waiting on an open body.
+        if (terminal) {
+          controller.error(error);
+          return;
+        }
         terminal = true;
         clearTimers();
         const semanticPhase = semanticTerminal?.phase;
@@ -602,7 +753,11 @@ async function observedResponse(
         if (semanticPhase === "completed") {
           controller.close();
         } else {
-          controller.error(error);
+          // The connection broke before a terminal event (a reset HTTP body
+          // or a WebSocket that closed mid-response). That is the same
+          // interrupted stream as one that ends without a terminal event, so
+          // it gets the same typed failure and the same recovery.
+          controller.error(interruptedCodexStreamError(res, error));
         }
       }
     },
@@ -661,6 +816,75 @@ function timeoutErrorResponse(info: {
   );
 }
 
+/** Rewrites the SDK's /responses URL to the backend's /codex/responses. */
+function codexResponsesUrl(rawUrl: string): string {
+  // Idempotent: the negative lookbehind skips URLs whose base already includes
+  // /codex (avoids /codex/codex/responses).
+  return rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
+}
+
+/**
+ * The headers that identify a Codex request's account, client and
+ * conversation. Every request carries them, and the Responses WebSocket
+ * handshake is opened with them.
+ */
+function setCodexIdentityHeaders(
+  headers: Headers,
+  ctx: CodexRequestContext,
+  auth: CodexTokenSnapshot,
+): void {
+  headers.set("Authorization", `Bearer ${auth.accessToken}`);
+  if (auth.chatgptAccountId) {
+    headers.set("ChatGPT-Account-ID", auth.chatgptAccountId);
+  }
+  headers.set("originator", CODEX_ORIGINATOR);
+  headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
+  headers.set("version", ctx.clientVersion);
+  const affinityKey = ctx.cacheAffinityKey ?? ctx.sessionId;
+  if (affinityKey) {
+    // Cache affinity is not conversation identity. Keep the body's session
+    // key and the transport's conversation-scoped continuation unchanged.
+    headers.set("session_id", affinityKey);
+  }
+  if (auth.isFedramp) {
+    headers.set("X-OpenAI-Fedramp", "true");
+  }
+  // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
+  if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
+    headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
+  }
+  // Turn analytics / request_kind live in x-codex-turn-metadata — body
+  // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
+  if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
+    headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
+  }
+}
+
+/**
+ * Opens the current Codex conversation's Responses WebSocket ahead of its first
+ * model request, so the handshake overlaps the rest of turn preparation rather
+ * than delaying the first response. Call inside the turn's Codex request
+ * context with the transport and base URL the model client uses. It sends no
+ * model request and never throws; a transport without WebSockets ignores it,
+ * and the first request still resolves and checks its own credential.
+ */
+export async function warmCodexResponsesConnection(
+  transport: FetchLike,
+  baseUrl: string,
+): Promise<void> {
+  const ctx = codexRequestStorage.getStore();
+  const warm = (transport as Partial<CodexResponsesTransport>).warm;
+  if (!ctx || typeof warm !== "function") return;
+  try {
+    const auth = await ctx.getToken();
+    const headers = new Headers();
+    setCodexIdentityHeaders(headers, ctx, auth);
+    warm(codexResponsesUrl(`${baseUrl.replace(/\/+$/, "")}/responses`), headers);
+  } catch {
+    // Only an optimization: the first request opens its own connection.
+  }
+}
+
 export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): FetchLike {
   return async (input, init) => {
     const ctx = codexRequestStorage.getStore();
@@ -671,9 +895,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
 
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    // /responses -> /codex/responses, idempotent: the negative lookbehind skips
-    // URLs whose base already includes /codex (avoids /codex/codex/responses).
-    const rewritten = rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
+    const rewritten = codexResponsesUrl(rawUrl);
 
     const policy = resolveCodexResponseTimeoutPolicy(ctx.responseTimeoutPolicy);
     const handedRequestId = new Headers(init?.headers).get(CODEX_REQUEST_ID_HEADER);
@@ -693,35 +915,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       headers.delete(CODEX_REQUEST_MODEL_HEADER);
       headers.delete(CODEX_REQUEST_ID_HEADER);
       headers.delete(CODEX_REQUEST_CALLER_STREAM_HEADER);
-      headers.set("Authorization", `Bearer ${auth.accessToken}`);
-      if (auth.chatgptAccountId) {
-        headers.set("ChatGPT-Account-ID", auth.chatgptAccountId);
-      }
-      headers.set("originator", CODEX_ORIGINATOR);
-      headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
-      headers.set("version", ctx.clientVersion);
+      setCodexIdentityHeaders(headers, ctx, auth);
       headers.set("accept", "text/event-stream");
       headers.set("content-type", "application/json");
-      if (ctx.sessionId) {
-        // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
-        // without it, byte-identical resends miss the prompt cache ~half the
-        // time; with it they pin to a warm shard and hit at the ceiling.
-        headers.set("session_id", ctx.sessionId);
-      }
-      if (auth.isFedramp) {
-        headers.set("X-OpenAI-Fedramp", "true");
-      }
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
-      // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
-      if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
-        headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
-      }
-      // Turn analytics / request_kind live in x-codex-turn-metadata — body
-      // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
-      if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
-        headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
-      }
 
       // The backend is streaming-only; force stream=true on the wire but remember
       // the caller's intent for legacy/unowned non-streaming consumers. The owned
@@ -777,11 +975,14 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx,
         requestId,
         transportAttempt,
+        nextTransportAttempt: () => ++transportAttempt,
         ...(model ? { model } : {}),
         logicalStartedAt,
         attemptStartedAtMonotonic: performance.now(),
         policy,
         terminalOutcome: null,
+        admitted: false,
+        settlement: null,
       };
       emitRequestPreparationDiagnostic(ctx, "wire_request_ready");
       await emitRequestEvent(audit, {
@@ -792,7 +993,6 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         phase: null,
       };
       try {
-        await ctx.beforeProviderDispatch?.();
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
         const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {
@@ -800,6 +1000,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           responseObserved: true,
           status: res.status,
           ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+          // A response the socket transport did not label never passed through it.
+          transport: parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER)) ?? {
+            kind: "http",
+            reason: "unavailable",
+          },
         });
         res = await observedResponse(res, audit, nextInit.signal, semanticTerminal);
       } catch (error) {
@@ -828,17 +1033,27 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           timeoutClass: klass,
           willRetry: false,
         }).catch(() => undefined);
-        throw new CodexResponseTimeoutError(klass, requestId, false);
+        const timeoutError = new CodexResponseTimeoutError(klass, requestId, false);
+        if (audit.transport?.kind === "websocket") markModelSocketFailure(timeoutError);
+        throw timeoutError;
       }
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
-      // OK/!res.ok branch, so the same fire-and-forget read also covers the 429
+      // OK/!res.ok branch, so the same observation also covers the 429
       // hard-cap path (an exhausted serving account stamps its own fresh
-      // used_percent with no extra fetch). Sync + non-throwing + never awaited;
+      // used_percent with no extra fetch). The latest-cache observer is sync;
+      // the optional durable observer is awaited independently of that cache.
       // `if (usage)` makes an absent/malformed header set a safe no-op. We read
       // res.headers only — the SSE body is never touched here.
       const usage = parseCodexUsageHeaders(res.headers);
       if (usage) {
         ctx.onUsageHeaders?.(usage);
+        // Join the durable observer before returning the response. Failure is
+        // telemetry-only and must not replace a provider response or refusal.
+        try {
+          await ctx.persistUsageHeaders?.(usage);
+        } catch {
+          // Both synchronous throws and rejected promises are telemetry-only.
+        }
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
         // Never log provider bodies, identifiers, or headers: they can contain
@@ -877,9 +1092,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       if (callerWantsStream) {
         res = validateCodexStream(
           res,
-          (phase, meaningfulOutput) => {
+          (phase, meaningfulOutput, refused) => {
             markSemanticTerminal(semanticTerminal, phase);
             semanticTerminal.meaningfulOutput = meaningfulOutput === true;
+            if (phase === "completed") void settleProviderRequest(audit, "response_received");
+            else if (refused) void settleProviderRequest(audit, "refused");
           },
           async () => {
             const upstreamRequestId = providerRequestId(res.headers);
@@ -909,12 +1126,15 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     } catch (error) {
       const timeout = classifyCodexResponseTimeoutError(error);
       if (!timeout) throw error;
-      return timeoutErrorResponse({
+      const response = timeoutErrorResponse({
         timeoutClass: timeout.timeoutClass,
         requestId: timeout.requestId ?? requestId,
         responseObserved: timeout.responseObserved,
         message: timeout.message,
       });
+      if (isModelSocketTransportError(error))
+        response.headers.set(MODEL_SOCKET_FAILURE_HEADER, "1");
+      return response;
     }
   };
 }
@@ -1107,6 +1327,14 @@ async function sseToJsonResponse(
   }
   if (terminalError) {
     markSemanticTerminal(semanticTerminal, "failed");
+    // The provider itself terminated this response with a failure event
+    // (response.failed, error, response.incomplete). Before any completed
+    // output that is a definite answer, exactly like an HTTP 5xx status: no
+    // model response was produced, so the request is safe to run again. A
+    // failure after completed output stays unknown.
+    if (!hasMeaningfulCodexOutput(items)) {
+      await settleProviderRequest(audit, "refused");
+    }
     await emitRequestEvent(audit, {
       phase: "failed",
       responseObserved: true,
@@ -1416,6 +1644,25 @@ function codexSseFailureError(
 }
 
 /**
+ * A response body whose connection broke before any terminal event. The
+ * original transport error stays the cause; the typed failure is the same
+ * one an SSE body that ends without a terminal event produces.
+ */
+function interruptedCodexStreamError(
+  source: Response,
+  cause: unknown,
+): CodexStreamingTerminalError {
+  const error = codexSseFailureError(
+    source,
+    null,
+    "invalid_sse_terminal",
+    "The Codex response stream ended without a terminal response",
+  );
+  error.cause = cause;
+  return error;
+}
+
+/**
  * Preserve a live Responses SSE stream byte-for-byte while translating only
  * provider-specific terminal failures into typed transport errors. Successful
  * output reconstruction belongs to the model reducer, so this layer retains no
@@ -1423,7 +1670,11 @@ function codexSseFailureError(
  */
 function validateCodexStream(
   res: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed", meaningfulOutput?: boolean) => void,
+  onSemanticTerminal?: (
+    phase: "completed" | "failed",
+    meaningfulOutput?: boolean,
+    refused?: boolean,
+  ) => void,
   onParsedEof?: () => Promise<void>,
 ): Response {
   if (!res.body) {
@@ -1455,8 +1706,16 @@ function validateCodexStream(
   const observeOutput = (output: unknown) => {
     meaningfulOutput ||= hasMeaningfulCodexOutput(output);
   };
-  const observeTerminal = (phase: "completed" | "failed") =>
-    onSemanticTerminal?.(phase, phase === "completed" && meaningfulOutput);
+  // `providerTerminal` is true only for a failure the provider declared in the
+  // stream (response.failed, error, response.incomplete). Before completed
+  // output that is a definite answer, like an HTTP 5xx status; a stream that
+  // ends without any terminal event stays unknown.
+  const observeTerminal = (phase: "completed" | "failed", providerTerminal = false) =>
+    onSemanticTerminal?.(
+      phase,
+      phase === "completed" && meaningfulOutput,
+      phase === "failed" && !meaningfulOutput && providerTerminal,
+    );
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -1472,9 +1731,19 @@ function validateCodexStream(
     }
   };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      emitCompleteBlocks(controller, false);
+    async transform(chunk, controller) {
+      try {
+        buffer += decoder.decode(chunk, { stream: true });
+        emitCompleteBlocks(controller, false);
+      } catch (error) {
+        // Parsing a provider failure throws before pipeThrough cancels its
+        // source. Join request custody here: the worker must not classify
+        // recovery while the refusal/unknown receipt is still being written.
+        // Audit or settlement failure must preserve the provider diagnostic;
+        // an unsuccessful custody write keeps the request's replay fence.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
+      }
     },
     async flush(controller) {
       try {
@@ -1499,12 +1768,17 @@ function validateCodexStream(
             "The Codex response stream ended without a terminal response",
           );
         }
-      } finally {
-        // Raw transport EOF can precede parsing a final block without a blank
-        // separator. Settle only after that parse; the audit fence deduplicates
-        // an earlier terminal already observed from a complete block.
-        await onParsedEof?.();
+      } catch (error) {
+        // A final buffered failure has the same diagnostic and custody rules
+        // as a failure parsed from a complete chunk. Finalization must not
+        // replace that failure with an audit or settlement rejection.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
       }
+      // Raw transport EOF can precede parsing a final block without a blank
+      // separator. Settle only after that parse; successful parsing still
+      // propagates a failed custody/audit write to the caller.
+      await onParsedEof?.();
     },
   });
   const headers = new Headers(res.headers);
@@ -1563,7 +1837,7 @@ const CODEX_TERMINAL_TYPE_HINTS = [
 function inspectCodexSseBlock(
   block: string,
   source: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+  onSemanticTerminal?: (phase: "completed" | "failed", providerTerminal?: boolean) => void,
   onOutput?: (output: unknown) => void,
 ): boolean {
   const lines = block.split(/\r\n|\r|\n/);
@@ -1589,7 +1863,7 @@ function inspectCodexSseBlock(
   const terminal = classifyCodexSseTerminal(ev);
   if (ev.type === "response.output_item.done") onOutput?.([ev.item]);
   if (terminal?.phase === "failed") {
-    onSemanticTerminal?.("failed");
+    onSemanticTerminal?.("failed", true);
     throw codexSseFailureError(
       source,
       terminal.rawError,

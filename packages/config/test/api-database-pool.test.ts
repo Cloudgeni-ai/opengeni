@@ -26,3 +26,39 @@ describe("API application database pool capacity", () => {
     },
   );
 });
+
+describe("database prepared statements", () => {
+  test("notification connections are opt-in without changing the main database URL", () => {
+    expect(getSettings({}).databaseNotificationUrl).toBeUndefined();
+    expect(
+      getSettings({ OPENGENI_DATABASE_NOTIFICATION_URL: " " }).databaseNotificationUrl,
+    ).toBeUndefined();
+    const source = { OPENGENI_DATABASE_URL: "postgres://app:fixture@localhost:6432/opengeni" };
+    const direct = "postgres://app:fixture@localhost:5432/opengeni";
+    const settings = getSettings({ ...source, OPENGENI_DATABASE_NOTIFICATION_URL: direct });
+    expect(settings.databaseUrl).toBe(source.OPENGENI_DATABASE_URL);
+    expect(settings.databaseNotificationUrl).toBe(direct);
+  });
+
+  test("stays unset so the pool decides from the connection URL", () => {
+    expect(getSettings({}).databasePreparedStatements).toBeUndefined();
+    expect(
+      getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: " " }).databasePreparedStatements,
+    ).toBeUndefined();
+  });
+
+  test.each([
+    ["false", false],
+    ["0", false],
+    ["true", true],
+    ["on", true],
+  ])("accepts an explicit %s", (value, expected) => {
+    expect(
+      getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: value }).databasePreparedStatements,
+    ).toBe(expected);
+  });
+
+  test("rejects a value that is not a boolean", () => {
+    expect(() => getSettings({ OPENGENI_DATABASE_PREPARED_STATEMENTS: "sometimes" })).toThrow();
+  });
+});

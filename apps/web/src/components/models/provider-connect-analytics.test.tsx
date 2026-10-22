@@ -9,12 +9,12 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { modelsScopeLabels } from "./models-ui";
+import { modelsScopeLabels } from "@opengeni/react/app/components/models/models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
 // Keep replacement dialog content inspectable without exercising its portal.
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormDialog: ({ open, title, children }: { open: boolean; title: string; children: ReactNode }) =>
     open ? (
       <div role="dialog">
@@ -133,7 +133,7 @@ test("organization subscription model controls keep pool and legacy credentials 
 });
 
 test("the API-key provider Connect button carries the provider's connect label", async () => {
-  for (const action of ["connect_ai_gateway", "connect_openrouter"] as const) {
+  for (const action of ["connect_ai_gateway", "connect_openrouter", "connect_opper"] as const) {
     const state = {
       config: {
         title: "Provider",

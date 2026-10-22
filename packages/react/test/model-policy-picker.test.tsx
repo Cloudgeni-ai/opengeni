@@ -13,6 +13,9 @@ import {
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -121,6 +124,27 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("model-identity policies omit unsaved effort and latency controls", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="fast"
+        allowModelOptions={false}
+        triggerStyle="field"
+        onModelChange={() => {}}
+        onEffortChange={() => {
+          throw new Error("effort is not saved here");
+        }}
+        onLatencyModeChange={() => {
+          throw new Error("latency is not saved here");
+        }}
+      />,
+    );
+    expect(container.querySelectorAll('[data-testid^="model-picker-choice-"]')).toHaveLength(2);
+    expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeNull();
+  });
   test.each([true, false])(
     "catalog logo respects model versus billing presentation (collapseScopes=%s)",
     async (collapseScopes) => {
@@ -206,7 +230,7 @@ describe("ModelPolicyPicker", () => {
   );
 
   test("neutral defaults preserve external identities and caller-provided row labels", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       { ...MODELS[0]!, id: "deployment/model", source: "opengeni", cost: "credits" },
       { ...MODELS[0]!, id: "external/model", source: "opengeni", provider: "custom" },
       MODELS[1]!,
@@ -256,7 +280,7 @@ describe("ModelPolicyPicker", () => {
   });
 
   test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       {
         ...MODELS[0]!,
         id: "host/example",
@@ -396,7 +420,7 @@ describe("ModelPolicyPicker", () => {
   test.each([false, true])(
     "renders usable Codex first without mutating selection (codexOnly=%s)",
     async (codexOnly) => {
-      const rows = projectClientModelRows([
+      const rows = projectClientModelRows(englishText, [
         { ...MODELS[0]!, id: "free", label: "Free", source: "opengeni", cost: "free" },
         { ...MODELS[0]!, id: "paid", label: "Paid", source: "opengeni", cost: "credits" },
         ...MODELS,
@@ -741,6 +765,9 @@ describe("ModelPolicyPicker", () => {
     expect(mobileLabel?.textContent).toBe("5.6 Sol");
     expect(desktopLabel?.textContent).toBe("GPT-5.6 Sol");
     expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
+    // Phone: the crowded composer row keeps the name, not the chevron.
+    expect(trigger?.className).toContain("max-sm:px-1.5");
+    expect(trigger?.lastElementChild?.getAttribute("class")).toContain("max-sm:hidden");
   });
 
   test("the field trigger shows the model and the payer, and leaves the effort to the menu", async () => {
@@ -771,7 +798,7 @@ describe("ModelPolicyPicker", () => {
     async (triggerStyle) => {
       const render = (fundingHint: string) => {
         const props: ModelPolicyPickerProps = {
-          rows: projectClientModelRows(MODELS).map((row) => ({
+          rows: projectClientModelRows(englishText, MODELS).map((row) => ({
             ...row,
             fundingHint,
             catalog: {
@@ -808,7 +835,7 @@ describe("ModelPolicyPicker", () => {
       const trigger = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Model and effort"]',
       )!;
-      for (const hint of ["Free credits", "Uses credits", "Needs credits"]) {
+      for (const hint of ["Free credits", "Uses credits", "Not covered by your credits"]) {
         await act(async () => mounted!.root.render(render(hint)));
         expect(trigger.textContent).not.toContain("credits");
         expect(trigger.title).not.toContain("credits");
@@ -1064,7 +1091,7 @@ describe("ModelPolicyPicker", () => {
           thinkingEffort: "Tenkenivå",
           selected: "Valgt",
           billingHints: {
-            ...defaultModelPolicyPickerMessages.billingHints,
+            ...defaultModelPolicyPickerMessages(englishText).billingHints,
             codex_subscription: "Codex-abonnement",
           },
         }}
@@ -1247,6 +1274,41 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
+  test("preserves the workspace-provider rail for a removed Opper selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-opper/aws/retired-model-eu"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
+  test("uses the credits-safe rail when a removed deployment Opper selection has no cost row", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="opper/aws/retired-model-eu"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
+  });
+
   test("labels the shared BYOK rail without connection scope", async () => {
     const container = await mount(<BillingClassMark billingClass="byok" />);
 
@@ -1341,6 +1403,97 @@ describe("ModelPolicyPicker", () => {
   });
 });
 
+describe("Ultrafast speed choice", () => {
+  const sol = MODELS[0]!;
+  const withUltrafast = (runnable: boolean, billingMultiplierBps?: number): ClientModel => ({
+    ...sol,
+    capabilities: {
+      ...sol.capabilities!,
+      latencyModes: [
+        ...sol.capabilities!.latencyModes,
+        {
+          id: "ultrafast",
+          upstream: "supported",
+          runnable,
+          ...(billingMultiplierBps ? { billingMultiplierBps } : {}),
+        },
+      ],
+    },
+  });
+
+  async function menu(model: ClientModel, latencyMode: "standard" | "fast" | "ultrafast") {
+    const changes: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode={latencyMode}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={(mode) => changes.push(mode)}
+      />,
+    );
+    return { container, changes };
+  }
+
+  test("a model offering Ultrafast replaces the Fast toggle with a Speed choice", async () => {
+    const { container, changes } = await menu(withUltrafast(true, 60_000), "ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+    const group = container.querySelector('[role="radiogroup"][aria-label="Speed"]')!;
+    expect(group).toBeTruthy();
+    const options = [...group.querySelectorAll('[role="radio"]')];
+    expect(options.map((option) => option.textContent)).toEqual(["Standard", "Fast", "Ultrafast"]);
+    expect(options.map((option) => option.getAttribute("aria-checked"))).toEqual([
+      "false",
+      "false",
+      "true",
+    ]);
+    // The plan counts Ultrafast against its usage limits.
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "8× usage",
+    );
+    await act(async () => (options[1] as HTMLButtonElement).click());
+    expect(changes).toEqual(["fast"]);
+  });
+
+  test("metered routes show the rate multiple", async () => {
+    const { container } = await menu(
+      { ...withUltrafast(true, 60_000), id: "gpt-6.1-sol", provider: "openai", source: "opengeni" },
+      "ultrafast",
+    );
+    expect(container.querySelector('[data-testid="model-picker-speed"]')?.textContent).toContain(
+      "6× rate",
+    );
+  });
+
+  test("without a runnable Ultrafast the Fast toggle stays", async () => {
+    const { container } = await menu(withUltrafast(false), "standard");
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="model-picker-speed"]')).toBeNull();
+  });
+
+  test("the composer trigger marks Ultrafast", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[withUltrafast(true)]}
+        model={sol.id}
+        effort="medium"
+        latencyMode="ultrafast"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(
+      container
+        .querySelector('[data-testid="model-picker-ultrafast-icon"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Ultrafast");
+    expect(container.querySelector('[data-testid="model-picker-fast-icon"]')).toBeNull();
+  });
+});
+
 describe("model identity outside settings", () => {
   test("ModelName shows the clean name and maker mark for any connection scope", async () => {
     const container = await mount(
@@ -1351,7 +1504,7 @@ describe("model identity outside settings", () => {
       </>,
     );
     const names = [...container.querySelectorAll("span[title]")].map((node) => node.textContent);
-    expect(names).toEqual(["Claude Opus 5.5", "Claude Opus 5.5", "GPT-6.1 Sol"]);
+    expect(names).toEqual(["Opus 5.5", "Opus 5.5", "GPT-6.1 Sol"]);
     expect(
       [...container.querySelectorAll("[data-model-vendor]")].map((node) =>
         node.getAttribute("data-model-vendor"),
@@ -1382,7 +1535,7 @@ describe("model identity outside settings", () => {
       />,
     );
     const trigger = container.querySelector('button[aria-label="Model and effort"]')!;
-    expect(trigger.textContent).toContain("Claude Haiku 4.5");
+    expect(trigger.textContent).toContain("Haiku 4.5");
     expect(trigger.textContent).not.toContain("claude-haiku");
     expect(trigger.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
     expect(trigger.querySelector('[data-testid^="billing-class-icon-"]')).toBeNull();

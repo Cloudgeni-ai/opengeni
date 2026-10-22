@@ -1,7 +1,7 @@
 # Additive AKS launch capacity
 
 This narrow root manages a general-purpose Linux `launch` User pool on each
-existing OpenGeni AKS cluster. It never creates, imports, or replaces a cluster.
+existing Opengeni AKS cluster. It never creates, imports, or replaces a cluster.
 Production's `system` pool remains owned by `deploy/terraform/azure` and its
 existing production state. Staging has no full-cluster state: this root imports
 only the existing staging `system` pool and tightens its autoscaler bounds.

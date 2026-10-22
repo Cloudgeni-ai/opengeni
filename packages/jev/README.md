@@ -1,8 +1,8 @@
 # `@opengeni/jev`
 
-`@opengeni/jev` holds OpenGeni's client for TypeSafe Jev, a fast judge model, and the Jev-ranked
-`code_search` engine behind the worker's `code_search` agent tool. The package has no runtime
-dependencies. It uses global `fetch`, runs under Node 18+ and Bun, and makes no filesystem or process
+`@opengeni/jev` holds Opengeni's client for TypeSafe Jev, its adapter to the shared
+`@opengeni/decisions` interface, and the provider-neutral `code_search` engine.
+Its only runtime dependency is that shared typed contract. It uses global `fetch`, runs under Node 18+ and Bun, and makes no filesystem or process
 calls of its own.
 
 ## Jev client
@@ -58,9 +58,23 @@ Retries and errors work like this:
 
 ## code_search
 
-`runCodeSearch({question, keywords, subQuestions?, paths?, workspace, jev, signal?, budgetTokens?})`
+`createJevDecisionModel(client)` adapts the existing client without replacing its
+transport policy. `JevError`, `JevUnavailableError` and `JevRequestError` remain
+exported aliases of the shared decision errors. The existing breaker accepts those
+same canonical errors for every provider, with unchanged thresholds and cooldowns.
+The direct client's numeric usage fields remain compatible; `inputTokensReported`
+distinguishes missing counts. The shared adapter reports null token/cost values
+when any successful chunk omitted a valid count, not a zero-cost estimate.
+
+`runCodeSearch({question, keywords, subQuestions?, paths?, workspace, decisionModel, signal?, budgetTokens?})`
 is scout-0.4. It keeps the recall, triage and verification defaults of the validated research tool
 scout-0.3.1, and adds the stages that let an agent read less irrelevant code without reading less relevant code.
+The legacy `jev: JevClient` input remains supported when `decisionModel` is absent.
+Stages now use the shared typed interface; the following Jev-based pipeline was
+the original validated configuration, not a performance claim for every backend.
+Usage is under `stats.decision` (nullable token/cost counts, model/provider and
+cost source); stage events are named `decision`. Refusals fail rather than turning
+into lexical scores. See [decision models](../../docs/decision-models.md).
 The pipeline:
 
 1. **Recall:** one ripgrep pass over the keyword variants, then IDF scoring per file.

@@ -352,7 +352,7 @@ resource "azurerm_monitor_data_collection_rule" "container_insights" {
   name                = "MSCI-${var.location}-${local.aks_name}"
   resource_group_name = local.resource_group_name
   location            = azurerm_log_analytics_workspace.observability[0].location
-  description         = "Namespace-scoped AKS Container Insights collection for OpenGeni."
+  description         = "Namespace-scoped AKS Container Insights collection for Opengeni."
   tags                = local.tags
 
   destinations {
@@ -407,7 +407,7 @@ resource "azurerm_monitor_data_collection_rule_association" "container_insights"
   name                    = "ContainerInsightsExtension"
   target_resource_id      = azurerm_kubernetes_cluster.this.id
   data_collection_rule_id = azurerm_monitor_data_collection_rule.container_insights[0].id
-  description             = "Association of the OpenGeni Container Insights data collection rule. Deleting it stops container log collection for this cluster."
+  description             = "Association of the Opengeni Container Insights data collection rule. Deleting it stops container log collection for this cluster."
 }
 
 # _LogOperation is not subject to the daily cap, so this fires after the
@@ -521,7 +521,7 @@ resource "azurerm_application_insights_standard_web_test" "availability" {
   timeout                 = local.availability_test_timeout
   retry_enabled           = true
   geo_locations           = local.availability_test_geo_locations
-  description             = "OpenGeni production health check."
+  description             = "Opengeni production health check."
   tags                    = local.tags
 
   request {
@@ -546,7 +546,7 @@ resource "azurerm_monitor_metric_alert" "availability" {
     azurerm_application_insights_standard_web_test.availability[0].id,
     azurerm_application_insights.observability[0].id,
   ]
-  description              = "Alerts when the OpenGeni production availability test fails."
+  description              = "Alerts when the Opengeni production availability test fails."
   severity                 = local.availability_alert_severity
   enabled                  = true
   auto_mitigate            = true

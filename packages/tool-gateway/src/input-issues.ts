@@ -1,4 +1,5 @@
 import type { ErrorObject } from "ajv";
+import { compileSchemaPattern } from "./schema-pattern";
 
 /**
  * One argument problem found by input-schema validation. Every field is derived
@@ -587,7 +588,7 @@ function unconditionalErrorSites(
       const declared = isSchema(schema.properties) ? schema.properties : {};
       const patterns = isSchema(schema.patternProperties)
         ? Object.entries(schema.patternProperties).map(
-            ([pattern, child]) => [pattern, new RegExp(pattern, "u"), child] as const,
+            ([pattern, child]) => [pattern, compileSchemaPattern(pattern, "u"), child] as const,
           )
         : [];
       for (const [name, childValue] of Object.entries(value)) {

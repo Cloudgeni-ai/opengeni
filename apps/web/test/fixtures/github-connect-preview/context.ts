@@ -120,6 +120,7 @@ function initial(): Store {
   switch (scenario) {
     case "ready":
     case "opening":
+    case "requested":
       return { ...base, githubStatus: unbound, githubRepos: [] };
     case "connected":
     case "connected-zero":

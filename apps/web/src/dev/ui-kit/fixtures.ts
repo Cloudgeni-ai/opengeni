@@ -782,11 +782,11 @@ export interface ModelAccount {
 export const codexProvider = {
   name: "Codex",
   subtitle: "ChatGPT plan",
-  /** "Spread work | Primary only", shown only with 2+ accounts. */
+  /** "Spread work | Primary first", shown only with 2+ accounts. */
   rotation: "spread" as "spread" | "primary",
   rotationOptions: [
     { id: "spread", label: "Spread work" },
-    { id: "primary", label: "Primary only" },
+    { id: "primary", label: "Primary first" },
   ],
   /** "Organization | This workspace", shown only when the org assigns an account. */
   source: "workspace" as "organization" | "workspace",
@@ -912,7 +912,7 @@ export const exhaustedUsageWindow: UsageWindow = {
 };
 
 export interface GatewayProvider {
-  id: "vercel" | "openrouter";
+  id: "vercel" | "openrouter" | "opper";
   name: string;
   description: string;
   connected: boolean;
@@ -935,6 +935,13 @@ export const gatewayProviders: GatewayProvider[] = [
     connected: true,
     keyHint: "•••• 4f2a",
     customModels: ["anthropic/claude-sonnet-4.5", "meta-llama/llama-4-maverick"],
+  },
+  {
+    id: "opper",
+    name: "Opper",
+    description: "Use EU-hosted models through Opper, billed to your Opper key.",
+    connected: false,
+    customModels: ["gemini-3.8-flash", "aws/claude-sonnet-4-6-eu"],
   },
 ];
 

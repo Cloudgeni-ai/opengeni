@@ -2,11 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerCompanyProfileRoutes } from "../src/routes/company-profile";
 
@@ -95,7 +92,7 @@ describe("company-profile API authority", () => {
     const body = {
       operationId: crypto.randomUUID(),
       profile: {
-        identity: "CloudGeni builds OpenGeni.",
+        identity: "CloudGeni builds Opengeni.",
         mission: "Make durable autonomous work dependable.",
         products: [],
         customers: [],
@@ -133,7 +130,7 @@ describe("company-profile API authority", () => {
     expect(accountAdmin.status).toBe(200);
     const created = (await accountAdmin.json()) as Record<string, any>;
     expect(created).toMatchObject({
-      revision: { profile: { identity: "CloudGeni builds OpenGeni." } },
+      revision: { profile: { identity: "CloudGeni builds Opengeni." } },
       head: { revisionId: created.revision.id, activationVersion: 1 },
       event: { type: "activate" },
     });

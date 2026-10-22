@@ -40,7 +40,10 @@ describe("workspace retained artifact loader", () => {
     );
 
     const result = await loader(artifact, new AbortController().signal);
-    expect(result).toEqual({ url: "https://objects.example/generated.png?signature=test" });
+    expect(result).toEqual({
+      url: "https://objects.example/generated.png?signature=test",
+      expiresAt: "2026-08-08T00:15:00.000Z",
+    });
     expect(calls).toEqual([{ workspaceId: "workspace-a", artifact }]);
   });
 
@@ -67,5 +70,34 @@ describe("workspace retained artifact loader", () => {
     );
 
     expect(await loader(fileArtifact, new AbortController().signal)).toEqual(bytes);
+  });
+
+  test("a caller may ask for the existing signed download URL for a file", async () => {
+    const { dimensions: _dimensions, ...artifactWithoutDimensions } = artifact;
+    const patch: RetainedArtifactReference = {
+      ...artifactWithoutDimensions,
+      kind: "file",
+      contentType: "application/octet-stream",
+    };
+    const loader = createWorkspaceRetainedArtifactLoader(
+      {
+        downloadRetainedArtifact: async () => {
+          throw new Error("unexpected byte download");
+        },
+        createRetainedArtifactDownloadUrl: async (workspaceId, received) => {
+          expect(workspaceId).toBe("workspace-a");
+          expect(received).toEqual(patch);
+          return {
+            url: "https://objects.example/changes.patch?signature=test",
+            expiresAt: "2026-08-08T00:05:00.000Z",
+          };
+        },
+      },
+      "workspace-a",
+    );
+    expect(await loader(patch, new AbortController().signal, { prefer: "url" })).toEqual({
+      url: "https://objects.example/changes.patch?signature=test",
+      expiresAt: "2026-08-08T00:05:00.000Z",
+    });
   });
 });

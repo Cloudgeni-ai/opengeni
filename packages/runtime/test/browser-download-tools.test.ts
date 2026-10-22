@@ -139,13 +139,22 @@ describe("browser download attempt tools", () => {
   test("rejects another session, controller, download or save operation binding", async () => {
     for (const response of [
       { ...listing, browserSessionId: randomUUID() },
-      { ...listing, controllerGeneration: "stale-controller" },
+      { ...listing, downloads: [{ ...download, browserSessionId: randomUUID() }] },
     ]) {
       const [read] = definitions({ listBrowserDownloads: async () => response });
       await expect(read!.execute({ browserSessionId }, context)).rejects.toThrow(
         "another session binding",
       );
     }
+    // Downloads kept from before a suspension keep the generation that
+    // fetched them and stay listed after the browser resumed.
+    const [kept] = definitions({
+      listBrowserDownloads: async () => ({
+        ...listing,
+        controllerGeneration: "resumed-controller",
+      }),
+    });
+    expect(await kept!.execute({ browserSessionId }, context)).not.toMatchObject({ isError: true });
     const [read] = definitions({
       getBrowserDownload: async () => ({ ...download, id: randomUUID() }),
     });

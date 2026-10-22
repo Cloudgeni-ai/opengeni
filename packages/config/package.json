@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/config",
-  "version": "1.4.4",
-  "description": "OpenGeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
+  "version": "4.3.1",
+  "description": "Opengeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./defaults": {
+      "types": "./src/defaults.ts",
+      "default": "./src/defaults.ts"
     }
   },
   "publishConfig": {
@@ -28,7 +32,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

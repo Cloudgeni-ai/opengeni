@@ -56,12 +56,8 @@ import {
   type AccessGrant,
   type Permission,
 } from "@opengeni/contracts";
-import {
-  applyRawSql,
-  expectContiguousSequences,
-  startTestServices,
-  type TestServices,
-} from "@opengeni/testing";
+import { applyRawSql, startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { expectContiguousSequences } from "@opengeni/testing/assertions";
 
 describe("DB integration", () => {
   let services: TestServices;
@@ -1964,6 +1960,9 @@ async function createRlsAppRole(
   // snapshot validators are invoker-rights; the latter evaluate immutable
   // snapshot CHECK constraints on ordinary session inserts.
   await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.session_private_actor_visible_keys() TO "${role}"`),
+  );
+  await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
     ),
@@ -1987,6 +1986,11 @@ async function createRlsAppRole(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.claude_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
+  );
+  // RLS policies call this runtime-granted helper (migration 0751 dropped the
+  // legacy pool policies and their SuperGrok and Claude predicates).
+  await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO "${role}"`),
   );
   const url = new URL(ownerUrl);
   url.username = role;

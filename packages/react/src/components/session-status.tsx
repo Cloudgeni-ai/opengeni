@@ -1,5 +1,9 @@
-import type { SessionStatus as SessionStatusValue } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
+import { SESSION_STATUS_PRESENTATION, type SessionDisplayStatus } from "../session-status-model";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+/** A server status, or the display-only `blocked` (see `sessionDisplayStatus`). */
+type SessionStatusValue = SessionDisplayStatus;
 
 export type SessionStatusMeta = {
   label: string;
@@ -10,56 +14,64 @@ export type SessionStatusMeta = {
   pulse: boolean;
 };
 
-export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> = {
+export const SESSION_STATUS_META = (
+  t: OpenGeniText,
+): Record<SessionStatusValue, SessionStatusMeta> => ({
   queued: {
-    label: "Queued",
+    label: SESSION_STATUS_PRESENTATION(t).queued.label,
     dotClassName: "bg-og-status-queued",
     badgeClassName: "text-og-fg-muted border-og-border bg-og-status-queued/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION(t).queued.pulse,
   },
   running: {
-    label: "Running",
+    label: SESSION_STATUS_PRESENTATION(t).running.label,
     dotClassName: "bg-og-status-running",
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION(t).running.pulse,
   },
   recovering: {
-    label: "Recovering",
+    label: SESSION_STATUS_PRESENTATION(t).recovering.label,
     dotClassName: "bg-og-status-running",
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION(t).recovering.pulse,
   },
   waiting_capacity: {
-    label: "Waiting for capacity",
+    label: SESSION_STATUS_PRESENTATION(t).waiting_capacity.label,
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION(t).waiting_capacity.pulse,
   },
   idle: {
-    label: "Idle",
+    label: SESSION_STATUS_PRESENTATION(t).idle.label,
     dotClassName: "bg-og-status-idle",
     badgeClassName: "text-og-status-idle border-og-status-idle/30 bg-og-status-idle/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION(t).idle.pulse,
   },
   requires_action: {
-    label: "Waiting on you",
+    label: SESSION_STATUS_PRESENTATION(t).requires_action.label,
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION(t).requires_action.pulse,
   },
-  failed: {
-    label: "Failed",
+  blocked: {
+    label: SESSION_STATUS_PRESENTATION(t).blocked.label,
     dotClassName: "bg-og-status-failed",
     badgeClassName: "text-og-status-failed border-og-status-failed/35 bg-og-status-failed/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION(t).blocked.pulse,
+  },
+  failed: {
+    label: SESSION_STATUS_PRESENTATION(t).failed.label,
+    dotClassName: "bg-og-status-failed",
+    badgeClassName: "text-og-status-failed border-og-status-failed/35 bg-og-status-failed/10",
+    pulse: SESSION_STATUS_PRESENTATION(t).failed.pulse,
   },
   cancelled: {
-    label: "Cancelled",
+    label: SESSION_STATUS_PRESENTATION(t).cancelled.label,
     dotClassName: "bg-og-status-cancelled",
     badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION(t).cancelled.pulse,
   },
-};
+});
 
 export type SessionStatusProps = {
   status: SessionStatusValue;
@@ -71,7 +83,8 @@ export type SessionStatusProps = {
 
 /** Status badge with a breathing dot for live states. */
 export function SessionStatus({ status, label, size = "md", className }: SessionStatusProps) {
-  const meta = SESSION_STATUS_META[status];
+  const t = useOpenGeniText();
+  const meta = SESSION_STATUS_META(t)[status];
   return (
     <span
       data-status={status}
@@ -95,7 +108,8 @@ export type StatusDotProps = {
 
 /** Just the dot — for dense rows and tiles. */
 export function StatusDot({ status, className }: StatusDotProps) {
-  const meta = SESSION_STATUS_META[status];
+  const t = useOpenGeniText();
+  const meta = SESSION_STATUS_META(t)[status];
   return (
     <span
       className={cn(

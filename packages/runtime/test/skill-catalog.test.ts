@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../src/index";
 import {
   formatSkillCatalog,
@@ -11,10 +11,10 @@ import {
 describe("sandbox-independent Skill catalog", () => {
   test("includes management guidance and short descriptors, never bodies or paths", () => {
     const catalog = formatSkillCatalog([
-      { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
+      { id: "builtin:skill-management", name: "skill-management", description: "Manage Skills" },
       { id: "workspace:deploy", name: "deploy", description: "Deploy services" },
     ]);
-    expect(catalog).toContain("builtin:opengeni-skills");
+    expect(catalog).toContain("builtin:skill-management");
     expect(catalog).toContain("workspace:deploy");
     expect(catalog).toContain("Management tools are lazy");
     expect(catalog).not.toContain("references/");
@@ -43,7 +43,7 @@ describe("sandbox-independent Skill catalog", () => {
     );
     expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
     expect(catalog).toContain("additional Skills are omitted");
-    expect(catalog).not.toContain("builtin:opengeni-skills");
+    expect(catalog).not.toContain("builtin:skill-management");
   });
 
   test("reads back exactly the ids a rendered catalog lists", () => {
@@ -53,13 +53,13 @@ describe("sandbox-independent Skill catalog", () => {
       description: 'Line one\nline two with "quotes" and - { braces',
     }));
     const catalog = formatSkillCatalog([
-      { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
+      { id: "builtin:skill-management", name: "skill-management", description: "Manage Skills" },
       ...entries,
     ]);
     const ids = skillCatalogEntryIds(catalog);
     expect(catalog).toContain("4 additional Skills are omitted");
     expect(ids.size).toBe(SKILL_CATALOG_MAX_ENTRIES);
-    expect(ids.has("builtin:opengeni-skills")).toBe(true);
+    expect(ids.has("builtin:skill-management")).toBe(true);
     expect(ids.has(entries.at(-1)!.id)).toBe(false);
     expect([...skillCatalogEntryIds(formatSkillCatalog([]))]).toEqual([]);
     expect([...skillCatalogEntryIds('- {not json\n- plain text\n- {"id":7}')]).toEqual([]);
@@ -68,7 +68,7 @@ describe("sandbox-independent Skill catalog", () => {
   test("an empty host selection does not inject hidden management guidance", () => {
     const catalog = formatSkillCatalog([]);
     expect(catalog).toContain("skill_read");
-    expect(catalog).not.toContain("opengeni-skills");
+    expect(catalog).not.toContain("skill-management");
   });
 
   test("composes through the ordinary no-sandbox instruction path", () => {
@@ -83,7 +83,7 @@ describe("sandbox-independent Skill catalog", () => {
       "skill_read",
     );
     expect(inspection.composed.endsWith("Session-specific instructions")).toBe(true);
-    expect(inspection.composed).not.toContain("opengeni-skills");
+    expect(inspection.composed).not.toContain("skill-management");
     expect(inspection.composed).not.toContain("skill_save");
   });
 

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type AutomationSessionTemplate } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   assertAutomationRunAuthorityInTransaction,
@@ -134,7 +134,7 @@ describe("PR Review persistence", () => {
     const registration = await createPrReviewAppRegistration(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      name: "OpenGeni Review Bot race fixture",
+      name: "Opengeni Review Bot race fixture",
       provider: "github",
       providerBaseUrl: "https://github.com",
       appId: "12345",
@@ -279,7 +279,7 @@ describe("PR Review persistence", () => {
     const registration = await createPrReviewAppRegistration(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      name: "OpenGeni Review Bot",
+      name: "Opengeni Review Bot",
       provider: "github",
       providerBaseUrl: "https://github.com",
       appId: "12345",
@@ -402,7 +402,7 @@ describe("PR Review persistence", () => {
         initialMessage: "Review pull request 17",
         sessionTemplate: acceptedTemplate,
         serviceSubjectId: `automation:${binding.triggerId}`,
-        serviceLabel: "OpenGeni Review Bot",
+        serviceLabel: "Opengeni Review Bot",
         provenance: { repositoryBindingId: binding.id, headSha },
       },
     });

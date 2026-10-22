@@ -21,6 +21,7 @@ import {
   CODEMODE_CLAIM_HEARTBEAT_MS,
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
   CodemodeOperation,
+  isSecretReferenceError,
   type SessionEvent,
   type ToolDisplayMetadata,
   type ToolFamily,
@@ -507,6 +508,8 @@ export class CodemodeAttemptDispatcher {
         error instanceof AttemptToolApprovalRequiredError ||
         error instanceof AttemptToolCatalogStaleError ||
         error instanceof AttemptToolNotFoundError ||
+        // Secret resolution runs before the executor; nothing was sent.
+        isSecretReferenceError(error) ||
         connectorActionWasNotExecuted(error);
       await this.settleWithOutput(operation, claimId, {
         state: knownPreExecution ? "failed" : "outcome_unknown",
@@ -724,7 +727,17 @@ function errorCode(error: unknown, signal: AbortSignal, executionStarted: boolea
   return "tool_outcome_unknown";
 }
 
+/** Codemode journal error messages are bounded (CodemodeOperation.errorMessage). */
+const CODEMODE_ERROR_MESSAGE_MAX = 4_096;
+
 function safeErrorMessage(error: unknown): string {
+  if (isSecretReferenceError(error)) {
+    // References and the ready ask card only; never values.
+    const output = error.toModelOutput();
+    return output.length <= CODEMODE_ERROR_MESSAGE_MAX
+      ? output
+      : error.message.slice(0, CODEMODE_ERROR_MESSAGE_MAX);
+  }
   if (
     error instanceof AttemptToolApprovalRequiredError ||
     error instanceof AttemptToolCatalogStaleError ||

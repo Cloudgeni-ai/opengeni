@@ -2,6 +2,10 @@ name: Publish canary packages
 
 # Lockstep {next-patch}-canary.N to dist-tag canary. Does not consume
 # changeset files, does not commit, never moves latest.
+# The publish job writes each package once. npm accepts writes with 202 and
+# processes them later, so a separate credential-free confirm job waits for the
+# versions to become readable and emits the Site pins. If npm is slower than
+# one confirmation window, re-run the failed confirm job; nothing is republished.
 on:
   workflow_dispatch:
     inputs:
@@ -16,13 +20,18 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
   id-token: write
 
 jobs:
   publish:
+    environment: package-release
     name: Publish canary.N
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      cohort: ${{ steps.publish.outputs.cohort }}
     steps:
       - name: Admit protected main source
         env:
@@ -38,44 +47,162 @@ jobs:
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary.yml@refs/heads/main" ]]
 
-      - name: Check out source
+      - name: Check out controller
         uses: actions/checkout@v6
         with:
           ref: "${{ github.sha }}"
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Verify exact source
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
+      - name: Restore complete checkout history without listing refs
         shell: bash
+        timeout-minutes: 5
+        env:
+          EXPECTED_CHECKOUT_SHA: "${{ github.sha }}"
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
-          git checkout --quiet --detach "$SOURCE_SHA"
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          checked_out_sha="$(git rev-parse HEAD 2>/dev/null)"
+          fetch_args=()
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+            fetch_args+=(--unshallow)
+          fi
+          selected_fetch="$checked_out_sha"
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ]; then
+            if [[ ! "$EXPECTED_SELECTED_PULL_REF" =~ ^refs/pull/[0-9]+/head$ ]]; then
+              echo "::error::Selected checkout identity changed"
+              exit 1
+            fi
+            selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
+          fi
+          if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            "$selected_fetch" >/dev/null 2>&1; then
+            echo "::error::Could not restore complete repository history"
+            exit 1
+          fi
+          if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ] ||
+             [ "$(git rev-parse HEAD 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Repository history or source identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_SELECTED_PULL_REF:-}" ] &&
+             [ "$(git rev-parse refs/remotes/origin/selected-pull 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_SHA:-}" ] &&
+             [ "$checked_out_sha" != "$EXPECTED_CHECKOUT_SHA" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+          if [ -n "${EXPECTED_CHECKOUT_REF:-}" ] &&
+             [ "$(git rev-parse "$EXPECTED_CHECKOUT_REF" 2>/dev/null)" != "$checked_out_sha" ]; then
+            echo "::error::Selected checkout identity changed"
+            exit 1
+          fi
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Admit exact source and CI
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/canary-source-admission.ts
+
+      - name: Check out admitted source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/canary-source" "$SOURCE_SHA"
+          [[ "$(git -C "$RUNNER_TEMP/canary-source" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          cmp .bun-version "$RUNNER_TEMP/canary-source/.bun-version"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install admitted source dependencies
+        working-directory: ${{ runner.temp }}/canary-source
+        run: bun install --frozen-lockfile
+
+      - name: Set up publisher Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.20.0"
+
+      - name: Build trusted publisher for Node
+        run: bun build scripts/publish-canary-node.ts --target=node --packages=external --outfile .release/publish-canary.mjs
+
+      - name: Publish canary versions
+        id: publish
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          OPENGENI_RELEASE: "1"
+          OPENGENI_RELEASE_SOURCE_ROOT: ${{ runner.temp }}/canary-source
+        # Execute the trusted controller; only admitted source supplies package builds.
+        run: node .release/publish-canary.mjs
+
+      - name: Retain bounded publication and registry receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-publication-receipts-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: .release/canary-receipts
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain source admission evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-source-admission-${{ inputs.source_sha }}
+          path: .release/canary-source-admission.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain signed source provenance
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-source-provenance-${{ inputs.source_sha }}
+          path: .release/canary-provenance
+          if-no-files-found: warn
+          retention-days: 7
+
+  confirm:
+    name: Confirm canary.N registry receipts
+    needs: publish
+    runs-on: ubuntu-latest
+    # One 30-minute visibility window plus setup; re-run this job to wait longer.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out controller
+        uses: actions/checkout@v6
+        with:
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Install controller dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: Publish canary versions
+      - name: Wait for npm to serve the accepted cohort
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-          OPENGENI_RELEASE: "1"
-        # npm verifies GITHUB_SHA against the signed workflow identity.
-        # Verify exact source above and the source-named receipt bind the checkout.
-        run: bun scripts/publish-canary.ts
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANARY_COHORT: ${{ needs.publish.outputs.cohort }}
+        run: bun scripts/confirm-canary-publication.ts
 
       - name: Retain exact Site package pins for this deployment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -83,3 +210,12 @@ jobs:
           name: site-package-versions-${{ inputs.source_sha }}
           path: .release/site-package-versions.json
           if-no-files-found: error
+
+      - name: Retain registry confirmation receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-confirmation-receipts-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: .release/canary-confirmation-receipts
+          if-no-files-found: warn
+          retention-days: 7

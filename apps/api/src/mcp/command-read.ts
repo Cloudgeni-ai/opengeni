@@ -3,6 +3,9 @@ import { COMMAND_OUTPUT_MAX_BYTES } from "@opengeni/db/session-background-comman
 
 export const COMMAND_READ_MAX_WAIT_SECONDS = 50;
 export const COMMAND_WAIT_DEFAULT_SECONDS = 45;
+/** Steer notice that rechecks `yieldTo` at once. */
+const YIELD_EVENT_TYPE = "session.control.steer_requested";
+const YIELD_RECHECK_MS = 5_000;
 
 /** Shared provider-neutral command_read/command_wait operation. Notifications
  * are only wake hints. Every result, including timeout, comes from durable DB
@@ -17,6 +20,12 @@ export async function readCommandWithWait<
   signal?: AbortSignal;
   read: () => Promise<T>;
   subscribe: (onEvents: (events: SessionEvent[]) => void) => Promise<() => void>;
+  /**
+   * Ends the wait early with the ordinary current read when true, for example
+   * once a Steer waits for the caller's turn. Checked at the start, on each
+   * Steer notice and at most every few seconds; the command keeps running.
+   */
+  yieldTo?: (() => Promise<boolean>) | undefined;
 }) {
   const seconds = input.waitSeconds ?? 0;
   if (!Number.isInteger(seconds) || seconds < 0 || seconds > COMMAND_READ_MAX_WAIT_SECONDS) {
@@ -36,6 +45,10 @@ export async function readCommandWithWait<
   let wake: (() => void) | undefined;
   let changed = false;
   let liveFanout = true;
+  // Recheck the yield condition at the start, on each Steer notice, and at
+  // most every YIELD_RECHECK_MS otherwise.
+  let yieldDue = seconds > 0 && input.yieldTo !== undefined;
+  let yieldCheckedAt = 0;
   const notify = () => {
     changed = true;
     wake?.();
@@ -56,6 +69,10 @@ export async function readCommandWithWait<
             )
           )
             notify();
+          if (input.yieldTo && events.some((event) => event.type === YIELD_EVENT_TYPE)) {
+            yieldDue = true;
+            notify();
+          }
         });
       } catch {
         liveFanout = false;
@@ -65,11 +82,22 @@ export async function readCommandWithWait<
       changed = false;
       const result = await input.read();
       const expired = Date.now() >= deadline;
+      let yielded = false;
+      if (
+        input.yieldTo &&
+        seconds > 0 &&
+        (yieldDue || Date.now() - yieldCheckedAt >= YIELD_RECHECK_MS)
+      ) {
+        yieldDue = false;
+        yieldCheckedAt = Date.now();
+        yielded = await input.yieldTo();
+      }
       if (
         result.terminal ||
         result.chunks.length > 0 ||
         result.hasMore ||
         expired ||
+        yielded ||
         input.signal?.aborted
       ) {
         return {

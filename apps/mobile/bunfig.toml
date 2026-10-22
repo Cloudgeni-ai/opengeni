@@ -1,0 +1,5 @@
+# The native app keeps its own hoisted install: Expo autolinking and CocoaPods resolve
+# native modules from a flat node_modules. Workspace packages are linked by Metro
+# (see metro.config.js), not installed here.
+[install]
+linker = "hoisted"

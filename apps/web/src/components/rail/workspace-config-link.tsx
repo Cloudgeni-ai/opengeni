@@ -7,6 +7,7 @@ import {
   CalendarClockIcon,
   GaugeIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   PanelsTopLeftIcon,
   PlugIcon,
   ServerCogIcon,
@@ -18,11 +19,12 @@ import type {
   WorkspaceConfigIcon,
   WorkspaceConfigItem,
 } from "@/components/rail/workspace-nav-data";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_CONFIG_ICONS = {
   gauge: GaugeIcon,
   box: BoxIcon,
+  "lock-keyhole": LockKeyholeIcon,
   "server-cog": ServerCogIcon,
   laptop: LaptopIcon,
   "brain-circuit": BrainCircuitIcon,

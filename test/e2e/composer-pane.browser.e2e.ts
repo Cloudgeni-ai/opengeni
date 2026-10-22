@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Page } from "playwright";
 
 const root = new URL("../..", import.meta.url).pathname;
@@ -42,24 +43,6 @@ describe("console composer in a split desktop pane", () => {
       viewport: { width: 1775, height: 1000 },
       reducedMotion: "reduce",
     });
-    // Keep the production settings editor, but supply deterministic context at
-    // the fixture boundary instead of bootstrapping a live authenticated app.
-    await page.route("**/src/context.tsx", (route) =>
-      route.fulfill({
-        contentType: "application/javascript",
-        body: `let settings = {}; const context = {
-        client: {
-          getAgentLearningSettings: async () => ({ version: 1, settings }),
-          saveAgentLearningSettings: async (_workspace, input) => {
-            settings = { ...settings, ...input.settings };
-            return { version: 2, settings };
-          }
-        },
-        captureWorkspaceInvocation: () => ({}), ownsWorkspaceInvocation: () => true
-      }; export function useAppContext() { return context; }
-      export function useOptionalAppContext() { return context; }`,
-      }),
-    );
     await page.goto(url, { waitUntil: "networkidle" });
   }, 60_000);
 
@@ -68,9 +51,9 @@ describe("console composer in a split desktop pane", () => {
   });
 
   test("production console source wires pane measurement", () => {
-    expect(readFileSync(`${root}/apps/web/src/components/Composer.tsx`, "utf8")).toContain(
-      'responsiveBasis="container"',
-    );
+    expect(
+      readFileSync(`${root}/packages/react/src/app/components/Composer.tsx`, "utf8"),
+    ).toContain('responsiveBasis="container"');
   });
 
   test("rendered fixture measures its composer container", async () => {
@@ -106,13 +89,13 @@ describe("console composer in a split desktop pane", () => {
     await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
   });
 
-  test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
+  test("shared actions keep repositories, connectors, and secrets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     // The menu body is optional lazy code; the loading shell is not action readiness.
     await page.getByRole("menuitem", { name: /^Chat settings\b/ }).waitFor();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
-    expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: /Secrets/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /^Chat settings\b/ }).count()).toBe(1);
     await page.keyboard.press("Escape");
   });
@@ -127,7 +110,7 @@ describe("console composer in a split desktop pane", () => {
       await page.locator("main").evaluate((node) => {
         node.style.width = "min(448px, calc(100vw - 32px))";
       });
-      for (const name of ["Repositories", "Connectors", "Variable sets"]) {
+      for (const name of ["Repositories", "Connectors", "Secrets"]) {
         const plus = page.getByRole("button", { name: "More composer actions" });
         expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();

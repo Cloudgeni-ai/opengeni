@@ -122,13 +122,65 @@ describe("workspace archive spool storage", () => {
     );
   });
 
-  test("rejects a successful write that produces no object", async () => {
-    const { storage } = fixture();
-    storage.headObject = async () => null;
-    await expect(uploadWorkspaceArchiveSpool(storage, key, source())).rejects.toMatchObject({
-      code: "archive_object_missing",
-      retryable: false,
+  test("rejects a successful write that never becomes visible, after bounded readback retries", async () => {
+    const { storage, ranges } = fixture();
+    let heads = 0;
+    storage.headObject = async () => {
+      heads += 1;
+      return null;
+    };
+    const slept: number[] = [];
+    await expect(
+      uploadWorkspaceArchiveSpool(storage, key, source(), {
+        readbackRetryDelaysMs: [1, 2, 3],
+        sleep: async (ms) => {
+          slept.push(ms);
+        },
+      }),
+    ).rejects.toMatchObject({ code: "archive_object_missing", retryable: false });
+    expect(slept).toEqual([1, 2, 3]);
+    expect(heads).toBe(4);
+    expect(ranges).toEqual([]);
+  });
+
+  test("tolerates an object store without read-after-write consistency", async () => {
+    const { storage, ranges } = fixture();
+    const head = storage.headObject!;
+    const range = storage.getObjectRange!;
+    let heads = 0;
+    let staleRange = true;
+    // Not visible on the first HEAD; then visible but its first pinned range
+    // read lands on a replica that has not caught up yet.
+    storage.headObject = async (objectKey) => (++heads === 1 ? null : await head(objectKey));
+    storage.getObjectRange = async (input) => {
+      if (staleRange) {
+        staleRange = false;
+        return null;
+      }
+      return await range(input);
+    };
+    const slept: number[] = [];
+    await uploadWorkspaceArchiveSpool(storage, key, source(), {
+      readbackRetryDelaysMs: [5, 10, 20],
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
     });
+    expect(slept).toEqual([5, 10]);
+    expect(ranges.length).toBe(3);
+  });
+
+  test("does not retry a readback whose content is wrong", async () => {
+    const corrupt = fixture(new Uint8Array(payload.length));
+    const slept: number[] = [];
+    await expect(
+      uploadWorkspaceArchiveSpool(corrupt.storage, key, source(), {
+        sleep: async (ms) => {
+          slept.push(ms);
+        },
+      }),
+    ).rejects.toMatchObject({ code: "archive_hash_mismatch" });
+    expect(slept).toEqual([]);
   });
 
   for (const stage of ["upload", "readback"] as const) {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession } from "../src";
@@ -83,11 +83,15 @@ describe("migration 0374 session event cursors", () => {
           applied_at timestamptz not null default now()
         )
       `);
+      // Later cursor consumers must stay withheld with 0374/0503. In
+      // particular, 0888's pin trigger requires 0503's unread-intent column.
       await sql`
         insert into schema_migrations (name)
         values (${migrationName}), ('0379_session_event_raw_lane_activation.sql'),
           ('0503_session_meaningful_attention.sql'),
-          ('0585_session_attention_cursor.sql')`;
+          ('0585_session_attention_cursor.sql'),
+          ('0837_hot_session_tables_analyze_cadence.sql'),
+          ('0888_session_list_invalidation.sql')`;
       await migrate(blank.databaseUrl);
 
       const suffix = crypto.randomUUID();

@@ -18,6 +18,9 @@ import {
   timeoutControlResponse,
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import { prepareSecretExec, runWithSecretCarry } from "../src/sandbox/secret-delivery";
+import { isSecretReferenceError, type SecretReferenceError } from "@opengeni/contracts";
+import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
@@ -57,6 +60,7 @@ function sessionWith(
             exitCode: response.exitCode,
             timedOut: response.timedOut,
             durationMs: response.durationMs,
+            backgroundChildrenStopped: response.backgroundChildrenStopped,
           },
         };
       },
@@ -453,6 +457,24 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(exec.shell).toBe(true);
   });
 
+  test("controller stdin is exact, snapshotted before admission, and absent from argv/environment", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    const stdin = new TextEncoder().encode("private synthetic input\n");
+    const expected = stdin.slice();
+    const pending = session.execWithInput({ cmd: "cat", stdin, shell: "/bin/sh", login: false });
+    stdin.fill(0);
+    await pending;
+    const request = streamedExecRequest(mock, 0);
+    expect(request.stdin).toEqual(expected);
+    expect(request.command).toEqual(["/bin/sh", "-c", "cat"]);
+    expect(request.env).toEqual({});
+    await expect(
+      session.execWithInput({ cmd: "cat", stdin: new Uint8Array(128 * 1024 + 1) }),
+    ).rejects.toThrow("input is too large");
+    expect(mock.requests.filter((call) => call.req.op?.$case === "opStart")).toHaveLength(1);
+  });
+
   test("exec honors explicit POSIX shell and login choices through direct argv", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
@@ -501,6 +523,30 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(structured.exitCode).toBe(2);
   });
 
+  test("native child cleanup appends a notice without changing structured output", async () => {
+    const mock = new MockAgentResponder({
+      exec: () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("done\n"),
+        stderr: new Uint8Array(),
+        timedOut: false,
+        durationMs: "4",
+        backgroundChildrenStopped: true,
+      }),
+    });
+    const session = sessionWith(mock);
+    const structured = await session.exec({ cmd: "sleep 60 & printf done" });
+    expect(structured.stdout).toBe("done\n");
+    expect(structured.stderr).toBe("");
+    const text = await session.execCommand({ cmd: "sleep 60 & printf done" });
+    expect(text).toContain("done\n");
+    expect(
+      text.endsWith(
+        "Stopped background child processes when the shell exited. For long jobs, use exec_command on this machine with the job in the foreground, then command_read or command_wait with the returned command ID.",
+      ),
+    ).toBe(true);
+  });
+
   test("exec maps explicit Windows shell families without POSIX flags", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
@@ -542,10 +588,141 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     });
   });
 
+  test("exec_command without a shell runs PowerShell on a Windows machine", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "C:/Users/user/project" });
+
+    await session.execCommand({ cmd: "Get-ChildItem" });
+    await session.execCommand({ cmd: "dir", shell: "cmd.exe" });
+    await session.exec({ cmd: "echo internal" });
+
+    const requests = [0, 1, 2].map((index) => streamedExecRequest(mock, index));
+    expect(requests[0]).toMatchObject({
+      command: [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-ChildItem",
+      ],
+      shell: false,
+    });
+    // An explicit shell is honoured as before.
+    expect(requests[1]).toMatchObject({
+      command: ["cmd.exe", "/D", "/S", "/C", "dir"],
+      shell: false,
+    });
+    // Internal Channel-A commands keep the machine's own default shell.
+    expect(requests[2]).toMatchObject({ command: ["echo internal"], shell: true });
+  });
+
+  test("exec_command without a shell keeps the machine default off Windows", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    await session.execCommand({ cmd: "ls" });
+    expect(streamedExecRequest(mock)).toMatchObject({ command: ["ls"], shell: true });
+  });
+
   test("exec surfaces $HOSTNAME from the machine", async () => {
     const mock = new MockAgentResponder({ hostname: "the-vm" });
     const res = await sessionWith(mock).exec({ cmd: "echo $HOSTNAME" });
     expect(res.stdout.trim()).toBe("the-vm");
+  });
+
+  test("runAs reaches only a runner that advertises run-as", async () => {
+    const fsOps = (mock: MockAgentResponder) =>
+      mock.requests
+        .map((request) => request.req.op)
+        .filter(
+          (op) => op?.$case === "fsRead" || op?.$case === "fsWrite" || op?.$case === "fsStat",
+        );
+
+    const supported = new MockAgentResponder();
+    const runAsSession = sessionWith(supported, 0, undefined, { runAsSupported: true });
+    await runAsSession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(supported).runAs).toBe("dev");
+    await runAsSession.writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" });
+    await runAsSession.readFile({ path: "/tmp/as-dev", runAs: "dev" });
+    await runAsSession.pathExists("/tmp/as-dev", "dev");
+    expect(
+      fsOps(supported).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : op?.$case === "fsStat"
+              ? op.fsStat.runAs
+              : null,
+      ),
+    ).toEqual(["dev", "dev", "dev"]);
+
+    // An older runner would ignore the field and act as its own account, so it
+    // never receives one: commands and reads keep their legacy behavior and
+    // writes keep refusing.
+    const legacy = new MockAgentResponder();
+    const legacySession = sessionWith(legacy);
+    await legacySession.exec({ cmd: "id -u", runAs: "dev" });
+    expect(streamedExecRequest(legacy).runAs).toBe("");
+    await legacySession.writeFile({ path: "/tmp/plain", content: "x" });
+    await legacySession.readFile({ path: "/tmp/plain", runAs: "dev" });
+    expect(
+      fsOps(legacy).map((op) =>
+        op?.$case === "fsRead"
+          ? op.fsRead.runAs
+          : op?.$case === "fsWrite"
+            ? op.fsWrite.runAs
+            : null,
+      ),
+    ).toEqual(["", ""]);
+    await expect(
+      legacySession.writeFile({ path: "/tmp/refused", content: "x", runAs: "dev" }),
+    ).rejects.toThrow("Native file writes do not support runAs impersonation");
+  });
+
+  test("a runAs write is refused, never stripped, when a reconnect swaps in a runner without run-as", async () => {
+    const mock = new MockAgentResponder();
+    let dropped = false;
+    const rpc: ControlRpc = {
+      request: async (subject, request, opts) => {
+        if (!dropped && request.op?.$case === "fsWrite") {
+          dropped = true;
+          return offlineControlResponse(request.requestId, true);
+        }
+        return await mock.request(subject, request, opts);
+      },
+    };
+    const admissions = [
+      { connectionInstanceId: CONNECTION_INSTANCE, runAsSupported: true },
+      { connectionInstanceId: "33333333-3333-4333-8333-333333333333", runAsSupported: false },
+    ];
+    let reads = 0;
+    const session = sessionWith(rpc, 0, undefined, {
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      resolveOperationAdmission: async () => ({
+        ...admissions[Math.min(reads++, admissions.length - 1)]!,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+      }),
+    });
+
+    const error = await session
+      .writeFile({ path: "/tmp/as-dev", content: "x", runAs: "dev" })
+      .catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(SelfhostedControlError);
+    expect((error as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_UNSUPPORTED);
+    expect((error as Error).message).toContain("no file was written");
+    // The write was checked and dispatched on one admission; only the retry
+    // re-admitted, and it refused the replacement runner.
+    expect(reads).toBe(2);
+    expect(mock.requests.filter((r) => r.req.op?.$case === "fsWrite")).toHaveLength(0);
   });
 
   test("writeFile then readFile round-trips through the mock (binary-safe)", async () => {
@@ -630,6 +807,23 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const request = mock.requests.at(-1)?.req.op;
     if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
     expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
+  });
+
+  test("relay endpoint carries the producer-selected owner route through the public edge", async () => {
+    const mock = new MockAgentResponder();
+    const rpc: ControlRpc = {
+      request: async (subject, request, options) => {
+        const response = await mock.request(subject, request, options);
+        if (response.result?.$case === "ptyOpen" && response.result.ptyOpen.channel) {
+          response.result.ptyOpen.channel.relayRoute = "signed.owner-route";
+        }
+        return response;
+      },
+    };
+    const endpoint = await sessionWith(rpc).resolveExposedPort(7681);
+    expect(endpoint.host).toBe("relay.test");
+    expect(new URLSearchParams(endpoint.query).get("route")).toBe("signed.owner-route");
+    expect(new URLSearchParams(endpoint.query).get("channel")).toBe("mock-pty");
   });
 
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
@@ -818,7 +1012,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // environment variables" unless the session manifest's environment EQUALS the
     // turn's. The session must carry the run's declared environment for parity.
     const env = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       HOME: "/workspace",
       DEPLOY_TARGET: "vm2",
     };
@@ -1213,7 +1407,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1223,7 +1417,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "retry-connection",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
@@ -1250,7 +1444,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: "1", agentMonotonicMs: "1" },
+                ping: { nonce: "1", agentMonotonicMs: "1", controlReplayTokens: [] },
               },
             }).finish(),
           };
@@ -1260,7 +1454,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     const req = {
       requestId: "shared-connect",
       epoch: 0,
-      op: { $case: "ping", ping: { nonce: "1" } },
+      op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
     } as ControlRequest;
 
     const [first, second] = await Promise.all([
@@ -1286,7 +1480,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1307,7 +1501,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       {
         requestId: "r",
         epoch: 0,
-        op: { $case: "ping", ping: { nonce: "1" } },
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
       } as ControlRequest,
       { timeoutMs: 10 },
     );
@@ -1328,6 +1522,7 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
             ping: {
               nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
               agentMonotonicMs: "1",
+              controlReplayTokens: [],
             },
           },
         };
@@ -1336,5 +1531,395 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const session = sessionWith(rpc);
     expect(await session.ping("42")).toBe(true);
+  });
+
+  test("a request bound to a replaced agent connection ends at once, never sent", async () => {
+    const { NatsControlRpc, CONNECTION_REPLACED_DETAIL_KEY } = await import("../src/sandbox");
+    let deliveries = 0;
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async () => {
+        deliveries += 1;
+        throw Object.assign(new Error("503 no responders"), { code: "503" });
+      },
+    }));
+    let checks = 0;
+    const startedAt = Date.now();
+    const res = await rpc.request(
+      "agent.x.y.rpc",
+      {
+        requestId: "r",
+        epoch: 0,
+        op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
+      } as ControlRequest,
+      {
+        timeoutMs: 50,
+        // The agent restarted after the first delivery found no responder.
+        connectionCurrent: async () => (checks += 1) < 2,
+      },
+    );
+    expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
+    expect(res.error?.message).toMatch(/was replaced before this request reached it/);
+    expect(res.error?.detail[CONNECTION_REPLACED_DETAIL_KEY]).toBeDefined();
+    // Well inside the transport's 120 s recovery allowance.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(deliveries).toBe(2);
+  });
+
+  test("a Connected Machine read in flight when its agent restarts is read again from the new agent", async () => {
+    const { NatsControlRpc } = await import("../src/sandbox");
+    const NEW_INSTANCE = "33333333-3333-4333-8333-333333333333";
+    const mock = new MockAgentResponder({ files: { "/home/user/project/a.txt": "kept" } });
+    let live = CONNECTION_INSTANCE;
+    const subjects: string[] = [];
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      request: async (subject: string, payload: Uint8Array) => {
+        subjects.push(subject);
+        if (!subject.includes(live)) {
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        if (subject.includes(CONNECTION_INSTANCE)) {
+          // The agent restarts: its old connection is gone, a new one is live.
+          live = NEW_INSTANCE;
+          throw Object.assign(new Error("503 no responders"), { code: "503" });
+        }
+        const base = subject.split(".replay.")[0]!;
+        const answer = await mock.request(base, ControlRequest.decode(payload), {
+          timeoutMs: 1_000,
+        });
+        return {
+          data: ControlResponse.encode(answer).finish(),
+          headers: { get: (name: string) => (name === "Opengeni-Control-Replay" ? "1" : "") },
+        };
+      },
+    }));
+    const session = sessionWith(rpc, 0, undefined, {
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: live,
+        workspaceRoot: "/home/user/project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
+      }),
+    });
+    const startedAt = Date.now();
+    const bytes = await session.readFile({ path: "/home/user/project/a.txt" });
+    expect(new TextDecoder().decode(bytes)).toBe("kept");
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+    expect(subjects.some((subject) => subject.includes(NEW_INSTANCE))).toBe(true);
+  });
+});
+
+describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
+  const CANARY = "cm-canary 'q' \"d\" $HOME `id`\nline2";
+
+  async function execWithSecret(
+    root: string,
+    cmd: string,
+    args: { shell?: string } = {},
+  ): Promise<{ mock: MockAgentResponder; error: unknown }> {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: root,
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: "codemode-bearer" }),
+    });
+    const resolver = createStaticSecretResolver({ Canary: CANARY });
+    const prepared = await prepareSecretExec(cmd, {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    expect(prepared?.carry).toBeTruthy();
+    const error = await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text, ...args }),
+    ).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    return { mock, error };
+  }
+
+  test("POSIX machine: forced /bin/sh, values only in ExecRequest.env", async () => {
+    const { mock, error } = await execWithSecret(
+      "/home/user/project",
+      'printf %s "{{secret:Canary}}"',
+    );
+    expect(error).toBeNull();
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual(["/bin/sh", "-c", 'printf %s "${OPENGENI_SECRET_0}"']);
+    expect(exec.shell).toBe(false);
+    expect(Object.keys(exec.env).sort()).toEqual(["OPENGENI_CODEMODE_TOKEN", "OPENGENI_SECRET_0"]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+    expect(JSON.stringify(exec.command)).not.toContain("cm-canary");
+  });
+
+  test("an explicit supported shell is honoured", async () => {
+    const { mock, error } = await execWithSecret("/home/user/project", "echo {{secret:Canary}}", {
+      shell: "bash",
+    });
+    expect(error).toBeNull();
+    expect(streamedExecRequest(mock).command).toEqual([
+      "bash",
+      "-c",
+      'echo "${OPENGENI_SECRET_0}"',
+    ]);
+  });
+
+  test("Windows machine: forced powershell -NoProfile -NonInteractive -Command", async () => {
+    const { mock, error } = await execWithSecret(
+      "C:/Users/user/project",
+      "Write-Output '{{secret:Canary}}'",
+    );
+    expect(error).toBeNull();
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual([
+      "powershell",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      'Write-Output "${env:OPENGENI_SECRET_0}"',
+    ]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+  });
+
+  test.each(["cmd", "C:\\Windows\\System32\\cmd.exe", "fish"])(
+    "%s is refused before dispatch with unsupported_shell",
+    async (shell) => {
+      const { mock, error } = await execWithSecret(
+        "C:/Users/user/project",
+        "echo {{secret:Canary}}",
+        {
+          shell,
+        },
+      );
+      expect(isSecretReferenceError(error)).toBe(true);
+      expect((error as SecretReferenceError).failures[0]?.code).toBe("unsupported_shell");
+      expect(mock.requests.some((request) => request.req.op?.$case === "opStart")).toBe(false);
+    },
+  );
+
+  test("Windows exec_command splices secrets for the PowerShell it runs", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "C:/Users/user/project" });
+    const prepared = await prepareSecretExec("Write-Output '{{secret:Canary}}'", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () => session.execCommand({ cmd: prepared!.text }));
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual([
+      "powershell.exe",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      'Write-Output "${env:OPENGENI_SECRET_0}"',
+    ]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+  });
+
+  test("commands without references are byte-identical (machine default shell)", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    await session.exec({ cmd: "echo plain" });
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual(["echo plain"]);
+    expect(exec.shell).toBe(true);
+    expect(exec.env).toEqual({});
+  });
+
+  test("the session never persists secret env (CM-4: no ambient env copy)", async () => {
+    const { mock } = await execWithSecret("/home/user/project", "true {{secret:Canary}}");
+    expect(mock.requests.length).toBeGreaterThan(0);
+    const session = sessionWith(new MockAgentResponder());
+    expect(session.state.environment).toEqual({});
+    expect(session.state.manifest.environment).toEqual({});
+  });
+
+  test("attempt-end cleanup removes the machine's secretfile scope recursively", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () => session.exec({ cmd: prepared!.text }));
+    const write = mock.requests.find((entry) => entry.req.op?.$case === "fsWrite")?.req.op;
+    if (write?.$case !== "fsWrite") throw new Error("expected the secretfile fsWrite");
+    const scopeDir = `/tmp/opengeni-private/secrets/${prepared!.carry.scope}`;
+    expect(write.fsWrite.path.startsWith(`${scopeDir}/`)).toBe(true);
+    expect(write.fsWrite.mode).toBe(0o600);
+
+    await session.clearSecretFilesForAttempt();
+    const removes = mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove");
+    expect(removes.map((entry) => entry.req.op)).toEqual([
+      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true, runAs: "" } },
+    ]);
+    // Idempotent: the scope is forgotten once removed.
+    await session.clearSecretFilesForAttempt();
+    expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
+  });
+
+  test("an exec gives up at its deadline while a secret file is still being written", async () => {
+    const events: string[] = [];
+    class SlowWrites extends MockAgentResponder {
+      override async request(
+        subject: string,
+        req: ControlRequest,
+        opts: { timeoutMs: number },
+      ): Promise<ControlResponse> {
+        if (req.op?.$case === "fsWrite") {
+          await Bun.sleep(150);
+          events.push("write");
+        }
+        if (req.op?.$case === "fsRemove") events.push("remove");
+        return await super.request(subject, req, opts);
+      }
+    }
+    const mock = new SlowWrites();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      execTimeoutMs: 50,
+    });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}} {{secretfile:Other}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY, Other: "other" }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    const startedAt = Date.now();
+    const error = await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text }),
+    ).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    // The exec gives up at its deadline, with the first write still in flight.
+    expect(String(error)).toMatch(/did not respond in time/);
+    expect(Date.now() - startedAt).toBeLessThan(140);
+    expect(events).toEqual([]);
+    expect(mock.requests.some((entry) => entry.req.op?.$case === "opStart")).toBe(false);
+    // The preparation it left finishes on its own; nothing waits for it.
+    await Bun.sleep(350);
+  });
+});
+
+describe("SelfhostedSession.browserControlHttp", () => {
+  const call = {
+    scopeId: `${WS}:attached:device-1`,
+    scopeGeneration: "connection-1",
+    method: "GET" as const,
+    path: "/v1/health",
+    bearerToken: "a".repeat(32),
+    timeoutMs: 1_000,
+    maxResponseBytes: 64,
+  };
+
+  function nativeSession(
+    answer: (request: ControlRequest) => ControlResponse["result"] | ControlResponse["error"],
+    supported = true,
+  ) {
+    const ops: ControlRequest[] = [];
+    const rpc: ControlRpc = {
+      request: async (_subject, req) => {
+        ops.push(req);
+        const answered = answer(req);
+        if (answered && "code" in answered) return { requestId: req.requestId, error: answered };
+        return { requestId: req.requestId, result: answered };
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: rpc,
+      relay: RELAY,
+      workspaceRoot: "/home/user/project",
+      browserControlHttpSupported: supported,
+    });
+    return { session, ops };
+  }
+
+  test("an incapable runner is never asked", async () => {
+    const { session, ops } = nativeSession(() => undefined, false);
+    expect(await session.browserControlHttp(call)).toEqual({ kind: "unsupported" });
+    expect(ops).toHaveLength(0);
+  });
+
+  test("an absent controller is reported as undelivered", async () => {
+    const { session } = nativeSession(() => ({
+      code: ErrorCode.ERROR_CODE_NOT_FOUND,
+      message: "no controller",
+      retryable: false,
+    }));
+    expect(await session.browserControlHttp(call)).toEqual({ kind: "controller_absent" });
+  });
+
+  test("a spooled body is drained in order without repeating the request", async () => {
+    const full = new TextEncoder().encode("0123456789abcdefghij");
+    const { session, ops } = nativeSession((req) => {
+      const op = req.op;
+      if (op?.$case === "browserControlHttp") {
+        expect(op.browserControlHttp).toMatchObject({
+          scopeId: call.scopeId,
+          method: "GET",
+          path: "/v1/health",
+          hasBody: false,
+          maxResponseBytes: "64",
+        });
+        return {
+          $case: "browserControlHttp",
+          browserControlHttp: {
+            status: 200,
+            headers: [{ name: "Content-Type", value: "application/json" }],
+            body: full.slice(0, 8),
+            totalBytes: String(full.byteLength),
+            spoolId: "spool-1",
+          },
+        };
+      }
+      if (op?.$case === "browserControlHttpRead") {
+        const offset = Number(op.browserControlHttpRead.offset);
+        const data = full.slice(offset, offset + 8);
+        return {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: { data, done: offset + data.byteLength >= full.byteLength },
+        };
+      }
+      throw new Error(`unexpected op ${op?.$case}`);
+    });
+    const outcome = await session.browserControlHttp(call);
+    expect(outcome.kind).toBe("response");
+    if (outcome.kind !== "response") return;
+    expect(outcome.status).toBe(200);
+    expect(outcome.headers.get("content-type")).toBe("application/json");
+    expect(new TextDecoder().decode(outcome.body)).toBe("0123456789abcdefghij");
+    expect(ops.map((op) => op.op?.$case)).toEqual([
+      "browserControlHttp",
+      "browserControlHttpRead",
+      "browserControlHttpRead",
+    ]);
+  });
+
+  test("a response longer than the caller's bound is refused", async () => {
+    const { session } = nativeSession(() => ({
+      $case: "browserControlHttp",
+      browserControlHttp: {
+        status: 200,
+        headers: [],
+        body: new Uint8Array(4),
+        totalBytes: "65",
+        spoolId: "spool-1",
+      },
+    }));
+    await expect(session.browserControlHttp(call)).rejects.toThrow(/length is invalid/);
   });
 });

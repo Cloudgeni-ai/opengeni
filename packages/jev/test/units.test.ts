@@ -515,7 +515,7 @@ describe("leads", () => {
           path: "docs/a.md",
           start: 1,
           rel: 0.9,
-          lines: ["OpenGeni uses `resolveThreshold()` and `MAX_TOKENS_LIMIT`."],
+          lines: ["Opengeni uses `resolveThreshold()` and `MAX_TOKENS_LIMIT`."],
         },
       ],
       new Set(),

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { CodexAccount, OrganizationCodexAccountsResponse } from "@opengeni/sdk";
 import { act, useState, type ReactNode } from "react";
@@ -33,25 +33,112 @@ const response: OrganizationCodexAccountsResponse = {
     activeCredentialId: activeAccountId,
   },
 };
+let usageNeedsReconnect = false;
 
-const requestJson = mock(async (method: string, path: string, _body?: unknown) => {
-  if (method === "GET" && path === `/v1/organizations/${organizationId}/codex/accounts`) {
-    return response;
-  }
-  if (
-    method === "POST" &&
-    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
-  ) {
-    return undefined;
-  }
-  if (
-    method === "DELETE" &&
-    path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`
-  ) {
-    return undefined;
-  }
-  throw new Error(`Unexpected request: ${method} ${path}`);
-});
+const requestJson = mock(
+  async (method: string, path: string, _body?: unknown): Promise<unknown> => {
+    if (method === "GET" && path.endsWith("/overview")) {
+      const result = (await requestJson("GET", path.replace(/\/overview$/, "/usage"))) as {
+        usage: unknown;
+      };
+      return {
+        accountId: inactiveAccountId,
+        usage: {
+          source: "provider",
+          fetchedAt: new Date().toISOString(),
+          stale: false,
+          error: null,
+          value: result.usage,
+        },
+        resetCredits: {
+          source: "none",
+          fetchedAt: null,
+          stale: false,
+          error: null,
+          detailState: "unsupported",
+          detailsComplete: false,
+          availableCount: null,
+          credits: [],
+        },
+        canRedeem: false,
+        canResumeRedemption: false,
+        redemptions: [],
+        redemptionAccess: { ownership: "unowned", canClaimUnownedViaReconnect: false },
+      };
+    }
+    if (method === "GET" && path.endsWith("/usage")) {
+      if (usageNeedsReconnect) {
+        response.accounts[1] = { ...response.accounts[1]!, status: "needs_relogin" };
+        return {
+          status: "error",
+          usage: {
+            status: "error",
+            reason: "needs_relogin",
+            planType: null,
+            fiveHour: null,
+            weekly: null,
+            limitReached: false,
+            fetchedAt: new Date().toISOString(),
+          },
+        };
+      }
+      return {
+        status: "ok",
+        usage: {
+          status: "ok",
+          planType: "pro",
+          fiveHour: null,
+          weekly: null,
+          limitReached: false,
+          fetchedAt: new Date().toISOString(),
+          credits: {
+            balance: "120.50",
+            hasCredits: true,
+            unlimited: false,
+            overageLimitReached: false,
+          },
+        },
+      };
+    }
+    if (method === "GET" && path === `/v1/organizations/${organizationId}/codex/accounts`) {
+      return structuredClone(response);
+    }
+    if (
+      method === "PATCH" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`
+    ) {
+      const enabled = (_body as { enabled: boolean }).enabled;
+      response.accounts[1] = {
+        ...response.accounts[1]!,
+        allocatorEnabled: enabled,
+        allocatorVersion: 2,
+      };
+      return { changed: true, allocatorEnabled: enabled, allocatorVersion: 2 };
+    }
+    if (method === "PATCH" && path.endsWith("/extra-credits")) {
+      const enabled = (_body as { enabled: boolean }).enabled;
+      response.accounts[1] = {
+        ...response.accounts[1]!,
+        extraCreditsEnabled: enabled,
+        extraCreditsVersion: 2,
+      };
+      return { changed: true, extraCreditsEnabled: enabled, extraCreditsVersion: 2 };
+    }
+    if (
+      method === "POST" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/activate`
+    ) {
+      return undefined;
+    }
+    if (
+      method === "DELETE" &&
+      path === `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}`
+    ) {
+      return undefined;
+    }
+    throw new Error(`Unexpected request: ${method} ${path}`);
+  },
+);
 const access = {
   policy: {
     allowedModels: null,
@@ -67,6 +154,8 @@ const context = {
   clientConfig: { claudeSubscriptionEnabled: false },
   client: {
     requestJson,
+    organizationCodexAccountUsage: (orgId: string, id: string) =>
+      requestJson("GET", `/v1/organizations/${orgId}/codex/accounts/${id}/usage`),
     getModelConnectionAccess: mock(async () => access),
     listOrganizationSuperGrokAccounts: mock(async () => ({
       accounts: [],
@@ -78,7 +167,7 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { error: mock(() => undefined), success: mock(() => undefined) },
 }));
@@ -86,7 +175,7 @@ mock.module("@tanstack/react-router", () => ({
   useNavigate: () => () => undefined,
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -96,7 +185,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     onConfirm,
@@ -129,7 +218,12 @@ GlobalRegistrator.register();
 const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
-const { modelsScopeLabels } = await import("./models/models-ui");
+const { modelsScopeLabels } = await import("@opengeni/react/app/components/models/models-ui");
+const { clearSharedQueries, useConsoleSharedQueries } =
+  await import("@opengeni/react/app/lib/shared-query");
+
+// Account lists are retained per client between mounts; every test starts cold.
+beforeEach(() => clearSharedQueries(context.client));
 
 afterAll(() => {
   mock.restore();
@@ -178,6 +272,166 @@ function button(container: HTMLElement, text: string | RegExp) {
 }
 
 describe("organization Codex subscriptions", () => {
+  test("one connection-change event checks each organization overview once", async () => {
+    function Console() {
+      useConsoleSharedQueries(context.client);
+      return <Harness accountId={inactiveAccountId} />;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const overviewReads = () =>
+      requestJson.mock.calls.filter(
+        ([method, path]) => method === "GET" && path.endsWith("/overview"),
+      ).length;
+    try {
+      await act(async () => root.render(<Console />));
+      await flush();
+      const before = overviewReads();
+      await act(async () => window.dispatchEvent(new Event("model-connections-changed")));
+      await flush();
+      expect(overviewReads()).toBe(before + 1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("usage sign-in failure refreshes account health and offers reconnection", async () => {
+    usageNeedsReconnect = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      expect(button(container, "Sign in again")).toBeDefined();
+      expect(container.textContent).toContain("Sign in to ChatGPT again to check usage.");
+      expect(container.textContent).toContain("Not reported");
+      expect(container.textContent).not.toContain("Try again in a moment");
+    } finally {
+      usageNeedsReconnect = false;
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("a disabled account shows live credits without workspace assignment or consent changes", async () => {
+    response.accounts[1] = { ...response.accounts[1]!, allocatorEnabled: false };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const before = requestJson.mock.calls.length;
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      expect(container.textContent).toContain("Extra credits");
+      // The balance is formatted for reading (#4307), not shown as the raw decimal string.
+      expect(container.textContent).toContain(
+        new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(120.5),
+      );
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
+      expect(requestJson.mock.calls.slice(before).every(([method]) => method === "GET")).toBe(true);
+      expect(
+        container
+          .querySelector('[aria-label="Use extra credits on Backup subscription"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("false");
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("a conflicting disable refreshes the account before the next change", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      requestJson.mockImplementationOnce(async () => {
+        response.accounts[1] = {
+          ...response.accounts[1]!,
+          allocatorEnabled: false,
+          allocatorVersion: 7,
+        };
+        throw new Error("Account changed; refresh and try again");
+      });
+      const selector = '[role="switch"][aria-label="Enable Backup subscription"]';
+      await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flush();
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
+      await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
+        { enabled: true, expectedVersion: 7 },
+      ]);
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("credit consent is off by default and sends its own version without changing availability", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[role="switch"][aria-label="Use extra credits on Backup subscription"]',
+      )!;
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      await act(async () => toggle.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/extra-credits`,
+        { enabled: true, expectedVersion: 1 },
+      ]);
+      expect(response.accounts[1]!.allocatorEnabled).toBe(true);
+      expect(access.policy.allowedWorkspaces).toBeNull();
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("disabling changes only organization allocation and preserves workspace access", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
+      await flush();
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[role="switch"][aria-label="Enable Backup subscription"]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle!.click());
+      await flush();
+      expect(requestJson.mock.calls).toContainEqual([
+        "PATCH",
+        `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
+        { enabled: false, expectedVersion: 1 },
+      ]);
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
+      expect(container.textContent).toContain("Everyone in Acme");
+      expect(access.policy.allowedWorkspaces).toBeNull();
+    } finally {
+      response.accounts[1] = account(inactiveAccountId, "Backup subscription", false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("an account's page sends explicit JSON bodies for activate and disconnect", async () => {
     backToList = mock(() => undefined);
     const container = document.createElement("div");
@@ -255,5 +509,17 @@ describe("organization Codex subscriptions", () => {
     expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
       false,
     );
+    // The workspace that connected it always reaches it; an older response
+    // without that list is unchanged.
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: ["workspace-a"] }, shared)).toBe(true);
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: [] }, shared)).toBe(false);
+    // Chosen people use it wherever they work: not a property of the workspace.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: ["p"] } }, shared),
+    ).toBeNull();
+    // An empty people choice reaches no one.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: [] } }, shared),
+    ).toBe(false);
   });
 });

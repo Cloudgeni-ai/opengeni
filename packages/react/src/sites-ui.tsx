@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import type {
   OpenGeniClient,
   WorkspaceArtifact,
-  WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
 } from "@opengeni/sdk";
+import { loadSiteSnapshot, type SiteDisplayContent } from "./site-snapshot";
 import {
   PublishedHtmlArtifactFrame,
   type PublishedHtmlArtifactToolBridge,
 } from "./components/artifacts/published-html-artifact-frame";
+import { useOpenGeniText } from "./messages/runtime";
 
 /** Implement with an authenticated host proxy. Never put an organization key
  * in browser props; replace the client object when the host actor changes. */
@@ -21,62 +22,8 @@ export type SiteClient = Pick<
   | "rollbackWorkspaceArtifact"
   | "setWorkspaceArtifactStatus"
 >;
-type SiteDisplayContent = Pick<
-  WorkspaceArtifactContentResponse,
-  "artifactId" | "versionId" | "html" | "requestedTools"
->;
 type SiteScope = { client: SiteClient; workspaceId: string; className?: string };
-/** Shared native/embedded read boundary: pin content to the observed version,
- * and never accept a response belonging to another workspace or Site. */
-export async function loadSiteSnapshot(
-  client: Pick<SiteClient, "getWorkspaceArtifact" | "getWorkspaceArtifactHtml"> &
-    Partial<Pick<OpenGeniClient, "getWorkspaceArtifactContent">>,
-  workspaceId: string,
-  siteId: string,
-  options: { signal?: AbortSignal; includeArchivedContent?: boolean; versionId?: string } = {},
-): Promise<{
-  detail: WorkspaceArtifactDetailResponse;
-  content: SiteDisplayContent | null;
-}> {
-  const requestOptions = options.signal ? { signal: options.signal } : {};
-  const detail = await client.getWorkspaceArtifact(workspaceId, siteId, requestOptions);
-  options.signal?.throwIfAborted();
-  if (detail.artifact.id !== siteId || detail.artifact.workspaceId !== workspaceId)
-    throw new Error("Site scope mismatch");
-  const selectedVersion = options.versionId
-    ? detail.versions.find((version) => version.id === options.versionId)
-    : detail.artifact.currentVersion;
-  const versionId = options.versionId ?? selectedVersion?.id;
-  let content: SiteDisplayContent | null =
-    selectedVersion &&
-    versionId &&
-    (detail.artifact.status === "active" || options.includeArchivedContent)
-      ? {
-          artifactId: siteId,
-          versionId,
-          requestedTools: selectedVersion!.requestedTools,
-          html: await client.getWorkspaceArtifactHtml(workspaceId, siteId, {
-            ...requestOptions,
-            versionId,
-          }),
-        }
-      : null;
-  if (
-    versionId &&
-    !selectedVersion &&
-    (detail.artifact.status === "active" || options.includeArchivedContent)
-  ) {
-    if (!client.getWorkspaceArtifactContent) throw new Error("Site version unavailable");
-    content = await client.getWorkspaceArtifactContent(workspaceId, siteId, {
-      ...requestOptions,
-      versionId,
-    });
-  }
-  options.signal?.throwIfAborted();
-  if (content && (content.artifactId !== siteId || content.versionId !== versionId))
-    throw new Error("Site content mismatch");
-  return { detail: structuredClone(detail), content: content ? structuredClone(content) : null };
-}
+export { loadSiteSnapshot };
 export type SiteListProps = SiteScope & {
   status?: "active" | "archived";
   onOpen: (site: WorkspaceArtifact) => void;
@@ -109,6 +56,7 @@ function ScopedSiteList({
   onOpen,
   className,
 }: SiteListProps) {
+  const t = useOpenGeniText();
   const [page, setPage] = useState<WorkspaceArtifactListResponse | null>(null);
   const [cursor, setCursor] = useState<string | undefined>();
   const [error, setError] = useState(false);
@@ -135,13 +83,13 @@ function ScopedSiteList({
     return () => abort.abort();
   }, [client, workspaceId, status, cursor, reload]);
   return (
-    <section className={className} aria-label="Sites" aria-busy={!page && !error}>
+    <section className={className} aria-label={t("sitesUi.sites")} aria-busy={!page && !error}>
       {error ? (
-        <p role="alert">Sites are unavailable or access has changed. Refresh to check access.</p>
+        <p role="alert">{t("sitesUi.sitesAreUnavailableOrAccess")}</p>
       ) : !page ? (
-        <p role="status">Loading Sites…</p>
+        <p role="status">{t("sitesUi.loadingSites")}</p>
       ) : page.artifacts.length === 0 ? (
-        <p role="status">No {status} Sites.</p>
+        <p role="status">{t("sitesUi.noStatusSites", { status })}</p>
       ) : (
         <ul>
           {page.artifacts.map((site) => (
@@ -151,7 +99,8 @@ function ScopedSiteList({
               </button>
               <p>{site.description}</p>
               <span>
-                {site.status} · revision {site.currentVersion?.revision ?? "unpublished"}
+                {t("sitesUi.statusRevision", { status: site.status })}{" "}
+                {site.currentVersion?.revision ?? t("sitesUi.unpublished")}
               </span>
             </li>
           ))}
@@ -159,16 +108,16 @@ function ScopedSiteList({
       )}
       {page?.nextCursor && (
         <button type="button" onClick={() => setCursor(page.nextCursor!)}>
-          Next page
+          {t("sitesUi.nextPage")}
         </button>
       )}
       {cursor && (
         <button type="button" onClick={() => setCursor(undefined)}>
-          First page
+          {t("sitesUi.firstPage")}
         </button>
       )}
       <button type="button" onClick={() => setReload((value) => value + 1)}>
-        Refresh Sites
+        {t("sitesUi.refreshSites")}
       </button>
     </section>
   );
@@ -186,6 +135,7 @@ function ScopedSiteDetail({
   toolBridge,
   className,
 }: SiteDetailProps) {
+  const t = useOpenGeniText();
   const [loaded, setLoaded] = useState<{
     detail: WorkspaceArtifactDetailResponse;
     content: SiteDisplayContent | null;
@@ -306,21 +256,18 @@ function ScopedSiteDetail({
   return (
     <section
       className={className}
-      aria-label="Site details"
+      aria-label={t("sitesUi.siteDetails")}
       aria-busy={busy || (!loaded && !error)}
     >
-      {error && (
-        <p role="alert">
-          Site state could not be confirmed or access has changed. Refresh before continuing.
-        </p>
-      )}
-      {!loaded && !error && <p role="status">Loading Site…</p>}
+      {error && <p role="alert">{t("sitesUi.siteStateCouldNotBe")}</p>}
+      {!loaded && !error && <p role="status">{t("sitesUi.loadingSite")}</p>}
       {site && (
         <>
           <h2>{site.title}</h2>
           <p>{site.description}</p>
           <p>
-            {site.status} · revision {site.currentVersion?.revision ?? "unpublished"}
+            {t("sitesUi.statusRevision", { status: site.status })}{" "}
+            {site.currentVersion?.revision ?? t("sitesUi.unpublished")}
           </p>
           {loaded.content && (
             <PublishedHtmlArtifactFrame
@@ -329,26 +276,27 @@ function ScopedSiteDetail({
               {...(toolBridge ? { toolBridge } : {})}
             />
           )}
-          <h3>Versions</h3>
+          <h3>{t("sitesUi.versions")}</h3>
           <ul>
             {loaded.detail.versions.map((version) => (
               <li key={version.id}>
-                Revision {version.revision} · {version.createdAt}
+                {t("sitesUi.revisionRevisionCreatedat", {
+                  revision: version.revision,
+                  createdAt: version.createdAt,
+                })}
                 {version.id === site.currentVersion?.id ? " · current" : ""}
               </li>
             ))}
           </ul>
-          {loaded.detail.versionsTruncated && (
-            <p>Older versions are not included in this response.</p>
-          )}
+          {loaded.detail.versionsTruncated && <p>{t("sitesUi.olderVersionsAreNotIncluded")}</p>}
           {canPublish && site.currentVersion && (
             <fieldset disabled={busy}>
-              <legend>Manage Site</legend>
+              <legend>{t("sitesUi.manageSite")}</legend>
               <button type="button" onClick={() => setConfirmation("status")}>
-                {site.status === "active" ? "Archive Site" : "Restore Site"}
+                {site.status === "active" ? t("sitesUi.archiveSite") : t("sitesUi.restoreSite")}
               </button>
               <label>
-                Version to restore
+                {t("sitesUi.versionToRestore")}
                 <select
                   value={rollbackId}
                   onChange={(event) => {
@@ -356,12 +304,12 @@ function ScopedSiteDetail({
                     setConfirmation(null);
                   }}
                 >
-                  <option value="">Choose a version</option>
+                  <option value="">{t("sitesUi.chooseAVersion")}</option>
                   {loaded.detail.versions
                     .filter((version) => version.id !== site.currentVersion?.id)
                     .map((version) => (
                       <option key={version.id} value={version.id}>
-                        Revision {version.revision}
+                        {t("sitesUi.revisionRevision", { revision: version.revision })}
                       </option>
                     ))}
                 </select>
@@ -371,22 +319,22 @@ function ScopedSiteDetail({
                 disabled={!rollbackId}
                 onClick={() => setConfirmation("rollback")}
               >
-                Review rollback
+                {t("sitesUi.reviewRollback")}
               </button>
               {confirmation && (
-                <div role="group" aria-label="Confirm Site change">
+                <div role="group" aria-label={t("sitesUi.confirmSiteChange")}>
                   <p>
                     {confirmation === "rollback"
-                      ? "Make the selected version current?"
+                      ? t("sitesUi.makeTheSelectedVersionCurrent")
                       : site.status === "active"
-                        ? "Archive this Site for workspace users?"
-                        : "Restore this Site for workspace users?"}
+                        ? t("sitesUi.archiveThisSiteForWorkspace")
+                        : t("sitesUi.restoreThisSiteForWorkspace")}
                   </p>
                   <button type="button" onClick={() => void commit()}>
-                    Confirm change
+                    {t("sitesUi.confirmChange")}
                   </button>
                   <button type="button" onClick={() => setConfirmation(null)}>
-                    Keep current state
+                    {t("sitesUi.keepCurrentState")}
                   </button>
                 </div>
               )}
@@ -395,7 +343,7 @@ function ScopedSiteDetail({
         </>
       )}
       <button type="button" disabled={busy} onClick={() => setReload((value) => value + 1)}>
-        Refresh Site
+        {t("sitesUi.refreshSite")}
       </button>
     </section>
   );

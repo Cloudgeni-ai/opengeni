@@ -427,7 +427,7 @@ async function main(): Promise<void> {
     if (!target) throw new Error("browser opened without a target");
     let observation = await browser.observe(target.id);
     record("browserObserve", performance.now() - started);
-    if (observation.target.title !== "OpenGeni Interaction Acceptance") {
+    if (observation.target.title !== "Opengeni Interaction Acceptance") {
       throw new Error(`browser fixture title is ${JSON.stringify(observation.target.title)}`);
     }
     for (let index = 1; index < args.iterations; index += 1) {
@@ -723,7 +723,7 @@ async function main(): Promise<void> {
         targets.targets.find(
           (candidate) =>
             candidate.kind === "window" &&
-            candidate.title.startsWith("OpenGeni Interaction Acceptance"),
+            candidate.title.startsWith("Opengeni Interaction Acceptance"),
         ) ??
         targets.targets.find((candidate) => candidate.kind === "window" && candidate.focused) ??
         targets.targets.find((candidate) => candidate.kind === "app" && candidate.focused) ??
@@ -1410,7 +1410,7 @@ function budgetFailure(
 }
 
 function fixtureUrl(): string {
-  const html = `<!doctype html><meta charset="utf-8"><title>OpenGeni Interaction Acceptance</title><style>body{font:24px system-ui;background:#10151d;color:#fff;padding:48px}input{font:24px;padding:16px;width:720px}button{font:18px system-ui;margin-top:20px;padding:12px 18px}#state,#dialog-state{margin-top:24px}</style><h1>Interaction acceptance</h1><input id="acceptance-input" aria-label="Acceptance input" autofocus><div id="state">ready</div><button id="acceptance-dialog">Open acceptance prompt</button><div id="dialog-state">dialog ready</div><script>const input=document.querySelector("#acceptance-input");const state=document.querySelector("#state");const dialogState=document.querySelector("#dialog-state");input.addEventListener("input",()=>{state.textContent=input.value;let hash=0;for(const char of input.value)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;document.body.style.background="hsl("+(hash%360)+" 58% 24%)"});document.querySelector("#acceptance-dialog").addEventListener("click",()=>{const value=window.prompt("Acceptance value?","ready");dialogState.textContent=value===null?"dialog dismissed":value});</script>`;
+  const html = `<!doctype html><meta charset="utf-8"><title>Opengeni Interaction Acceptance</title><style>body{font:24px system-ui;background:#10151d;color:#fff;padding:48px}input{font:24px;padding:16px;width:720px}button{font:18px system-ui;margin-top:20px;padding:12px 18px}#state,#dialog-state{margin-top:24px}</style><h1>Interaction acceptance</h1><input id="acceptance-input" aria-label="Acceptance input" autofocus><div id="state">ready</div><button id="acceptance-dialog">Open acceptance prompt</button><div id="dialog-state">dialog ready</div><script>const input=document.querySelector("#acceptance-input");const state=document.querySelector("#state");const dialogState=document.querySelector("#dialog-state");input.addEventListener("input",()=>{state.textContent=input.value;let hash=0;for(const char of input.value)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;document.body.style.background="hsl("+(hash%360)+" 58% 24%)"});document.querySelector("#acceptance-dialog").addEventListener("click",()=>{const value=window.prompt("Acceptance value?","ready");dialogState.textContent=value===null?"dialog dismissed":value});</script>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 

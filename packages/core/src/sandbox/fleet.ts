@@ -11,28 +11,42 @@
 // session group exists. `run_on` builds a one-off backend session and runs a
 // single op WITHOUT touching the active pointer.
 
-import type { Settings } from "@opengeni/config";
-import type { SandboxBackend } from "@opengeni/contracts";
+import type { VaultProviderRegistry } from "@opengeni/vaults";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  agentCapabilityEnabled,
+  type SandboxBackend,
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  type SecretResolver,
+} from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
   getEnrollment,
+  getSession,
   getLiveEnrollmentConnection,
   getSandbox,
   listEnrollments,
   listSandboxes,
+  nestedPostgresSqlState,
   readActiveSandbox,
   readLease,
   resolvePersonalMachineConnectionForAttempt,
   requireSession,
   setActiveSandbox,
+  type ActiveSandboxSwapRefusal,
   type Database,
   type EnrollmentRecord,
   type SandboxRecord,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
+import { HTTPException } from "hono/http-exception";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
+  prepareSecretExec,
+  resolveSecretLiteralText,
+  runWithSecretCarry,
+  type SecretExecCarry,
   selfhostedLiveness,
   SelfhostedSession,
   resolveConnectedMachineWorkspaceRoot,
@@ -44,8 +58,11 @@ import {
   type SelfhostedOpStreamDeps,
   type SelfhostedOperationAdmission,
   type SelfhostedOperationResourcePolicy,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "./routing";
+import { directRequestAbandonCommand, relayConfigFromSettings } from "./routing";
+import { agentBackgroundCommandDeps } from "./agent-background-commands";
+import { createSecretResolver } from "../domain/vaults/secret-resolver";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
 
 export type FleetServices = {
@@ -67,6 +84,11 @@ export type FleetContext = {
   accountId: string;
   workspaceId: string;
   subjectId?: string;
+  /** Only an explicit human move request may consent for the running turn. */
+  consentToCurrentTurn?: boolean;
+  /** Exact live attempt for command custody, independent of personal-machine
+   * access authority or whether a human initiated this turn. */
+  commandAttempt?: { turnId: string; attemptId: string; executionGeneration: number };
   attemptAuthority?: {
     turnId: string;
     attemptId: string;
@@ -100,6 +122,7 @@ export async function buildFleetContextForSession(
     sessionId: string;
     subjectId?: string;
     attemptAuthority?: FleetContext["attemptAuthority"];
+    commandAttempt?: FleetContext["commandAttempt"];
   },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
@@ -108,6 +131,7 @@ export async function buildFleetContextForSession(
     workspaceId: ctx.workspaceId,
     ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
     ...(ctx.attemptAuthority ? { attemptAuthority: ctx.attemptAuthority } : {}),
+    ...(ctx.commandAttempt ? { commandAttempt: ctx.commandAttempt } : {}),
     sessionId: ctx.sessionId,
     sessionBackend: session.sandboxBackend,
     sessionGroupId: session.sandboxGroupId,
@@ -150,6 +174,17 @@ export type FleetSandboxEntry = {
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
   hasDisplay?: boolean;
   lastSeenAt?: string | null;
+  /** Latest retained update proof; no command text or page contents. */
+  agentVersion?: string | null;
+  agentUpdate?: {
+    status: string;
+    targetVersion: string;
+    errorCode: string | null;
+    requestedAt: string;
+    updatedAt: string;
+    waitingForMs: number | null;
+    blockers: Array<{ kind: string; count: number }>;
+  } | null;
   /** Orthogonal truth dimensions. `liveness` is only their conservative UI
    * projection and is never evidence for a specific dimension. */
   providerStatus: "not_created" | "creating" | "exists" | "missing" | "unknown";
@@ -174,6 +209,31 @@ export type FleetSandboxEntry = {
   archiveComplete: boolean;
 };
 
+/** Public update projection omits connection credentials and authority coordinates. */
+export function fleetAgentProgress(
+  enrollment: Pick<EnrollmentRecord, "agentVersion" | "agentUpdate">,
+  now = Date.now(),
+): Pick<FleetSandboxEntry, "agentVersion" | "agentUpdate"> {
+  const update = enrollment.agentUpdate;
+  return {
+    agentVersion: enrollment.agentVersion,
+    agentUpdate: update
+      ? {
+          status: update.status,
+          targetVersion: update.targetVersion,
+          errorCode: update.errorCode,
+          requestedAt: update.requestedAt,
+          updatedAt: update.updatedAt,
+          waitingForMs:
+            update.status === "waiting_for_idle"
+              ? Math.max(0, now - Date.parse(update.requestedAt))
+              : null,
+          blockers: update.blockers ?? [],
+        }
+      : null,
+  };
+}
+
 export type FleetListResult = {
   /** The session's currently-active sandbox id, or null == the group box. */
   activeSandboxId: string | null;
@@ -192,10 +252,107 @@ export type FleetSwapResult = {
     | BackendUnresolvableCode
     | "invalid_working_directory"
     | "concurrent_swap"
+    | PersonalMachineRefusalCode
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";
 };
+
+/** The typed code and plain reason for a swap the pointer write refused. */
+function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
+  code: NonNullable<FleetSwapResult["code"]>;
+  reason: string;
+} {
+  switch (refusal) {
+    case "not_permitted":
+      return {
+        code: "personal_machine_not_permitted",
+        reason: "This machine is not available to this chat.",
+      };
+    case "target_unavailable":
+      return {
+        code: "stale_pointer",
+        reason: "This machine is no longer connected to the workspace.",
+      };
+    case "chat_unavailable":
+      return { code: "stale_pointer", reason: "This chat no longer exists." };
+    case "epoch_changed":
+      return {
+        code: "concurrent_swap",
+        reason: "The chat was moved by another request at the same time. Try again.",
+      };
+  }
+}
+
+export type PersonalMachineRefusalCode =
+  | "personal_machine_permission_required"
+  | "personal_machine_not_permitted";
+
+/**
+ * Plain refusal for a personal ("Only me") Connected Machine that the database
+ * admission (`authorize_session_attempt_personal_machine`) turned down. The
+ * function raises SQLSTATE 42501 for policy refusals and P0002 when a required
+ * owner, authority or enrollment row is not current. Only failures of that
+ * admission statement are mapped; anything else is a real failure and stays an
+ * error. The raw database error is never shown.
+ */
+export function personalMachineRefusal(
+  error: unknown,
+): { code: PersonalMachineRefusalCode; reason: string } | null {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState !== "42501" && sqlState !== "P0002") return null;
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    messages.push(current.message);
+    current = current.cause;
+  }
+  const text = messages.join("\n");
+  if (!text.includes("authorize_session_attempt_personal_machine")) return null;
+  if (sqlState === "42501" && text.includes("requires explicit grant")) {
+    return {
+      code: "personal_machine_permission_required",
+      reason:
+        "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
+        "To ask them, call capability_authorization_request once with capabilityId api:connected-machine: the card it posts lets them allow it, so do not describe buttons or steps.",
+    };
+  }
+  if (
+    text.includes("only the personal machine owner may use it") ||
+    text.includes("not the frozen initiating human")
+  ) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This is a personal (Only me) machine. Only its owner can use it, in turns the owner started.",
+    };
+  }
+  if (text.includes("lacks target workspace access")) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This is a personal (Only me) machine, and its owner does not have access to this workspace.",
+    };
+  }
+  if (text.includes("requires exact current attempt authority")) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This turn is no longer the chat's current turn, so it cannot use the personal machine.",
+    };
+  }
+  if (sqlState === "P0002") {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This personal machine's connection or its owner's access is no longer current. The owner can reconnect it.",
+    };
+  }
+  return {
+    code: "personal_machine_not_permitted",
+    reason: "This personal (Only me) machine cannot be used from this chat.",
+  };
+}
 
 const PROBE_TIMEOUT_MS = 5_000;
 
@@ -429,6 +586,7 @@ export async function listFleet(
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
+      ...fleetAgentProgress(enrollment),
       providerStatus:
         probe.liveness === "online"
           ? "exists"
@@ -453,6 +611,27 @@ export async function listFleet(
     activeEpoch: pointer.activeEpoch,
     sandboxes: entries,
   };
+}
+
+/**
+ * What an agent reading `sandboxes_list` should know about the person's
+ * computers at that moment. It travels in the tool result, where it never
+ * changes text an earlier request already sent.
+ */
+export function fleetAgentNotice(fleet: FleetListResult): string {
+  const computers = fleet.sandboxes.filter((entry) => !entry.isSessionGroup);
+  const offline = computers.filter((entry) => entry.liveness !== "online");
+  const offer =
+    "before answering, call capability_authorization_request once with capabilityId api:connected-machine so they can connect it. They then see what to do, so do not describe buttons, commands or install steps.";
+  const unlisted = `If the computer the person means is not in this list, it is not connected: ${offer}`;
+  if (computers.length === 0) return `None of the person's computers is connected. ${unlisted}`;
+  // A listed personal computer may still need its owner's permission for this
+  // chat. Trying it is the way to ask: that refusal shows the owner a card.
+  const allow =
+    "A listed computer may still need its owner to allow this chat: just use it, and if it is not allowed yet, the chat shows the owner a card to allow it.";
+  if (offline.length === 0) return `${unlisted} ${allow}`;
+  const names = offline.map((entry) => entry.name).join(", ");
+  return `${names} ${offline.length === 1 ? "is" : "are"} not online and cannot be used until ${offline.length === 1 ? "it reconnects" : "they reconnect"}. If the person needs ${offline.length === 1 ? "it" : "one of them"} or a computer not in this list, ${offer} ${allow}`;
 }
 
 type FleetResourceContext = Pick<FleetContext, "accountId" | "workspaceId" | "subjectId">;
@@ -618,9 +797,12 @@ async function resolveTarget(
       return {
         ok: false,
         reason:
-          ctx.sessionBackend === "none"
-            ? "this session has no home sandbox; attach a Connected Machine"
-            : "this deployment has no managed session sandbox; select an enrolled machine",
+          // Staying on the current machine is a fine end state, so say so
+          // instead of naming a sandbox that does not exist.
+          (ctx.sessionBackend === "none"
+            ? "This session has no managed sandbox of its own, so there is nothing to swap back to."
+            : "This deployment has no managed session sandbox, so there is nothing to swap back to.") +
+          " Keep working on the current machine, or swap to another machine's sandboxes_list id.",
         code: "unsupported_backend_context",
       };
     }
@@ -668,6 +850,9 @@ export async function swapActiveSandbox(
     try {
       readinessHold = await services.ensureSessionGroupReady(ctx);
     } catch (error) {
+      // An explicit refusal (e.g. the session's Sandbox Environment is not
+      // available to this caller) is not a recovery state; surface it as is.
+      if (error instanceof HTTPException && error.status === 403) throw error;
       const lease = await readLease(services.db, ctx.workspaceId, ctx.sessionGroupId);
       const restore = lease?.recovery.restore.status;
       const code =
@@ -725,20 +910,35 @@ export async function swapActiveSandbox(
       // Even a same-target attach advances active_epoch. It is a repair/fence
       // request, not a no-op acknowledgment: any cached stale route is invalidated
       // only after target readiness has been proved above.
-      const result = await setActiveSandbox(services.db, {
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        sessionId: ctx.sessionId,
-        targetSandboxId: resolved.targetSandboxId,
-        expectedEpoch: pointer.activeEpoch,
-        ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
-        ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
-        ...(resolved.workspaceRoot !== undefined
-          ? { workingDir: effectiveWorkingDir ?? resolved.workspaceRoot }
-          : workingDir !== undefined
-            ? { workingDir }
-            : {}),
-      });
+      let result: Awaited<ReturnType<typeof setActiveSandbox>>;
+      try {
+        result = await setActiveSandbox(services.db, {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.sessionId,
+          targetSandboxId: resolved.targetSandboxId,
+          expectedEpoch: pointer.activeEpoch,
+          consentToCurrentTurn: ctx.consentToCurrentTurn === true,
+          ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+          ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
+          ...(resolved.workspaceRoot !== undefined
+            ? { workingDir: effectiveWorkingDir ?? resolved.workspaceRoot }
+            : workingDir !== undefined
+              ? { workingDir }
+              : {}),
+        });
+      } catch (error) {
+        // The admission refusal rolled the whole CAS transaction back, so the
+        // pointer read above is still current.
+        const refusal = personalMachineRefusal(error);
+        if (!refusal) throw error;
+        return {
+          swapped: false,
+          activeSandboxId: pointer.activeSandboxId,
+          activeEpoch: pointer.activeEpoch,
+          ...refusal,
+        };
+      }
       if (result.swapped && result.pointer) {
         return {
           swapped: true,
@@ -746,7 +946,16 @@ export async function swapActiveSandbox(
           activeEpoch: result.pointer.activeEpoch,
         };
       }
-      // CAS lost (a concurrent swap won) — re-read + retry once.
+      // Only a lost epoch race is worth re-reading and retrying; every other
+      // refusal is a decision about the chat or the target and is final.
+      if (result.refusal !== undefined && result.refusal !== "epoch_changed") {
+        return {
+          swapped: false,
+          activeSandboxId: pointer.activeSandboxId,
+          activeEpoch: pointer.activeEpoch,
+          ...swapRefusal(result.refusal),
+        };
+      }
     }
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,
@@ -756,8 +965,7 @@ export async function swapActiveSandbox(
       swapped: false,
       activeSandboxId: pointer.activeSandboxId,
       activeEpoch: pointer.activeEpoch,
-      reason: "a concurrent swap won the epoch fence; re-read and retry",
-      code: "concurrent_swap",
+      ...swapRefusal("epoch_changed"),
     };
   } finally {
     // Do not let a cleanup failure turn an already-committed route CAS into a
@@ -788,9 +996,24 @@ export type RunOnResult = {
   content?: string;
   bytesWritten?: number;
   reason?: string;
+  /** Typed refusal for a personal (Only me) machine this attempt may not use. */
+  code?: PersonalMachineRefusalCode;
+  notice?: string;
+  /** Present only after the session command ledger accepted a running exec. */
+  commandId?: string;
+  state?: "running";
 };
 
 export type RunOnSelfhostedMachine = {
+  /** Session-owned commands may yield into the existing durable ledger.
+   * Direct callers without these hooks retain terminal semantics. */
+  backgroundCommands?: Pick<
+    SelfhostedSessionDeps,
+    "adoptBackgroundCommand" | "captureBackgroundCommandOutput" | "settleBackgroundCommand"
+  >;
+  /** Observation wait, not an execution deadline. Omit for the runtime default. */
+  yieldTimeMs?: number;
+  abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   workspaceId: string;
   agentId: string;
   /** Exact live daemon pinned for this operation. */
@@ -816,14 +1039,52 @@ export type RunOnSelfhostedMachine = {
    * the active attempt that owns the one-off operation.
    */
   transientExecEnvironment?: Readonly<Record<string, string>>;
+  /**
+   * The calling attempt's secret resolver (W1, DL-9). exec splices
+   * `{{secret:…}}` / `{{secretfile:…}}` in the machine's dialect and delivers
+   * values in ExecRequest.env; write resolves its content; read resolves
+   * nothing. Absent: references pass through literally.
+   */
+  secretResolver?: SecretResolver | null;
 };
+
+/**
+ * The secret resolver for a `run_on` call made by an exact agent attempt (the
+ * MCP claims). Gated by the session's `secrets` capability (default on).
+ */
+export async function createRunOnSecretResolver(
+  services: Pick<FleetServices, "db" | "settings">,
+  attempt: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+  /** Connected vaults (1Password, host) for the attempt's acting human. */
+  providersForSubject?: (subjectId: string | null) => VaultProviderRegistry,
+): Promise<SecretResolver> {
+  const session = await getSession(services.db, attempt.workspaceId, attempt.sessionId);
+  return createSecretResolver(
+    { db: services.db, encryptionKey: environmentsEncryptionKeyBytes(services.settings) ?? null },
+    { kind: "attempt", ...attempt },
+    {
+      capabilityEnabled: session?.agent
+        ? agentCapabilityEnabled(session.agent.capabilities, "secrets")
+        : true,
+      ...(providersForSubject ? { providersForSubject } : {}),
+    },
+  );
+}
 
 export type RunOnOptions = {
   transientExecEnvironment?: Readonly<Record<string, string>>;
+  secretResolver?: SecretResolver | null;
 };
 
 function runOnOperationAdmission(
-  services: FleetServices,
+  services: Pick<FleetServices, "settings" | "bus">,
   enrollment: EnrollmentRecord | null,
 ): SelfhostedOperationAdmission | null {
   if (!enrollment?.connectionInstanceId || !enrollment.workspaceRoot) return null;
@@ -845,7 +1106,18 @@ function runOnOperationAdmission(
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
   };
+}
+
+function hasSecretFileReference(carry: SecretExecCarry): boolean {
+  return carry.tokens.some(
+    (token) => token.type === "reference" && token.reference.kind === "secretfile",
+  );
 }
 
 /**
@@ -859,6 +1131,7 @@ export async function executeRunOnSelfhostedMachine(
   target: string,
   op: RunOnOp,
 ): Promise<RunOnResult> {
+  let commandRetained = false;
   const session = new SelfhostedSession({
     workspaceId: machine.workspaceId,
     agentId: machine.agentId,
@@ -868,6 +1141,23 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.abandonCommand ? { abandonCommand: machine.abandonCommand } : {}),
+    ...machine.backgroundCommands,
+    ...(machine.backgroundCommands?.adoptBackgroundCommand
+      ? {
+          adoptBackgroundCommand: async (command) => {
+            const adopted = await machine.backgroundCommands!.adoptBackgroundCommand!(command);
+            commandRetained = true;
+            return adopted;
+          },
+          settleBackgroundCommand: async (command) => {
+            await machine.backgroundCommands?.settleBackgroundCommand?.(command);
+            if (command.outcome === "exited") {
+              await session.clearSecretFilesForAttempt().catch(() => undefined);
+            }
+          },
+        }
+      : {}),
     ...(machine.operationResourcePolicy !== undefined
       ? { operationResourcePolicy: machine.operationResourcePolicy }
       : {}),
@@ -888,13 +1178,49 @@ export async function executeRunOnSelfhostedMachine(
     ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
+  const secretUse = { surface: "run_on" as const, toolName: "run_on" };
   try {
     if (op.kind === "exec") {
       const deadlineMs = session.effectiveExecDeadlineMs;
-      const res = await session.exec({
-        cmd: op.cmd,
-        ...(op.workdir ? { workdir: op.workdir } : {}),
+      // Resolve before dispatch (all-or-nothing); the machine adapter splices
+      // in its own dialect from the in-memory carry. `op.cmd` keeps references.
+      const prepared = await prepareSecretExec(op.cmd, {
+        resolver: machine.secretResolver,
+        dialect: null,
+        use: secretUse,
       });
+      let res: Awaited<ReturnType<typeof session.exec>> | undefined;
+      try {
+        res = await runWithSecretCarry(prepared?.carry ?? null, () =>
+          session.execWithYield({
+            cmd: prepared?.text ?? op.cmd,
+            ...(op.workdir ? { workdir: op.workdir } : {}),
+            ...(machine.yieldTimeMs !== undefined ? { yieldTimeMs: machine.yieldTimeMs } : {}),
+          }),
+        );
+      } finally {
+        // Retained work still owns its private files. Only a terminal one-off
+        // or an observed terminal settlement may clean them up here.
+        if (!commandRetained && prepared?.carry && hasSecretFileReference(prepared.carry)) {
+          await session.clearSecretFilesForAttempt().catch(() => undefined);
+        }
+      }
+      if (res.backgroundCommandId) {
+        return {
+          target,
+          kind: "exec",
+          ok: true,
+          state: "running",
+          commandId: res.backgroundCommandId,
+          stdout: res.stdout,
+          stderr: res.stderr,
+          exitCode: null,
+          timedOut: false,
+          deadlineMs,
+          notice:
+            "Command is still running. Use command_read or command_wait with this commandId; do not restart it.",
+        };
+      }
       const timedOut = res.timedOut === true;
       const hasTerminalExit = res.exitCode !== null;
       return {
@@ -911,11 +1237,16 @@ export async function executeRunOnSelfhostedMachine(
         deadlineMs,
         ...(timedOut
           ? {
-              reason: `command exceeded the ${deadlineMs} ms execution deadline`,
+              // A command on someone's computer often stalls on a permission
+              // prompt or dialog that only the person at its screen can see.
+              reason: `command exceeded the ${deadlineMs} ms execution deadline. If someone uses this computer, it may be waiting on a permission prompt or dialog on their screen: ask them to check before retrying.`,
             }
           : !hasTerminalExit
             ? { reason: "machine returned no terminal exit code" }
             : {}),
+        ...(res.backgroundChildrenStopped
+          ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+          : {}),
       };
     }
     if (op.kind === "read") {
@@ -929,7 +1260,10 @@ export async function executeRunOnSelfhostedMachine(
     }
     const bytesWritten = await session.writeFile({
       path: op.path,
-      content: op.content,
+      content: await resolveSecretLiteralText(op.content, {
+        resolver: machine.secretResolver,
+        use: { ...secretUse, surface: "file_write" },
+      }),
     });
     return { target, kind: "write", ok: true, bytesWritten };
   } catch (error) {
@@ -949,6 +1283,56 @@ export async function executeRunOnSelfhostedMachine(
     // release replay/output retention instead of waiting for TTL cleanup.
     await session.finalizeOpStreamOps().catch(() => undefined);
   }
+}
+
+/**
+ * Run one short command on a specific enrolled machine for an action a person
+ * or agent took outside a session's routing (opening a macOS settings pane).
+ * The caller has already authorized the actor for this enrollment; `access` is
+ * the same scope the caller used to read it. `execTimeoutMs` bounds the command.
+ */
+export async function runOnEnrollmentDirect(
+  services: Pick<FleetServices, "db" | "settings" | "bus">,
+  input: {
+    access: string | { accountId: string; workspaceId: string; subjectId: string };
+    enrollmentId: string;
+    /** Display label for results (machine name or sandbox id). */
+    target: string;
+    cmd: string;
+    execTimeoutMs: number;
+  },
+): Promise<RunOnResult> {
+  const live = await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId);
+  if (!live || live.status !== "active" || !live.connectionInstanceId || !live.workspaceRoot) {
+    return { target: input.target, kind: "exec", ok: false, reason: "machine is not connected" };
+  }
+  return await executeRunOnSelfhostedMachine(
+    {
+      workspaceId: live.workspaceId,
+      agentId: input.enrollmentId,
+      connectionInstanceId: live.connectionInstanceId,
+      workspaceRoot: live.workspaceRoot,
+      controlRpc: controlRpc(services.bus),
+      relay: relayConfigFromSettings(services.settings),
+      controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
+      execTimeoutMs: input.execTimeoutMs,
+      operationResourcePolicy: live.operationPolicy,
+      operationResourcePolicySupported: live.agentCapabilities.operationResourcePolicy === true,
+      operationCpuQuotaSupported: live.agentCapabilities.operationCpuQuota === true,
+      resolveOperationAdmission: async () => {
+        try {
+          return runOnOperationAdmission(
+            services,
+            await getLiveEnrollmentConnection(services.db, input.access, input.enrollmentId),
+          );
+        } catch {
+          return null;
+        }
+      },
+    },
+    input.target,
+    { kind: "exec", cmd: input.cmd },
+  );
 }
 
 /**
@@ -1026,13 +1410,16 @@ export async function runOnSandbox(
           reason: "personal Connected Machine authority was not admitted for this attempt",
         };
       }
-    } catch {
+    } catch (error) {
+      const refusal = personalMachineRefusal(error);
       return {
         target,
         targetName: sandbox.name,
         kind: op.kind,
         ok: false,
-        reason: "personal Connected Machine authority is not live for this attempt",
+        reason:
+          refusal?.reason ?? "personal Connected Machine authority is not live for this attempt",
+        ...(refusal ? { code: refusal.code } : {}),
       };
     }
   }
@@ -1107,6 +1494,16 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      ...(ctx.commandAttempt
+        ? {
+            backgroundCommands: agentBackgroundCommandDeps(services.db, services.bus, {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              sessionId: ctx.sessionId,
+              backgroundCommandAttempt: ctx.commandAttempt,
+            }),
+          }
+        : { abandonCommand: directRequestAbandonCommand(services.db, ctx) }),
       operationResourcePolicy: enrollment.operationPolicy,
       operationResourcePolicySupported:
         enrollment.agentCapabilities.operationResourcePolicy === true,
@@ -1115,6 +1512,7 @@ export async function runOnSandbox(
       ...(options.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: options.transientExecEnvironment }
         : {}),
+      ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&
       services.bus?.getOpStreamConnection
@@ -1123,6 +1521,10 @@ export async function runOnSandbox(
               transport: new NatsOpStreamTransport(
                 async () => services.bus?.getOpStreamConnection?.() ?? null,
               ),
+              ...(enrollment.agentCapabilities.opRelease === true
+                ? { outputReleaseSupported: true }
+                : {}),
+              connectionGeneration: String(enrollment.connectionGeneration),
             },
           }
         : {}),

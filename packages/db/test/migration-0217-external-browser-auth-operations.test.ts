@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
@@ -26,7 +26,6 @@ describe("migration 0217 external browser auth operations", () => {
         where connamespace = current_schema()::regnamespace
           and conname = 'interaction_resource_operations_kind_check'`;
       expect(constraint?.definition).toContain("external_auth");
-      expect(constraint?.definition).toContain("protected_fill");
     } finally {
       await sql.end();
       await blank.release();

@@ -1,25 +1,30 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import {
   abandonCodexResetRedemptionBeforeProvider,
-  adoptCodexResetRedemptionAttempt,
-  claimCodexResetRedemption,
-  completeCodexResetRedemption,
   createDb,
+  encryptEnvironmentValue,
+  getCodexResetRedemptionAttempt,
+  releaseCodexResetRedemptionClaim,
+  withWorkspaceSessionActivityRls,
+  type Database,
+  type DbClient,
+} from "../src";
+import {
+  adoptCodexResetRedemptionAttempt,
+  fenceCodexResetRedemptionSend,
+} from "./fixtures/legacy-codex";
+import { claimCodexResetRedemption } from "./fixtures/legacy-codex";
+import {
+  completeCodexResetRedemption,
   clearCodexAppsCredential,
   designateCodexAppsCredential,
   disconnectAllCodexAccounts,
   disconnectCodexAccount,
-  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   fetchCodexUsageForAccount,
-  fenceCodexResetRedemptionSend,
-  getCodexResetRedemptionAttempt,
   getCodexAppsCredentialAuthorizationForRun,
   getCodexAppsSettings,
   listCodexAccountStatuses,
@@ -27,15 +32,11 @@ import {
   loadCodexCredentialForRun,
   recordCodexAccountUsage,
   recordCodexTokenRefresh,
-  releaseCodexResetRedemptionClaim,
   setCodexCredentialExhausted,
   updateCodexAllocatorEligibility,
   upsertCodexSubscriptionCredential,
   withCodexAppsRequestAuthorization,
-  withWorkspaceSessionActivityRls,
-  type Database,
-  type DbClient,
-} from "../src";
+} from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 import { sql } from "drizzle-orm";
 

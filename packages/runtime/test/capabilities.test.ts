@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, Runner, type AgentOutputItem } from "@openai/agents";
-import { assistantMessage, ScriptedModel, testSettings } from "@opengeni/testing";
+import { Agent, Runner, tool as functionTool, type AgentOutputItem } from "@openai/agents";
+import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
@@ -64,10 +65,88 @@ describe("filesystem function tool schemas", () => {
         }),
       );
     }
+    // The trailing empty "+" line gives the created file Codex's final newline.
     expect(operations).toEqual([
-      { type: "create_file", path: "example.txt", diff: "+example\n" },
-      { type: "create_file", path: "example.txt", diff: "+example\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
     ]);
+  });
+});
+
+// Production: a model sent apply_patch and a dependent `git add` as two calls in
+// one response. They ran concurrently, so the command ran before the file
+// existed. A file edit must run in model order relative to its sibling calls.
+describe("apply_patch ordering within one model response", () => {
+  async function runBatch(order: Array<"patch" | "probe">): Promise<string[]> {
+    const events: string[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async () => {
+          events.push("patch:start");
+          await Bun.sleep(30);
+          events.push("patch:end");
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+    }).find((cap) => cap.type === "filesystem")!;
+    const patchTool = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .find((candidate) => candidate.name === "apply_patch")!;
+    let probes = 0;
+    const probe = functionTool({
+      name: "probe",
+      description: "Records when it runs.",
+      parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+      strict: true,
+      execute: async () => {
+        const id = ++probes;
+        events.push(`probe${id}:start`);
+        await Bun.sleep(30);
+        events.push(`probe${id}:end`);
+        return "ok";
+      },
+    });
+    const calls = order.map(
+      (name, index) =>
+        ({
+          id: `call-${index}`,
+          type: "function_call",
+          callId: `call-${index}`,
+          name: name === "patch" ? "apply_patch" : "probe",
+          status: "completed",
+          arguments:
+            name === "patch"
+              ? JSON.stringify({ patch: "*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch" })
+              : "{}",
+        }) as AgentOutputItem,
+    );
+    const model = new ScriptedModel([{ output: calls }, { output: [assistantMessage("done")] }]);
+    const agent = new Agent({ name: "patcher", model, tools: [patchTool, probe] });
+    await new Runner({ tracingDisabled: true }).run(agent, "edit then check");
+    return events;
+  }
+
+  test("a call after the edit starts only once the edit has finished", async () => {
+    expect(await runBatch(["patch", "probe"])).toEqual([
+      "patch:start",
+      "patch:end",
+      "probe1:start",
+      "probe1:end",
+    ]);
+  });
+
+  test("the edit waits for earlier calls, which still run concurrently", async () => {
+    const events = await runBatch(["probe", "probe", "patch", "probe"]);
+    const at = (event: string) => events.indexOf(event);
+    expect(at("probe2:start")).toBeLessThan(at("probe1:end"));
+    expect(at("patch:start")).toBeGreaterThan(at("probe1:end"));
+    expect(at("patch:start")).toBeGreaterThan(at("probe2:end"));
+    expect(at("probe3:start")).toBeGreaterThan(at("patch:end"));
   });
 });
 
@@ -174,7 +253,9 @@ describe("malformed apply_patch arguments", () => {
     const agent = new Agent({ name: "patcher", model, tools });
     const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
     expect(result.interruptions).toHaveLength(0);
-    expect(operations).toEqual([{ type: "create_file", path: "notes/soak.txt", diff: "+alpha\n" }]);
+    expect(operations).toEqual([
+      { type: "create_file", path: "notes/soak.txt", diff: "+alpha\n+\n" },
+    ]);
   });
 });
 

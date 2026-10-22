@@ -12,6 +12,7 @@ import {
   RejectPreferenceRegistryProposalRequest,
   SupersedePreferenceRegistryRequest,
   type AccessGrant,
+  type Permission,
   type PreferenceRegistryScope,
 } from "@opengeni/contracts";
 import {
@@ -97,6 +98,7 @@ function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptCla
 
 function requireHumanMutation(access: AccessGrantAuthorization): void {
   const { grant } = access;
+  if (isDeploymentKeyOperator(access)) return;
   if (
     !access.contextIntegrity ||
     access.authenticatedSubjectId !== grant.subjectId ||
@@ -112,10 +114,31 @@ function requireHumanMutation(access: AccessGrantAuthorization): void {
   }
 }
 
+/**
+ * A key-only (configured) deployment has no Opengeni sign-in: whoever holds the
+ * deployment key is its operator, so a request made with the key itself counts
+ * as the person. Agents never hold the key and stay refused.
+ */
+function isDeploymentKeyOperator(access: AccessGrantAuthorization): boolean {
+  const { grant } = access;
+  return (
+    access.contextIntegrity &&
+    access.authenticatedSubjectId === grant.subjectId &&
+    grant.principalKind === "configured_key" &&
+    exactAttemptClaims(grant) === null &&
+    !grant.serviceInitiator &&
+    !grant.serviceInitiatorContext
+  );
+}
+
 export function authorizePreferenceRegistryScopeMutation(
   access: AccessGrantAuthorization,
   scope: PreferenceRegistryScope,
 ): void {
+  // The registry is the Skills authority. Workspace Skills are shared team
+  // procedures that ordinary Members (documents:manage) author, review, move
+  // and retire, just as their agents already can under Agent learning.
+  const workspacePermission: Permission = "documents:manage";
   const { grant } = access;
   requireHumanMutation(access);
   if (scope === "organization") {
@@ -128,8 +151,8 @@ export function authorizePreferenceRegistryScopeMutation(
     }
     return;
   }
-  if (scope === "workspace" && !hasPermission(grant.permissions, "workspace:admin")) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+  if (scope === "workspace" && !hasPermission(grant.permissions, workspacePermission)) {
+    throw new HTTPException(403, { message: `missing permission: ${workspacePermission}` });
   }
   // User scope is always self-only: the route derives the target from the
   // authenticated actor and never accepts a subject selector.

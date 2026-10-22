@@ -126,7 +126,7 @@ export function createWorkerServiceLifecycle(input: {
       }
       const previousState = state;
       safeLifecycleLog(() =>
-        input.observability.info("OpenGeni worker draining (graceful shutdown)", {
+        input.observability.info("Opengeni worker draining (graceful shutdown)", {
           role: input.role,
           errorClass: "WorkerLifecycleOperation",
           errorCode: "worker_draining",

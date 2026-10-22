@@ -11,7 +11,7 @@ import {
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import {
   buildWorkspaceModelCatalog,
@@ -216,7 +216,7 @@ describe("workspace model catalog availability", () => {
     });
   });
 
-  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+  test("projects Opengeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
       modelProvidersJson: "[]",
@@ -416,6 +416,39 @@ describe("workspace model catalog availability", () => {
       basis: "configuration",
       checkedAt: null,
     });
+  });
+
+  test("credits turned off reports credits_disabled only when credits are the sole blocker", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: false });
+    const find = (policy: Parameters<typeof buildWorkspaceModelCatalog>[0]["policy"]) =>
+      buildWorkspaceModelCatalog({ settings, policy, codexSubscriptionActive: false }).models;
+    const creditModel = find(null).find((candidate) => candidate.cost === "credits")!;
+    expect(creditModel).toBeDefined();
+
+    const creditsOff = find({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+    expect(creditsOff.find((candidate) => candidate.id === creditModel.id)!.availability).toEqual({
+      status: "unavailable",
+      selectable: false,
+      reason: "credits_disabled",
+      checkedAt: null,
+    });
+    // Models that do not spend credits stay selectable.
+    for (const model of creditsOff.filter((candidate) => candidate.cost !== "credits")) {
+      expect(model.availability.reason).not.toBe("credits_disabled");
+    }
+
+    // An allowlist that also excludes the model keeps the generic reason, so
+    // turning credits back on is never suggested as the fix.
+    const alsoBlocked = find({
+      allowedProviders: [],
+      allowedModels: null,
+      allowCreditModels: false,
+    }).find((candidate) => candidate.id === creditModel.id)!;
+    expect(alsoBlocked.availability.reason).toBe("policy_blocked");
   });
 
   test("XAI Grok availability requires fresh successful health evidence", () => {
@@ -954,6 +987,36 @@ describe("workspace model catalog defaults", () => {
 });
 
 describe("workspace model catalog route discipline", () => {
+  test("speeds no serving account offers are shown but not runnable", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: true });
+    const model = configuredModels(withCodexCatalogProvider(settings)).find((candidate) =>
+      candidate.capabilities.latencyModes.some((mode) => mode.id === "ultrafast"),
+    )!;
+    const observations = {
+      [model.definitionVersion]: {
+        status: "available" as const,
+        reason: null,
+        checkedAt: new Date().toISOString(),
+        unavailableLatencyModes: ["ultrafast" as const],
+      },
+    };
+    const project = (withObservations: boolean) =>
+      projectWorkspaceModelCatalog(
+        resolveWorkspaceModelSelection({
+          settings,
+          policy: null,
+          codexSubscriptionActive: true,
+          ...(withObservations ? { observations } : {}),
+        }),
+      ).models.find((candidate) => candidate.id === model.id)!;
+    const runnable = (row: ReturnType<typeof project>) =>
+      Object.fromEntries(
+        (row.capabilities?.latencyModes ?? []).map((mode) => [mode.id, mode.runnable]),
+      );
+    expect(runnable(project(false))).toEqual({ standard: true, fast: true, ultrafast: true });
+    expect(runnable(project(true))).toEqual({ standard: true, fast: true, ultrafast: false });
+  });
+
   const here = dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(resolve(here, "..", "src", "routes", "workspaces.ts"), "utf8");
 
@@ -966,8 +1029,11 @@ describe("workspace model catalog route discipline", () => {
     expect(grant).toBeGreaterThanOrEqual(0);
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
+    // Codex readiness follows the organization's Codex cutover row.
+    expect(handler.indexOf("loadWorkspaceCodexCatalogReadiness")).toBeGreaterThan(grant);
+    // SuperGrok readiness is the shared core's projection only.
+    expect(handler.indexOf("loadCoreRoutedXaiCatalogReadiness")).toBeGreaterThan(grant);
+    expect(handler).not.toContain("workspaceXaiSubscriptionActive");
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
     // The published default uses the same selection and the caller's own

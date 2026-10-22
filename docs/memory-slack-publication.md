@@ -45,13 +45,13 @@ projection is hashed or persisted. The final Slack formatter applies the same
 boundary again before escaping and truncation as defense in depth. Recognized
 credential forms are replaced with a fixed omission marker; canonical Memory,
 governed-learning receipts, model history, events, and other internal
-OpenGeni content remain exact and are never rewritten by this boundary.
+Opengeni content remain exact and are never rewritten by this boundary.
 
 ## Immutable configuration
 
 Workspace administrators configure the feature on the Capabilities page:
 
-- choose an active, verified OpenGeni workspace-bot installation;
+- choose an active, verified Opengeni workspace-bot installation;
 - choose an active bot-member channel;
 - shared/Slack Connect and archived channels are excluded;
 - choose `automatic`, `review`, or `quiet` independently for major, normal, and
@@ -120,7 +120,7 @@ and forced workspace row-level security.
 
 Slack copy contains only the allowlisted summary, importance, optional owner,
 occurrence time, governed destination/outcome where applicable, and a link back
-to the authoritative OpenGeni Memory or Workspace State view. It excludes raw
+to the authoritative Opengeni Memory or Workspace State view. It excludes raw
 Memory content, governed-learning proposal content, evidence,
 prompts, credential-shaped values, and actor identifiers. The same sanitized
 summary is used by the persisted publication row and bounded delivery-history

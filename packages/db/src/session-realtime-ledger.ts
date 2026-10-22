@@ -7,7 +7,10 @@ import {
   ReasoningEffort,
   type SessionRealtimeMode,
 } from "@opengeni/contracts";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -171,6 +174,8 @@ export type SessionRealtimeInboundEntryInput = {
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
   controlLockTimeoutMs?: number;
+  /** The owner's own label (their email), so a voice request names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -1134,7 +1139,12 @@ async function admitRealtimeDelegationInTransaction(
   db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
-    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+    | "workspaceId"
+    | "sessionId"
+    | "realtimeId"
+    | "connectionEpoch"
+    | "ownerSubjectId"
+    | "ownerSubjectLabel"
   >,
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
@@ -1190,7 +1200,7 @@ async function admitRealtimeDelegationInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,
@@ -1219,6 +1229,7 @@ async function admitRealtimeDelegationInTransaction(
       mode.personalConnectionDelegations,
     ),
     mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
+    connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
   });
   return {
     turnId: admitted.turnId,

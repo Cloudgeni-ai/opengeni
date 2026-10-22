@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible problem in OpenGeni
+about: Report a reproducible problem in Opengeni
 title: ""
 labels: bug
 assignees: ""

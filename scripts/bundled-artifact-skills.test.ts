@@ -3,17 +3,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS } from "@opengeni/contracts";
-const ARTIFACT_SKILL_NAMES = [
-  "opengeni-spreadsheets",
-  "opengeni-documents",
-  "opengeni-presentations",
-] as const;
-const SITE_SKILL_NAMES = ["opengeni-sites"] as const;
-const VIDEO_SKILL_NAMES = ["opengeni-video-generation"] as const;
+const ARTIFACT_SKILL_NAMES = ["spreadsheets", "documents", "presentations"] as const;
+const SITE_SKILL_NAMES = ["sites"] as const;
+const VIDEO_SKILL_NAMES = ["video-generation"] as const;
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMMAND_KINDS_BY_SKILL = {
-  "opengeni-documents": [
+  documents: [
     "document.flags.set",
     "paragraph.add",
     "paragraph.edit",
@@ -30,14 +26,8 @@ const COMMAND_KINDS_BY_SKILL = {
     "comment.resolved.set",
     "tracked-change.add",
   ],
-  "opengeni-spreadsheets": [
-    "sheet.create",
-    "sheet.rename",
-    "sheet.delete",
-    "cells.set",
-    "range.clear",
-  ],
-  "opengeni-presentations": [
+  spreadsheets: ["sheet.create", "sheet.rename", "sheet.delete", "cells.set", "range.clear"],
+  presentations: [
     "master.create",
     "layout.create",
     "slide.create",

@@ -1,0 +1,92 @@
+name: Reconcile acknowledged canary receipts
+
+# Produces a new linked, nonpromotable receipt. Never republishes packages or
+# changes the failed publisher run, its conclusion, or its missing Site artifact.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact published protected-main source SHA."
+        required: true
+        type: string
+      publisher_run_id:
+        description: "Completed failed publish-canary run with a complete acknowledged cohort."
+        required: true
+        type: string
+      publisher_attempt:
+        description: "Exact failed publisher attempt."
+        required: true
+        type: string
+
+concurrency:
+  group: publish-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  reconcile:
+    name: Reconcile acknowledged canary receipts
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Admit protected recovery controller
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+          PUBLISHER_ATTEMPT: ${{ inputs.publisher_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/reconcile-canary-publication.yml@refs/heads/main" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PUBLISHER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PUBLISHER_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+
+      - name: Check out controller
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install controller dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify acknowledged archives and reconcile receipts
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+          PUBLISHER_ATTEMPT: ${{ inputs.publisher_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/reconcile-canary-publication.ts
+
+      - name: Retain linked reconciliation receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-publication-reconciliation-${{ inputs.source_sha }}-${{ inputs.publisher_run_id }}-${{ inputs.publisher_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .release/canary-reconciliation
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Retain explicitly reconciled Site pins
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: reconciled-site-package-versions-${{ inputs.source_sha }}-${{ inputs.publisher_run_id }}-${{ inputs.publisher_attempt }}
+          path: .release/canary-reconciliation/*.pins
+          if-no-files-found: error
+          retention-days: 7

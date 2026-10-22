@@ -5,6 +5,7 @@
 // organization and keeps the same kind of page. Workspace, organization and
 // personal settings all draw this same rail, so a page never moves to another
 // rail and the scope of every page is visible.
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
@@ -14,11 +15,11 @@ import {
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   UsersIcon,
-  VariableIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -29,20 +30,24 @@ import {
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel } from "@/lib/org";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import {
+  lastSessionMemoryId,
+  readLastSessionId,
+} from "@opengeni/react/app/lib/last-session-memory";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
 import type {
   WorkspaceManagementLocation,
   WorkspaceSettingsSection,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 
 /** Where in settings the person is: a workspace page, an organization page, or their account. */
 export type SettingsLocation = WorkspaceManagementLocation | { kind: "account" };
@@ -83,7 +88,7 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   },
   learning: {
     title: "Agent learning",
-    description: () => "How agents save knowledge, instructions and skills.",
+    description: () => "What agents can change on their own, and what waits for your OK.",
   },
 };
 
@@ -97,12 +102,14 @@ const SECTION_ICONS = {
   developer: CodeIcon,
 } as const;
 
-// Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+// Agent learning sits with the workspace's own settings. A Personal workspace
+// keeps it too: it holds your private-chat modes.
 // Models is not a workspace page: every model setting, each workspace's included,
 // lives on Organization > Models, and the old workspace URL redirects there.
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
+  "learning",
   "usage",
   "api-keys",
   "developer",
@@ -120,9 +127,9 @@ export const ACTIVITY_PAGES = [
 
 export const RUNTIME_PAGES = [
   {
-    to: "/workspaces/$workspaceId/variable-sets" as const,
-    label: "Variable sets",
-    icon: VariableIcon,
+    to: "/workspaces/$workspaceId/secrets" as const,
+    label: "Secrets",
+    icon: LockKeyholeIcon,
   },
   {
     to: "/workspaces/$workspaceId/rigs" as const,
@@ -231,7 +238,7 @@ export function useSettingsRail(input: {
     input.organizationName ??
     managedWorkspace?.organizationName ??
     knownName ??
-    (accountId ? orgLabel(accountId, context.accessContext.accountGrants) : null);
+    (accountId ? orgLabel(t, accountId, context.accessContext.accountGrants) : null);
   // Models stays named when it refuses someone (members choose models in the
   // composer), so the page and the rail don't jump to another page.
   const organizationSection =
@@ -440,14 +447,24 @@ export function useSettingsRail(input: {
     });
   }
 
-  // Leaving settings returns to the sessions settings were opened from.
+  // Leaving settings returns to the sessions settings were opened from: the
+  // session last open there in this tab, otherwise a new session.
   const sessionsWorkspaceId = managedWorkspace
     ? (managedWorkspace.organizationSettingsWorkspaceId ?? null)
     : (workspace?.id ?? null);
+  const lastSessionId = sessionsWorkspaceId
+    ? readLastSessionId(lastSessionMemoryId(context.accessContext.subjectId, sessionsWorkspaceId))
+    : null;
   const back = sessionsWorkspaceId
     ? {
         label: "Back to sessions",
-        link: (
+        link: lastSessionId ? (
+          <Link
+            to="/workspaces/$workspaceId/sessions/$sessionId"
+            params={{ workspaceId: sessionsWorkspaceId, sessionId: lastSessionId }}
+            state={{ restoredSessionId: lastSessionId }}
+          />
+        ) : (
           <Link
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: sessionsWorkspaceId }}

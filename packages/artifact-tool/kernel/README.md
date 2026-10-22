@@ -1,4 +1,4 @@
-# OpenGeni artifact kernel
+# Opengeni artifact kernel
 
 This crate is the deterministic model core beneath `@opengeni/artifact-tool`.
 It deliberately knows nothing about JavaScript, React, filesystems, ZIP/Office

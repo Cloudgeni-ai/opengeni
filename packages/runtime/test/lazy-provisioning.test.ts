@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { dir, Manifest } from "@openai/agents/sandbox";
@@ -77,7 +78,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {
@@ -114,7 +115,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {
@@ -173,6 +174,61 @@ describe("lazy provisioning synthetic manifest", () => {
     );
     expect(seedCommand).toContain("ogd_provisioning_time");
     expect(seedCommand).not.toContain("ogd_turn_start");
+  });
+
+  test("owned setup overlaps the Codemode token seed with repository setup", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      webSearchEnabled: false,
+      delegationSecret: "codemode-secret",
+    });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(
+      settings,
+      [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+      {
+        model: new ScriptedModel([]),
+        sandboxEnvironment: environment,
+        codemodeTokenSeed: "ogd_seed",
+        codemodeTokenSessionId: "session-overlap",
+      },
+    );
+    let releaseSeed!: () => void;
+    const seedGate = new Promise<void>((resolve) => {
+      releaseSeed = resolve;
+    });
+    let seedFinished = false;
+    let cloneStartedBeforeSeedFinished = false;
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        if (args.cmd.includes("OPENGENI_CODEMODE_TOKEN_SEED")) {
+          await seedGate;
+          seedFinished = true;
+        } else if (args.cmd.includes("/.opengeni/setup-programs")) {
+          cloneStartedBeforeSeedFinished ||= !seedFinished;
+          releaseSeed();
+        }
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    // Owned callers register token renewal only after setup returns, so the
+    // seed does not gate the ordered credential and repository chain. If it
+    // did, the clone would wait for a seed that only the clone releases.
+    const setup = runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+    }).catch(() => undefined);
+    const settled = await Promise.race([
+      setup.then(() => "settled" as const),
+      Bun.sleep(2_000).then(() => "stalled" as const),
+    ]);
+    releaseSeed();
+    await setup;
+    expect(settled).toBe("settled");
+    expect(cloneStartedBeforeSeedFinished).toBe(true);
+    expect(seedFinished).toBe(true);
   });
 
   // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the

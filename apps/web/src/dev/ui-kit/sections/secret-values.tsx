@@ -2,14 +2,12 @@ import { useEffect, useState, type ReactNode } from "react";
 import { EyeIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormFrame } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormFrame } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
 import { SecretInput, SecretOnce, SecretValue } from "@/components/ui/secret-field";
-import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
-import type { WorkspaceVariableSet } from "@/types";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {
   newApiKeySecret,
@@ -255,17 +253,7 @@ function VariablesTable({
       </RowList>
       {readOnlyReason ? (
         <p className="mt-3 text-xs leading-4.5 text-fg-muted">{readOnlyReason}</p>
-      ) : (
-        // As in the product: one variable is added inline under the list.
-        <AddVariableRow
-          set={set as unknown as WorkspaceVariableSet}
-          onAdd={async ({ name }) => {
-            await wait(600);
-            toast.success(`Added ${name} to ${set.name}`);
-          }}
-          onPaste={() => toast("Paste .env opens its own page")}
-        />
-      )}
+      ) : null}
       {replacing ? (
         <ReplaceValueDialog variable={replacing} set={set} onClose={() => setReplacing(null)} />
       ) : null}
@@ -325,22 +313,6 @@ export default function SecretValuesSection() {
         columns={2}
         description="Write-only, the recommended version: adding, replacing, the saved row and the one-time view."
       >
-        <StateCell
-          label="Add variable (inline)"
-          align="stretch"
-          note="The product's row under the list. Name is uppercased as you type; a reserved or duplicate name (try GITHUB_TOKEN or AWS_REGION) is flagged inline."
-        >
-          <div className="min-w-0 flex-1">
-            <AddVariableRow
-              set={aws as unknown as WorkspaceVariableSet}
-              onAdd={async ({ name }) => {
-                await wait(600);
-                toast.success(`Added ${name} to ${aws.name}`);
-              }}
-              onPaste={() => toast("Paste .env opens its own page")}
-            />
-          </div>
-        </StateCell>
         <StateCell
           label="Replace value"
           align="stretch"

@@ -22,7 +22,6 @@ import {
 import {
   XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
   XaiSubscriptionHostedToolContinuationError,
-  XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
   type XaiSubscriptionRequestContext,
@@ -56,7 +55,7 @@ import {
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { guardedMcpFetch } from "@opengeni/runtime/mcp-network";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
@@ -66,9 +65,8 @@ import {
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
   classifySandboxLogicalProvisionFailure,
-  classifyXaiCredentialFailure,
+  classifyXaiProviderError,
   credentialSubjectIdForTurnInitiator,
-  xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
   classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
@@ -164,6 +162,9 @@ import {
 } from "../src/sandbox-resume";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
@@ -392,7 +393,7 @@ function citedAssistantMessage() {
     content: [
       {
         type: "output_text",
-        text: "OpenGeni is documented here [1].",
+        text: "Opengeni is documented here [1].",
         providerData: {
           annotations: [
             {
@@ -400,7 +401,7 @@ function citedAssistantMessage() {
               start_index: 28,
               end_index: 31,
               url: "https://docs.opengeni.example/search",
-              title: "OpenGeni search documentation",
+              title: "Opengeni search documentation",
             },
           ],
         },
@@ -574,7 +575,7 @@ describe("turn exact-content boundaries", () => {
     ).toMatchObject({
       type: "url_citation",
       url: "https://docs.opengeni.example/search",
-      title: "OpenGeni search documentation",
+      title: "Opengeni search documentation",
     });
   });
 
@@ -589,7 +590,7 @@ describe("turn exact-content boundaries", () => {
         type: "web_search_call",
         id: "ws_123",
         status: "completed",
-        action: { type: "search", query: "OpenGeni" },
+        action: { type: "search", query: "Opengeni" },
       },
     };
 
@@ -661,6 +662,34 @@ describe("turn exact-content boundaries", () => {
               name,
               status: "completed",
               output: "opaque",
+            },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+
+  test.each([
+    {
+      status: "failed",
+      providerData: { type: "web_search_call", error: { code: "max_uses_exceeded" } },
+    },
+    { status: "in_progress", providerData: { type: "web_search_call" } },
+    { status: "failed", providerData: undefined },
+  ])(
+    "does not register a finished or provider-run hosted search ($status) as a pending call",
+    ({ status, providerData }) => {
+      expect(
+        pendingToolCallFromSdkEvent({
+          type: "run_item_stream_event",
+          item: {
+            type: "tool_call_item",
+            rawItem: {
+              type: "hosted_tool_call",
+              id: "msg_1:1",
+              name: "web_search_call",
+              status,
+              ...(providerData ? { providerData } : {}),
             },
           },
         }),
@@ -1035,32 +1064,6 @@ describe("accepted turn execution identity", () => {
         latencyModeSource: "continuation",
       });
     }
-  });
-
-  test("uses frozen initiating-human xAI authority for service-originated catalog reads", () => {
-    const authoritySnapshot = {
-      version: 1 as const,
-      scope: "user" as const,
-      authorityGeneration: 7,
-    };
-    expect(
-      xaiCatalogReadinessAuthority(
-        {
-          initiatingHumanSubjectId: "human-subject",
-          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
-        },
-        undefined,
-      ),
-    ).toEqual({ subjectId: "human-subject", authoritySnapshot });
-    expect(
-      xaiCatalogReadinessAuthority(
-        {
-          initiatingHumanSubjectId: null,
-          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
-        },
-        "direct-subject",
-      ),
-    ).toEqual({ subjectId: "direct-subject", authoritySnapshot });
   });
 });
 
@@ -1888,6 +1891,90 @@ describe("production model-response usage callback authority", () => {
     }
   });
 
+  test("a response continued across requests binds context to its last request and counts its searches", async () => {
+    // Claude continues a paused search turn with a second request that
+    // re-sends the whole prefix: billing sums both, context is the last one.
+    const terminal = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "msg_paused",
+        output: [],
+        usage: {
+          requests: 2,
+          inputTokens: 30_000,
+          outputTokens: 40,
+          totalTokens: 30_040,
+          inputTokensDetails: { cached_tokens: 25_000 },
+          requestUsageEntries: [
+            { inputTokens: 14_000, outputTokens: 10, totalTokens: 14_010 },
+            {
+              inputTokens: 16_000,
+              outputTokens: 30,
+              totalTokens: 16_030,
+              inputTokensDetails: { cached_tokens: 15_000 },
+            },
+          ],
+        },
+        providerData: { anthropic: { webSearchRequests: 3 } },
+      },
+    } as any);
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
+      const result = await processModelResponseTerminalEvent({
+        event: terminal,
+        state,
+        dispatchId: "activity-A",
+        settings: testSettings(),
+        db: {} as any,
+        observability,
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        turnAttemptId: "attempt-1",
+        provider: "claude-subscription",
+        providerApi: "anthropic-messages",
+        model: "claude-opus-5-5",
+        metricProvider: "claude-subscription",
+        externallyBilled: true,
+        servingCredentialId: "credential-1",
+        priorSessionCredentialId: "credential-1",
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async (tokens) => {
+          fencedInputs.push(tokens);
+        },
+      });
+      expect(result).toMatchObject({ status: "processed", authoritative: true });
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 16_030 });
+      expect(fencedInputs).toEqual([16_000]);
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_web_search_requests_total\{[^}]*provider="claude-subscription"[^}]*\} 3\b/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_model_tokens_total\{[^}]*provider="claude-subscription"[^}]*type="input"[^}]*\} 30000\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
   test("persists unpinned workspace Gateway endpoint authority before a soft fact-write failure", async () => {
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
     const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
@@ -1926,7 +2013,7 @@ describe("production model-response usage callback authority", () => {
     );
     const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
       async () => {
-        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+        throw new Error("workspace Gateway usage must not debit Opengeni credits");
       },
     );
     try {
@@ -2511,6 +2598,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2586,6 +2674,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses",
       model: "codex/gpt-5.6",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2636,6 +2725,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-duplicate",
       usage: { usage: { inputTokens: 10, outputTokens: 1 } },
     });
@@ -2676,6 +2766,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-write",
       usage: responseUsage,
     });
@@ -2738,6 +2829,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses" as const,
       model: "codex/gpt-5.6-sol",
+      purpose: "main" as const,
       sourceKey: "aggregate-1",
       usage: { usage: aggregate },
       emittedSourceKeys: sourceKeys,
@@ -2806,6 +2898,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-malformed",
       usage: responseUsage,
     });
@@ -3457,6 +3550,16 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(toolsSource).not.toContain("getWorkspaceGrant");
     expect(toolsSource).toMatch(
       /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
+    );
+  });
+
+  test("resuming journaled work starts deferred preparation before joining it", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const resume = source.slice(source.indexOf("const codemodeOperations = await"));
+    expect(resume).toMatch(
+      /async \(\) => \{\s*eventing\.preparedTools\?\.startDeferredPreparation\?\.\(\);\s*await eventing\.toolPreparationReady;/,
     );
   });
 
@@ -4595,7 +4698,10 @@ describe("Codex credential lease deadline fence", () => {
     let now = performance.now();
     const clock = spyOn(performance, "now").mockImplementation(() => now);
     let resolveHeartbeat!: (value: Date | null) => void;
-    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+    const scope = spyOn(opengeniDb, "withRlsContext").mockImplementation(
+      async (db, _context, fn) => await fn(db),
+    );
+    const heartbeat = spyOn(opengeniDb, "renewSubscriptionTurnLease").mockImplementation(
       () =>
         new Promise<Date | null>((resolve) => {
           resolveHeartbeat = resolve;
@@ -4612,7 +4718,9 @@ describe("Codex credential lease deadline fence", () => {
         workspaceId: "workspace-1",
         codexWorkspaceKey: "workspace-key",
         getTurnId: () => "turn-1",
+        getSessionId: () => "session-1",
       } as never);
+      lease.useSubscriptionCoreLease("connection-1");
       lease.held = true;
       lease.holderId = "holder-1";
       lease.generation = 1;
@@ -4630,6 +4738,7 @@ describe("Codex credential lease deadline fence", () => {
       expect(lease.confirmedUntilMs).toBe(priorDeadline);
     } finally {
       heartbeat.mockRestore();
+      scope.mockRestore();
       clock.mockRestore();
     }
   });
@@ -4718,6 +4827,30 @@ describe("sandbox file materialization note", () => {
     expect(requiresSignedFileResourceDownloads(modalHome, "selfhosted")).toBe(true);
     expect(requiresSignedFileResourceDownloads(modalHome, "docker")).toBe(true);
     expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
+  });
+
+  test("a backend that cannot mount object storage always gets signed downloads", () => {
+    // The compute fabric applies no mount entries, so a mounted attachment would
+    // never appear at its path. Every store must use signed delivery there, and
+    // that delivery keeps the box eager so the file is in place before the model.
+    for (const objectStorageBackend of ["s3-compatible", "azure-blob", "aws-s3", "gcs"] as const) {
+      const computeHome = testSettings({ sandboxBackend: "compute", objectStorageBackend });
+      expect(requiresSignedFileResourceDownloads(computeHome)).toBe(true);
+    }
+    const computeHome = testSettings({
+      sandboxBackend: "compute",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({
+        lazyEnabled: true,
+        machinePrimary: false,
+        sandboxBackend: "compute",
+        hasRunCredentialResolver: false,
+        generatedVideoFileCount: 0,
+        hasSignedFileResources: requiresSignedFileResourceDownloads(computeHome),
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
   });
 
   test("filters downloads already materialized on the current box", () => {
@@ -5227,6 +5360,7 @@ describe("transient provider error classifier", () => {
       error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "unavailable",
     });
     expect(JSON.stringify({ error: observed.error, payload })).toContain(
       "SECRET worker server provider detail",
@@ -5279,6 +5413,7 @@ describe("transient provider error classifier", () => {
       code: "provider_rate_limited",
       retryable: true,
       detail: "SECRET worker rate provider detail",
+      providerCondition: "rate_limited",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -5588,7 +5723,7 @@ describe("transient provider error classifier", () => {
       expect(isTransientProviderError(error)).toBe(false);
       expect(classifyCodexCredentialFailure(error)).toBeNull();
       expect(
-        classifyXaiCredentialFailure(
+        classifyXaiProviderError(
           Object.assign(new Error(message), {
             status,
             headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
@@ -5628,7 +5763,7 @@ describe("transient provider error classifier", () => {
     });
     expect(isTransientProviderError(error)).toBe(false);
     expect(classifyCodexCredentialFailure(error)).toBeNull();
-    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(classifyXaiProviderError(error)).toBeNull();
     expect(error.message).toContain("2031-04-05 06:07:08 UTC");
   });
 
@@ -5646,7 +5781,7 @@ describe("transient provider error classifier", () => {
     });
     expect(isTransientProviderError(error)).toBe(false);
     expect(classifyCodexCredentialFailure(error)).toBeNull();
-    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(classifyXaiProviderError(error)).toBeNull();
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -5680,7 +5815,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
@@ -5706,6 +5841,44 @@ describe("transient provider error classifier", () => {
     ]) {
       expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
       expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({ error: nearMatch });
+    }
+  });
+
+  test("a dropped upstream socket recovers the same turn even when wrapped", () => {
+    // Bun's exact fetch error when an upstream closes an open connection.
+    const message =
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    const dropped = Object.assign(new TypeError(message), { code: "ECONNRESET" });
+    const recovery = {
+      error:
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
+      code: "upstream_connectivity_unavailable",
+      retryable: true,
+    };
+    for (const error of [
+      dropped,
+      // A wrapper that keeps the text but moves the code to `cause`.
+      new Error(message, { cause: dropped }),
+      // A wrapper that re-creates the error from its message alone.
+      new Error(message),
+    ]) {
+      expect(isTransientProviderError(error)).toBe(true);
+      expect(agentRunFailurePayload(error)).toEqual(recovery);
+    }
+    // A wrapper with its own text still recovers through the transport code.
+    const runner = new Error("Model stream failed", {
+      cause: new Error("read failed", { cause: dropped }),
+    });
+    expect(isTransientProviderError(runner)).toBe(true);
+    expect(agentRunFailurePayload(runner)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    // HTTP status stays authoritative over a transport code or text in the chain.
+    const rejected = Object.assign(new Error(message, { cause: dropped }), { status: 400 });
+    expect(isTransientProviderError(rejected)).toBe(false);
+    for (const nearMatch of [`Tool failed: ${message}`, `${message} Unexpected suffix`]) {
+      expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
     }
   });
 
@@ -5869,6 +6042,7 @@ describe("transient provider error classifier", () => {
       error: "Our servers are currently overloaded. Please try again later.",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "overloaded",
     });
 
     const generic500 = Object.assign(
@@ -6138,7 +6312,7 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
-  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", async () => {
     const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
     const refreshCodexToken = mock(async () => ({
       accessToken: "codex-token-2",
@@ -6168,7 +6342,12 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
-    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    // The main dispatch checks still run for title requests, scoped as a title dispatch.
+    await titleCodexContext.beforeProviderDispatch?.({
+      requestId: "title-request",
+      transportAttempt: 1,
+    });
+    expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
@@ -6203,65 +6382,10 @@ describe("transient provider error classifier", () => {
     expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
   });
 
-  test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
-    const marked = (status: number, headers: HeadersInit = {}) =>
-      Object.assign(new Error(`xAI request failed (${status})`), {
-        status,
-        headers: new Headers({
-          ...Object.fromEntries(new Headers(headers).entries()),
-          [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1",
-        }),
-      });
-    expect(classifyXaiCredentialFailure(new XaiSubscriptionReloginRequired())).toEqual({
-      kind: "auth",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(401))).toEqual({
-      kind: "auth",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(403))).toEqual({
-      kind: "forbidden",
-      cooldownMs: null,
-    });
-    expect(classifyXaiCredentialFailure(marked(429, { "retry-after": "12" }))).toEqual({
-      kind: "rate_limit",
-      cooldownMs: 12_000,
-    });
-    expect(classifyXaiCredentialFailure(marked(503))).toBeNull();
-    expect(
-      classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
-    ).toBeNull();
-    expect(
-      classifyXaiCredentialFailure(
-        new XaiSubscriptionStreamingTerminalError({
-          message:
-            "The model is currently at capacity due to high demand. Please try again in a few minutes.",
-          code: "response_error",
-          eventType: "error",
-          status: 502,
-        }),
-      ),
-    ).toEqual({
-      kind: "rate_limit",
-      cooldownMs: 60_000,
-    });
-    expect(
-      classifyXaiCredentialFailure(
-        new XaiSubscriptionStreamingTerminalError({
-          message: "Our servers are currently overloaded. Please try again later.",
-          code: "response_error",
-          eventType: "error",
-          status: 502,
-        }),
-      ),
-    ).toBeNull();
-  });
-
-  test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
+  test("classifies a stalled hosted-search continuation as an interrupted stream", () => {
     expect(agentRunFailurePayload(new XaiSubscriptionHostedToolContinuationError())).toEqual({
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     });
@@ -6325,7 +6449,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("surfaces a stalled SuperGrok stream with bounded correlation facts and no replay", () => {
+  test("surfaces a stalled SuperGrok stream with bounded correlation facts", () => {
     expect(
       agentRunFailurePayload(
         new XaiSubscriptionStreamIdleTimeoutError(
@@ -6337,8 +6461,7 @@ describe("transient provider error classifier", () => {
         ),
       ),
     ).toEqual({
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: true,

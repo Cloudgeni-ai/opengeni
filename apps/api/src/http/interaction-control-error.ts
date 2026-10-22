@@ -4,11 +4,46 @@ import {
   type ErrorCode,
   type InteractionControlFailureCode,
 } from "@opengeni/contracts";
-import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import { BrowserControlRequestError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./api-error";
 
 export type InteractionControlSurface = "browser" | "computer";
+
+/**
+ * Agents released before the dedicated `capacity_exhausted` code report a full
+ * browser or computer supervisor as a retryable 503 `resource_unavailable`.
+ * That is not a transient outage: nothing frees capacity until a session ends.
+ * Present it as the current agents do, a 409 that says what to do, instead of
+ * the generic "temporarily unavailable" every 5xx becomes.
+ */
+export function legacyInteractionCapacityFailure(
+  error: unknown,
+  surface: InteractionControlSurface,
+): { code: "capacity_exhausted"; message: string; retryable: false } | null {
+  if (
+    !(error instanceof BrowserControlRequestError) ||
+    error.error.code !== "resource_unavailable" ||
+    !error.error.message.endsWith("supervisor session capacity is exhausted")
+  ) {
+    return null;
+  }
+  const sessions = surface === "browser" ? "browsers" : "computer sessions";
+  const ended = surface === "browser" ? "browser sessions" : "computer sessions";
+  return {
+    code: "capacity_exhausted",
+    message: `This machine is already running its limit of ${sessions}. End ${ended} that are no longer needed, then open a new one; retrying will not help until one ends.`,
+    retryable: false,
+  };
+}
+
+export function legacyInteractionCapacityError(
+  error: unknown,
+  surface: InteractionControlSurface,
+): HTTPException | null {
+  const failure = legacyInteractionCapacityFailure(error, surface);
+  return failure ? new HTTPException(409, { message: failure.message, cause: error }) : null;
+}
 
 /**
  * Projects an internal connected-machine control fault into the public API

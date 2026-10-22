@@ -122,3 +122,19 @@ export class SubscriptionTurnLease {
     this.heartbeatTimer = undefined;
   };
 }
+
+/** One turn attempt's core lease holder for a provider (`<provider>-turn:<attempt>`). */
+export function subscriptionTurnLeaseHolderId(
+  provider: string,
+  displayName: string,
+  input: { workflowId: string; attemptId: string },
+  turnId: string,
+): string {
+  const parts = [input.workflowId, turnId, input.attemptId];
+  if (parts.some((part) => part.trim().length === 0)) {
+    throw new Error(
+      `${displayName} credential lease holder requires a complete turn attempt identity`,
+    );
+  }
+  return `${provider}-turn:${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+}

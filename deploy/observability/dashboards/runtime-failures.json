@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-runtime-failures",
-  "title": "OpenGeni · Runtime Failures",
+  "title": "Opengeni · Runtime Failures",
   "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
   "schemaVersion": 39,
   "version": 5,
@@ -88,7 +88,7 @@
       "id": 17,
       "type": "stat",
       "title": "Critical alerts",
-      "description": "Current firing OpenGeni critical alerts. Zero is explicit because Prometheus omits the ALERTS series when no alert is firing.",
+      "description": "Current firing Opengeni critical alerts. Zero is explicit because Prometheus omits the ALERTS series when no alert is firing.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -117,7 +117,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "critical",
           "editorMode": "code",
           "instant": true,
@@ -130,7 +130,7 @@
       "id": 18,
       "type": "stat",
       "title": "Warnings",
-      "description": "Current firing OpenGeni warning alerts. The card turns amber immediately and red when several warnings overlap.",
+      "description": "Current firing Opengeni warning alerts. The card turns amber immediately and red when several warnings overlap.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -160,7 +160,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "warning",
           "editorMode": "code",
           "instant": true,
@@ -173,7 +173,7 @@
       "id": 19,
       "type": "stat",
       "title": "Scrape health",
-      "description": "Percentage of selected OpenGeni application scrape targets currently reachable. No data is a telemetry outage, not a healthy zero.",
+      "description": "Percentage of selected Opengeni application scrape targets currently reachable. No data is a telemetry outage, not a healthy zero.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -346,7 +346,7 @@
     {
       "id": 23,
       "type": "table",
-      "title": "Firing OpenGeni alerts",
+      "title": "Firing Opengeni alerts",
       "description": "The exact warning and critical alert names behind the summary cards. Open Alerting for full annotations and runbook context.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
@@ -367,7 +367,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
+          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"Opengeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
           "format": "table",
           "legendFormat": "{{severity}} · {{alertname}}",
           "editorMode": "code",
@@ -509,8 +509,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "MCP tool-call p95 by outcome",
-      "description": "Separates slow successful tools from timeout and transport tails.",
+      "title": "MCP tool-call p95 by outcome and tool",
+      "description": "Separates slow successful tools from timeout and transport tails, and names the slow first-party tool. Every connector and custom tool shares the bounded \"external\" tool series.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
@@ -522,6 +522,13 @@
           "refId": "A",
           "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
           "legendFormat": "{{outcome}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "tool {{tool}} p95",
           "editorMode": "code",
           "range": true
         }

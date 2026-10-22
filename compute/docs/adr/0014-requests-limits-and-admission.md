@@ -1,0 +1,406 @@
+# 14. Requests, limits and admission
+
+Status: Accepted, 2026-10-16. Built. Amended 2026-10-20: processor time is
+booked and guaranteed like memory.
+
+## Context
+
+Host memory is used only as a guest touches it, so many sandboxes fit while
+they are quiet. That is overbooking: when they get busy together, actual use
+can exceed the host's memory. Without admission nothing reserves memory or
+processor time for anyone, and the host kernel's out-of-memory killer would
+pick a VM.
+
+## Decision
+
+- Each sandbox has a **request** and a **limit** (its maximum size). The
+  requests of awake and waking sandboxes, plus what paused ones still hold
+  and any use above a request, stay within the host's capacity (the
+  huge-page pool, or memory less fixed headroom). So do VMs the agent does
+  not manage: those of removed sandboxes until they have ended, and those
+  it found but could not take back, at full size (the most any sandbox may
+  have when not even the size can be read from its record). A VM taken back
+  after a restart counts at its full size until it is first measured. A
+  wake is admitted once and owns its room until the sandbox runs: one from
+  object storage before it downloads anything, through its restore. On an
+  overdrawn budget (after a restart with less) nothing more wakes, not even
+  a resume that takes nothing more.
+- A create, a claim of a ready sandbox and an adoption from object storage
+  are admitted as the first wake they lead to: the host says yes only while
+  that wake would fit now (memory request, processors, disk, and the local
+  copy for an adoption), and books it from that yes until the sandbox
+  first runs, it breaks, or two minutes pass without a wake. A burst of
+  creates therefore never takes more sandboxes than the host can wake; the
+  rest are refused with `host_full` at once and placed elsewhere
+  ([15](0015-placement-and-moves-between-hosts.md)).
+  - The deadline of that booking is in the sandbox's record and the record
+    drops it only once a wake of the sandbox succeeded, so an agent that
+    restarts books each first wake still due again before it admits
+    anything else, including one whose first try failed.
+  - An adoption is first checked without its copy's disk, since only
+    claiming the copy shows how long that is, never by this host's base
+    image. Once claimed, it is checked with the copy's disk and refused with
+    `host_full` if that does not fit, before anything of it is made on the
+    host, leaving the store's copy for another host. Its files are made
+    only after that check and its record last, so an agent that restarts
+    meanwhile finds no adopted sandbox, at most files it tidies, and a
+    repeat of the adopt meanwhile is answered busy, never done. A create or
+    adopt that fails after making files or a network deletes them; what it
+    cannot delete keeps its id blocked and its ordinal taken, and removing
+    the id again retries, as after a removal that stopped part way.
+  - A claimed ready sandbox's VM already holds memory. Its first wake books
+    that memory up to the request, and only what the VM holds beyond the
+    request stays counted apart until the sandbox joins the core, so claims
+    that overlap never count one VM twice.
+- Admission in create, wake and connect is arithmetic on numbers held in
+  memory (microseconds). Inside a request the only relief is instant: ending
+  idle VMs that already have a valid saved copy (milliseconds, no I/O). If
+  that is not enough the request gets a retryable `host_full` at once,
+  saying how much it needs. Nothing is paused, compressed or saved inside a
+  request.
+- Room is kept ahead of time in the background: the host keeps a buffer
+  free (a sixteenth of capacity by default), plus what refused sandboxes
+  that are still held need, by pushing idle sandboxes deeper, least
+  recently used first. Held or recently busy sandboxes are never touched;
+  recently busy means within one busy window and two samples, since work
+  of its own is reported once per window.
+- The request becomes the VM cgroup's `memory.low` while it runs (zero while
+  paused) and its `cpu.weight`; the vCPU count stays the ceiling. The
+  parent group's `memory.low` is kept at the sum of its VMs', since a group
+  is protected only as far as its ancestors are. Not
+  `memory.min`: when the host runs short beyond everything unprotected, the
+  kernel then kills processes rather than reclaim from a protected group,
+  and slowing a VM down is the better failure.
+- Processor time is a request too: `cpu_request_millis`, in thousandths
+  of a processor, a tenth of each of its `vcpus` unless set, up to all of
+  them. It is what a sandbox is
+  guaranteed while awake; above it, it may use idle processors up to
+  `vcpus`, best effort. The requests of awake and waking sandboxes, and of
+  VMs the agent does not manage that may run (a removed sandbox's until
+  its VM has ended; one found running that it did not take back, at all
+  its processors, since an earlier agent set its weight), stay within the
+  host's processor capacity: the processors its VMs' group may run on
+  less a headroom for the agent and the rest of the host (a sixteenth, at
+  least half a processor), or what the operator sets. Template builds and
+  ready sandboxes book every processor of their shape while they come up,
+  since their guests run then at the weight of a whole guest, and none
+  once ready (paused); no new one starts while that would not fit or a
+  held wake waits for processor time. A VM whose record cannot be read
+  books what the parts still readable say, otherwise the most a sandbox
+  may have. A sleeping sandbox books none: paused, its vCPUs
+  do not run. Nothing frees processor time instantly, so a wake that does
+  not fit is refused at once with `host_full` naming processor time,
+  before memory is looked at, and ends no idle VM; a held one wakes by
+  itself once another sandbox sleeps (pausing after its idle time is the
+  relief), and the host does not count its memory toward the buffer while
+  its processor time cannot fit. On an overdrawn capacity nothing wakes,
+  as with memory.
+- The kernel enforces it with weights, not limits. A VM's `cpu.weight` is
+  one per 10 millicores requested, the request rounded up to that, so the
+  weights of awake VMs add up to at most the capacity; an agent taking
+  over VMs an earlier one left sets each one's weight anew from its
+  request. The VMs' parent group gets the weight that gives it the
+  capacity against every group beside it that holds processes, all busy
+  at once: the sum of their weights times the capacity over what is left,
+  at most 10000. What it then gets is worked out from the whole hierarchy
+  (the processors its `cpuset.cpus.effective` lists, its share at every
+  level above it against the busy groups beside each, whose weights the
+  agent leaves alone, and any `cpu.max` on the way), and the host
+  guarantees no more than that: when no weight covers the capacity, as
+  under a nested group or beside a heavy one, the capacity is lowered to
+  what the group gets, rounded down to 10 millicores and 0 when it gets
+  less than that (nothing wakes then; no minimum is made up), and the
+  agent warns. Groups beside it come and go,
+  so the agent reads the hierarchy again every five seconds, sets the
+  weight anew and, when what the group gets changes, the capacity with
+  it: sandboxes awake stay awake, and while more is booked than the
+  capacity no wake is admitted until enough sleep, as on an overdrawn
+  capacity. Contended time goes to busy groups by weight, so when every
+  processor is busy each awake VM still gets at least its request, VMM
+  threads and its pager included, which run in its group, as long as
+  what is booked fits the capacity. Between the capacity falling below
+  what is booked and enough sandboxes sleeping, awake VMs share what the
+  group gets in proportion to their requests, each getting less than its
+  request by the same fraction: keeping them awake is preferred to
+  stopping work the host promised, and the shortfall lasts only while
+  something outside the VMs' group takes more than the host keeps back.
+  The agent's own
+  work beyond the headroom (archiving, mostly) waits for idle processors.
+  A capacity the operator gives outright is kept as given, even above
+  what the group gets: above the processors it overcommits them on
+  purpose, requests then hold only in proportion, and the agent warns.
+  Hosts
+  report their capacity as it is now, what is free, and what ending idle
+  VM processes whose state is saved, and ready spare VMs, frees at once,
+  which admission counts for a wake (ADR 4). Placement and host groups
+  count both as free, so a saved idle sandbox holds no room; placement
+  prefers a host with free memory, which leaves those VMs in memory,
+  waking fastest, until a wake needs their room. Placement skips a host
+  without
+  room for a sandbox's request, and a host group grows for whichever of
+  memory and processor time runs short first, or when its hosts have too
+  few rooms for the largest sandbox (its memory and processor time on one
+  host, counted host by host, since spare scattered in slivers holds
+  none), and shrinks only with plenty of all of them. Not `cpu.max`: a
+  ceiling would waste idle processors and slow a
+  burst that harms nobody, and the request is a floor, as in Kubernetes
+  and Modal.
+- A running VM is never compressed or swapped: `memory.swap.max` and
+  `memory.zswap.max` are 0 from launch, after adoption and before every
+  resume, and open only while the agent compresses a paused VM, with
+  `memory.zswap.writeback` at 0 so nothing reaches the swap device. A host
+  that compresses must have zswap on, or the agent refuses to start.
+  Status shows each VM's zswap traffic and memory pressure; a running VM
+  with zswap stores is a bug.
+- VMMs and pagers run with `oom_score_adj` -900, so the host's
+  out-of-memory killer ends nearly anything else first, and the agent with
+  -999, so it outlasts the VMs it can bring back. It runs in a service unit
+  of its own with a `MemoryMax`; VM cgroups lie outside it. Not -1000:
+  that would make a leaking agent hang at its limit instead of restarting.
+- On bare-metal hosts, use above the request shares whatever is free. When
+  the host runs short, background relief acts in this order:
+  1. idle sandboxes leave memory, least recently used first;
+  2. the balloons of sandboxes in use above their request, furthest above
+     first, ask for everything above the request; the guest gives file
+     cache and free memory first and deflates the balloon rather than run
+     out (`deflate_on_oom`). Relief waits a short grace
+     (`balloon_grace`, 3 s) for a balloon to fill before going further,
+     and lets balloons go, oldest first, once memory is back above the
+     high watermark. A balloon let go claims the room it will take back,
+     like a wake, until its VM confirms the balloon is empty and a later
+     reading shows it, so the two never spend the same free memory; a
+     setting still pending or refused keeps its claim. Setting the target
+     is not enough: a let-go is confirmed only once the device's
+     statistics, turned on at boot, report the guest holds no page in
+     the balloon (within 10 s, else it is retried). A VM restored from an
+     image booted without statistics cannot report it, and statistics
+     cannot be turned on after boot; its let-go is confirmed once it has
+     run, let go, for those same 10 s, which is the longest a guest that
+     can report is given. A guest driver gives pages back as soon as it
+     sees the new target, a megabyte per round trip, so 10 s covers far
+     more than any guest's memory; a guest that touches them later shows
+     in readings like any other use above its request. Without this its
+     claim would last until it next paused and was saved, holding room no
+     one could use. Confirming by statistics bounds nothing more than
+     confirming by time: a Firecracker balloon that deflates returns no
+     host memory, it only hands pages back to the guest's allocator, so
+     host memory is taken only when the guest touches them again, which
+     no confirmation limits or foresees and readings count either way.
+     The claim covers the moments in which the guest is expected to
+     refill; a guest with statistics just ends it sooner. A sandbox whose let-go is
+     unconfirmed is not ballooned again, but step 3 may still pause and
+     save it, keeping its claim, or give it back its claim if it turns
+     out unsavable and stays awake. Pausing frees nothing, so a claim
+     that ends, for whatever reason, still counts until a reading taken
+     after that shows what the guest took; a removed sandbox's claim
+     lasts until its VM is ended;
+  3. if that is still not enough, the sandbox furthest above its request
+     is paused and saved, held or not. It loses nothing: once its recorded
+     footprint fits above the high watermark, next to the footprints of
+     those let through before it until a reading shows them, it wakes by
+     itself with its programs. Asking for it meanwhile gets `host_full`.
+  Sandboxes within their request are never touched by any of these.
+  A VM's balloon is let go again once it runs after any step and after
+  adoption, since a restored image or an earlier agent may have left it
+  set. A setting the VM did not take is sent again after a backoff that
+  grows with each failure in a row and starts over once a setting is
+  taken. Each request goes only to the VMM it was made for: the agent
+  checks the process answering on the API socket before sending anything.
+  Each carries a request number from the core, and only the answer to
+  the latest request for that sandbox counts, so an answer meant for an
+  earlier VM of the sandbox never settles a later one. A request that
+  finds its VM paused or ended is answered as not taken.
+- Congestion is visible: the status shows `balloon_bytes` for a sandbox
+  whose balloon is out and `paused_for_memory` (the bytes it held) for one
+  saved for host memory, with `waiting_for_room` while it waits; refused
+  requests get `host_full` with what they needed. A control plane can then
+  move such a sandbox ([15](0015-placement-and-moves-between-hosts.md)).
+- On huge-page hosts (the nested profile) guest memory cannot be compressed
+  or ballooned back, so a sandbox's request is its limit: a running sandbox
+  is booked at its full size against the pool, a paused one at the huge
+  pages its processes map (counted per process: a cgroup leaves them out
+  of `memory.current` unless mounted with `memory_hugetlb_accounting`). A
+  guest that touches memory with the pool empty does not die: its vCPU
+  retries the fault and the guest stalls until a page is free (tested).
+  Booking running VMs whole keeps that from happening unless something
+  outside the agent takes from the pool.
+- Status reports capacity (total, reserved, occupied, free, awake);
+  reservations are rebuilt from records after a restart.
+- Spare VMs, the ready pool's clones and template builds
+  ([12](0012-templates-and-ready-pool.md)), are in the same book. Each
+  counts against the budget, at its full size until it is filled and then
+  at what it holds. A new one starts only in room above the buffer and the
+  high watermark that no wake wants: none while a wake is queued for
+  memory or refused and held, or before the first memory reading after a
+  start; and it is booked before it starts. Ready
+  clones are the first relief for a wake, the buffer and memory pressure,
+  oldest first, ahead of step 1 of the relief above; one still filling is
+  left to finish. A ready clone is offered for relief only once it waits
+  to be claimed. One whose removal fails, and a build VM that cannot be
+  proven gone, stay counted as unmanaged at their size (a build's is in
+  its directory, for a later agent) and are no relief, until a later
+  build of the same VM or the next start of the agent ends them; one still
+  filling keeps its claim above the high watermark until it is gone, and
+  a later agent claims the same for a build VM it finds and cannot end.
+  Available memory is `MemAvailable` plus the free pages the kernel keeps
+  on per-CPU lists (`/proc/zoneinfo`), which `MemAvailable` leaves out:
+  on a 192-CPU host about 1 GiB of a 6 GiB process that exited was still
+  there 15 s later, so a sandbox waiting for room woke 12 to 34 s late.
+  When `MemAvailable` reads zero it is zero: the kernel clamps a negative
+  estimate there, and the per-CPU pages may cover only part of it. On
+  huge-page hosts it is no more than the free huge-page pool.
+- What a VM holds, which a running sandbox above its request is booked
+  at and relief compares with its request, is on bare-metal hosts its
+  group's `memory.current` less the page cache in it that is clean and
+  mapped by no process. The kernel charges a VMM's group with the page
+  cache of its disk's reads and writes and of the images it saves, which
+  is never guest memory: the host drops it whenever memory is short, and
+  `MemAvailable` already counts it, less the kernel's low watermark, as
+  available. Counting it as held as well booked a paused sandbox whose
+  8 GiB image had just been saved at 8 GiB while its VM held 336 MiB, and
+  would have had relief balloon, pause and save a sandbox for writing to
+  its disk. Shared memory, mapped files and cache still to be written
+  stay held: what a guest writes to its disk is held until the host
+  writes it back, which it starts only once the data has been dirty for
+  its writeback delay (`vm.dirty_expire_centisecs`, 30 s by default) or
+  dirty memory runs high: the drives pass guests no flush, so a guest's
+  own sync does not hasten it. The two counters are separate reads, so cache added
+  between them could make the subtraction leave out memory still held; a
+  reading is therefore never less than what `memory.stat` alone names as
+  held (anonymous, kernel, socket and huge-page memory and the cache that
+  stays), which one read gives at once.
+- Local disk is booked the same way, because a full disk blocks the very
+  saves that relieve memory. Every VM whose state is not saved yet books
+  its worst-case next save: its memory size once where files share extents
+  (XFS), twice where they do not (the merge writes a whole new image), plus
+  64 MiB and a few inodes. Bookings plus a kept-back reserve
+  (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
+  of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
+  filesystem has free, read every sample. A booking whose save has written
+  stays counted until a reading taken after it shows what the save used,
+  and before the first reading after a start nothing that needs disk is
+  admitted. Sizes are in whole allocation units of the state filesystem,
+  which the agent learns at start by writing a probe, so ext4 bigalloc's
+  clusters count. The probe bounds what any write takes only on ext4, XFS
+  and btrfs, so the agent refuses to start on a state root on any other
+  filesystem (ZFS grows a file's record size, tmpfs can give huge pages
+  within a file's size), naming those three.
+- Everything else that writes to local disk is booked the same way, before
+  it can write, and any booking that ends or shrinks stays counted until a
+  reading taken after that shows what was written:
+  - An awake or waking VM books what its guest disk may still grow by: the
+    disk's length in whole units plus 1/256 of it for the blocks that map
+    it (ext4 maps 340 data blocks per 4 KiB of extent tree), less what the
+    disk already holds alone. Until a VM is first measured it books the
+    whole bound. The agent measures every sample, before its disk
+    reading: on ext4 every allocated block counts; on XFS, where a disk
+    copied from its template or the base image shares their blocks and a
+    write to a shared block takes a new one, only blocks the disk holds
+    alone count (`FS_IOC_FIEMAP`), and of those only extents stored as
+    they are, since an encoded (compressed) extent holds more than its
+    blocks. On btrfs no block counts and the whole bound stays booked:
+    every write there takes new blocks, and the old ones are freed only
+    once nothing in their extent is used. A sleeping VM books no growth:
+    no guest writes to its disk.
+  - A wake from object storage books its local copy from admission until
+    the copy is whole: its disk at that bound, its memory image (what the
+    pager fills while the guest runs) and 64 MiB of device state. A failed
+    fetch keeps it for its retry; a wake that gives up gives it up. The
+    agent reports the end of the fill, measured every sample, and a
+    restarted agent reports a fill it finds still running. A fill that
+    failed has not ended until its fetch task has and every write it
+    started into the memory image has landed, so its growth is not taken
+    as settled while a write may still add to it.
+  - A removed sandbox's bookings, its next save and its disk growth, last
+    until its VM has ended, as its guest and VMM may still write until
+    then; so do those of a ready clone that could not be ended. A VM a
+    restarted agent finds and does not manage (a removal under way, an
+    unclaimed ready clone, a blocked sandbox) books its worst-case save,
+    which an earlier agent may have started, and its disk's growth, and a
+    build VM it cannot end its disk and a snapshot, until it has ended.
+    Each such disk is booked by the length of its own file, or the length
+    its record keeps if that is longer, never by today's base image; one
+    whose length cannot be read books more than any disk holds, so nothing
+    else is admitted to the disk until it has ended. A missing disk file
+    counts as unreadable, since its VM may still write to it through a
+    descriptor it held when the file was unlinked, unless the record says
+    the disk is in the store, which it does only once its VM has ended.
+  - A new sandbox's first files (its copy of its template's disk or the
+    base image, by data ranges, whichever is larger since a stale template
+    falls back to the base image) are booked before the copy starts, and a
+    create the disk cannot take is refused with `host_full` naming disk.
+  - A ready clone's fill books its copy of the template's disk and what its
+    guest writes until it is ready, together at most the disk's bound; a
+    paused clone writes nothing and books nothing.
+  - A template build books its disk at the bound, since its guest writes to
+    its copy while it boots, its kernel copy by data ranges, and its
+    worst-case snapshot, before it starts, and waits without the room.
+  A sandbox's bound comes from its own disk's length, recorded when its
+  disk is made, so a base image that changes later does not change what
+  older sandboxes book; a new one before its disk exists uses today's
+  base image. A sandbox adopted from the store keeps the length of the
+  disk in the copy it claims. An awake VM's
+  measurement uses its own disk's length too. A boot also relinks the
+  kernel (tens of MiB, replacing the previous copy), which the reserve
+  covers. A wake that cannot book what it needs
+  gets `host_full` at once, naming disk or inodes and how much. What a
+  booking that ended stood for, such as a ready sandbox's finished copy,
+  stays booked until the next reading (about a second) shows what was
+  written, so a wake or create short by no more than that waits for that
+  reading, which decides it, rather than being refused for room that may
+  be there. In the
+  background, while refused held sandboxes cannot book, idle sandboxes
+  that are already archived to object storage give up their local copies,
+  least recently used first. A step that fails, such as a save the disk
+  cannot hold, shows in the sandbox's status as `failed_step` until the
+  same step succeeds on a retry.
+
+## Consequences
+
+- A sandbox that stays within its request is never squeezed, paused or
+  killed for memory. Above it, it may be squeezed or paused for a few
+  seconds, never lose data.
+- An awake sandbox always gets its processor request when it wants it,
+  and more when processors are idle. A host fills by requests, so a small
+  request packs many awake sandboxes and a whole-vCPU request few: a
+  host of 8 processors keeps at most 7.5 awake sandboxes of 1000
+  millicores, 75 of the default 100 for one vCPU, or 107 of 64 (each
+  booked at 70). The default is small on purpose, as hosted sandboxes'
+  are: sandboxes that ask for nothing pack about as densely as before
+  requests counted, each sure of a share, and a sandbox that needs whole
+  processors under contention asks for them. A burst above the request
+  is never promised: next to busy neighbours a sandbox may get only its
+  request. Groups made or woken beside the VMs' after the agent starts
+  are counted within 5 seconds, when it next reads the hierarchy; until
+  then the VMs' group may get less than the capacity it advertises.
+- Whether a sandbox waits, saved, for room after a pause for memory is kept
+  in its holds file, written by the same writer as its holds whenever the
+  core says the wait starts or ends. The core says it starts before the
+  sandbox is paused for memory, and the pause and save begin only once the
+  holds file says so; it ends only once the sandbox runs again, so a crash
+  at any point in between leaves it waiting, and a pause or save for it
+  that cannot first write the holds file fails and is tried again rather
+  than run without it. One a restarted agent finds still holding its VM
+  was never saved: a running one waits no more, and a paused one wakes,
+  still waiting until it runs. Otherwise a restarted agent gives it back to the
+  core, which waits for room above the high watermark for it again, and
+  wakes it by itself once there is.
+- The room a paused sandbox waits for is its VM's cgroup footprint, file
+  cache included, so it may wait somewhat longer than its guest needs.
+- On nested hosts free page reporting does return huge pages: Firecracker
+  1.17 maps guest memory as private anonymous huge pages, booted or
+  restored, and a discarded range frees the whole pages inside it.
+  Measured ([measurements](../measurements.md)), 1.5 GiB a guest freed was
+  back in the pool within 30 s. A balloon returns nothing there: it gives
+  back 4 KiB pages, and a huge page is freed only whole. Nested hosts still
+  book every awake VM whole and never count it by what it holds: a guest
+  that takes memory back while the pool is empty stalls until a page is
+  free, with no compression or swap to absorb it, so the pool is never
+  overcommitted. What reporting returns does count as available memory
+  against the watermarks, so fewer idle sandboxes are pushed deeper.
+- Nested hosts hold fewer running sandboxes for the same memory, in exchange
+  for cheaper wakes ([5](0005-host-memory-profiles.md)).
+- Disk bookings are worst cases: an awake VM on ext4 books all of its
+  disk it has not yet allocated, though most guests never fill their disk.
+  On a host with many awake sandboxes the disk, not memory, may then bound
+  how many wake; size state volumes for it.

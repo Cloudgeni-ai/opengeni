@@ -4,8 +4,8 @@ import {
   PuzzleIcon,
   RefreshCwIcon,
   SparklesIcon,
+  PowerOffIcon,
   TrashIcon,
-  UnplugIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -22,7 +22,7 @@ import {
   CredentialForm,
   FikenConnectorControls,
   type ConnectAction,
-} from "@/components/capabilities/capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import {
   CapabilityAside,
   CapabilityMark,
@@ -33,24 +33,26 @@ import {
 import {
   ConnectorToolPermissions,
   hasConnectorToolPermissionTarget,
-} from "@/components/capabilities/connector-tool-permissions";
+} from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   capabilityPresentation,
   presentationPermissions,
-} from "@/components/capabilities/integration-experience";
-import type { IntegrationViewModel } from "./integration-view-model";
-import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+} from "@opengeni/react/app/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
 import {
   CatalogConnectedAccounts,
+  type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
 } from "./catalog-connected-accounts";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
@@ -62,8 +64,12 @@ import {
   GENERIC_API_KEY_FIELD,
   socialConnectionsForOwnership,
   type ConnectionHealth,
-} from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+} from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    The page for a catalog entry: a connection from the catalog or the public
@@ -93,6 +99,7 @@ export function CatalogItemPage({
   fikenSetup,
   socialSetupAvailable = true,
   connectionAccounts,
+  accountManagement,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -114,7 +121,12 @@ export function CatalogItemPage({
   fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
   /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
   socialSetupAvailable?: boolean;
-  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item">;
+  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item" | "management">;
+  /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
+  accountManagement?: Pick<
+    CatalogConnectedAccountsManagement,
+    "viewerSubjectId" | "canWrite" | "onRemove"
+  >;
 }) {
   const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
@@ -144,6 +156,7 @@ export function CatalogItemPage({
     health.connection === null &&
     (personalOnly || item.connectionRef?.subjectScope === "subject");
   const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const addAccountOwnership = catalogAddAccountOwnership(item, personalOnly);
   const isSkill = item.kind === "skill";
   const signInFlow =
     item.kind === "mcp" && item.authKind === "oauth2" && !item.enabled && onConnectAccount;
@@ -234,6 +247,8 @@ export function CatalogItemPage({
     }
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
+  } else if (item.surfaceType === "first_party_onepassword") {
+    primary = <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />;
   } else if (plan.mode === "social_oauth") {
     primary = socialSetupAvailable ? (
       <Button
@@ -296,12 +311,11 @@ export function CatalogItemPage({
       menu.push(
         <DropdownMenuItem
           key="disconnect"
-          variant="destructive"
           disabled={busy}
           onSelect={() => onAction({ type: "disconnect", item })}
         >
-          <UnplugIcon />
-          Disconnect
+          <PowerOffIcon />
+          Turn off for this workspace
         </DropdownMenuItem>,
       );
     }
@@ -666,7 +680,46 @@ export function CatalogItemPage({
         setup
       )}
 
-      {connectionAccounts ? <CatalogConnectedAccounts item={item} {...connectionAccounts} /> : null}
+      {connectionAccounts ? (
+        <CatalogConnectedAccounts
+          item={item}
+          {...connectionAccounts}
+          {...(accountManagement
+            ? {
+                management: {
+                  ...accountManagement,
+                  busy,
+                  // Re-sign-in reuses exactly this row. Only while the connector
+                  // is on: the OAuth return would otherwise also turn it on.
+                  ...(item.enabled
+                    ? {
+                        onReconnect: (account) =>
+                          onAction({
+                            type: "reconnect_oauth",
+                            item,
+                            connectionId: account.id,
+                            ownership: account.subjectId === null ? "workspace" : "personal",
+                            ...(account.workspaceId !== workspaceId
+                              ? { connectionWorkspaceId: account.workspaceId }
+                              : {}),
+                          }),
+                      }
+                    : {}),
+                  ...(addAccountOwnership
+                    ? {
+                        onAdd: () =>
+                          onAction({
+                            type: "add_oauth_account",
+                            item,
+                            ownership: addAccountOwnership,
+                          }),
+                      }
+                    : {}),
+                },
+              }
+            : {})}
+        />
+      ) : null}
 
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
@@ -674,7 +727,12 @@ export function CatalogItemPage({
           description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
-            key={`${workspaceId}:${item.id}`}
+            key={`${workspaceId}:${item.id}:${
+              connectionAccounts?.connections
+                ?.map((account) => `${account.id}:${account.version}:${account.status}`)
+                .sort()
+                .join(",") ?? ""
+            }`}
             workspaceId={workspaceId}
             capabilityId={item.id}
             bare
@@ -726,13 +784,23 @@ function ExternalLink({ href }: { href: string }) {
     // Not a URL: show it as written.
   }
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer noopener"
-      className="font-medium text-brand hover:underline"
-    >
+    <a href={href} target="_blank" rel="noreferrer noopener" className="font-medium og-link">
       {label}
     </a>
   );
+}
+
+/** A further account can be added only where the installation uses every
+ * eligible account (never an exact single-account pin, which a new sign-in
+ * would replace). The new account keeps the installation's ownership. */
+export function catalogAddAccountOwnership(
+  item: Pick<CapabilityCatalogItem, "enabled" | "kind" | "surfaceType" | "connectionRef">,
+  personalOnly: boolean,
+): ConnectionOwnership | null {
+  const ref = item.connectionRef;
+  if (!item.enabled || item.kind !== "mcp" || item.surfaceType === "codex_apps" || !ref)
+    return null;
+  if (ref.authoritySource === "host" || ref.connectionId || ref.kind !== "oauth2") return null;
+  if (ref.subjectScope === "subject" || personalOnly) return "personal";
+  return ref.accountSelection === "all_eligible" ? "workspace" : null;
 }

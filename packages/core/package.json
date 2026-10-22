@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/core",
-  "version": "1.4.4",
-  "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
+  "version": "4.3.1",
+  "description": "Opengeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -44,11 +44,12 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/capabilities": "workspace:*",
     "@opengeni/codex": "workspace:*",
@@ -61,6 +62,7 @@
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/vaults": "workspace:*",
     "hono": "^4.12.18",
     "zod": "^4.2.1"
   },

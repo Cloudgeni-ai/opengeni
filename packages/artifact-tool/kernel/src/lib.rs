@@ -1,4 +1,4 @@
-//! Deterministic, runtime-neutral model kernel for OpenGeni artifacts.
+//! Deterministic, runtime-neutral model kernel for Opengeni artifacts.
 
 #![forbid(unsafe_code)]
 
@@ -29,7 +29,8 @@ pub use command::{
 };
 pub use id::{IdError, IdGenerator, StableId};
 pub use sheet::{
-    CellBlock, CellBlockError, CellCoord, CellRange, Sheet, TileCoord, TILE_CELL_COUNT, TILE_EDGE,
+    CellBlock, CellBlockError, CellCoord, CellRange, DimensionAxis, Sheet, TileCoord,
+    DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, MAX_DIMENSION_PIXELS, TILE_CELL_COUNT, TILE_EDGE,
 };
 pub use snapshot::{decode_snapshot, encode_snapshot, SnapshotError, SNAPSHOT_VERSION};
 pub use value::{

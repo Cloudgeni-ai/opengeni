@@ -65,14 +65,16 @@ const packageReferencePattern = /@opengeni\/[a-z0-9-]+/g;
 const inlineCodePattern = /`([^`\n]+)`/g;
 const skippedPathFragments = ["*", "<", ">", "{", "$", "..."];
 const externalPackageAllowlist = new Set<string>();
-const workspaceRoots = await listWorkspaceRoots();
+const { roots: workspaceRoots, excluded: excludedWorkspaces } = await listWorkspaceRoots();
 
 const [files, workspaceFiles] = await Promise.all([
   listFiles(sourceRoots),
   listFiles(workspaceRoots),
 ]);
-const workspaceManifests = workspaceFiles.filter((file) =>
-  isWorkspaceManifest(file, workspaceRoots),
+const workspaceManifests = workspaceFiles.filter(
+  (file) =>
+    isWorkspaceManifest(file, workspaceRoots) &&
+    !excludedWorkspaces.some((directory) => file.startsWith(`${directory}/`)),
 );
 const workspacePackages = await listWorkspacePackages(workspaceManifests);
 const findings: Finding[] = [];
@@ -220,7 +222,7 @@ function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]):
   }
 }
 
-async function listWorkspaceRoots(): Promise<string[]> {
+async function listWorkspaceRoots(): Promise<{ roots: string[]; excluded: string[] }> {
   const manifest = await Bun.file("package.json")
     .json()
     .catch(() => null);
@@ -231,16 +233,25 @@ async function listWorkspaceRoots(): Promise<string[]> {
   if (!Array.isArray(workspaces) || workspaces.length === 0) {
     throw new Error("Root package.json workspaces must be a non-empty array");
   }
-  return workspaces.map((workspace) => {
+  const roots: string[] = [];
+  const excluded: string[] = [];
+  for (const workspace of workspaces) {
     if (typeof workspace !== "string") {
       throw new Error("Root package.json workspace entries must be strings");
+    }
+    // `!dir` removes one directory from a glob, e.g. an app with its own install.
+    const exclusion = /^!([A-Za-z0-9_./-]+)$/.exec(workspace);
+    if (exclusion?.[1]) {
+      excluded.push(exclusion[1].replace(/^\.\//, "").replace(/\/+$/, ""));
+      continue;
     }
     const match = /^([A-Za-z0-9_./-]+)\/\*$/.exec(workspace);
     if (!match?.[1]) {
       throw new Error(`Unsupported workspace pattern: ${workspace}`);
     }
-    return match[1].replace(/^\.\//, "");
-  });
+    roots.push(match[1].replace(/^\.\//, ""));
+  }
+  return { roots, excluded };
 }
 
 function isWorkspaceManifest(file: string, roots: string[]): boolean {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Agent, Runner, tool, setTracingDisabled, type ModelRequest } from "@openai/agents";
 import { z } from "zod";
 import { configuredProviders, type ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   AnthropicMessagesModel,
   AnthropicProviderRejection,
@@ -55,11 +55,16 @@ const response = (content: unknown[], stop = "end_turn") => ({
 test.each(["low", "medium", "high", "xhigh", "max"] as const)(
   "native effort %s reaches the wire unchanged for both 5.5 models",
   (effort) => {
-    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
-      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      // Models that write progress updates need display "updates" to tell
+      // them apart from reasoning; the others keep reasoning summaries.
+      expect(body.thinking).toEqual({
+        type: "adaptive",
+        display: model === "claude-haiku-5-5" ? "summarized" : "updates",
+      });
       expect(body.output_config.effort).toBe(effort);
       expect(body.max_tokens).toBe(128_000);
     }

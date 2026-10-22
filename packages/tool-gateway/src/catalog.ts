@@ -3,6 +3,7 @@ import {
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
   ToolGatewayCatalog,
   type ToolGatewayCatalog as ToolGatewayCatalogValue,
+  type ToolGatewayCatalogEntry,
 } from "@opengeni/contracts";
 import { ToolGatewayCatalogIntegrityError, ToolGatewayCatalogTooLargeError } from "./errors";
 
@@ -25,6 +26,20 @@ export function digestCanonicalJson(value: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify(canonicalJsonValue(value)), "utf8")
     .digest("hex");
+}
+
+/** Public definition precondition, not an authorization receipt or remote revision lock. */
+export function digestToolGatewayDefinition(
+  scope: { accountId: string; workspaceId: string },
+  entry: ToolGatewayCatalogEntry,
+): string {
+  return digestCanonicalJson({
+    domain: "opengeni.tool-definition",
+    version: 1,
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    entry,
+  });
 }
 
 /** Compare canonical JSON keys by JavaScript UTF-16 code units, independent of host locale. */

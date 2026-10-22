@@ -6,6 +6,7 @@ import postcss, {
   parse,
   type AcceptedPlugin,
   type AtRule,
+  type ChildNode,
   type Declaration,
   type Rule,
 } from "postcss";
@@ -19,11 +20,28 @@ const tokensPath = join(stylesRoot, "tokens.css");
 const effectiveTokensPath = join(stylesRoot, "effective-tokens.css");
 const checkOnly = process.argv.includes("--check");
 
+// The visualization assets are raw CSS/HTML for a sandboxed iframe, not class
+// names; tests and fixtures never ship; and the inline exclusions are prose
+// words from comments and identifiers that Tailwind would otherwise compile
+// into unused utilities. `src/app` (the session app `SessionApp` renders) is
+// included, so its utilities ship scoped like every other component's, and so
+// are the plain stylesheets its components import (connect and setup cards,
+// This computer, capability cards): an embed needs only this one file.
 const input = `@import "tailwindcss/theme.css" layer(theme);
 @import "./index.css";
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./responsive.css";
+@import "./app.css";
+@import "./connect.css";
+@import "./this-computer.css";
+@import "../src/app/components/capabilities/session-capability-card.css";
 @source "../src";
+@source not "../src/**/*.test.ts";
+@source not "../src/**/*.test.tsx";
+@source not "../src/**/*.dom-fixture.tsx";
+@source not "../src/components/artifacts/visualization-assets";
+@source not "../src/components/artifacts/visualization-assets.gen.ts";
+@source not inline("blur collapse filter lowercase ring");
 `;
 
 const scope = selectorParser().astSync(":where(.og-root)").nodes[0]!.nodes[0]!;
@@ -67,10 +85,22 @@ function hasScopedRuleAncestor(rule: Rule): boolean {
   return false;
 }
 
+/**
+ * Whether the selector only matches inside an `og-root` (or, for token
+ * contexts, on an ancestor that `:has()` one). A root named inside `:not()`
+ * does not scope it: `button:not(.og-root textarea)` still matches every
+ * button on the host page.
+ */
 function containsRoot(selector: Selector): boolean {
   let found = false;
   selector.walkClasses((className) => {
-    if (className.value === "og-root") found = true;
+    if (className.value !== "og-root") return;
+    let parent = className.parent as { type: string; value?: string; parent?: unknown } | undefined;
+    while (parent) {
+      if (parent.type === "pseudo" && parent.value === ":not") return;
+      parent = parent.parent as typeof parent;
+    }
+    found = true;
   });
   return found;
 }
@@ -338,6 +368,42 @@ function tailwindInitializerRule(declarations: readonly Declaration[]): string {
   return `${selectors} {\n${body}\n}`;
 }
 
+/**
+ * Removes cascade layers without changing which rule wins. In the browser,
+ * layers apply in their declared order and every unlayered rule beats every
+ * layered one, so a plain flattening in source order would let a base reset
+ * that comes later override an unlayered component rule of equal
+ * specificity. Top-level layered rules therefore go first, in layer order,
+ * and the unlayered rules keep their own order after them.
+ */
+export function flattenLayers(root: ReturnType<typeof parse>): void {
+  const order: string[] = [];
+  const add = (name: string) => {
+    if (!order.includes(name)) order.push(name);
+  };
+  root.each((node) => {
+    if (node.type !== "atrule" || node.name !== "layer") return;
+    for (const name of node.params.split(",")) add(name.trim());
+  });
+  const layered = new Map<string, ChildNode[]>();
+  root.each((node) => {
+    if (node.type !== "atrule" || node.name !== "layer") return;
+    const name = node.params.trim();
+    if (node.nodes && !name.includes(",")) {
+      const nodes = layered.get(name) ?? [];
+      nodes.push(...node.nodes.map((child) => child.clone()));
+      layered.set(name, nodes);
+    }
+    node.remove();
+  });
+  root.prepend(...order.flatMap((name) => layered.get(name) ?? []));
+  // Layers nested in other at-rules (rare) stay in place.
+  root.walkAtRules("layer", (atRule) => {
+    if (atRule.nodes) atRule.replaceWith(...atRule.nodes);
+    else atRule.remove();
+  });
+}
+
 function removeEmptyContainers(root: ReturnType<typeof parse>): void {
   let removed = true;
   while (removed) {
@@ -384,17 +450,14 @@ export function scopeSelectors(css: string): string {
         return [selectorParser.selector({ value: "", nodes: [scope.clone()] })];
       }
       if (isTokenContext(selector)) return tokenContextTargets(selector);
-      return rootAndDescendant(selector);
+      return rootAndDescendant(isScopedBase ? selector : lowerRootSpecificity(selector));
     });
     const unique = new Map(scoped.map((selector) => [selector.toString(), selector]));
     parsed.removeAll();
     for (const selector of unique.values()) parsed.append(selector);
     rule.selector = parsed.toString();
   });
-  root.walkAtRules("layer", (atRule) => {
-    if (atRule.nodes) atRule.replaceWith(...atRule.nodes);
-    else atRule.remove();
-  });
+  flattenLayers(root);
   removeEmptyContainers(root);
   root.prepend(
     ...parse(

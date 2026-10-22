@@ -15,6 +15,7 @@ import {
 import { type Database, withRlsContext } from "./database";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import * as schema from "./schema";
+import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -151,7 +152,9 @@ export async function legacyToolActionReview(
         // The immutable model-name map supplies schema privacy and exact tool
         // identity; the accepted account binding independently supplies provider.
         if (stored) {
-          const catalog = parseVerifiedAttemptToolCatalog(stored.catalog);
+          const catalog = parseVerifiedAttemptToolCatalog(
+            await hydrateStoredAttemptToolCatalog(tx, stored),
+          );
           const entry = catalog.entries.find((item) => item.modelName === saved.name);
           if (entry) {
             const bindings = McpConnectionAccountBindings.safeParse(turn.mcpAccountBindings);

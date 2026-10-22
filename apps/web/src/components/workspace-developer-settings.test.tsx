@@ -387,7 +387,7 @@ describe("workspace developer settings", () => {
     const { container } = await developerPage({}, { canManage: false });
     expect(container.textContent).toContain("Only workspace admins can manage webhooks.");
     expect(container.textContent).toContain("Ask a workspace admin for access.");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     expect(container.textContent).not.toContain("missing permission");
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(
@@ -410,7 +410,7 @@ describe("workspace developer settings", () => {
     const { container } = await developerPage();
     expect(container.textContent).toContain("Couldn't load webhooks.");
     expect(container.textContent).toContain("Try again in a moment.");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     const reference = container.querySelector("dl");
     expect(reference?.hidden).toBe(true);
     expect(reference?.textContent).toContain("7f1c2d4e-0000-4000-8000-000000000001");

@@ -69,7 +69,7 @@ import {
 export function resolveWorkspaceSpec(
   depName: string,
   spec: string,
-  versionByPackage: Map<string, string>,
+  versionByPackage: ReadonlyMap<string, string>,
 ): string {
   if (!spec.startsWith("workspace:")) {
     return spec;
@@ -104,7 +104,7 @@ export type WorkspaceDependencyRewrite = Readonly<{
 
 export function rewriteWorkspaceDependenciesToConcrete(
   pkg: PackageJson,
-  versions: Map<string, string>,
+  versions: ReadonlyMap<string, string>,
 ): WorkspaceDependencyRewrite[] {
   const rewrites: WorkspaceDependencyRewrite[] = [];
   for (const field of PUBLISHED_DEP_FIELDS) {

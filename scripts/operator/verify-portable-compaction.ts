@@ -139,7 +139,7 @@ export async function main(args: string[] = process.argv.slice(2)) {
   let replacement: Item[];
   if (args.includes("--durable")) {
     const { compactDurableFixture } = await import("./compaction-durable");
-    const { acquireSharedTestDatabase } = await import("@opengeni/testing");
+    const { acquireSharedTestDatabase } = await import("@opengeni/testing/shared-pg");
     const shared = await acquireSharedTestDatabase("portable-compaction-live");
     if (!shared) throw new CompactionVerificationError("Disposable PostgreSQL unavailable");
     try {

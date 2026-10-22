@@ -28,6 +28,10 @@ import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
+import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
+import { rehypeSecretRefs } from "./rehype-secret-refs";
+import { mayContainSecretReference, SecretRefChip } from "./secret-ref-chip";
+import { useSecretsUi } from "../secrets-ui";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -41,10 +45,19 @@ import {
   type OpenGeniLinkTarget,
 } from "@opengeni/sdk";
 import {
+  chainLinkRenderers,
   chainLinkResolvers,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
+  type OpenGeniLinkRenderer,
   type OpenGeniLinkResolver,
 } from "./open-geni-links";
+import {
+  rehypeStandaloneLinks,
+  STANDALONE_LINK_ATTRIBUTE,
+  STANDALONE_LINK_PROPERTY,
+} from "./rehype-standalone-links";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -82,6 +95,14 @@ export type MarkdownProps = {
   children: string;
   className?: string | undefined;
   /**
+   * Render a single newline inside prose as a line break (`<br>`), the way chat
+   * apps show messages; CommonMark otherwise folds it into a space. Chat message
+   * bodies enable this. Leave it off for documents and other authored Markdown.
+   * Code (fenced and inline), lists, tables, and blank-line paragraphs are
+   * unaffected either way.
+   */
+  softLineBreaks?: boolean | undefined;
+  /**
    * While true, newly arrived source fades in through tip ink (`.og-stream-ink`):
    * an age window over each append batch — fast streams keep a large soft band,
    * slow streams a tight tip. Paint-only: the DOM always holds the full truthful
@@ -96,12 +117,20 @@ export type MarkdownProps = {
    */
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
   /**
-   * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable
+   * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable
    * artifacts, Sites) to a host URL or action. Asked before any
    * {@link OpenGeniLinkProvider} above this body; `artifactHref` and
    * `onSandboxFile` still win for their own kinds.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Draw the host's own links (its scheme, in-app paths, web URLs) instead of
+   * the default link. Asked before any `renderLink` on an
+   * {@link OpenGeniLinkProvider} above this body. A link that is the only
+   * content of its paragraph or list item arrives with `standalone: true`, and
+   * that paragraph renders as a block so the host may return block content.
+   */
+  renderLink?: OpenGeniLinkRenderer | undefined;
 };
 
 /** Exact target path plus optional 1-based line from a markdown href. */
@@ -239,54 +268,82 @@ const baseComponents: Components = {
   img: MarkdownImage,
 };
 
-const MARKDOWN_LINK_CLASS =
-  "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
+const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
 const MarkdownLinkContext = createContext<
-  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink">
+  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink" | "renderLink">
 >({});
 
-const UNAVAILABLE_LABEL: Record<Exclude<OpenGeniLinkTarget["kind"], "sandbox-file">, string> = {
-  file: "This file needs a workspace-aware host to open",
-  "editable-artifact": "This artifact needs a workspace-aware host to open",
-  site: "This Site needs a workspace-aware host to open",
-};
+const UNAVAILABLE_LABEL = (
+  t: OpenGeniText,
+): Record<Exclude<OpenGeniLinkTarget["kind"], "sandbox-file">, string> => ({
+  file: t("markdown.thisFileNeedsAWorkspace"),
+  "editable-artifact": t("markdown.thisArtifactNeedsAWorkspace"),
+  site: t("markdown.thisSiteNeedsAWorkspace"),
+});
 
-function linkActionTitle(target: OpenGeniLinkTarget): string {
+function linkActionTitle(t: OpenGeniText, target: OpenGeniLinkTarget): string {
   if (target.kind === "sandbox-file") {
     return target.line !== null
-      ? `Open ${target.path} at line ${target.line}`
-      : `Open ${target.path}`;
+      ? t("markdown.openPathAtLineLine", { path: target.path, line: target.line })
+      : t("markdown.openPath", { path: target.path });
   }
   return target.kind === "file"
-    ? "Open file"
+    ? t("markdown.openFile")
     : target.kind === "site"
-      ? "Open Site"
-      : "Open artifact";
+      ? t("markdown.openSite")
+      : t("markdown.openArtifact");
 }
 
+/** A `rehypeSecretRefs` placeholder becomes a chip; every other span passes through. */
+function MarkdownSpan({
+  node: _node,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"span"> & ExtraProps) {
+  const raw = (props as Record<string, unknown>)["data-og-secret-ref"];
+  if (typeof raw === "string") return <MarkdownSecretRef raw={raw}>{children}</MarkdownSecretRef>;
+  return <span {...props}>{children}</span>;
+}
+
+function MarkdownSecretRef({ raw, children }: { raw: string; children?: ReactNode }) {
+  const ui = useSecretsUi();
+  const token = ui?.tokenize(raw).find((candidate) => candidate.type === "reference");
+  if (!token || token.type !== "reference") return <>{children}</>;
+  return <SecretRefChip reference={token.reference} />;
+}
+
+// Module-level so react-markdown keeps stable component identities across
+// renders; renderers that need host text read it through the hook.
 const markdownComponents: Components = {
   ...baseComponents,
+  span: MarkdownSpan,
   p: ({ children, node, ...props }) => {
-    const containsArtifact = node?.children.some(
+    // Retained images and host-drawn standalone links may be block content.
+    const containsBlock = node?.children.some(
       (child) =>
         child.type === "element" &&
-        child.tagName === "img" &&
-        typeof child.properties.src === "string" &&
-        retainedImageId(child.properties.src),
+        ((child.tagName === "img" &&
+          typeof child.properties.src === "string" &&
+          retainedImageId(child.properties.src)) ||
+          (child.tagName === "a" && child.properties[STANDALONE_LINK_PROPERTY] !== undefined)),
     );
-    const Tag = containsArtifact ? "div" : "p";
+    const Tag = containsBlock ? "div" : "p";
     return (
       <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
         {children}
       </Tag>
     );
   },
-  a: ({ children, href, ...props }) => {
-    const { onSandboxFile, artifactHref, resolveLink } = useContext(MarkdownLinkContext);
+  a: ({ children, href, ...linkProps }) => {
+    const t = useOpenGeniText();
+    const { onSandboxFile, artifactHref, resolveLink, renderLink } =
+      useContext(MarkdownLinkContext);
     const inherited = useOpenGeniLinkResolver();
+    const { [STANDALONE_LINK_ATTRIBUTE]: standaloneMarker, ...props } =
+      linkProps as typeof linkProps & Record<typeof STANDALONE_LINK_ATTRIBUTE, unknown>;
     const target = parseOpenGeniLink(href);
     if (target) {
       // Explicit per-kind props keep their historical precedence.
@@ -324,7 +381,7 @@ const markdownComponents: Components = {
       }
       if (resolution?.open) {
         return (
-          <ActionMarkdownLink title={linkActionTitle(target)} onOpen={resolution.open}>
+          <ActionMarkdownLink title={linkActionTitle(t, target)} onOpen={resolution.open}>
             {children}
           </ActionMarkdownLink>
         );
@@ -334,7 +391,7 @@ const markdownComponents: Components = {
           <span
             className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
             aria-disabled="true"
-            title="This sandbox file requires a session-aware handler"
+            title={t("markdown.thisSandboxFileRequiresA")}
           >
             {children}
           </span>
@@ -342,23 +399,30 @@ const markdownComponents: Components = {
       }
       // Never navigate: a console path resolves against the host origin and 404s.
       return (
-        <span title={UNAVAILABLE_LABEL[target.kind]} data-og-link-unavailable={target.kind}>
-          {children} (artifact unavailable)
+        <span title={UNAVAILABLE_LABEL(t)[target.kind]} data-og-link-unavailable={target.kind}>
+          {children} {t("markdown.artifactUnavailable")}
         </span>
       );
     }
-    if (isReservedOpenGeniLink(href) || !href) {
+    if (!isReservedOpenGeniLink(href) && href && renderLink) {
+      const drawn = renderLink({ href, children, standalone: standaloneMarker !== undefined });
+      if (drawn !== undefined) return <>{drawn}</>;
+    }
+    // The URL transform keeps every authored href for the host renderer, so
+    // the default link sanitizes here.
+    const safeHref = href ? defaultUrlTransform(href) : "";
+    if (isReservedOpenGeniLink(href) || !safeHref) {
       return (
         <span
           className="break-words text-og-fg-subtle"
           aria-disabled="true"
           title={
             isSandboxHref(href)
-              ? "This sandbox file reference is invalid"
-              : "This link is unavailable"
+              ? t("markdown.thisSandboxFileReferenceIs")
+              : t("markdown.thisLinkIsUnavailable")
           }
         >
-          {children} (link unavailable)
+          {children} {t("markdown.linkUnavailable")}
         </span>
       );
     }
@@ -367,7 +431,7 @@ const markdownComponents: Components = {
         className={MARKDOWN_LINK_CLASS}
         target="_blank"
         rel="noreferrer noopener"
-        href={href}
+        href={safeHref}
         {...props}
       >
         {children}
@@ -385,6 +449,7 @@ function ActionMarkdownLink({
   onOpen: () => void | Promise<void>;
   children: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   return (
     <button
@@ -397,7 +462,7 @@ function ActionMarkdownLink({
       // so a host viewer could not return focus to the link that opened it.
       aria-disabled={state === "loading" || undefined}
       aria-busy={state === "loading"}
-      title={state === "error" ? "Couldn't open this file. Select to retry." : title}
+      title={state === "error" ? t("markdown.couldnTOpenThisFile") : title}
       onClick={() => {
         if (state === "loading") return;
         setState("loading");
@@ -420,7 +485,7 @@ function isSandboxHref(href: string | undefined): boolean {
 }
 
 /**
- * Parse an OpenGeni `sandbox:` application href (plus the historical bare
+ * Parse an Opengeni `sandbox:` application href (plus the historical bare
  * `/workspace/...` form). The decoded path is intentionally opaque here:
  * target selection, path policy, and filesystem authority belong to the
  * session-aware host and its FileSystem boundary.
@@ -438,21 +503,30 @@ export function retainedImageId(src: string): string | null {
   return parseRetainedFileReference(src);
 }
 function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
+  const t = useOpenGeniText();
   const { renderImage, suppressImages } = useContext(InteractiveContext);
   if (suppressImages)
-    return <span data-og-image-placeholder="">{alt || "Image"} (preview unavailable)</span>;
-  if (!src) return <span>{alt ?? "Image unavailable"}</span>;
+    return (
+      <span data-og-image-placeholder="">
+        {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
+      </span>
+    );
+  if (!src) return <span>{alt ?? t("markdown.imageUnavailable")}</span>;
   if (retainedImageId(src))
     return renderImage ? (
       <>{renderImage({ src, alt: alt ?? "" })}</>
     ) : (
-      <span>{alt || "Image"} (preview unavailable)</span>
+      <span>
+        {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
+      </span>
     );
   return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
 }
 
+// Link hrefs stay as authored: Opengeni object links and host renderers need
+// the exact destination, and the `a` renderer sanitizes the default link.
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  (key === "href" && node.tagName === "a" && isReservedOpenGeniLink(url)) ||
+  (key === "href" && node.tagName === "a") ||
   (key === "src" && node.tagName === "img" && retainedImageId(url))
     ? url
     : defaultUrlTransform(url);
@@ -494,6 +568,7 @@ function fenceLanguage(children: ReactNode): string | null {
 }
 
 function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
+  const t = useOpenGeniText();
   const { source, render, streaming } = useContext(InteractiveContext);
   const language = fenceLanguage(children);
   if (render && (language === "opengeni-html" || language === "opengeni-site")) {
@@ -524,10 +599,10 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
           ) : (
             <ActivityDisclosure
               icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
-              title="Preview incomplete"
+              title={t("markdown.previewIncomplete")}
               running={false}
               expandable={false}
-              preview="Generation stopped before the preview was ready."
+              preview={t("markdown.generationStoppedBeforeThePreview")}
             />
           )}
         </div>
@@ -546,6 +621,7 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
 }
 
 function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
+  const t = useOpenGeniText();
   const code = nodeText(children).replace(/\n$/, "");
   const language = fenceLanguage(children);
   // mt-only (no mb / last:mb-0): next sibling streaming in used to flip a
@@ -561,7 +637,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
           </span>
         ) : null}
         <div className="pointer-events-auto">
-          <CopyButton text={code} label="Copy code" reveal="group-hover" />
+          <CopyButton text={code} label={t("markdown.copyCode")} reveal="group-hover" />
         </div>
       </div>
       <pre
@@ -575,6 +651,7 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
+  const t = useOpenGeniText();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLTableElement>(null);
   const layoutRef = useRef<ReturnType<typeof observeMarkdownTableLayout>>(undefined);
@@ -602,12 +679,18 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
     layoutRef.current?.measure();
   }, [children]);
   return (
-    <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">
-      <div className="pointer-events-none absolute top-0 right-0 z-10">
+    // Touch shows the copy action permanently at full touch size, so it sits
+    // under the table there instead of covering the right-aligned header.
+    <div
+      ref={wrapperRef}
+      data-og-table=""
+      className="group/copy relative mt-3 max-w-full first:mt-0 pointer-coarse:pb-11"
+    >
+      <div className="pointer-events-none absolute top-0 right-0 z-10 pointer-coarse:top-auto pointer-coarse:bottom-0">
         <div className="pointer-events-auto">
           <CopyButton
             text={() => tableElementToTsv(tableRef.current)}
-            label="Copy table"
+            label={t("markdown.copyTable")}
             reveal="group-hover"
           />
         </div>
@@ -630,15 +713,25 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
+type RemarkPlugins = NonNullable<Parameters<typeof ReactMarkdown>[0]["remarkPlugins"]>;
+const REMARK_PLUGINS: RemarkPlugins = [remarkGfm];
+// Structural plugin types (see remark-soft-line-breaks.ts) need one cast at the seam.
+const SOFT_LINE_BREAK_REMARK_PLUGINS = [
+  remarkGfm,
+  remarkSoftLineBreaks,
+] as unknown as RemarkPlugins;
+
 function MarkdownImpl({
   children,
   artifactHref,
   className,
+  softLineBreaks = false,
   streaming = false,
   onSandboxFile,
   renderInteractiveBlock,
   renderImage,
   resolveLink,
+  renderLink,
   suppressImages,
 }: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
@@ -672,11 +765,29 @@ function MarkdownImpl({
     hadRevealRef.current = true;
   }
   const revealActive = reveal !== null && (streaming || reveal.hasActive(now));
-  // The plugin walks the standard hast tree; a structural local type keeps the
-  // module dependency-free, at the cost of this narrowing cast at the seam.
+  const secretsUi = useSecretsUi();
+  const inheritedRenderer = useOpenGeniLinkRenderer();
+  const linkRenderer = useMemo(
+    () => chainLinkRenderers(renderLink, inheritedRenderer) ?? undefined,
+    [renderLink, inheritedRenderer],
+  );
+  // Secret references become chip placeholders before the ink split, so a
+  // reference is never cut into ink spans. Without a host tokenizer, or when
+  // the text names no reference, the pipeline is unchanged.
+  const secretRefs =
+    secretsUi && mayContainSecretReference(children)
+      ? [[rehypeSecretRefs, { tokenize: secretsUi.tokenize }]]
+      : [];
+  // The plugins walk the standard hast tree; structural local types keep the
+  // modules dependency-free, at the cost of this narrowing cast at the seam.
+  const rehypePluginList = [
+    ...(linkRenderer ? [rehypeStandaloneLinks] : []),
+    ...secretRefs,
+    ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
+  ];
   const rehypePlugins =
-    revealActive && reveal !== null
-      ? ([[rehypeStreamReveal, { reveal, now }]] as unknown as NonNullable<
+    rehypePluginList.length > 0
+      ? (rehypePluginList as unknown as NonNullable<
           Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
         >)
       : undefined;
@@ -730,8 +841,8 @@ function MarkdownImpl({
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
   const linkContext = useMemo(
-    () => ({ onSandboxFile, artifactHref, resolveLink }),
-    [onSandboxFile, artifactHref, resolveLink],
+    () => ({ onSandboxFile, artifactHref, resolveLink, renderLink: linkRenderer }),
+    [onSandboxFile, artifactHref, resolveLink, linkRenderer],
   );
 
   const interactiveContext = useMemo(
@@ -760,7 +871,7 @@ function MarkdownImpl({
             )}
           >
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}
               components={markdownComponents}
               urlTransform={markdownUrlTransform}
@@ -776,6 +887,7 @@ function MarkdownImpl({
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
 export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
+  const t = useOpenGeniText();
   const [retained, setRetained] = useState<{ text: string; target: TimelineSearchTarget } | null>(
     null,
   );
@@ -792,7 +904,7 @@ export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
   const offset = searchMatchOffset(props.children, target);
   if (offset < 0)
     return props.searchTarget ? (
-      <div role="status">This match is no longer in the message source.</div>
+      <div role="status">{t("markdown.thisMatchIsNoLonger")}</div>
     ) : (
       <MarkdownImpl {...props} />
     );
@@ -806,15 +918,15 @@ export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
   return (
     <div className={cn("og-markdown-body min-w-0 break-words", props.className)}>
       <div data-og-annotation-chrome="" className="text-xs opacity-70">
-        Match in message source · Excerpt stays in place when Find closes
+        {t("markdown.matchInMessageSourceExcerpt")}
         <button
           type="button"
           disabled={!!props.searchTarget}
-          title={props.searchTarget ? "Close Find to show the formatted message" : undefined}
+          title={props.searchTarget ? t("markdown.closeFindToShowThe") : undefined}
           className="ml-2 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11 disabled:opacity-50"
           onClick={() => setRetained(null)}
         >
-          Show formatted message
+          {t("markdown.showFormattedMessage")}
         </button>
       </div>
       <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>

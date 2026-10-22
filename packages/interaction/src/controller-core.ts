@@ -18,6 +18,12 @@ export class InteractionControllerError extends Error {
 
 /** Driver proof that a dispatched command definitively failed without an ambiguous outcome. */
 export class InteractionDefiniteDriverError extends Error {
+  /** Optional page or screen state the driver observed after the failure, so
+   * the caller can act on it without another observation round trip. */
+  observation: unknown = null;
+  /** Optional structured facts about the failure, kept in the receipt's error. */
+  details: InteractionError["details"] = undefined;
+
   constructor(
     readonly code: InteractionError["code"],
     message: string,
@@ -32,6 +38,11 @@ export class InteractionDefiniteDriverError extends Error {
  * be confirmed. Unlike an arbitrary transport exception, this preserves the
  * adapter's bounded, user-actionable diagnosis without pretending certainty. */
 export class InteractionOutcomeUnknownDriverError extends Error {
+  /** Optional state observed after the failure; see InteractionDefiniteDriverError. */
+  observation: unknown = null;
+  /** Optional structured facts; see InteractionDefiniteDriverError. */
+  details: InteractionError["details"] = undefined;
+
   constructor(
     readonly code: InteractionError["code"],
     message: string,
@@ -45,7 +56,7 @@ export class InteractionOutcomeUnknownDriverError extends Error {
 export type InteractionCoreCommand = {
   operationId: string;
   controllerGeneration: string;
-  targetId: string;
+  targetId: string | null;
 };
 
 export type InteractionCoreTarget = {
@@ -54,13 +65,13 @@ export type InteractionCoreTarget = {
 };
 
 export type InteractionCoreObservation<TTarget extends InteractionCoreTarget> = {
-  target: TTarget;
+  target: TTarget | null;
 };
 
 export type InteractionCoreReceipt<TObservation> = {
   operationId: string;
   controllerGeneration: string;
-  targetId: string;
+  targetId: string | null;
   state: InteractionOperationState;
   dispatchedAt: string | null;
   settledAt: string | null;
@@ -74,6 +85,22 @@ export type InteractionOperationJournalRecord<TReceipt> = {
   receipt: TReceipt;
 };
 
+/** Side channel a driver may use to describe what a dispatch acted on, such
+ * as the element a locator resolved to. Recording never affects dispatch. */
+export type InteractionDispatchTrace = {
+  record(item: unknown): void;
+};
+
+class BoundedDispatchTrace implements InteractionDispatchTrace {
+  readonly items: unknown[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  record(item: unknown): void {
+    if (this.items.length < this.limit) this.items.push(item);
+  }
+}
+
 type InteractionDriver<
   TCommand extends InteractionCoreCommand,
   TTarget extends InteractionCoreTarget,
@@ -82,7 +109,8 @@ type InteractionDriver<
   target(targetId: string): Promise<TTarget | null>;
   observe(targetId: string): Promise<TObservation>;
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
-  dispatch(command: TCommand): Promise<TObservation | null>;
+  validateSession?(command: TCommand): Promise<void> | void;
+  dispatch(command: TCommand, trace?: InteractionDispatchTrace): Promise<TObservation | null>;
 };
 
 type InteractionCoreAdapter<
@@ -99,7 +127,14 @@ type InteractionCoreAdapter<
   assertCommandAuthority(command: TCommand): void;
   assertTargetAuthority(target: TTarget): void;
   assertExpectedGenerations(command: TCommand, target: TTarget): void;
-  assertObservationAuthority(observation: TObservation, targetId: string): void;
+  assertObservationAuthority(observation: TObservation, targetId: string | null): void;
+  /** Authority for the observation a dispatched command returns. Defaults to
+   * an observation of the command's own target. */
+  assertActionObservationAuthority?(observation: TObservation, command: TCommand): void;
+  outcome?(observation: TObservation): {
+    state: "completed" | "failed" | "outcome_unknown";
+    error: InteractionError | null;
+  };
   makeReceipt(input: {
     command: TCommand;
     state: InteractionOperationState;
@@ -109,6 +144,11 @@ type InteractionCoreAdapter<
     error: InteractionError | null;
   }): TReceipt;
   recoverReceipt(receipt: TReceipt, settledAt: string): TReceipt;
+  /** Upper bound on recorded dispatch trace items; zero disables tracing. */
+  maxDispatchTraceItems?: number;
+  /** Decorates the returned receipt with recorded trace items. It may throw
+   * on invalid items; the undecorated receipt is then returned unchanged. */
+  attachDispatchTrace?(receipt: TReceipt, items: readonly unknown[]): TReceipt;
 };
 
 type InteractionCoreAuthority<TCommand> = {
@@ -199,7 +239,7 @@ export class InteractionControllerCore<
     string,
     JournalEntry<TReceipt> | CompactJournalEntry | PersistedJournalEntry
   >();
-  private readonly targetTails = new Map<string, Promise<void>>();
+  private readonly targetTails = new Map<string | null, Promise<void>>();
 
   constructor(
     options: InteractionControllerCoreOptions<TCommand, TTarget, TObservation, TReceipt>,
@@ -289,6 +329,11 @@ export class InteractionControllerCore<
     }));
   }
 
+  /** True when no admitted command is queued or running on any target. */
+  isIdle(): boolean {
+    return this.targetTails.size === 0;
+  }
+
   /** Wait until every command already admitted to a target queue settles.
    * Callers must fence new dispatch through `authority` before awaiting this. */
   async waitForIdle(): Promise<void> {
@@ -306,9 +351,18 @@ export class InteractionControllerCore<
 
     try {
       await this.authority?.authorizeDispatch(command);
-      const target = await this.requireCurrentTarget(command.targetId);
-      this.adapter.assertExpectedGenerations(command, target);
-      await this.driver.validate?.(command, target);
+      if (command.targetId === null) {
+        if (!this.driver.validateSession)
+          throw new InteractionControllerError(
+            "invalid_action",
+            "session-scoped commands are unsupported",
+          );
+        await this.driver.validateSession(command);
+      } else {
+        const target = await this.requireCurrentTarget(command.targetId);
+        this.adapter.assertExpectedGenerations(command, target);
+        await this.driver.validate?.(command, target);
+      }
     } catch (error) {
       return await this.settle(
         entry,
@@ -336,20 +390,44 @@ export class InteractionControllerCore<
       );
     }
 
+    const trace = new BoundedDispatchTrace(this.adapter.maxDispatchTraceItems ?? 0);
+    const receipt = await this.dispatchAndSettle(entry, command, dispatchedAt, trace);
+    return this.attachDispatchTrace(receipt, trace.items);
+  }
+
+  /** Dispatch diagnostics decorate only the returned receipt. The journal keeps
+   * the undecorated receipt, so an older controller can always read it back. */
+  private attachDispatchTrace(receipt: TReceipt, items: readonly unknown[]): TReceipt {
+    if (items.length === 0 || !this.adapter.attachDispatchTrace) return receipt;
     try {
-      const dispatchedObservation = await this.driver.dispatch(command);
+      return this.adapter.attachDispatchTrace(receipt, items);
+    } catch {
+      // Diagnostics never change an operation's outcome.
+      return receipt;
+    }
+  }
+
+  private async dispatchAndSettle(
+    entry: JournalEntry<TReceipt>,
+    command: TCommand,
+    dispatchedAt: string,
+    trace: InteractionDispatchTrace,
+  ): Promise<TReceipt> {
+    try {
+      const dispatchedObservation = await this.driver.dispatch(command, trace);
       const observation =
         dispatchedObservation === null
           ? null
           : this.adapter.parseObservation(dispatchedObservation);
-      if (observation) this.adapter.assertObservationAuthority(observation, command.targetId);
+      if (observation) this.assertActionObservation(observation, command);
+      const outcome = observation ? this.adapter.outcome?.(observation) : undefined;
       const completed = this.makeReceipt(
         command,
-        "completed",
+        outcome?.state ?? "completed",
         dispatchedAt,
         this.timestamp(),
         observation,
-        null,
+        outcome?.error ?? null,
       );
       try {
         await this.publish(entry.operationId, entry.commandDigest, completed);
@@ -370,21 +448,37 @@ export class InteractionControllerCore<
       if (error instanceof InteractionDefiniteDriverError) {
         return await this.settle(
           entry,
-          this.makeReceipt(command, "failed", dispatchedAt, this.timestamp(), null, {
-            code: error.code,
-            message: error.message,
-            retryable: error.retryable,
-          }),
+          this.makeReceipt(
+            command,
+            "failed",
+            dispatchedAt,
+            this.timestamp(),
+            this.failureObservation(error.observation, command),
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
+          ),
         );
       }
       if (error instanceof InteractionOutcomeUnknownDriverError) {
         return await this.settle(
           entry,
-          this.makeReceipt(command, "outcome_unknown", dispatchedAt, this.timestamp(), null, {
-            code: error.code,
-            message: error.message,
-            retryable: error.retryable,
-          }),
+          this.makeReceipt(
+            command,
+            "outcome_unknown",
+            dispatchedAt,
+            this.timestamp(),
+            this.failureObservation(error.observation, command),
+            {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.details ? { details: error.details } : {}),
+            },
+          ),
         );
       }
       return await this.settle(
@@ -398,12 +492,31 @@ export class InteractionControllerCore<
     }
   }
 
+  private assertActionObservation(observation: TObservation, command: TCommand): void {
+    if (this.adapter.assertActionObservationAuthority)
+      this.adapter.assertActionObservationAuthority(observation, command);
+    else this.adapter.assertObservationAuthority(observation, command.targetId);
+  }
+
+  /** A failure's observation is optional context. One that does not parse or
+   * belongs to another target is dropped; it never changes the failure. */
+  private failureObservation(observation: unknown, command: TCommand): TObservation | null {
+    if (observation === null || observation === undefined) return null;
+    try {
+      const parsed = this.adapter.parseObservation(observation);
+      this.assertActionObservation(parsed, command);
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
   private async requireCurrentTarget(targetId: string): Promise<TTarget> {
     const target = await this.driver.target(targetId);
     if (!target) {
       throw new InteractionControllerError(
         "target_not_found",
-        `${this.adapter.resourceLabel} target does not exist`,
+        `${this.adapter.resourceLabel} target ${JSON.stringify(targetId)} does not exist; list the current targets and use one of their ids`,
       );
     }
     const parsed = this.adapter.parseTarget(target);
@@ -608,6 +721,16 @@ function safePredispatchError(error: unknown, resourceLabel: string): Interactio
 
 function digestJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+/** Digest of every command field except the controller-private `secretValues`
+ * side map: replays with fresh values (a new TOTP code) stay idempotent and
+ * the journal never binds plaintext. Equals the default digest of the same
+ * command without the map. */
+export function secretFreeCommandDigest(command: object): string {
+  if (!("secretValues" in command)) return digestJson(command);
+  const { secretValues: _private, ...rest } = command as { secretValues?: unknown };
+  return digestJson(rest);
 }
 
 function canonicalJson(value: unknown): string {

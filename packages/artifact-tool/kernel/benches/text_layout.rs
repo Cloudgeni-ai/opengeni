@@ -15,7 +15,7 @@ const TARGET_P95_MS: f64 = 150.0;
 fn main() {
     let pinned = std::env::var("OPENGENI_ARTIFACT_BENCH_PINNED").is_ok_and(|value| value == "1");
     let samples = if pinned { 20 } else { 8 };
-    let seed = "OpenGeni native/Wasm layout العربية שלום 漢字 👩‍🚀 — ";
+    let seed = "Opengeni native/Wasm layout العربية שלום 漢字 👩‍🚀 — ";
     let text = seed
         .repeat(TARGET_BYTES.div_ceil(seed.len()))
         .chars()

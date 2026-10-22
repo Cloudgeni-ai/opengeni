@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { provisionRoles } from "../src";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;

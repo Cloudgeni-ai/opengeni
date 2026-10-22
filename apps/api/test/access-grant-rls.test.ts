@@ -6,7 +6,9 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import { alongsideAuthorization, withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import { ApiHttpError } from "../src/http/api-error";
+import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -112,8 +114,176 @@ describe("access-grant session RLS context", () => {
     }
     expect(caught).toBeInstanceOf(HTTPException);
     expect((caught as HTTPException).status).toBe(403);
+    expect((caught as ApiHttpError).details).toEqual({ code: "agent_attempt_malformed" });
     expect(context).not.toHaveBeenCalled();
   });
+
+  test("names an ended attempt when its credential is reused after the turn", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+      new core.SessionAuthorizationDeniedError("caller_stale"),
+    );
+    let caught: unknown;
+    try {
+      await withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({ principalKind: "agent_attempt", metadata: { sessionId } }),
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ApiHttpError);
+    const error = caught as ApiHttpError;
+    expect(error.status).toBe(403);
+    expect(error.message).toBe("agent attempt authority is invalid");
+    expect(error.details).toEqual({ code: "agent_attempt_caller_stale" });
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: error.code, message: error.message, details: error.details } },
+        "forbidden",
+      ).reason,
+    ).toBe("agent_attempt_caller_stale");
+    expect(context).not.toHaveBeenCalled();
+  });
+  test("reads the claimed attempt's learning policy while the liveness check runs", async () => {
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
+    const attemptId = "55555555-5555-4555-8555-555555555555";
+    let settleLiveness!: (actor: unknown) => void;
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockReturnValue(
+      new Promise((settle) => {
+        settleLiveness = settle;
+      }) as never,
+    );
+    const policyReads: unknown[] = [];
+    spyOn(db, "freezeAgentLearningPolicy").mockImplementation(async (_db, context) => {
+      policyReads.push(context.actor);
+      return { defaultScope: "workspace", subjectId: null } as never;
+    });
+    const access = grant({
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      metadata: { sessionId, turnId, attemptId, executionGeneration: 3 },
+    });
+
+    const result = withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => "ok");
+    await Bun.sleep(0);
+    const claimed = { kind: "agent", sessionId, turnId, attemptId, executionGeneration: 3 };
+    expect(policyReads).toEqual([claimed]);
+    settleLiveness({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 3,
+      initiatingHumanSubjectId: null,
+    });
+    await expect(result).resolves.toBe("ok");
+    // The verified attempt is the claimed one, so the policy is not read again.
+    expect(policyReads).toEqual([claimed]);
+  });
+
+  test("a refused liveness check is the answer even when the policy read also fails", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+      new core.SessionAuthorizationDeniedError("caller_stale"),
+    );
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(new Error("policy unavailable"));
+    let caught: unknown;
+    try {
+      await withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({
+          principalKind: "agent_attempt",
+          metadata: { sessionId, turnId, attemptId: turnId, executionGeneration: 1 },
+        }),
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as ApiHttpError).details).toEqual({ code: "agent_attempt_caller_stale" });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  test("work started alongside a gate is dropped when the gate refuses", async () => {
+    const refused = new Error("refused");
+    await expect(
+      alongsideAuthorization(Promise.reject(refused), async () => {
+        throw new Error("work failed");
+      }),
+    ).rejects.toBe(refused);
+    await expect(
+      alongsideAuthorization(Promise.resolve("allowed"), async () => "read"),
+    ).resolves.toEqual(["allowed", "read"]);
+    const failed = new Error("work failed");
+    await expect(
+      alongsideAuthorization(Promise.resolve("allowed"), async () => {
+        throw failed;
+      }),
+    ).rejects.toBe(failed);
+  });
+
+  test("reuses an attempt's frozen learning policy while still checking liveness every time", async () => {
+    const actors: unknown[] = [];
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (actor, fn) => {
+      actors.push(actor);
+      return await fn();
+    });
+    const policyReads: unknown[] = [];
+    spyOn(db, "freezeAgentLearningPolicy").mockImplementation(async (_db, context) => {
+      policyReads.push(context.actor);
+      return { defaultScope: "personal", subjectId: "user:owner" } as never;
+    });
+    const attempt = (attemptId: string) => ({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 2,
+      initiatingHumanSubjectId: "user:owner",
+    });
+    const liveness = spyOn(core, "requireLiveAgentAttemptAuthorization");
+    const first = "66666666-6666-4666-8666-666666666666";
+    const second = "77777777-7777-4777-8777-777777777777";
+    const access = (attemptId: string) =>
+      grant({
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        metadata: { sessionId, turnId, attemptId, executionGeneration: 2 },
+      });
+    const deps = { db: {} } as never;
+
+    for (let request = 0; request < 3; request += 1) {
+      liveness.mockResolvedValueOnce(attempt(first) as never);
+      await expect(
+        withAccessGrantSessionRlsContext(deps, access(first), async () => "ok"),
+      ).resolves.toBe("ok");
+    }
+    expect(liveness).toHaveBeenCalledTimes(3);
+    expect(policyReads).toHaveLength(1);
+    expect(actors.at(-1)).toMatchObject({ privateFileOwnerSubjectId: "user:owner" });
+
+    // A different attempt of the same turn reads its own policy.
+    liveness.mockResolvedValueOnce(attempt(second) as never);
+    await withAccessGrantSessionRlsContext(deps, access(second), async () => "ok");
+    expect(policyReads).toHaveLength(2);
+
+    // A remembered policy never bypasses a refused liveness check.
+    liveness.mockRejectedValueOnce(new core.SessionAuthorizationDeniedError("caller_stale"));
+    const contexts = actors.length;
+    await expect(
+      withAccessGrantSessionRlsContext(deps, access(first), async () => "unreachable"),
+    ).rejects.toBeInstanceOf(ApiHttpError);
+    expect(actors).toHaveLength(contexts);
+    expect(policyReads).toHaveLength(2);
+
+    // Another database (deployment) never shares remembered policies.
+    liveness.mockResolvedValueOnce(attempt(first) as never);
+    await withAccessGrantSessionRlsContext({ db: {} } as never, access(first), async () => "ok");
+    expect(policyReads).toHaveLength(3);
+  });
+
   test("API-key grants retain pure-service billing attribution, not a human subject", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     await withAccessGrantSessionRlsContext(

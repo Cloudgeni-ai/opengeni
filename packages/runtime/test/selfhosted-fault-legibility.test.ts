@@ -55,6 +55,23 @@ function offlineErr(neverSent: boolean): SelfhostedControlError {
 }
 
 describe("renderSelfhostedFault — every fault class carries all four fields", () => {
+  test.each(["control_delivery_expired", "control_delivery_conflict"])(
+    "%s preserves uncertain execution instead of claiming the command failed",
+    (failure) => {
+      const error = mapped(ErrorCode.ERROR_CODE_PROTOCOL, "delivery refused", {
+        failure_code: failure,
+        outcome_unknown: "true",
+      });
+      const rendered = renderSelfhostedFault(error);
+      for (const field of ALL_FIELDS) expect(rendered).toContain(field);
+      expect(rendered).toContain("may have executed or may still be running");
+      expect(rendered).toContain("inspect the command or its effects before retrying");
+      expect(rendered).not.toContain("command failed");
+      expect(error.retryable).toBe(false);
+      expect(error.neverSent).toBe(false);
+    },
+  );
+
   const cases: Record<string, SelfhostedControlError> = {
     "offline (never-sent)": offlineErr(true),
     "offline (ambiguous)": offlineErr(false),
@@ -224,7 +241,7 @@ describe("G3-remnant — the transport marks never-sent only pre-send", () => {
   const req: ControlRequest = {
     requestId: "req-1",
     epoch: 0,
-    op: { $case: "ping", ping: { nonce: "1" } },
+    op: { $case: "ping", ping: { nonce: "1", controlReplayWindowMs: "0" } },
   };
 
   test("offlineControlResponse threads never-sent through the mapping", () => {

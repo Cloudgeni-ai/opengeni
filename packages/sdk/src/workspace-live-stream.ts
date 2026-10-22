@@ -9,7 +9,18 @@ import {
 } from "./stream";
 import type { WorkspaceControlEvent } from "./types";
 
-export type WorkspaceLiveEvent = WorkspaceControlEvent | WorkspaceInteractionRevisionEvent;
+/** Transient hints have no replay cursor; every reconnection reconciles lists. */
+export type WorkspaceSessionListEvent = {
+  type: "workspace.sessions.changed";
+  workspaceId: string;
+  available: boolean;
+  sessionIds: string[] | null;
+};
+
+export type WorkspaceLiveEvent =
+  | WorkspaceControlEvent
+  | WorkspaceInteractionRevisionEvent
+  | WorkspaceSessionListEvent;
 
 export type WorkspaceLiveStreamOptions = Omit<StreamSessionEventsOptions, "after"> & {
   controlAfter?: number;
@@ -63,7 +74,7 @@ export async function* streamWorkspaceLiveEvents(
         if (event.type === "workspace.control.changed") {
           if (event.sequence <= controlCursor) continue;
           controlCursor = event.sequence;
-        } else {
+        } else if (event.type === "workspace.interaction.changed") {
           if (event.sequence <= interactionCursor) continue;
           interactionCursor = event.sequence;
         }
@@ -98,7 +109,17 @@ export function parseWorkspaceLiveEvent(data: string): WorkspaceLiveEvent | null
   } catch {
     return null;
   }
-  if (!isRecord(value) || typeof value.sequence !== "number") return null;
+  if (!isRecord(value)) return null;
+  if (
+    value.type === "workspace.sessions.changed" &&
+    typeof value.workspaceId === "string" &&
+    typeof value.available === "boolean" &&
+    (value.sessionIds === null ||
+      (Array.isArray(value.sessionIds) && value.sessionIds.every((id) => typeof id === "string")))
+  ) {
+    return value as WorkspaceSessionListEvent;
+  }
+  if (typeof value.sequence !== "number") return null;
   if (
     value.type === "workspace.control.changed" &&
     typeof value.id === "string" &&

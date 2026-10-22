@@ -11,11 +11,9 @@ import {
   type AttemptToolResult as AttemptToolResultValue,
   type CodemodeOperation as CodemodeOperationValue,
 } from "@opengeni/contracts";
-import {
-  digestCodemodeOperationRequest,
-  parseVerifiedAttemptToolCatalog,
-} from "@opengeni/codemode";
+import { digestCodemodeOperationRequest } from "@opengeni/codemode";
 import { and, eq, sql } from "drizzle-orm";
+import { loadVerifiedAttemptToolCatalogTx } from "./attempt-tool-catalogs";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
@@ -140,18 +138,12 @@ export async function submitCodemodeOperation(
               return { operation: mapCodemodeOperation(existing), created: false };
             }
 
-            const [catalogRow] = await tx
-              .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
-              .from(schema.sessionAttemptToolCatalogs)
-              .where(
-                and(
-                  eq(schema.sessionAttemptToolCatalogs.attemptId, input.attemptId),
-                  eq(schema.sessionAttemptToolCatalogs.digest, call.catalogDigest),
-                ),
-              )
-              .limit(1);
-            if (!catalogRow) throw new CodemodeOperationNotExecutableError();
-            const catalog = parseVerifiedAttemptToolCatalog(catalogRow.catalog);
+            const catalog = await loadVerifiedAttemptToolCatalogTx(tx, {
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              digest: call.catalogDigest,
+            });
+            if (!catalog) throw new CodemodeOperationNotExecutableError();
             if (
               catalog.accountId !== input.accountId ||
               catalog.workspaceId !== input.workspaceId ||

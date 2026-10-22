@@ -47,6 +47,9 @@ export async function parentOutboxAuthorityTx(
     mcpAccountBindings,
     xaiProviderAccountAuthoritySnapshot: xai.snapshot,
     claudeProviderAccountAuthoritySnapshot: claude.snapshot,
+    // Codex v2 (M3 PR 3b): the exact spawning parent turn's frozen value,
+    // copied like the v1 pools (null before the cutover).
+    subscriptionAuthority: turn?.subscriptionAuthority ?? null,
     lineage: {
       childSessionId: session.id,
       parentSessionId: session.parentSessionId,

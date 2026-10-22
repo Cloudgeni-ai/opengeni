@@ -24,7 +24,7 @@ export type UseAttachedBrowsersResult = {
 };
 
 /** Workspace-wide inventory of Chrome profiles currently connected through an
- * enrolled OpenGeni machine. BrowserSessions remain the execution authority. */
+ * enrolled Opengeni machine. BrowserSessions remain the execution authority. */
 export function useAttachedBrowsers(
   options: UseAttachedBrowsersOptions = {},
 ): UseAttachedBrowsersResult {

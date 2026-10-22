@@ -13,7 +13,7 @@ import {
   sseLine,
   type ChatResolve,
 } from "./http";
-import type { OpenGeni } from "./opengeni";
+import type { Opengeni } from "./opengeni";
 import type { ChatChunk, ChatPending } from "./types";
 
 /**
@@ -31,7 +31,7 @@ export type UIMessageStreamOptions = {
   /** Assistant message id announced in the `start` part. Defaults to a random UUID. */
   messageId?: string | undefined;
   /**
-   * Emit OpenGeni's own tool activity as tool parts. Off by default: those
+   * Emit Opengeni's own tool activity as tool parts. Off by default: those
    * tools are not in the app's typed tool set. When on, parts are marked
    * `dynamic` and `providerExecuted`, so `useChat` renders them as
    * `dynamic-tool` parts and never tries to execute them. Approval requests
@@ -177,7 +177,7 @@ export function lastUIMessageText(messages: unknown): string | null {
  * the session. `regenerate-message` steers instead of queueing.
  */
 export async function handleVercelChatRequest(
-  og: OpenGeni,
+  og: Opengeni,
   request: Request,
   resolve: ChatResolve,
   options: Pick<UIMessageStreamOptions, "toolParts"> = {},

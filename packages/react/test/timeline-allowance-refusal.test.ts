@@ -6,6 +6,9 @@ import {
   groupTimeline,
 } from "../src/timeline/projection";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 function event(sequence: number, type: string, payload: unknown): SessionEvent {
   return {
@@ -36,7 +39,7 @@ describe("allowance timeline presentation", () => {
         subjectId: "user:member",
         segmentLimit: "budget_exhausted",
       });
-      const items = buildTimeline([
+      const items = buildTimeline(englishText, [
         event(1, "agent.message.completed", { messageId: "work", text: "Working" }),
         completed,
       ]);
@@ -61,7 +64,7 @@ describe("allowance timeline presentation", () => {
       });
       expect(creditExhaustedFromEvents([completed])).toBe(false);
       expect(
-        groupTimeline(items, { readableTurns: true }).some(
+        groupTimeline(englishText, items, { readableTurns: true }).some(
           (group) => group.kind === "activity" && group.outcome === "failed",
         ),
       ).toBe(true);
@@ -70,9 +73,11 @@ describe("allowance timeline presentation", () => {
 
   test("standalone usage exhaustion is visible and coalesces the paired completion or failure", () => {
     const exhausted = event(1, "usage.exhausted", refusal);
-    expect(buildTimeline([exhausted]).filter((item) => item.kind === "notice")).toHaveLength(1);
+    expect(
+      buildTimeline(englishText, [exhausted]).filter((item) => item.kind === "notice"),
+    ).toHaveLength(1);
     for (const type of ["turn.completed", "turn.failed"]) {
-      const items = buildTimeline([
+      const items = buildTimeline(englishText, [
         exhausted,
         event(2, type, {
           ...refusal,
@@ -86,18 +91,20 @@ describe("allowance timeline presentation", () => {
 
   test("non-recurring member refusal and malformed reset never become an add-credits state", () => {
     const member = event(1, "turn.failed", { ...refusal, scope: "member", resetsAt: null });
-    expect(JSON.stringify(buildTimeline([member]))).toContain("no automatic reset");
+    expect(JSON.stringify(buildTimeline(englishText, [member]))).toContain("no automatic reset");
     const malformed = event(2, "turn.completed", {
       ...refusal,
       resetsAt: "invalid",
       segmentLimit: "budget_exhausted",
     });
     expect(creditExhaustedFromEvents([malformed])).toBe(false);
-    expect(JSON.stringify(buildTimeline([malformed]))).not.toContain(CREDIT_EXHAUSTION_MESSAGE);
+    expect(JSON.stringify(buildTimeline(englishText, [malformed]))).not.toContain(
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
+    );
   });
 
   test("human Retry preserves a later same-turn refusal instead of coalescing it with history", () => {
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       event(1, "usage.exhausted", refusal),
       event(2, "turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
       event(3, "turn.recovery.requested", { reason: "human_retry" }),
@@ -115,7 +122,7 @@ describe("allowance timeline presentation", () => {
       }),
       turnId: null,
     };
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       prompt,
       event(2, "turn.queued", { turnId: "turn", triggerEventId: prompt.id }),
       event(3, "usage.exhausted", { ...refusal, scope: "member" }),
@@ -128,12 +135,14 @@ describe("allowance timeline presentation", () => {
 
   test("ordinary insufficient credits retain their existing presentation", () => {
     const completed = event(1, "turn.completed", {
-      detail: "insufficient OpenGeni credits",
+      detail: "insufficient Opengeni credits",
       segmentLimit: "budget_exhausted",
     });
     expect(creditExhaustedFromEvents([completed])).toBe(true);
-    expect(buildTimeline([completed]).find((item) => item.kind === "notice")).toMatchObject({
-      text: CREDIT_EXHAUSTION_MESSAGE,
+    expect(
+      buildTimeline(englishText, [completed]).find((item) => item.kind === "notice"),
+    ).toMatchObject({
+      text: CREDIT_EXHAUSTION_MESSAGE(englishText),
     });
   });
 });

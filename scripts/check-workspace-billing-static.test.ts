@@ -15,6 +15,10 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
 
 describe("workspace provider import guard", () => {
   test.each([
+    "apps/api/src/billing-stripe-customer.ts",
+    "apps/api/src/billing-subscriptions.ts",
+    "apps/api/test/billing-subscriptions.test.ts",
+    "apps/api/test/billing-subscriptions-review-postgres.test.ts",
     "apps/api/test/scoped-credit-checkout.test.ts",
     "apps/api/test/scoped-credits-postgres.test.ts",
   ])("permits the billing adapter's Stripe contract fixture: %s", async (file) => {
@@ -113,6 +117,7 @@ describe("workspace and organization MCP route guard", () => {
     "apps/api/src/mcp-oauth.ts",
     "apps/api/src/organization-mcp.ts",
     "apps/api/test/organization-mcp-e2e.test.ts",
+    "apps/api/test/personal-api-keys.test.ts",
     "apps/web/src/App.tsx",
     "apps/web/src/components/organization-access/organization-connected-agents.tsx",
     "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",

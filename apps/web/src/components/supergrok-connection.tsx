@@ -1,18 +1,23 @@
 import {
   useSubscriptionAccountPool,
   subscriptionAccountName,
+  subscriptionPoolQueryPrefix,
 } from "./models/use-subscription-account-pool";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { trackModelConnection } from "@/lib/analytics-observer";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 
 import type { SuperGrokAccount, SuperGrokAccountScope } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
+import {
+  invalidateSharedQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+} from "@opengeni/react/app/lib/shared-query";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
 // organization scope: the data and every mutation. Rows, the account page and
@@ -35,6 +40,9 @@ type SubscriptionScope =
   | { workspaceId: string; organizationId?: never; canManage: boolean }
   | { organizationId: string; workspaceId?: never; canManage: boolean };
 
+// `useSuperGrokAccounts` readers of the same client see account changes too.
+const SUPERGROK_RELATED_QUERIES = [["supergrok-accounts"]] as const;
+
 export type SuperGrokSubscriptions = ReturnType<typeof useSuperGrokSubscriptions>;
 
 export function useSuperGrokSubscriptions({
@@ -50,10 +58,23 @@ export function useSuperGrokSubscriptions({
 }) {
   const operations = useMemo(
     () => ({
-      load: () =>
-        organizationId
+      load: async () => {
+        if (!organizationId) {
+          // This existing endpoint probes the effective shared primary's
+          // models, or the owner's personal primary's usage when no shared
+          // primary exists. List AFTER it so any stored quota/status update
+          // reaches the meter. There is no all-account/org usage-refresh API.
+          // A failed probe must not hide an otherwise readable account list.
+          try {
+            await client.supergrokStatus(workspaceId!);
+          } catch {
+            // Preserve saved readings (and their original checkedAt).
+          }
+        }
+        return organizationId
           ? client.listOrganizationSuperGrokAccounts(organizationId)
-          : client.listSuperGrokAccounts(workspaceId!),
+          : client.listSuperGrokAccounts(workspaceId!);
+      },
       rotation: (rotationEnabled: boolean) =>
         organizationId
           ? client.setOrganizationSuperGrokRotationSettings(organizationId, { rotationEnabled })
@@ -92,8 +113,9 @@ export function useSuperGrokSubscriptions({
     workspaceId,
     canManage,
     enabled: readEnabled,
+    pollIntervalMs: organizationId ? undefined : MODEL_SETTINGS_STALE_TIME_MS,
+    relatedQueryPrefixes: SUPERGROK_RELATED_QUERIES,
   });
-  const { refresh } = pool;
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingDeviceCode | null>(null);
   const connectEpoch = useRef({
@@ -176,6 +198,15 @@ export function useSuperGrokSubscriptions({
           signal: controller.signal,
         })
           .then(async (result) => {
+            // An observed sign-in changes this client's retained reads before
+            // checking whether navigation has retired the page's UI.
+            if (result?.status === "connected") {
+              await Promise.all([
+                invalidateSharedQueries(client, subscriptionPoolQueryPrefix("SuperGrok")),
+                invalidateSharedQueries(client, ["supergrok-accounts"]),
+                invalidateSharedQueries(client, ["model-settings"]),
+              ]);
+            }
             if (!result || controller.signal.aborted || !live()) return;
             setPending(null);
             if (result.status === "connected") {
@@ -187,7 +218,6 @@ export function useSuperGrokSubscriptions({
                     ? "SuperGrok connected for the workspace"
                     : "Your private SuperGrok account is connected",
               );
-              await refresh();
               if (live()) options?.onConnected?.(result.accountId ?? null);
               return;
             }
@@ -219,7 +249,7 @@ export function useSuperGrokSubscriptions({
         if (live()) setBusy(false);
       }
     },
-    [client, refresh, workspaceId, organizationId, epoch, canManage, readEnabled],
+    [client, workspaceId, organizationId, epoch, canManage, readEnabled],
   );
 
   return {

@@ -40,6 +40,7 @@ module.exports = { createOpenGeniClient };
 | `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                                                      |
 | `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                                                      |
 | `@opengeni/sdk/usage-allowances`                | Server helpers for workspace and member [usage allowances](/guides/usage-allowances)                                           |
+| `@opengeni/sdk/session-usage-limits`            | Task [usage limit](/guides/task-usage-limits) reads, writes and the refusal parser                                             |
 | `@opengeni/sdk/workspace-integrations`          | Organization webhooks and credential provider; `verifyWebhookEvent` and `verifyCredentialProviderRequest` are also on the root |
 
 For the default embed, see [Embed manually](/embed-manually).
@@ -138,14 +139,14 @@ app.all("/api/opengeni/*", toHonoHandler(createSessionProxyHandler(og, options))
 
 The Node middleware streams bodies and SSE, works after a body parser, and aborts when the client disconnects.
 
-Pass the `OpenGeni` facade from `@opengeni/sdk/chat` so `resolve` can return your own ids; with a plain `OpenGeniClient`, `resolve` must return `{ user, workspaceId }`. Don't replace the proxy with a passthrough that forwards any path under the organization key.
+Pass the `Opengeni` facade from `@opengeni/sdk/chat` so `resolve` can return your own ids; with a plain `OpenGeniClient`, `resolve` must return `{ user, workspaceId }`. Don't replace the proxy with a passthrough that forwards any path under the organization key.
 
 ## Chat facade
 
 ```ts
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! }); // add baseUrl when self-hosting
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! }); // add baseUrl when self-hosting
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("What did we decide last time?");

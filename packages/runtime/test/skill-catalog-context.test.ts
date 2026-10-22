@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readSkillCatalogContext, skillCatalogContextItem } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../src/index";
 import { formatSkillCatalog } from "../src/skill-catalog";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
@@ -116,7 +116,7 @@ test("actual Responses SDK keeps earlier wire input unchanged when an updated ca
 
 test("catalog survives an actual interrupted SDK RunState round-trip", async () => {
   const { Agent, Runner, RunState, tool } = await import("@openai/agents");
-  const { ScriptedModel, functionCall } = await import("@opengeni/testing");
+  const { ScriptedModel, functionCall } = await import("@opengeni/testing/scripted-model");
   const { z } = await import("zod");
   const agent = new Agent({
     name: "catalog restore",

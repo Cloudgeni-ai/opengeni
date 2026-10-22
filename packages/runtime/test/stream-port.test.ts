@@ -165,7 +165,7 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
     const session = fakeSession({ host: "box-7.modal.host", port: 443, tls: true, query: "" });
     const result = await exposeStreamPort(session, { ...baseInput, nowSeconds, ttlSeconds: 120 });
 
-    // The provider-direct URL — the OpenGeni token is NOT appended.
+    // The provider-direct URL — the Opengeni token is NOT appended.
     expect(result.url).toBe("wss://box-7.modal.host/");
     expect(result.url).not.toContain("token=");
     expect(result.transport).toBe("vnc-ws");

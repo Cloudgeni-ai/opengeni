@@ -2,9 +2,9 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { Select } from "@/components/ui/select";
-import { SettingRow } from "@/components/ui/setting-row";
-import { apiErrorAdvice } from "@/lib/api-error";
+import { Select } from "@opengeni/react/ui/select";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { apiErrorAdvice } from "@opengeni/react/ui/api-error";
 
 type SandboxImagesClient = Pick<
   OpenGeniBrowserClient,

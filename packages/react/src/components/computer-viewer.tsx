@@ -58,11 +58,12 @@ import type { EmbeddedComputerInteractionClientOverride } from "../session-conte
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { DesktopViewer } from "./desktop-viewer";
 import { useViewerMenuDismiss } from "./use-viewer-menu-dismiss";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
 export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
-  /** Selected OpenGeni agent/session. Peer ComputerSessions remain visible. */
+  /** Selected Opengeni agent/session. Peer ComputerSessions remain visible. */
   sessionId: string;
   enabled?: boolean | undefined;
   className?: string | undefined;
@@ -96,6 +97,7 @@ export function ComputerViewer({
   onComputerSessionIdChange,
   ...override
 }: ComputerViewerProps) {
+  const t = useOpenGeniText();
   const registry = useComputerSessions({ ...override, sessionId, enabled });
   const createSession = registry.create;
   const refreshRegistry = registry.refresh;
@@ -378,10 +380,10 @@ export function ComputerViewer({
       seenInterventionIdsRef.current.add(intervention.id);
       onNotify?.({
         kind: "info",
-        message: `${interventionTitle(intervention)}: ${intervention.reason}`,
+        message: `${interventionTitle(t, intervention)}: ${intervention.reason}`,
       });
     }
-  }, [interventions.interventions, onNotify]);
+  }, [interventions.interventions, onNotify, t]);
 
   const resolveIntervention = useCallback(
     (intervention: InteractionIntervention, outcome: "completed" | "dismissed") => {
@@ -394,12 +396,14 @@ export function ComputerViewer({
           onNotify?.({
             kind: "info",
             message:
-              outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
+              outcome === "completed"
+                ? t("computerViewer.agentNotifiedContinuingWork")
+                : t("computerViewer.requestCancelled"),
           });
         })
-        .catch((cause) => notifyError(cause, "Could not update the desktop request."));
+        .catch((cause) => notifyError(cause, t("computerViewer.couldNotUpdateTheDesktop")));
     },
-    [interventions, notifyError, onNotify],
+    [interventions, notifyError, onNotify, t],
   );
 
   const createComputer = useCallback(() => {
@@ -412,15 +416,16 @@ export function ComputerViewer({
         selectComputerSession({ sessionId: response.session.id, pinned: false });
       })
       .catch((cause) => {
-        const error = cause instanceof Error ? cause : new Error("Could not open a desktop.");
+        const error =
+          cause instanceof Error ? cause : new Error(t("computerViewer.couldNotOpenADesktop"));
         setCreateError(error);
-        notifyError(error, "Could not open a desktop.");
+        notifyError(error, t("computerViewer.couldNotOpenADesktop"));
       })
       .finally(() => {
         createInFlightRef.current = false;
         setCreating(false);
       });
-  }, [createSession, notifyError, selectComputerSession, sessionId]);
+  }, [createSession, notifyError, selectComputerSession, sessionId, t]);
 
   useEffect(() => {
     if (
@@ -502,20 +507,20 @@ export function ComputerViewer({
       operationId?: string,
     ): Promise<ComputerActionReceipt> => {
       if (computer.controlError) throw computer.controlError;
-      if (inputDenied) throw new Error("Desktop is view only. Refresh to check desktop controls.");
+      if (inputDenied) throw new Error(t("computerViewer.desktopIsViewOnlyRefresh"));
       let receipt;
       if (action.type === "pointer") {
-        if (!frame) throw new Error("Desktop view is not ready for pointer input.");
+        if (!frame) throw new Error(t("computerViewer.desktopViewIsNotReady"));
         receipt = await actFromFrame(action, frame, operationId);
       } else {
         receipt = await act(action, operationId);
       }
       if (!isStaleComputerActionResult(receipt) && receipt.state !== "completed") {
-        throw computerActionReceiptError(receipt);
+        throw computerActionReceiptError(t, receipt);
       }
       return receipt;
     },
-    [act, actFromFrame, computer.controlError, inputDenied],
+    [act, actFromFrame, computer.controlError, inputDenied, t],
   );
 
   const reconnect = () => {
@@ -536,11 +541,11 @@ export function ComputerViewer({
         const clipboard = await computer.readClipboard();
         if (isStaleComputerActionResult(receipt) || isStaleComputerActionResult(clipboard)) return;
         if (clipboard.text && !(await copyTextToClipboard(clipboard.text))) {
-          throw new Error("Desktop text could not be copied to the local clipboard");
+          throw new Error(t("computerViewer.desktopTextCouldNotBe"));
         }
-      })().catch((cause) => notifyError(cause, "Could not copy from the desktop."));
+      })().catch((cause) => notifyError(cause, t("computerViewer.couldNotCopyFromThe")));
     },
-    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream, t],
   );
 
   const pasteIntoRfb = useCallback(
@@ -559,12 +564,12 @@ export function ComputerViewer({
         if (isStaleComputerActionResult(receipt)) return;
         const clipboard = await computer.readClipboard();
         if (isStaleComputerActionResult(receipt) || isStaleComputerActionResult(clipboard)) return;
-        assertExactComputerClipboard(clipboard, text);
+        assertExactComputerClipboard(t, clipboard, text);
         await perform({ type: "clipboard", operation: "paste" }, null);
-      })().catch((cause) => notifyError(cause, "Could not paste into the desktop."));
+      })().catch((cause) => notifyError(cause, t("computerViewer.couldNotPasteIntoThe")));
       return true;
     },
-    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream, t],
   );
 
   const hideGenericCreate = suppressGenericCreate && liveRelevant.length === 0;
@@ -577,7 +582,7 @@ export function ComputerViewer({
     return (
       <ComputerNotice
         icon={<LoaderCircleIcon className="size-4 animate-spin" />}
-        text="Finding workspace desktops…"
+        text={t("computerViewer.findingWorkspaceDesktops")}
         {...(className ? { className } : {})}
       />
     );
@@ -589,11 +594,10 @@ export function ComputerViewer({
           <div className="max-w-sm text-center">
             <CircleAlertIcon className="mx-auto size-5 text-og-danger" />
             <p className="mt-3 text-og-menu font-medium text-og-fg">
-              Chrome reconnected—open a fresh browser/desktop.
+              {t("computerViewer.chromeReconnectedOpenAFresh")}
             </p>
             <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
-              This Chrome profile is live again, but the previous desktop cannot move to the new
-              connection. Use Browser → New browser → Connected Chrome.
+              {t("computerViewer.thisChromeProfileIsLive")}
             </p>
           </div>
         </div>
@@ -612,10 +616,10 @@ export function ComputerViewer({
             )}
           </span>
           <p className="mt-3 text-og-menu font-medium text-og-fg">
-            {error ? "Desktop didn’t open" : "Opening desktop…"}
+            {error ? t("computerViewer.desktopDidnTOpen") : t("computerViewer.openingDesktop")}
           </p>
           <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
-            {error?.message ?? "Preparing this agent’s desktop. It will appear here when ready."}
+            {error?.message ?? t("computerViewer.preparingThisAgentSDesktop")}
           </p>
           {error ? (
             <button
@@ -629,7 +633,7 @@ export function ComputerViewer({
               ) : (
                 <RotateCcwIcon className="size-3.5" />
               )}
-              Try again
+              {t("computerViewer.tryAgain")}
             </button>
           ) : null}
         </div>
@@ -657,7 +661,7 @@ export function ComputerViewer({
         onSelectTarget={(targetId) => {
           void computer
             .selectTarget(targetId)
-            .catch((cause) => notifyError(cause, "Could not switch desktop views."));
+            .catch((cause) => notifyError(cause, t("computerViewer.couldNotSwitchDesktopViews")));
         }}
         onSelect={(computerSessionId) =>
           selectComputerSession({ sessionId: computerSessionId, pinned: true })
@@ -686,7 +690,7 @@ export function ComputerViewer({
         onOpen={(intervention) =>
           void computer
             .selectTarget(intervention.targetId)
-            .catch((cause) => notifyError(cause, "Could not open the requested desktop view."))
+            .catch((cause) => notifyError(cause, t("computerViewer.couldNotOpenTheRequested")))
         }
         onResolve={resolveIntervention}
       />
@@ -723,17 +727,17 @@ export function ComputerViewer({
                   <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-white/80 backdrop-blur">
                     {controlUnavailable ? (
                       <>
-                        Desktop controls unavailable{" "}
+                        {t("computerViewer.desktopControlsUnavailable")}{" "}
                         <button
                           type="button"
                           onClick={reconnect}
                           className="pointer-events-auto ml-2 font-medium underline"
                         >
-                          Reconnect
+                          {t("computerViewer.reconnect")}
                         </button>
                       </>
                     ) : (
-                      "View only · direct input unavailable"
+                      t("computerViewer.viewOnlyDirectInputUnavailable")
                     )}
                   </div>
                 ) : null}
@@ -759,6 +763,12 @@ export function ComputerViewer({
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
                 backgroundInput={computer.session?.capabilities?.backgroundInput === true}
+                allowForegroundInputWithinOwnedSeat={
+                  computer.session?.platform === "linux" &&
+                  computer.session.adapter === "opengeni.cua.linux.v1" &&
+                  computer.session.seatId === `linux-virtual:${computer.session.id}` &&
+                  Boolean(computer.session.displayId)
+                }
                 clipboardEnabled={
                   attachmentInputAllowed && computer.session?.capabilities?.clipboard === true
                 }
@@ -777,7 +787,7 @@ export function ComputerViewer({
                 onReconnect={
                   generationLossSelected || generationLossFrames ? () => undefined : reconnect
                 }
-                onError={(cause) => notifyError(cause, "Desktop input failed.")}
+                onError={(cause) => notifyError(cause, t("computerViewer.desktopInputFailed"))}
               />
             )}
             {showControls ? (
@@ -788,7 +798,7 @@ export function ComputerViewer({
                 inputAllowed={!inputDenied}
                 onAction={(action) =>
                   void perform(action, null).catch((cause) =>
-                    notifyError(cause, "Desktop action failed."),
+                    notifyError(cause, t("computerViewer.desktopActionFailed")),
                   )
                 }
               />
@@ -802,7 +812,7 @@ export function ComputerViewer({
             inputAllowed={!inputDenied}
             refreshing={registry.refreshing}
             showControls={showControls}
-            controlCount={semanticControls(computer.observation).length}
+            controlCount={semanticControls(t, computer.observation).length}
             onToggleControls={() => setShowControls((current) => !current)}
           />
         </>
@@ -818,6 +828,7 @@ function ComputerUnselectedPanel(props: {
   generationLoss: boolean;
   onCreate: () => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
@@ -830,18 +841,18 @@ function ComputerUnselectedPanel(props: {
         </span>
         <p className="mt-3 text-og-menu font-medium text-og-fg">
           {props.generationLoss
-            ? "Chrome reconnected—open a fresh browser/desktop."
+            ? t("computerViewer.chromeReconnectedOpenAFresh")
             : props.error
-              ? "Desktop didn’t open"
-              : "Opening desktop…"}
+              ? t("computerViewer.desktopDidnTOpen")
+              : t("computerViewer.openingDesktop")}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {props.generationLoss
-            ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+            ? t("computerViewer.thisChromeProfileIsLive")
             : (props.error?.message ??
               (props.peerCount === 1
-                ? "Preparing this agent’s desktop. One peer desktop remains available from the menu."
-                : `Preparing this agent’s desktop. ${props.peerCount} peer desktops remain available from the menu.`))}
+                ? t("computerViewer.preparingThisAgentSDesktop2")
+                : t("computerViewer.preparingThisAgentSDesktop3", { peerCount: props.peerCount })))}
         </p>
         {props.error && !props.generationLoss ? (
           <button
@@ -855,7 +866,7 @@ function ComputerUnselectedPanel(props: {
             ) : (
               <RotateCcwIcon className="size-3.5" />
             )}
-            Try again
+            {t("computerViewer.tryAgain")}
           </button>
         ) : null}
       </div>
@@ -879,6 +890,7 @@ function ComputerToolbar(props: {
   onCreate?: (() => void) | undefined;
   onRefresh: () => void;
 }) {
+  const t = useOpenGeniText();
   const detailsRef = useViewerMenuDismiss();
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
   const current = props.sessions.filter((session) => props.relevantSessionIds.has(session.id));
@@ -897,7 +909,9 @@ function ComputerToolbar(props: {
         <summary className="flex h-7 max-w-32 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 @sm/computer-viewer:max-w-52 [&::-webkit-details-marker]:hidden">
           <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
           <span className="truncate font-medium">
-            {selected?.name === "Computer" ? "Desktop" : (selected?.name ?? "Desktop")}
+            {selected?.name === "Computer"
+              ? t("computerViewer.desktop")
+              : (selected?.name ?? t("computerViewer.desktop"))}
           </span>
           {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
             <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
@@ -907,14 +921,14 @@ function ComputerToolbar(props: {
         <div className="absolute left-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-72 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
           <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
             <ComputerSessionGroup
-              label="Current agent"
+              label={t("computerViewer.currentAgent")}
               sessions={current}
               selectedId={props.selectedSessionId}
               interventionCounts={props.interventionCounts}
               onSelect={choose}
             />
             <ComputerSessionGroup
-              label="Other agents"
+              label={t("computerViewer.otherAgents")}
               sessions={others}
               selectedId={props.selectedSessionId}
               interventionCounts={props.interventionCounts}
@@ -929,7 +943,7 @@ function ComputerToolbar(props: {
                   closeMenu(event.detail === 0);
                 }}
               >
-                Follow agent
+                {t("computerViewer.followAgent")}
               </MenuButton>
             ) : null}
             {props.onCreate ? (
@@ -940,14 +954,14 @@ function ComputerToolbar(props: {
                 }}
                 disabled={props.creating}
               >
-                <PlusIcon className="size-3.5" /> New desktop
+                <PlusIcon className="size-3.5" /> {t("computerViewer.newDesktop")}
               </MenuButton>
             ) : null}
           </div>
         </div>
       </details>
       <span className="min-w-0 flex-1 truncate text-og-xs text-og-fg-subtle">
-        {selected ? `${platformLabel(selected)} · ${placementLabel(selected)}` : ""}
+        {selected ? `${platformLabel(t, selected)} · ${placementLabel(t, selected)}` : ""}
       </span>
       <ComputerTargetPicker
         targets={props.targets}
@@ -961,7 +975,7 @@ function ComputerToolbar(props: {
         disabled={props.refreshing}
         aria-busy={props.refreshing}
         className="grid size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
-        aria-label="Refresh desktops"
+        aria-label={t("computerViewer.refreshDesktops")}
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
       </button>
@@ -971,7 +985,7 @@ function ComputerToolbar(props: {
           onClick={props.onCreate}
           disabled={props.creating}
           className="hidden size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40 @sm/computer-viewer:grid"
-          aria-label="Open a new desktop"
+          aria-label={t("computerViewer.openANewDesktop")}
         >
           {props.creating ? (
             <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -991,6 +1005,7 @@ function ComputerSessionGroup(props: {
   interventionCounts: Map<string, number>;
   onSelect: (id: string, restoreFocus: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   if (props.sessions.length === 0) return null;
   return (
     <div className="py-1">
@@ -1019,7 +1034,7 @@ function ComputerSessionGroup(props: {
             <span className="min-w-0 flex-1">
               <span className="block truncate text-og-control text-og-fg">{session.name}</span>
               <span className="block truncate text-og-xs text-og-fg-subtle">
-                {platformLabel(session)} · {placementLabel(session)}
+                {platformLabel(t, session)} · {placementLabel(t, session)}
               </span>
             </span>
             {interventionCount > 0 ? (
@@ -1057,6 +1072,7 @@ function ComputerTargetPicker(props: {
   loading: boolean;
   onSelect: (id: string) => void;
 }) {
+  const t = useOpenGeniText();
   const screens = props.targets.filter((target) => target.kind === "screen");
   const advancedTargets = props.targets.filter(
     (target) =>
@@ -1075,17 +1091,17 @@ function ComputerTargetPicker(props: {
     <>
       {screens.length > 1 ? (
         <select
-          aria-label="Screen"
+          aria-label={t("computerViewer.screen")}
           value={selected?.kind === "screen" ? selected.id : ""}
           onChange={(event) => choose(event.currentTarget.value)}
           className="h-7 min-w-0 max-w-28 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 text-og-control text-og-fg outline-hidden focus:border-og-accent @sm/computer-viewer:max-w-40"
         >
           <option value="" disabled hidden>
-            Screen
+            {t("computerViewer.screen")}
           </option>
           {screens.map((screen, index) => (
             <option key={screen.id} value={screen.id}>
-              {screen.title || `Screen ${index + 1}`}
+              {screen.title || t("computerViewer.screenIndex", { index: index + 1 })}
             </option>
           ))}
         </select>
@@ -1095,22 +1111,26 @@ function ComputerTargetPicker(props: {
           onClick={() => choose(screens[0]!.id)}
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
         >
-          <MonitorIcon className="size-3.5" /> Full desktop
+          <MonitorIcon className="size-3.5" /> {t("computerViewer.fullDesktop")}
         </button>
       ) : null}
       {advancedTargets.length > 0 ? (
         <details ref={advancedRef} className="shrink-0">
           <summary
-            aria-label="Advanced desktop views"
-            title="Advanced desktop views"
+            aria-label={t("computerViewer.advancedDesktopViews")}
+            title={t("computerViewer.advancedDesktopViews")}
             className="flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden"
           >
             <PanelsTopLeftIcon className="size-3.5" />
-            <span className="hidden @sm/computer-viewer:inline">Advanced</span>
+            <span className="hidden @sm/computer-viewer:inline">
+              {t("computerViewer.advanced")}
+            </span>
             <ChevronDownIcon className="size-3" />
           </summary>
           <div className="absolute right-2 top-10 z-30 flex max-h-[calc(100%-3rem)] w-64 max-w-[calc(100%-1rem)] flex-col overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
-            <p className="shrink-0 px-2 py-1 text-og-xs text-og-fg-subtle">Apps and windows</p>
+            <p className="shrink-0 px-2 py-1 text-og-xs text-og-fg-subtle">
+              {t("computerViewer.appsAndWindows")}
+            </p>
             <div className="min-h-0 max-h-80 overflow-y-auto overscroll-contain">
               {advancedTargets.map((target) => (
                 <button
@@ -1128,13 +1148,15 @@ function ComputerTargetPicker(props: {
                       {target.title || target.applicationId || target.kind}
                     </span>
                     <span className="block text-og-xs text-og-fg-subtle">
-                      {target.kind === "app" ? "App controls" : "Window view"}
+                      {target.kind === "app"
+                        ? t("computerViewer.appControls")
+                        : t("computerViewer.windowView")}
                     </span>
                   </span>
                   {target.focused ? (
                     <span
                       className="size-1.5 shrink-0 rounded-full bg-og-status-running"
-                      aria-label="Focused"
+                      aria-label={t("computerViewer.focused")}
                     />
                   ) : null}
                 </button>
@@ -1169,6 +1191,7 @@ function ComputerLifecyclePanel(props: {
   onRefresh: () => Promise<void>;
   onRetry: () => void;
 }) {
+  const t = useOpenGeniText();
   const generationLoss = isAttachedChromeGenerationLoss(props.session);
   const failed = ["failed", "lost", "repair_required"].includes(props.session.lifecycle);
   const retryCreatesSession = ["failed", "lost"].includes(props.session.lifecycle);
@@ -1182,16 +1205,16 @@ function ComputerLifecyclePanel(props: {
         )}
         <p className="mt-3 text-og-menu font-medium text-og-fg">
           {generationLoss
-            ? "Chrome reconnected—open a fresh browser/desktop."
+            ? t("computerViewer.chromeReconnectedOpenAFresh")
             : failed
-              ? "Desktop needs attention"
-              : lifecycleLabel(props.session.lifecycle)}
+              ? t("computerViewer.desktopNeedsAttention")
+              : lifecycleLabel(t, props.session.lifecycle)}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {generationLoss
-            ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
-            : (computerFailureMessage(props.session) ??
-              "The desktop is being prepared on its placement. It will appear here when ready.")}
+            ? t("computerViewer.thisChromeProfileIsLive")
+            : (computerFailureMessage(t, props.session) ??
+              t("computerViewer.theDesktopIsBeingPrepared"))}
         </p>
         {failed && !generationLoss ? (
           <button
@@ -1205,7 +1228,7 @@ function ComputerLifecyclePanel(props: {
             ) : (
               <RotateCcwIcon className="size-3.5" />
             )}
-            {retryCreatesSession ? "Try again" : "Check again"}
+            {retryCreatesSession ? t("computerViewer.tryAgain") : t("computerViewer.checkAgain")}
           </button>
         ) : null}
       </div>
@@ -1231,6 +1254,7 @@ function ComputerViewport(props: {
   mutating: boolean;
   backgroundActions: boolean;
   backgroundInput: boolean;
+  allowForegroundInputWithinOwnedSeat: boolean;
   clipboardEnabled: boolean;
   pointerInput: boolean;
   pointerClickContinuation: boolean;
@@ -1244,6 +1268,7 @@ function ComputerViewport(props: {
   onReconnect: () => void;
   onError: (cause: unknown) => void;
 }) {
+  const t = useOpenGeniText();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
@@ -1273,10 +1298,16 @@ function ComputerViewport(props: {
     timer: ReturnType<typeof setTimeout>;
   } | null>(null);
   const actionRef = useRef(props.onAction);
+  const targetRef = useRef(props.target);
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
+  const queuedTextRef = useRef<{
+    action: Extract<ComputerAction, { type: "keyboard" }>;
+    epoch: number;
+    delivery: ComputerQueuedAction;
+  } | null>(null);
   const queuedFrameRef = useRef<ComputerFrame | null>(null);
   const currentFrameRef = useRef<ComputerFrame | null>(props.frame);
   const paintedFrameRef = useRef<ComputerFrame | null>(null);
@@ -1284,6 +1315,7 @@ function ComputerViewport(props: {
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
+  targetRef.current = props.target;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
   const streamFailed = props.connectionState === "error";
@@ -1293,6 +1325,9 @@ function ComputerViewport(props: {
     !props.controlUnavailable &&
     !props.machineLocked &&
     (props.backgroundInput ||
+      // CUA may activate within its allocated Linux desktop. This does not
+      // grant foreground input to an attached physical desktop.
+      props.allowForegroundInputWithinOwnedSeat ||
       !props.backgroundActions ||
       props.target?.kind === "screen" ||
       props.target?.focused === true);
@@ -1304,6 +1339,7 @@ function ComputerViewport(props: {
     clickTimerRef.current = null;
     wheelRef.current = null;
     pendingTextRef.current = null;
+    queuedTextRef.current = null;
     pointerStartRef.current = null;
     lastClickRef.current = null;
     composingRef.current = false;
@@ -1432,7 +1468,24 @@ function ComputerViewport(props: {
       continuation?: ComputerQueuedAction,
     ) => {
       const epoch = actionQueueEpochRef.current;
+      const plainText = action.type === "keyboard" && action.action === "type";
+      const queuedText = queuedTextRef.current;
+      if (
+        plainText &&
+        !frame &&
+        !after &&
+        !continuation &&
+        queuedText?.epoch === epoch &&
+        queuedText.delivery.completion === actionTailRef.current &&
+        queuedText.action.value.length + action.value.length <= 1_000_000
+      ) {
+        // Only combine adjacent text that has not crossed the dispatch boundary.
+        queuedText.action.value += action.value;
+        return queuedText.delivery;
+      }
+      queuedTextRef.current = null;
       const dispatch = actionRef.current;
+      const admittedTarget = targetRef.current;
       const isCurrent = () => mountedRef.current && epoch === actionQueueEpochRef.current;
       const operationId = crypto.randomUUID();
       let markStarted!: (value: boolean) => void;
@@ -1448,6 +1501,7 @@ function ComputerViewport(props: {
           : previous.then(() => true);
       const delivery = ready
         .then(async (firstStarted) => {
+          if (queuedTextRef.current?.action === action) queuedTextRef.current = null;
           if (!firstStarted || !isCurrent()) {
             markStarted(false);
             return;
@@ -1457,6 +1511,23 @@ function ComputerViewport(props: {
           const receipt = await pending;
           const isCurrentResult = () => isCurrent() && !isStaleComputerActionResult(receipt);
           if (!isCurrentResult()) return;
+          const observedTarget = receipt.observation?.target;
+          if (
+            !admittedTarget ||
+            receipt.computerSessionId !== admittedTarget.computerSessionId ||
+            receipt.controllerGeneration !== admittedTarget.controllerGeneration ||
+            receipt.targetId !== admittedTarget.id ||
+            (observedTarget &&
+              (observedTarget.computerSessionId !== admittedTarget.computerSessionId ||
+                observedTarget.controllerGeneration !== admittedTarget.controllerGeneration ||
+                observedTarget.id !== admittedTarget.id ||
+                observedTarget.targetGeneration !== admittedTarget.targetGeneration))
+          ) {
+            // Receipt projection can replace the target before React remounts us.
+            actionQueueEpochRef.current += 1;
+            clearBufferedInput();
+            return;
+          }
           await after?.(isCurrentResult);
         })
         .catch((cause) => {
@@ -1470,7 +1541,11 @@ function ComputerViewport(props: {
         ? Promise.all([previous, delivery]).then(() => undefined)
         : delivery;
       actionTailRef.current = completion;
-      return { operationId, started, completion };
+      const queued = { operationId, started, completion };
+      if (plainText && !frame && !after && !continuation) {
+        queuedTextRef.current = { action, epoch, delivery: queued };
+      }
+      return queued;
     },
     [clearBufferedInput],
   );
@@ -1750,7 +1825,7 @@ function ComputerViewport(props: {
       if (!isCurrent()) return;
       if (!clipboard.text) return;
       if (!(await copyTextToClipboard(clipboard.text))) {
-        throw new Error("Desktop text could not be copied to the local clipboard");
+        throw new Error(t("computerViewer.desktopTextCouldNotBe"));
       }
     });
   };
@@ -1767,7 +1842,7 @@ function ComputerViewport(props: {
     enqueue({ type: "clipboard", operation: "write", text }, null, async (isCurrent) => {
       const clipboard = await readClipboard();
       if (!isCurrent()) return;
-      assertExactComputerClipboard(clipboard, text);
+      assertExactComputerClipboard(t, clipboard, text);
       await dispatch({ type: "clipboard", operation: "paste" }, null);
     });
   };
@@ -1818,7 +1893,15 @@ function ComputerViewport(props: {
         }}
         onContextMenu={contextMenu}
         onWheel={wheel}
-        aria-label={`Interactive ${props.target?.kind ?? "desktop"} view`}
+        aria-label={t(
+          props.target?.kind === "app"
+            ? "computerViewer.interactiveAppView"
+            : props.target?.kind === "window"
+              ? "computerViewer.interactiveWindowView"
+              : props.target?.kind === "screen"
+                ? "computerViewer.interactiveScreenView"
+                : "computerViewer.interactiveDesktopView",
+        )}
       />
       <textarea
         ref={inputRef}
@@ -1834,7 +1917,7 @@ function ComputerViewport(props: {
         onCopy={copy}
         onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
-        aria-label="Desktop keyboard input"
+        aria-label={t("computerViewer.desktopKeyboardInput")}
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
@@ -1854,19 +1937,19 @@ function ComputerViewport(props: {
       ) : null}
       {props.mutating ? (
         <div className="pointer-events-none absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/65 px-2.5 py-1 text-[11px] text-white/80 backdrop-blur">
-          <LoaderCircleIcon className="size-3 animate-spin" /> Acting
+          <LoaderCircleIcon className="size-3 animate-spin" /> {t("computerViewer.acting")}
         </div>
       ) : null}
       {showCanvas && (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) ? (
         <div className="absolute bottom-3 left-1/2 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
           <span>
             {!rawInputEnabled && (props.pointerInput || props.keyboardInput)
-              ? "Background view · use app controls"
+              ? t("computerViewer.backgroundViewUseAppControls")
               : !props.pointerInput && !props.keyboardInput
-                ? "View only · mouse and keyboard unavailable"
+                ? t("computerViewer.viewOnlyMouseAndKeyboard")
                 : props.keyboardInput
-                  ? "Keyboard only · mouse unavailable"
-                  : "Mouse only · keyboard unavailable"}
+                  ? t("computerViewer.keyboardOnlyMouseUnavailable")
+                  : t("computerViewer.mouseOnlyKeyboardUnavailable")}
           </span>
           {!rawInputEnabled && props.target && (props.pointerInput || props.keyboardInput) ? (
             <button
@@ -1875,7 +1958,7 @@ function ComputerViewport(props: {
               onClick={() => enqueue({ type: "focus", targetId: props.target!.id }, null)}
               className="shrink-0 whitespace-nowrap rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
             >
-              Bring to front
+              {t("computerViewer.bringToFront")}
             </button>
           ) : null}
         </div>
@@ -1884,9 +1967,13 @@ function ComputerViewport(props: {
   );
 }
 
-function assertExactComputerClipboard(clipboard: ComputerClipboard, expected: string): void {
+function assertExactComputerClipboard(
+  t: OpenGeniText,
+  clipboard: ComputerClipboard,
+  expected: string,
+): void {
   if (clipboard.truncated || clipboard.text !== expected) {
-    throw new Error("Desktop clipboard did not accept the exact pasted text");
+    throw new Error(t("computerViewer.desktopClipboardDidNotAccept"));
   }
 }
 
@@ -1900,14 +1987,17 @@ function ComputerViewportFallback(props: {
   onAction: (action: ComputerAction) => void;
   onReconnect: () => void;
 }) {
+  const t = useOpenGeniText();
   if (props.machineLocked) {
     return (
       <div className="absolute inset-0 grid place-items-center bg-og-bg p-6">
         <div className="max-w-sm text-center">
           <LockKeyholeIcon className="mx-auto size-6 text-og-fg-muted" />
-          <p className="mt-3 text-og-menu font-medium text-og-fg">Machine locked</p>
+          <p className="mt-3 text-og-menu font-medium text-og-fg">
+            {t("computerViewer.machineLocked")}
+          </p>
           <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
-            Live frames and input stay private until someone unlocks the machine.
+            {t("computerViewer.liveFramesAndInputStay")}
           </p>
         </div>
       </div>
@@ -1915,7 +2005,7 @@ function ComputerViewportFallback(props: {
   }
   const appControls = props.observation?.target.kind === "app";
   const controlFailure = interactionControlFailureFromError(props.error);
-  const interactive = semanticControls(props.observation)
+  const interactive = semanticControls(t, props.observation)
     .filter((node) => semanticAction(node) !== null)
     .slice(0, 10);
   return (
@@ -1931,33 +2021,35 @@ function ComputerViewportFallback(props: {
           )}
           <p className="text-og-menu font-medium text-og-fg">
             {isAttachedChromeGenerationLossError(props.error)
-              ? "Chrome reconnected—open a fresh browser/desktop."
+              ? t("computerViewer.chromeReconnectedOpenAFresh")
               : !props.inputAllowed
-                ? "View only"
+                ? t("computerViewer.viewOnly")
                 : props.controlUnavailable
-                  ? "Desktop controls unavailable"
+                  ? t("computerViewer.desktopControlsUnavailable")
                   : props.error
-                    ? "Live view disconnected"
+                    ? t("computerViewer.liveViewDisconnected")
                     : appControls
-                      ? "App controls"
-                      : computerConnectionLabel(props.connectionState)}
+                      ? t("computerViewer.appControls")
+                      : computerConnectionLabel(t, props.connectionState)}
           </p>
         </div>
         {props.error ? (
           <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
             {isAttachedChromeGenerationLossError(props.error)
-              ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
+              ? t("computerViewer.chromeReconnectedOpenAFresh2")
               : (controlFailure?.message ?? props.error.message)}
           </p>
         ) : null}
         {!props.inputAllowed ? (
           <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
-            Refresh to check desktop controls.
+            {t("computerViewer.refreshToCheckDesktopControls")}
           </p>
         ) : null}
         {interactive.length > 0 && !props.controlUnavailable && props.inputAllowed ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-fg-subtle">App controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-fg-subtle">
+              {t("computerViewer.appControlsRemainAvailable")}
+            </p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1979,9 +2071,11 @@ function ComputerViewportFallback(props: {
           <button
             type="button"
             onClick={props.onReconnect}
-            className="mt-3 text-og-control font-medium text-og-accent hover:underline"
+            className="mt-3 text-og-control font-medium og-link"
           >
-            {controlFailure?.retryable === false ? "Try again" : "Reconnect"}
+            {controlFailure?.retryable === false
+              ? t("computerViewer.tryAgain")
+              : t("computerViewer.reconnect")}
           </button>
         ) : null}
       </div>
@@ -1996,25 +2090,26 @@ function ComputerSemanticPanel(props: {
   inputAllowed: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
-  const nodes = semanticControls(props.observation).slice(0, 100);
+  const t = useOpenGeniText();
+  const nodes = semanticControls(t, props.observation).slice(0, 100);
   return (
     <aside className="box-border max-h-[40%] w-full shrink-0 overflow-y-auto border-t border-og-border bg-og-surface-1 p-2 @xl/computer-viewer:max-h-none @xl/computer-viewer:w-64 @xl/computer-viewer:border-t-0 @xl/computer-viewer:border-l">
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
-        <KeyboardIcon className="size-3" /> App controls
+        <KeyboardIcon className="size-3" /> {t("computerViewer.appControls")}
       </div>
       {!props.inputAllowed ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
-          View only · refresh to check desktop controls.
+          {t("computerViewer.viewOnlyRefreshToCheck")}
         </p>
       ) : props.controlUnavailable ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
-          Reconnect to use app controls.
+          {t("computerViewer.reconnectToUseAppControls")}
         </p>
       ) : null}
       {nodes.length === 0 ? (
         props.controlUnavailable ? null : (
           <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
-            This view has no accessibility controls. Use the live image instead.
+            {t("computerViewer.thisViewHasNoAccessibility")}
           </p>
         )
       ) : (
@@ -2038,6 +2133,7 @@ function ComputerSemanticControl(props: {
   mutating: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
+  const t = useOpenGeniText();
   const { node } = props;
   const editable = node.actions.includes("set_value");
   const action = semanticAction(node);
@@ -2072,14 +2168,16 @@ function ComputerSemanticControl(props: {
             disabled={props.mutating}
             onChange={(event) => setValue(event.currentTarget.value)}
             className="min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 py-1 text-og-control text-og-fg outline-hidden focus:border-og-accent"
-            aria-label={`Set ${node.name || node.identifier || node.role}`}
+            aria-label={t("computerViewer.setName", {
+              name: node.name || node.identifier || node.role,
+            })}
           />
           <button
             type="submit"
             disabled={props.mutating}
             className="rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:opacity-50"
           >
-            Set
+            {t("computerViewer.set")}
           </button>
         </div>
       </form>
@@ -2097,7 +2195,7 @@ function ComputerSemanticControl(props: {
     >
       <span className="mt-0.5 text-[10px] uppercase text-og-fg-subtle">{node.role}</span>
       <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
-        {node.name || semanticValue(node) || node.identifier || "Unnamed control"}
+        {node.name || semanticValue(node) || node.identifier || t("computerViewer.unnamedControl")}
       </span>
     </button>
   );
@@ -2114,6 +2212,7 @@ function ComputerStatusBar(props: {
   controlCount: number;
   onToggleControls: () => void;
 }) {
+  const t = useOpenGeniText();
   const screen = props.target?.kind === "screen";
   return (
     <div className="flex h-8 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-2 text-og-xs text-og-fg-subtle">
@@ -2125,31 +2224,31 @@ function ComputerStatusBar(props: {
       />
       <span>
         {!props.inputAllowed
-          ? "View only"
+          ? t("computerViewer.viewOnly")
           : props.controlUnavailable
-            ? "Controls unavailable"
+            ? t("computerViewer.controlsUnavailable")
             : props.target?.kind === "app"
-              ? "App controls"
+              ? t("computerViewer.appControls")
               : props.connectionState === "live"
-                ? "Live"
-                : computerConnectionLabel(props.connectionState)}
+                ? t("computerViewer.live")
+                : computerConnectionLabel(t, props.connectionState)}
       </span>
       <span className="min-w-0 flex-1 truncate">
         {!props.inputAllowed
-          ? "Refresh to check desktop controls"
+          ? t("computerViewer.refreshToCheckDesktopControls2")
           : props.controlUnavailable
-            ? "Reconnect to use desktop input"
+            ? t("computerViewer.reconnectToUseDesktopInput")
             : screen
-              ? "Full screen · input may move pointer and focus"
+              ? t("computerViewer.fullScreenInputMayMove")
               : props.target?.kind === "app"
                 ? props.session?.capabilities?.backgroundActions
-                  ? "App · controls work in the background"
-                  : "App controls"
+                  ? t("computerViewer.appControlsWorkInThe")
+                  : t("computerViewer.appControls")
                 : props.session?.capabilities?.backgroundInput
-                  ? "Window · clicks and typing stay in the background"
+                  ? t("computerViewer.windowClicksAndTypingStay")
                   : props.session?.capabilities?.backgroundActions
-                    ? "Window · app controls work in the background"
-                    : (props.target?.kind ?? "Desktop")}
+                    ? t("computerViewer.windowAppControlsWorkIn")
+                    : (props.target?.kind ?? t("computerViewer.desktop"))}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
@@ -2163,7 +2262,7 @@ function ComputerStatusBar(props: {
             props.showControls && "bg-og-surface-2 text-og-fg",
           )}
         >
-          Controls {props.controlCount}
+          {t("computerViewer.controlsControlcount", { controlCount: props.controlCount })}
         </button>
       ) : null}
     </div>
@@ -2202,7 +2301,10 @@ const structuralRoles = new Set([
   "page tab list",
 ]);
 
-function semanticControls(observation: ComputerObservation | null): InteractionSemanticNode[] {
+function semanticControls(
+  t: OpenGeniText,
+  observation: ComputerObservation | null,
+): InteractionSemanticNode[] {
   if (observation?.semantic?.kind !== "snapshot") return [];
   const result: InteractionSemanticNode[] = [];
   const visit = (node: InteractionSemanticNode) => {
@@ -2344,20 +2446,24 @@ function isLiveComputer(session: ComputerSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
 }
 
-function computerFailureMessage(session: ComputerSession): string | null {
+function computerFailureMessage(t: OpenGeniText, session: ComputerSession): string | null {
   switch (session.failureCode) {
     case "machine_locked":
-      return "Unlock the connected Mac, then try again.";
+      return t("computerViewer.unlockTheConnectedMacThen");
     case "controller_heartbeat_expired":
-      return "The desktop connection was lost. Try opening it again.";
+    // The sandbox it ran in was lost or replaced.
+    case "placement_instance_lost":
+      return t("computerViewer.theDesktopConnectionWasLost");
     case "controller_transition_expired":
       return session.placement.kind === "attached_device"
-        ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
-        : "The desktop connection expired. Open a new desktop.";
+        ? t("computerViewer.chromeReconnectedOpenAFresh2")
+        : t("computerViewer.theDesktopConnectionExpiredOpen");
+    case "idle_released":
+      return t("computerViewer.theDesktopStoppedAfterIt");
     case null:
       return null;
     default:
-      return "The desktop could not be opened. Try again.";
+      return t("computerViewer.theDesktopCouldNotBe");
   }
 }
 
@@ -2384,74 +2490,74 @@ function countInterventions(
   return counts;
 }
 
-function interventionTitle(intervention: InteractionIntervention): string {
+function interventionTitle(t: OpenGeniText, intervention: InteractionIntervention): string {
   switch (intervention.kind) {
     case "manual_login":
-      return "Sign in needed";
+      return t("computerViewer.signInNeeded");
     case "mfa":
-      return "Verification needed";
+      return t("computerViewer.verificationNeeded");
     case "external_action":
     case "confirmation":
-      return "Action needed";
+      return t("computerViewer.actionNeeded");
     case "other":
-      return "Desktop needs your help";
+      return t("computerViewer.desktopNeedsYourHelp");
   }
 }
 
-function platformLabel(session: ComputerSession): string {
+function platformLabel(t: OpenGeniText, session: ComputerSession): string {
   switch (session.platform) {
     case "macos":
-      return "Mac";
+      return t("computerViewer.mac");
     case "linux":
-      return "Linux";
+      return t("computerViewer.linux");
     case "windows":
-      return "Windows";
+      return t("computerViewer.windows");
     default:
-      return "Desktop";
+      return t("computerViewer.desktop");
   }
 }
 
-function placementLabel(session: ComputerSession): string {
+function placementLabel(t: OpenGeniText, session: ComputerSession): string {
   switch (session.placement.kind) {
     case "sandbox_group":
-      return "Agent sandbox";
+      return t("computerViewer.agentSandbox");
     case "connected_machine":
-      return "Connected machine";
+      return t("computerViewer.connectedMachine");
     case "attached_device":
-      return "Your machine";
+      return t("computerViewer.yourMachine");
     case "external_provider":
-      return "Cloud desktop";
+      return t("computerViewer.cloudDesktop");
   }
 }
 
-function lifecycleLabel(lifecycle: ComputerSession["lifecycle"]): string {
+function lifecycleLabel(t: OpenGeniText, lifecycle: ComputerSession["lifecycle"]): string {
   switch (lifecycle) {
     case "starting":
-      return "Opening desktop…";
+      return t("computerViewer.openingDesktop");
     case "suspending":
-      return "Pausing desktop…";
+      return t("computerViewer.pausingDesktop");
     case "suspended":
-      return "Desktop paused";
+      return t("computerViewer.desktopPaused");
     case "restoring":
-      return "Restoring desktop…";
+      return t("computerViewer.restoringDesktop");
     case "ending":
-      return "Closing desktop…";
+      return t("computerViewer.closingDesktop");
     default:
-      return "Connecting to desktop…";
+      return t("computerViewer.connectingToDesktop");
   }
 }
 
-function computerConnectionLabel(state: string): string {
+function computerConnectionLabel(t: OpenGeniText, state: string): string {
   switch (state) {
     case "attaching":
-      return "Opening desktop view…";
+      return t("computerViewer.openingDesktopView");
     case "connecting":
-      return "Connecting…";
+      return t("computerViewer.connecting");
     case "reconnecting":
-      return "Reconnecting…";
+      return t("computerViewer.reconnecting");
     case "error":
-      return "Disconnected";
+      return t("computerViewer.disconnected");
     default:
-      return "Waiting for desktop…";
+      return t("computerViewer.waitingForDesktop");
   }
 }

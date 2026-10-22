@@ -1,0 +1,923 @@
+import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
+import {
+  conversationTimeline,
+  personalMachineCopy,
+  useSessionStart,
+  type AgentMessageItem,
+  type UserMessageItem,
+} from "@opengeni/react/session";
+import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  Text,
+  View,
+  type TextInput,
+} from "react-native";
+import { annotationHasNote } from "@opengeni/react/timeline-model";
+import {
+  defaultChatComposerMessages,
+  type ChatComposerMessages,
+} from "@opengeni/react/composer-messages";
+import { Icon } from "./icon";
+import { withAlpha } from "./primitives";
+import type { OpenGeniNativeSessionController } from "../use-native-session";
+import type { NativeFileAttachmentsResult } from "../attachments";
+import { SessionComposer, type SessionComposerProps } from "./composer";
+import { TurnFeedbackButtons, useTurnRatings, type TurnFeedbackTarget } from "./feedback";
+import { Button } from "./controls";
+import {
+  ApprovalStrip,
+  HumanInputCard,
+  type ApprovalStripProps,
+  type HumanInputCardProps,
+} from "./decisions";
+import { NativeMessageAttachments } from "./message-attachments";
+import { QueueDock } from "./queue-dock";
+import {
+  AnnotationsChip,
+  AnnotationsSheet,
+  type AnnotationReveal,
+  type NativeAnnotationLike,
+} from "./annotations";
+import { SessionCommandsList, SessionSignals } from "./session-signals";
+import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
+import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
+import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useNativeTimelineMessages } from "./messages";
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
+
+/* ----------------------------------------------------------------------------
+   The web session page body at phone width: timeline (with the question card
+   as its trailing state), the live approval strip and the composer, driven by
+   the shared session controller. Navigation chrome belongs to the host.
+   -------------------------------------------------------------------------- */
+
+export interface NativeSessionScreenProps extends Omit<
+  NativeMessageTimelineProps,
+  "items" | "events" | "status" | "trailing"
+> {
+  controller: OpenGeniNativeSessionController;
+  /** Composer slots (products add their own actions/options here). */
+  composer?:
+    | Partial<
+        Pick<
+          SessionComposerProps,
+          | "renderLeading"
+          | "options"
+          | "header"
+          | "placeholder"
+          | "onAttach"
+          | "messages"
+          | "onActionFeedback"
+          | "voice"
+          | "call"
+        >
+      >
+    | undefined;
+  /** Extra content after the question card (host recovery, banners). */
+  trailing?: ReactNode;
+  /** Fixed host chrome above the timeline, inside the keyboard-avoiding area. */
+  topBar?: ReactNode;
+  bottomInset?: number | undefined;
+  /** Distance from this screen's bottom edge to the window bottom (e.g. a tab bar). */
+  keyboardBottomOffset?: number | undefined;
+  /** Reply feedback (thumbs beside Copy), as the web timeline offers it. */
+  feedback?: TurnFeedbackTarget | undefined;
+  /** Translations for the question card (the shared human-input catalog). */
+  humanInputMessages?: HumanInputCardProps["messages"];
+  /** Translations for the approval strip. */
+  approvalMessages?: ApprovalStripProps["messages"];
+  /** Reads the commands panel (the full client; omit to hide command details). */
+  client?: OpenGeniClient | undefined;
+  /** Model catalog for the agents panel rows. */
+  models?: readonly ClientModel[] | undefined;
+  /** Translations for the strings the native surfaces draw (merged over any provider above). */
+  timelineMessages?: Partial<NativeTimelineMessages> | undefined;
+  /**
+   * Draw the composer yourself. Receives exactly the props the shared
+   * `SessionComposer` would get (queue dock, approvals and attachment chips
+   * included), so a host can restyle it or render its own native composer.
+   * A floating composer must report its height through `onHeightChange`.
+   */
+  renderComposer?: ((props: SessionComposerProps) => ReactNode) | undefined;
+}
+
+export function NativeSessionScreen({
+  controller,
+  composer: composerSlots,
+  trailing,
+  topBar,
+  bottomInset,
+  keyboardBottomOffset,
+  feedback,
+  humanInputMessages,
+  approvalMessages,
+  client,
+  models,
+  timelineMessages,
+  renderComposer,
+  renderMessageActions: hostMessageActions,
+  ...timelineProps
+}: NativeSessionScreenProps) {
+  // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
+  // not a queue, and no Steer to learn.
+  return (
+    <SingleSendWording enabled={controller.composer.singleSend === true}>
+      <NativeTimelineMessagesProvider messages={timelineMessages}>
+        <SessionScreenBody
+          controller={controller}
+          composer={composerSlots}
+          trailing={trailing}
+          topBar={topBar}
+          bottomInset={bottomInset}
+          keyboardBottomOffset={keyboardBottomOffset}
+          feedback={feedback}
+          humanInputMessages={humanInputMessages}
+          approvalMessages={approvalMessages}
+          client={client}
+          models={models}
+          renderComposer={renderComposer}
+          renderMessageActions={hostMessageActions}
+          {...timelineProps}
+        />
+      </NativeTimelineMessagesProvider>
+    </SingleSendWording>
+  );
+}
+
+function SessionScreenBody({
+  controller,
+  composer: composerSlots,
+  trailing,
+  topBar,
+  bottomInset,
+  keyboardBottomOffset,
+  feedback,
+  humanInputMessages,
+  approvalMessages,
+  client,
+  models,
+  renderComposer,
+  renderMessageActions: hostMessageActions,
+  ...timelineProps
+}: Omit<NativeSessionScreenProps, "timelineMessages">) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const m = useNativeTimelineMessages();
+  const { composer, queue, humanInput, approvals, control, attachments } = controller;
+  const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
+  const annotationReveal = useRef<AnnotationReveal | null>(null);
+  const draftAnnotations = composer.annotations ?? [];
+  const annotationsIncomplete = draftAnnotations.some(
+    (annotation) => annotation.note.trim().length === 0,
+  );
+  const reviewTargetId = composer.annotationReviewTargetId ?? null;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  // A new quote, a marker tap or a send with an empty note opens its note.
+  useEffect(() => {
+    if (reviewTargetId) setReviewOpen(true);
+  }, [reviewTargetId]);
+  const closeReview = useCallback(() => {
+    setReviewOpen(false);
+    composer.clearAnnotationReviewTarget?.();
+  }, [composer]);
+  const [queuedReview, setQueuedReview] = useState<readonly NativeAnnotationLike[] | null>(null);
+  // Each send brings the conversation back to its latest row.
+  const [followLatestSignal, setFollowLatestSignal] = useState(0);
+  const followLatest = useCallback(() => setFollowLatestSignal((value) => value + 1), []);
+  // The composer floats over the conversation; its occupied height insets the timeline.
+  const [composerHeight, setComposerHeight] = useState(120);
+  const items = useMemo(
+    () => conversationTimeline(controller.timeline, queue, composer),
+    [controller.timeline, queue, composer],
+  );
+  const status = controller.sessionStatus;
+  const paused = queue.effectiveControl?.state === "paused";
+  const waitingOnInput = humanInput.requests.length > 0 && status === "requires_action";
+  const busy = composer.sending || composer.pausing || composer.resuming;
+  const { ratings, rate } = useTurnRatings(feedback);
+  const failed = controller.connectionState === "error";
+  useAutoRecover(
+    failed && controller.active,
+    controller.connectionState === "live",
+    controller.refresh,
+  );
+  const empty = items.length === 0;
+  // Web order beside Copy: reply feedback, then host actions (fork, share…).
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => {
+      const host = hostMessageActions?.(item);
+      if (!feedback || item.kind !== "agent-message" || item.streaming || !item.turnId) return host;
+      const turnId = item.turnId;
+      return (
+        <>
+          <TurnFeedbackButtons
+            target={feedback}
+            turnId={turnId}
+            saved={ratings[turnId]}
+            onRated={(sentiment) => rate(turnId, sentiment)}
+          />
+          {host}
+        </>
+      );
+    },
+    [feedback, hostMessageActions, rate, ratings],
+  );
+  return (
+    <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
+      {topBar}
+      <MessageTimeline
+        onAnnotate={composer.addAnnotation}
+        draftAnnotations={composer.annotations}
+        onDraftAnnotationSelect={composer.requestAnnotationReview}
+        annotationRevealRef={annotationReveal}
+        followLatestSignal={followLatestSignal}
+        {...timelineProps}
+        hasOlder={controller.hasOlder}
+        loadingOlder={controller.loadingOlder}
+        onLoadOlder={controller.loadOlder}
+        contentInsetBottom={composerHeight + 20}
+        overlayInsetBottom={composerHeight}
+        renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
+        renderUserAttachments={
+          timelineProps.renderUserAttachments ??
+          (client
+            ? (item) => (
+                <NativeMessageAttachments
+                  client={client}
+                  workspaceId={controller.workspaceId}
+                  sessionId={controller.sessionId}
+                  resources={item.resources}
+                />
+              )
+            : undefined)
+        }
+        items={items}
+        status={status}
+        emptyState={
+          empty && failed ? (
+            <LoadFailure
+              message={loadFailureMessage(controller.error, m.connectionFailed)}
+              onRetry={() => void controller.refresh()}
+            />
+          ) : empty && controller.initialLoading ? (
+            <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <ActivityIndicator color={theme.colors["fg-muted"]} />
+            </View>
+          ) : (
+            timelineProps.emptyState
+          )
+        }
+        trailing={
+          <>
+            {controller.admissionBlocked && !paused && controller.session.session ? (
+              <StuckCard
+                session={controller.session.session}
+                busy={composer.resuming || control.controlling}
+                onSessionChanged={async () => {
+                  await Promise.all([controller.session.refresh(), queue.refresh()]);
+                }}
+              />
+            ) : null}
+            {waitingOnInput ? (
+              <HumanInputCard
+                requests={humanInput.requests}
+                respondingRequestId={humanInput.respondingRequestId}
+                error={humanInput.mutationError?.message}
+                messages={humanInputMessages}
+                onSubmit={(requestId, response) =>
+                  humanInput.respond(requestId, response).then(() => undefined)
+                }
+              />
+            ) : null}
+            {trailing}
+          </>
+        }
+      />
+      {(renderComposer ?? renderSharedComposer)({
+        floating: true,
+        onHeightChange: (height) => setComposerHeight(Math.round(height)),
+        onActionFeedback: composerSlots?.onActionFeedback,
+        value: composer.value,
+        onChangeText: composer.setValue,
+        // A quote without its note cannot be sent: Send opens that note instead
+        // of staying disabled with no reason given.
+        onSend: () => {
+          if (annotationsIncomplete) composer.requestAnnotationReview?.();
+          else {
+            followLatest();
+            void composer.send();
+          }
+        },
+        // The other choice beside Send while the agent works: Queue when
+        // Send steers, Steer when Send queues.
+        alternateSend: composer.alternateSend ?? null,
+        ...(composer.sendAlternate
+          ? {
+              onAlternateSend: () => {
+                if (annotationsIncomplete) {
+                  composer.requestAnnotationReview?.();
+                  return;
+                }
+                followLatest();
+                void composer.sendAlternate?.();
+              },
+            }
+          : {}),
+        canSend: (composer.canSend || (annotationsIncomplete && !composer.sending)) && !busy,
+        sending: composer.sending,
+        running: controller.runActive,
+        paused: paused,
+        pauseBusy: composer.pausing || composer.resuming,
+        onPause: () => void composer.pause(),
+        onResume: () => void composer.resume(),
+        onAttach: composerSlots?.onAttach ?? (() => void attachments.pickImages()),
+        onPasteImages: (files) => void attachments.addFiles(files),
+        renderLeading: composerSlots?.renderLeading,
+        options: composerSlots?.options,
+        placeholder: composerSlots?.placeholder,
+        bottomInset: bottomInset,
+        keyboardBottomOffset: keyboardBottomOffset,
+        inputRef: composerInput,
+        messages: composerSlots?.messages,
+        voice: composerSlots?.voice,
+        call: composerSlots?.call,
+        below: composer.draftConflict ? (
+          <DraftConflictStrip
+            messages={composerSlots?.messages}
+            onResolve={(choice) => void composer.resolveDraftConflict(choice)}
+          />
+        ) : null,
+        header: (
+          <>
+            {composerSlots?.header}
+            <AttachmentChips attachments={attachments} />
+            {draftAnnotations.length > 0 && composer.removeAnnotation ? (
+              <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
+                <AnnotationsChip
+                  annotations={draftAnnotations}
+                  onPress={() => composer.requestAnnotationReview?.()}
+                  onClear={() => {
+                    const removeAll = () => {
+                      for (const annotation of draftAnnotations) {
+                        composer.removeAnnotation?.(annotation.id);
+                      }
+                    };
+                    // Bare quotes go at once; written notes are worth one confirm,
+                    // since the × sits right beside the chip.
+                    if (!draftAnnotations.some((item) => annotationHasNote(item.note))) {
+                      removeAll();
+                      return;
+                    }
+                    Alert.alert(
+                      t("native.timeline.annotations.removeAllTitle", {
+                        count: draftAnnotations.length,
+                      }),
+                      t("native.timeline.annotations.removeAllMessage", {
+                        count: draftAnnotations.filter((item) => annotationHasNote(item.note))
+                          .length,
+                      }),
+                      [
+                        { text: t("native.timeline.annotations.cancel"), style: "cancel" },
+                        {
+                          text: t("native.timeline.annotations.removeAllConfirm"),
+                          style: "destructive",
+                          onPress: removeAll,
+                        },
+                      ],
+                    );
+                  }}
+                />
+              </View>
+            ) : null}
+          </>
+        ),
+        above: (
+          <>
+            <QueueDock
+              queue={queue}
+              composer={composer}
+              singleSend={composer.singleSend === true}
+              onComposerFocus={() => composerInput.current?.focus()}
+              onReviewAnnotations={setQueuedReview}
+              leading={
+                <SessionSignals
+                  goal={controller.goal}
+                  agents={controller.lineage.lineage?.children ?? []}
+                  commandsCount={controller.session.session?.backgroundCommandActivity?.count ?? 0}
+                  onOpenSession={timelineProps.onOpenSession}
+                  models={models}
+                  readOnly={status === "failed" || status === "cancelled"}
+                  renderCommands={() =>
+                    client ? (
+                      <NativeSessionCommands
+                        client={client}
+                        workspaceId={controller.workspaceId}
+                        sessionId={controller.sessionId}
+                      />
+                    ) : null
+                  }
+                />
+              }
+            />
+            {approvals.length > 0 && status === "requires_action" ? (
+              <ApprovalStrip
+                approvals={approvals}
+                messages={approvalMessages}
+                onDecide={(id, decision) =>
+                  (decision === "approve" ? control.approve(id) : control.reject(id)).then(
+                    () => undefined,
+                  )
+                }
+              />
+            ) : null}
+          </>
+        ),
+      })}
+      <AnnotationsSheet
+        open={reviewOpen}
+        onClose={closeReview}
+        annotations={draftAnnotations}
+        editable={Boolean(composer.updateAnnotation)}
+        focusId={reviewTargetId}
+        onFocusConsumed={composer.clearAnnotationReviewTarget}
+        onUpdate={composer.updateAnnotation}
+        onRemove={composer.removeAnnotation}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+        onCommit={() => {
+          closeReview();
+          setTimeout(() => composerInput.current?.focus(), 250);
+        }}
+      />
+      <AnnotationsSheet
+        open={queuedReview !== null}
+        onClose={() => setQueuedReview(null)}
+        annotations={queuedReview ?? []}
+        editable={false}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+      />
+    </View>
+  );
+}
+
+/**
+ * A failed session stream retries with backoff (1s doubling to 30s) while the
+ * screen is active, so a transient API outage recovers without a relaunch.
+ */
+function useAutoRecover(failed: boolean, live: boolean, refresh: () => Promise<void>) {
+  const delay = useRef(1_000);
+  useEffect(() => {
+    // Only a live stream ends the outage; a retry briefly clears the error.
+    if (live) delay.current = 1_000;
+  }, [live]);
+  useEffect(() => {
+    if (!failed) return;
+    const timer = setTimeout(() => {
+      delay.current = Math.min(delay.current * 2, 30_000);
+      void refresh();
+    }, delay.current);
+    return () => clearTimeout(timer);
+  }, [failed, refresh]);
+}
+
+/** Transport failures read as a connection problem, never as a native stack. */
+function loadFailureMessage(error: Error | null, connectionFailed: string): string | undefined {
+  if (!error) return undefined;
+  if (
+    error.name === "TypeError" ||
+    /fetch failed|network request failed|could not connect|offline|timed out/i.test(error.message)
+  ) {
+    return connectionFailed;
+  }
+  return error.message;
+}
+
+function LoadFailure({ message, onRetry }: { message?: string | undefined; onRetry: () => void }) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: 24 }}>
+      <Icon name="circle-alert" size={20} color={theme.colors["status-failed"]} />
+      <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: theme.colors.fg }}>
+        {m.loadFailedTitle}
+      </Text>
+      {message ? (
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            lineHeight: 18,
+            color: theme.colors["fg-muted"],
+            textAlign: "center",
+          }}
+        >
+          {message}
+        </Text>
+      ) : null}
+      <Button label={m.retry} onPress={onRetry} />
+    </View>
+  );
+}
+
+/**
+ * The runtime could not start this session's next step. It is not waiting on
+ * the person, so it says so plainly and offers one recheck (Resume), which
+ * starts the kept work again.
+ */
+function StuckCard({
+  session,
+  busy,
+  onSessionChanged,
+}: {
+  session: Session;
+  busy: boolean;
+  onSessionChanged: () => Promise<void>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
+  // The same state as the web notice: why the saved message didn't start, the
+  // machines this person may move the chat to, and one fenced recheck.
+  const start = useSessionStart({ session, onSessionChanged });
+  const [failed, setFailed] = useState(false);
+  // The recheck is one fenced Resume outside the session control runner, so
+  // the card holds its own pending state: busy while it runs, and a second tap
+  // before the first settles sends nothing (as the web notice does).
+  const [rechecking, setRechecking] = useState(false);
+  const recheckPending = useRef(false);
+  const [moving, setMoving] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const c = theme.colors;
+  const reason = start.reason;
+  const machine =
+    start.needsDifferentMachine && start.machineAccess
+      ? personalMachineCopy(t, start.machineAccess, { queued: true })
+      : null;
+  const needsAccess =
+    reason?.reason === "initiator_membership_required" ||
+    reason?.reason === "personal_resource_grant_required";
+  const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
+  return (
+    <View
+      accessibilityRole="summary"
+      style={{
+        gap: 10,
+        padding: 14,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: withAlpha(c["status-failed"], 0.3),
+        backgroundColor: withAlpha(c["status-failed"], 0.08),
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
+          {machine ? t("sessionAdmission.needsDifferentMachineTitle") : m.stuckTitle}
+        </Text>
+      </View>
+      {machine ? (
+        <>
+          <Text style={textStyle}>{machine.explanation}</Text>
+          <Text style={textStyle}>{machine.next}</Text>
+          {start.canChooseMachine ? (
+            <View
+              style={{ gap: 6 }}
+              accessibilityLabel={t("sessionAdmission.chooseAMachineForThisChat")}
+            >
+              {start.machineChoices.length === 0 ? (
+                <Text style={textStyle}>{t("sessionAdmission.noMachineChoices")}</Text>
+              ) : (
+                start.machineChoices.map((choice) => (
+                  <Button
+                    key={choice.sandboxId}
+                    label={
+                      moving === choice.sandboxId
+                        ? t("sessionAdmission.moving")
+                        : machineDisplayName(t, choice)
+                    }
+                    busy={moving === choice.sandboxId}
+                    disabled={busy || moving !== null}
+                    style={{ alignSelf: "stretch" }}
+                    onPress={() => {
+                      setMoving(choice.sandboxId);
+                      setMoveError(null);
+                      start
+                        .chooseMachine(choice)
+                        .then(setMoveError, () =>
+                          setMoveError(t("sessionAdmission.machineChangeFailed")),
+                        )
+                        .finally(() => setMoving(null));
+                    }}
+                  />
+                ))
+              )}
+              <Text style={{ ...textStyle, fontSize: 13 }}>
+                {t("sessionAdmission.savedMessageMachineNote")}
+              </Text>
+            </View>
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : (
+        <Text style={textStyle}>{needsAccess ? m.stuckAccessBody : m.stuckBody}</Text>
+      )}
+      {failed ? (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            color: c["status-failed"],
+          }}
+        >
+          {m.stuckRetryFailed}
+        </Text>
+      ) : null}
+      {machine ? null : (
+        <Button
+          label={m.stuckRetry}
+          variant="primary"
+          busy={busy || rechecking}
+          disabled={busy || rechecking}
+          style={{ alignSelf: "flex-start" }}
+          onPress={() => {
+            if (recheckPending.current) return;
+            recheckPending.current = true;
+            setRechecking(true);
+            setFailed(false);
+            start
+              .recheck()
+              .catch(() => setFailed(true))
+              .finally(() => {
+                recheckPending.current = false;
+                setRechecking(false);
+              });
+          }}
+        />
+      )}
+    </View>
+  );
+}
+
+/** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
+export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  if (attachments.attachments.length === 0) return null;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingTop: 10,
+      }}
+    >
+      {attachments.attachments.map((item) => {
+        const failed = item.status === "failed";
+        const busy = item.status === "uploading" || item.status === "preparing";
+        if (item.kind === "image" && item.previewUri) {
+          // Photos show as photos, as on the web: a thumbnail with its state on top.
+          return (
+            <View key={item.id} style={{ width: 56, height: 56 }}>
+              <Pressable
+                accessibilityRole={failed ? "button" : "image"}
+                accessibilityLabel={
+                  failed
+                    ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                    : item.name
+                }
+                disabled={!failed}
+                onPress={() => void attachments.retry(item.id)}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: theme.radius.md,
+                  overflow: "hidden",
+                  borderWidth: 1,
+                  borderColor: failed ? withAlpha(c["status-failed"], 0.6) : c.border,
+                  backgroundColor: c["surface-2"],
+                }}
+              >
+                <Image
+                  source={{ uri: item.previewUri }}
+                  style={{ width: "100%", height: "100%" }}
+                  resizeMode="cover"
+                />
+                {busy || failed ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: failed
+                        ? withAlpha(c["status-failed"], 0.35)
+                        : "rgba(0,0,0,0.35)",
+                    }}
+                  >
+                    {busy ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Icon name="rotate-ccw" size={16} color="#FFFFFF" />
+                    )}
+                  </View>
+                ) : null}
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                  name: item.name,
+                })}
+                onPress={() => attachments.remove(item.id)}
+                hitSlop={8}
+                style={{
+                  position: "absolute",
+                  top: -6,
+                  right: -6,
+                  width: 20,
+                  height: 20,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: c.fg,
+                  borderWidth: 1.5,
+                  borderColor: c["surface-1"],
+                }}
+              >
+                <Icon name="x" size={10} color={c.bg} />
+              </Pressable>
+            </View>
+          );
+        }
+        return (
+          <View
+            key={item.id}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              borderRadius: theme.radius.sm,
+              borderWidth: 1,
+              borderColor: failed ? withAlpha(c["status-failed"], 0.4) : c.border,
+              paddingLeft: 8,
+              backgroundColor: c["surface-2"],
+            }}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                failed
+                  ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                  : item.name
+              }
+              disabled={!failed}
+              onPress={() => void attachments.retry(item.id)}
+              style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 }}
+            >
+              {busy ? <ActivityIndicator size="small" color={c["fg-subtle"]} /> : null}
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme),
+                  maxWidth: 160,
+                  fontSize: theme.size.xs,
+                  color: failed ? c["status-failed"] : c["fg-muted"],
+                }}
+              >
+                {item.name}
+                {failed ? t("native.timeline.sessionScreen.tapToRetrySuffix") : ""}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                name: item.name,
+              })}
+              onPress={() => attachments.remove(item.id)}
+              hitSlop={6}
+              style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
+            >
+              <Icon name="x" size={12} color={c["fg-subtle"]} />
+            </Pressable>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+/** The web composer's draft-conflict line: keep this device's draft or take the other. */
+function DraftConflictStrip(props: {
+  messages?: Partial<ChatComposerMessages> | undefined;
+  onResolve: (choice: "keep_mine" | "use_remote") => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const c = theme.colors;
+  const messages = { ...defaultChatComposerMessages(t), ...props.messages };
+  const text = { ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] };
+  return (
+    <View
+      accessibilityRole="alert"
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 8,
+        paddingHorizontal: 16,
+        paddingTop: 12,
+      }}
+    >
+      <Text style={{ ...text, flexGrow: 1, flexShrink: 1, flexBasis: 180 }}>
+        {messages.draftConflict}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        hitSlop={10}
+        onPress={() => props.onResolve("use_remote")}
+      >
+        <Text style={{ ...text, textDecorationLine: "underline" }}>{messages.useOtherDraft}</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        hitSlop={10}
+        onPress={() => props.onResolve("keep_mine")}
+      >
+        <Text
+          style={{
+            ...text,
+            ...fontStyle(theme, 500),
+            color: c["status-failed"],
+            textDecorationLine: "underline",
+          }}
+        >
+          {messages.keepMine}
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** Polls the session's commands only while the panel is open, as web does. */
+function NativeSessionCommands(props: {
+  client: OpenGeniClient;
+  workspaceId: string;
+  sessionId: string;
+}) {
+  const { client, workspaceId, sessionId } = props;
+  const [commands, setCommands] = useState<SessionBackgroundCommand[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const response = await client.listSessionBackgroundCommands(workspaceId, sessionId);
+      setCommands(response.commands);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, sessionId, workspaceId]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => void load(), 3_000);
+    return () => clearInterval(timer);
+  }, [load]);
+  const cancel = useCallback(
+    async (commandId: string) => {
+      await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);
+      await load();
+    },
+    [client, load, sessionId, workspaceId],
+  );
+  return <SessionCommandsList commands={{ commands, loading, error, cancel }} />;
+}
+
+function renderSharedComposer(props: SessionComposerProps): ReactNode {
+  return <SessionComposer {...props} />;
+}

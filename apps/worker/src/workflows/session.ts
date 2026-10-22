@@ -13,6 +13,7 @@ import {
   workflowInfo,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
+import { validProviderOverloadRecoveryDelay } from "../activities/agent-turn/provider-recovery-policy";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
@@ -53,7 +54,7 @@ const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
  * floor so that even a 0/elapsed continueDelayMs (a stale/unknown reset) can never
  * collapse the hold into a tight re-dispatch loop that hammers CPU/DB and never runs
- * the model (invariant 4: NO THRASH). Mirrors MIN_IDLE_MS in codex-rotation.ts; kept
+ * the model (invariant 4: NO THRASH). Retains the historical cooldown; kept
  * local so the deterministic workflow bundle does not import the activities module.
  */
 const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
@@ -85,6 +86,18 @@ export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
  * there, so replay only arms it behind this marker.
  */
 export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
+/** Workflows wait out a recovering turn's durable backoff instead of closing. */
+export const RECOVERY_BACKOFF_WAIT_PATCH = "session-recovery-backoff-wait-v1";
+const RECOVERY_BACKOFF_MIN_WAIT_MS = 1_000;
+
+/**
+ * How long to wait for a recovering turn's durable backoff deadline. The
+ * floor keeps clock skew between the workflow and the database (which owns
+ * the deadline) from turning into a tight peek loop.
+ */
+export function recoveryBackoffWaitMs(notBefore: string, nowMs = Date.now()): number {
+  return Math.max(RECOVERY_BACKOFF_MIN_WAIT_MS, humanInputDeadlineWaitMs(notBefore, nowMs));
+}
 export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
 export const CAPACITY_WAKE_JITTER_MAX_MS = 30_000;
 
@@ -374,6 +387,10 @@ export function postClaimDatabaseRecoveryDetail(
       detail.sandboxSetupRecoveryExhausted === true) &&
       hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
+    !validProviderOverloadRecoveryDelay(
+      detail.providerFailureCode,
+      detail.providerRecoveryContinueDelayMs,
+    ) ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||
         (detail.providerRecoveryCount ?? 0) <= 0 ||
@@ -382,7 +399,44 @@ export function postClaimDatabaseRecoveryDetail(
   ) {
     return null;
   }
+  if (
+    detail.sessionUsageReceipts !== undefined &&
+    !validPostClaimSessionUsageReceipts(detail.sessionUsageReceipts)
+  ) {
+    return null;
+  }
   return detail as PostClaimDatabaseRecoveryDetail;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Bounded, content-free task usage receipts carried by a recovery detail. */
+function validPostClaimSessionUsageReceipts(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return false;
+  return value.every((receipt) => {
+    if (!receipt || typeof receipt !== "object") return false;
+    const r = receipt as Record<string, unknown>;
+    const keys = Object.keys(r);
+    return (
+      keys.every((key) =>
+        ["sessionId", "sourceId", "turnId", "amountMicros", "pricingSource", "model"].includes(key),
+      ) &&
+      typeof r.sessionId === "string" &&
+      UUID_PATTERN.test(r.sessionId) &&
+      typeof r.sourceId === "string" &&
+      r.sourceId.length >= 1 &&
+      r.sourceId.length <= 1024 &&
+      (r.turnId === null || (typeof r.turnId === "string" && UUID_PATTERN.test(r.turnId))) &&
+      (r.amountMicros === null ||
+        (typeof r.amountMicros === "number" &&
+          Number.isSafeInteger(r.amountMicros) &&
+          r.amountMicros >= 0)) &&
+      (r.pricingSource === null ||
+        r.pricingSource === "configured_list_price" ||
+        r.pricingSource === "gateway_reported") &&
+      (r.model === null || (typeof r.model === "string" && r.model.length <= 512))
+    );
+  });
 }
 
 /**
@@ -706,12 +760,17 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // can activate this fix without waiting for continueAsNew.
     durableAdmissionBlocking = patched("session-durable-admission-block-v1");
     const safeObservation = patched("session-safe-control-observation-v1");
+    // Negotiate the deleted result at this command boundary: replay keeps old
+    // activity inputs/results, while the next live cycle can close an orphan.
+    const closeDeletedSession = patched("session-close-deleted-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
       ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+      ...(closeDeletedSession ? { includeDeletion: true } : {}),
     });
+    if (closeDeletedSession && peek.kind === "deleted") return;
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
       if (
         peek.kind === "attempt-owned" &&
@@ -743,6 +802,25 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "admission-blocked") {
+      const recoveryRetry =
+        peek.reason === "recovery_backoff" && peek.ref && "notBefore" in peek.ref ? peek.ref : null;
+      if (recoveryRetry && patched(RECOVERY_BACKOFF_WAIT_PATCH)) {
+        // The recovering turn's durable backoff deadline is authoritative.
+        // Wait for it here; any wake (a new message, Pause/Steer, or the
+        // session's own receipts) re-peeks, and the database decides whether
+        // the backoff still holds. The floor keeps clock skew between the
+        // workflow and the database from turning into a tight peek loop.
+        const seenWakeups = wakeups;
+        const seenInterruptionWakeups = interruptionWakeups;
+        await condition(
+          () =>
+            interruptionWakeups !== seenInterruptionWakeups ||
+            wakeups !== seenWakeups ||
+            pendingQuiescenceProofs.size > 0,
+          recoveryBackoffWaitMs(recoveryRetry.notBefore),
+        );
+        continue;
+      }
       if (signalVersion !== closeSignalVersion || pendingQuiescenceProofs.size > 0) continue;
       return;
     }
@@ -1330,18 +1408,23 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // Neither path replays model or tool side effects speculatively.
       if (!failure || failure.action === "unclaimed" || failure.action === "recovering") {
         unclaimedAttemptFailures += 1;
-        await condition(() => {
-          const current = {
-            wakeups,
-            interruptionWakeups,
-            approvalWakeups,
-            capacityWakeups,
-          };
-          return classifiedPreClaimFailure
-            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                current.wakeups !== retryWakeBaseline.wakeups;
-        }, retryDelayMs);
+        await condition(
+          () => {
+            const current = {
+              wakeups,
+              interruptionWakeups,
+              approvalWakeups,
+              capacityWakeups,
+            };
+            return classifiedPreClaimFailure
+              ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
+              : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
+                  current.wakeups !== retryWakeBaseline.wakeups;
+          },
+          failure?.action === "recovering"
+            ? (failure.continueDelayMs ?? retryDelayMs)
+            : retryDelayMs,
+        );
         return true;
       }
       unclaimedAttemptFailures = 0;

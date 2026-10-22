@@ -1389,7 +1389,30 @@ describe("workflow execution graph manifest", () => {
     ).not.toEqual([]);
   });
 
-  test("removing any one of the 32 approved caps invalidates the committed graph", async () => {
+  test("browserd gives headless and headed suites independent bounded steps", async () => {
+    const sources = await loadWorkflowExecutionSources(root);
+    const workflow = Bun.YAML.parse(sources[".github/workflows/ci.yml"]!) as {
+      jobs: Record<
+        string,
+        { "timeout-minutes": number; steps: Array<{ run?: string; "timeout-minutes"?: number }> }
+      >;
+    };
+    const job = workflow.jobs["browserd-real-e2e"]!;
+    const headless = job.steps.find((step) =>
+      step.run?.includes("bun run --cwd packages/browserd test:e2e"),
+    )!;
+    const headed = job.steps.find((step) => step.run?.includes("OPENGENI_BROWSERD_HEADED_E2E=1"))!;
+    expect(headless).toBeDefined();
+    expect(headed).toBeDefined();
+    expect(headed).not.toBe(headless);
+    expect(headless["timeout-minutes"]).toBe(6);
+    expect(headed["timeout-minutes"]).toBe(5);
+    expect(headed.run).toContain("streams a mobile headed tab continuously");
+    const stepBudget = job.steps.reduce((sum, step) => sum + (step["timeout-minutes"] ?? 0), 0);
+    expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(stepBudget + 3);
+  });
+
+  test("removing any one of the 54 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1406,7 +1429,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(32);
+    expect(capped).toHaveLength(54);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };

@@ -9,7 +9,7 @@ variable "subscription_id" {
 }
 
 variable "environment" {
-  description = "Existing OpenGeni AKS environment; production's system pool stays in its full Azure root."
+  description = "Existing Opengeni AKS environment; production's system pool stays in its full Azure root."
   type        = string
 
   validation {

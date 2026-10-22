@@ -1,4 +1,4 @@
-// P4.1 — the canonical OpenGeni desktop image, productionized from the PROVEN
+// P4.1 — the canonical Opengeni desktop image, productionized from the PROVEN
 // spike. Two layers:
 //
 //  LOCAL (default; runs when Docker is available):
@@ -162,7 +162,7 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
           'test "$(pip cache dir)" = /var/cache/pip',
           "pip install --dry-run --no-index pytest >/dev/null",
           "uv pip install --system --dry-run --offline pytest >/dev/null",
-          `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
+          `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'`,
           `python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary"'`,
           "psql --version >/dev/null",
           "uvx --version >/dev/null",

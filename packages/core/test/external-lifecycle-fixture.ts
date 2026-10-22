@@ -2,7 +2,8 @@ import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createOrganizationApiKey,
   createSession,

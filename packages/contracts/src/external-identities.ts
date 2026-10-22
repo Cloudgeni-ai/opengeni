@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
 
@@ -24,70 +25,86 @@ function opaqueText(maxBytes: number) {
 }
 const externalId = opaqueText(1024);
 const source = opaqueText(200);
-const externalSubject = z
-  .string()
-  .regex(/^external_user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/);
-const nativeSubject = z
-  .string()
-  .min(1)
-  .max(1024)
-  .regex(/^user:[^\r\n]+$(?![\s\S])/);
-export const ExternalIdentityReference = z
-  .object({
-    externalId,
-    source: source.default("default"),
-  })
-  .strict();
+const externalSubject = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .regex(
+      /^external_user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/,
+    ),
+);
+const nativeSubject = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^user:[^\r\n]+$(?![\s\S])/),
+);
+export const ExternalIdentityReference = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      externalId,
+      source: source.default("default"),
+    })
+    .strict(),
+);
 export type ExternalIdentityReference = z.infer<typeof ExternalIdentityReference>;
 
-export const AddExternalWorkspaceMemberRequest = z
-  .object({
-    identity: ExternalIdentityReference,
-    permissions: z.array(Permission).min(1).max(Permission.options.length),
-    /** Opt-in durable operation identity; unkeyed legacy requests are not cancellable. */
-    operationId: z.string().uuid().optional(),
-  })
-  .strict();
+export const AddExternalWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identity: ExternalIdentityReference,
+      permissions: z.array(Permission).min(1).max(Permission.options.length),
+      /** Opt-in durable operation identity; unkeyed legacy requests are not cancellable. */
+      operationId: z.string().uuid().optional(),
+    })
+    .strict(),
+);
 export type AddExternalWorkspaceMemberRequest = z.infer<typeof AddExternalWorkspaceMemberRequest>;
 
 /** Content-free service lookup, including identities which can no longer act. */
-export const ExternalIdentityLookup = z.discriminatedUnion("found", [
-  z.object({ found: z.literal(false) }).strict(),
-  z
-    .object({
-      found: z.literal(true),
-      subjectId: externalSubject,
-      organizationMembershipId: z.string().uuid(),
-      identityStatus: z.enum(["active", "disabled", "revoked"]),
-      identityAuthorizationRevision: z.number().int().positive().safe(),
-      membershipStatus: z.enum(["provisioning", "active", "suspended", "revoked"]),
-      membershipAuthorizationRevision: z.number().int().positive().safe(),
-    })
-    .strict(),
-]);
+export const ExternalIdentityLookup = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("found", [
+    z.object({ found: z.literal(false) }).strict(),
+    z
+      .object({
+        found: z.literal(true),
+        subjectId: externalSubject,
+        organizationMembershipId: z.string().uuid(),
+        identityStatus: z.enum(["active", "disabled", "revoked"]),
+        identityAuthorizationRevision: z.number().int().positive().safe(),
+        membershipStatus: z.enum(["provisioning", "active", "suspended", "revoked"]),
+        membershipAuthorizationRevision: z.number().int().positive().safe(),
+      })
+      .strict(),
+  ]),
+);
 export type ExternalIdentityLookup = z.infer<typeof ExternalIdentityLookup>;
 
 /** Terminal withdrawal of this external member's workspace access, also fencing
  * an exact earlier onboarding operation whether or not it has reached the API. */
-export const CancelExternalWorkspaceMemberGrantRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    cancelGrantOperationId: z.string().uuid(),
-  })
-  .strict()
-  .refine((value) => value.operationId !== value.cancelGrantOperationId, {
-    message: "Revocation and grant must use different operation identities",
-  });
+export const CancelExternalWorkspaceMemberGrantRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      cancelGrantOperationId: z.string().uuid(),
+    })
+    .strict()
+    .refine((value) => value.operationId !== value.cancelGrantOperationId, {
+      message: "Revocation and grant must use different operation identities",
+    }),
+);
 export type CancelExternalWorkspaceMemberGrantRequest = z.infer<
   typeof CancelExternalWorkspaceMemberGrantRequest
 >;
-export const CancelExternalWorkspaceMemberGrantResponse = z
-  .object({
-    removed: z.boolean(),
-    replay: z.boolean(),
-    fencedGrantOperationId: z.string().uuid(),
-  })
-  .strict();
+export const CancelExternalWorkspaceMemberGrantResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      removed: z.boolean(),
+      replay: z.boolean(),
+      fencedGrantOperationId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type CancelExternalWorkspaceMemberGrantResponse = z.infer<
   typeof CancelExternalWorkspaceMemberGrantResponse
 >;
@@ -95,191 +112,219 @@ export type CancelExternalWorkspaceMemberGrantResponse = z.infer<
 /** Replace an existing external member's permissions in one shared workspace.
  * Keyed and idempotent like a grant; narrowing forces live authority to
  * re-check but never cancels or tears down work. */
-export const UpdateExternalWorkspaceMemberRequest = z
-  .object({
-    permissions: z.array(Permission).min(1).max(Permission.options.length),
-    operationId: z.string().uuid(),
-  })
-  .strict();
+export const UpdateExternalWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      permissions: z.array(Permission).min(1).max(Permission.options.length),
+      operationId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type UpdateExternalWorkspaceMemberRequest = z.infer<
   typeof UpdateExternalWorkspaceMemberRequest
 >;
-export const UpdateExternalWorkspaceMemberResponse = z
-  .object({
-    subjectId: z.string(),
-    organizationMembershipId: z.string().uuid(),
-    permissions: z.array(Permission),
-    /** True when a previously held permission was removed. */
-    narrowed: z.boolean(),
-    replay: z.boolean(),
-  })
-  .strict();
+export const UpdateExternalWorkspaceMemberResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      subjectId: z.string(),
+      organizationMembershipId: z.string().uuid(),
+      permissions: z.array(Permission),
+      /** True when a previously held permission was removed. */
+      narrowed: z.boolean(),
+      replay: z.boolean(),
+    })
+    .strict(),
+);
 export type UpdateExternalWorkspaceMemberResponse = z.infer<
   typeof UpdateExternalWorkspaceMemberResponse
 >;
 
 /** Uses the organization membership ID returned by lazy identity admission.
  * Reactivation restores admission only, not revoked work or workspace grants. */
-export const UpdateExternalIdentityMembershipRequest = z
-  .object({
-    kind: z.enum(["suspend", "reactivate", "offboard"]),
-    expectedAuthorizationRevision: z.number().int().positive().safe(),
-    operationId: z.string().uuid(),
-    reason: z.string().max(512).optional(),
-  })
-  .strict();
+export const UpdateExternalIdentityMembershipRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.enum(["suspend", "reactivate", "offboard"]),
+      expectedAuthorizationRevision: z.number().int().positive().safe(),
+      operationId: z.string().uuid(),
+      reason: z.string().max(512).optional(),
+    })
+    .strict(),
+);
 export type UpdateExternalIdentityMembershipRequest = z.infer<
   typeof UpdateExternalIdentityMembershipRequest
 >;
 
-export const ExternalActorSelection = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("external"), identity: ExternalIdentityReference }).strict(),
-  z
-    .object({
-      mode: z.literal("linked_native"),
-      identity: ExternalIdentityReference,
-      linkId: z.string().uuid(),
-      expectedLinkRevision: z.number().int().positive().safe(),
-    })
-    .strict(),
-]);
+export const ExternalActorSelection = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("external"), identity: ExternalIdentityReference }).strict(),
+    z
+      .object({
+        mode: z.literal("linked_native"),
+        identity: ExternalIdentityReference,
+        linkId: z.string().uuid(),
+        expectedLinkRevision: z.number().int().positive().safe(),
+      })
+      .strict(),
+  ]),
+);
 export type ExternalActorSelection = z.infer<typeof ExternalActorSelection>;
 
-export const ExternalIdentity = z
-  .object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    source,
-    externalId,
-    subjectId: externalSubject,
-    organizationMembershipId: z.string().uuid(),
-    personalWorkspaceId: z.string().uuid(),
-    status: z.enum(["active", "disabled", "revoked"]),
-    authorizationRevision: z.number().int().positive().safe(),
-  })
-  .strict();
+export const ExternalIdentity = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
+      source,
+      externalId,
+      subjectId: externalSubject,
+      organizationMembershipId: z.string().uuid(),
+      personalWorkspaceId: z.string().uuid(),
+      status: z.enum(["active", "disabled", "revoked"]),
+      authorizationRevision: z.number().int().positive().safe(),
+    })
+    .strict(),
+);
 export type ExternalIdentity = z.infer<typeof ExternalIdentity>;
 
 // Audit attribution, not authentication. Only the canonical access resolver
 // may establish provenance; accepting this JSON from a browser proves nothing.
-export const ExternalActorAttribution = z
-  .object({
-    accountId: z.string().uuid(),
-    authenticatingApiKeyId: z.string().uuid(),
-    externalIdentityId: z.string().uuid(),
-    externalSubjectId: externalSubject,
-    externalAuthorizationRevision: z.number().int().positive().safe(),
-    effectiveSubjectId: z.string().min(1).max(1024),
-    actingMode: z.enum(["external", "linked_native"]),
-    linkId: z.string().uuid().optional(),
-    linkRevision: z.number().int().positive().safe().optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.actingMode === "external") {
-      if (
-        value.effectiveSubjectId !== value.externalSubjectId ||
-        value.linkId !== undefined ||
-        value.linkRevision !== undefined
+export const ExternalActorAttribution = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      accountId: z.string().uuid(),
+      authenticatingApiKeyId: z.string().uuid(),
+      externalIdentityId: z.string().uuid(),
+      externalSubjectId: externalSubject,
+      externalAuthorizationRevision: z.number().int().positive().safe(),
+      effectiveSubjectId: z.string().min(1).max(1024),
+      actingMode: z.enum(["external", "linked_native"]),
+      linkId: z.string().uuid().optional(),
+      linkRevision: z.number().int().positive().safe().optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.actingMode === "external") {
+        if (
+          value.effectiveSubjectId !== value.externalSubjectId ||
+          value.linkId !== undefined ||
+          value.linkRevision !== undefined
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "External mode cannot delegate native identity",
+          });
+        }
+      } else if (
+        !value.linkId ||
+        !value.linkRevision ||
+        !nativeSubject.safeParse(value.effectiveSubjectId).success
       ) {
         context.addIssue({
           code: "custom",
-          message: "External mode cannot delegate native identity",
+          message: "Linked mode requires exact native delegation provenance",
         });
       }
-    } else if (
-      !value.linkId ||
-      !value.linkRevision ||
-      !nativeSubject.safeParse(value.effectiveSubjectId).success
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "Linked mode requires exact native delegation provenance",
-      });
-    }
-  });
+    }),
+);
 export type ExternalActorAttribution = z.infer<typeof ExternalActorAttribution>;
 
 /** Server-signed/encrypted continuation data, never sufficient live authority. */
-export const ExternalActorContinuation = z
-  .object({
-    identity: ExternalIdentityReference,
-    actor: ExternalActorAttribution,
-  })
-  .strict();
+export const ExternalActorContinuation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identity: ExternalIdentityReference,
+      actor: ExternalActorAttribution,
+    })
+    .strict(),
+);
 export type ExternalActorContinuation = z.infer<typeof ExternalActorContinuation>;
 
-export const ExternalIdentityLink = z
-  .object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    externalIdentityId: z.string().uuid(),
-    externalIdentity: ExternalIdentityReference.optional(),
-    nativeSubjectId: nativeSubject.nullable(),
-    status: z.enum(["pending", "active", "revoked", "expired"]),
-    revision: z.number().int().positive().safe(),
-    permissions: z.array(Permission).max(Permission.options.length),
-    expiresAt: z.string().datetime({ offset: true }).nullable(),
-  })
-  .strict()
-  .refine(
-    (value) => value.status !== "active" || value.nativeSubjectId !== null,
-    "An active link requires a confirmed native identity",
-  );
+export const ExternalIdentityLink = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
+      externalIdentityId: z.string().uuid(),
+      externalIdentity: ExternalIdentityReference.optional(),
+      nativeSubjectId: nativeSubject.nullable(),
+      status: z.enum(["pending", "active", "revoked", "expired"]),
+      revision: z.number().int().positive().safe(),
+      permissions: z.array(Permission).max(Permission.options.length),
+      expiresAt: z.string().datetime({ offset: true }).nullable(),
+    })
+    .strict()
+    .refine(
+      (value) => value.status !== "active" || value.nativeSubjectId !== null,
+      "An active link requires a confirmed native identity",
+    ),
+);
 export type ExternalIdentityLink = z.infer<typeof ExternalIdentityLink>;
 
-export const ExternalIdentityLinkPage = z
-  .object({
-    links: z.array(ExternalIdentityLink).max(50),
-    nextCursor: z.string().uuid().nullable(),
-  })
-  .strict();
+export const ExternalIdentityLinkPage = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      links: z.array(ExternalIdentityLink).max(50),
+      nextCursor: z.string().uuid().nullable(),
+    })
+    .strict(),
+);
 export type ExternalIdentityLinkPage = z.infer<typeof ExternalIdentityLinkPage>;
 
 /** A native confirmation may narrow this request, never broaden it. The
  * challenge is delivered once to the host and is not an authentication token. */
-export const BeginExternalIdentityLinkRequest = z
-  .object({
-    permissions: z.array(Permission).min(1).max(Permission.options.length),
-    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
-  })
-  .strict();
+export const BeginExternalIdentityLinkRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      permissions: z.array(Permission).min(1).max(Permission.options.length),
+      expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+    })
+    .strict(),
+);
 export type BeginExternalIdentityLinkRequest = z.input<typeof BeginExternalIdentityLinkRequest>;
-export const ConfirmExternalIdentityLinkRequest = z
-  .object({
-    challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-    expectedRevision: z.number().int().positive().safe(),
-    permissions: z.array(Permission).min(1).max(Permission.options.length),
-  })
-  .strict();
+export const ConfirmExternalIdentityLinkRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      expectedRevision: z.number().int().positive().safe(),
+      permissions: z.array(Permission).min(1).max(Permission.options.length),
+    })
+    .strict(),
+);
 export type ConfirmExternalIdentityLinkRequest = z.infer<typeof ConfirmExternalIdentityLinkRequest>;
-export const BeginExternalIdentityLinkResponse = z
-  .object({
-    link: ExternalIdentityLink,
-    challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-    confirmBefore: z.string().datetime({ offset: true }),
-  })
-  .strict();
+export const BeginExternalIdentityLinkResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      link: ExternalIdentityLink,
+      challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      confirmBefore: z.string().datetime({ offset: true }),
+    })
+    .strict(),
+);
 export type BeginExternalIdentityLinkResponse = z.infer<typeof BeginExternalIdentityLinkResponse>;
-export const ExternalIdentityLinkPreview = z
-  .object({
-    link: ExternalIdentityLink,
-    externalIdentity: ExternalIdentityReference,
-    nativeSubjectId: nativeSubject,
-    organizationId: z.string().uuid(),
-  })
-  .strict();
+export const ExternalIdentityLinkPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      link: ExternalIdentityLink,
+      externalIdentity: ExternalIdentityReference,
+      nativeSubjectId: nativeSubject,
+      organizationId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type ExternalIdentityLinkPreview = z.infer<typeof ExternalIdentityLinkPreview>;
 
 /** Immutable accepted-work restriction, not a browser credential. Original key
  * identity remains audit-only; durable use validates the live link and members. */
-export const ExternalLinkWorkSnapshot = z
-  .object({
-    identity: ExternalIdentityReference,
-    actor: ExternalActorAttribution.refine((value) => value.actingMode === "linked_native"),
-    permissions: z.array(Permission).max(Permission.options.length),
-    /** Absent on historical snapshots, whose legacy semantics are preserved. */
-    permissionMode: z.enum(["legacy", "explicit"]).optional(),
-  })
-  .strict();
+export const ExternalLinkWorkSnapshot = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identity: ExternalIdentityReference,
+      actor: ExternalActorAttribution.refine((value) => value.actingMode === "linked_native"),
+      permissions: z.array(Permission).max(Permission.options.length),
+      /** Absent on historical snapshots, whose legacy semantics are preserved. */
+      permissionMode: z.enum(["legacy", "explicit"]).optional(),
+    })
+    .strict(),
+);
 export type ExternalLinkWorkSnapshot = z.infer<typeof ExternalLinkWorkSnapshot>;

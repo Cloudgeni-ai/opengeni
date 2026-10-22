@@ -18,6 +18,7 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  defaultDatabasePreparedStatements,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   type Database,
@@ -25,14 +26,18 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
+  installComputeAgentPlane,
   resolveCatalogSettings,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "@opengeni/core";
 import {
   Connection,
@@ -46,10 +51,14 @@ import { createAppComposition, type DocumentIndexClient, type SessionWorkflowCli
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
+import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
+import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
@@ -59,15 +68,22 @@ import {
 import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { OfficeWorkbookWebSocketTransport } from "./office-workbooks";
+import { officeWorkbookRelayFor } from "./routes/office-workbooks";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
 import {
+  startComputeAgentGateway,
+  type ComputeGatewayHandle,
+} from "./sandbox/compute-gateway-boot";
+import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
 import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
+import { installApiShutdownHandlers } from "./shutdown";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -172,9 +188,13 @@ export async function createTemporalWorkflowClient(
       });
     },
     requestSessionWorkflowWakeDispatch: async () => {
-      await temporal.schedule
-        .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID)
-        .trigger(ScheduleOverlapPolicy.BUFFER_ONE);
+      await temporal.workflow.signalWithStart(SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE, {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId: SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [],
+        signal: SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
+      });
     },
     signalCodexCapacity: async ({
       accountId,
@@ -330,8 +350,17 @@ export async function startApi(
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
     max: settings.apiDatabasePoolMax,
+    ...(settings.databaseNotificationUrl
+      ? { notificationDatabaseUrl: settings.databaseNotificationUrl }
+      : settings.databasePreparedStatements !== false &&
+          defaultDatabasePreparedStatements(settings.databaseUrl)
+        ? { notificationDatabaseUrl: settings.databaseUrl }
+        : {}),
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...(settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements }),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
@@ -371,7 +400,7 @@ export async function startApi(
       () => resolveCatalogSettings(dbClient.db, settings),
       { ...retryOptions, onRetry },
     );
-    observability.info("OpenGeni model catalog resolved", {
+    observability.info("Opengeni model catalog resolved", {
       catalogSource: resolvedCatalog.source,
       catalogVersion: resolvedCatalog.version,
     });
@@ -404,8 +433,10 @@ export async function startApi(
   }
   if (!bus || !workflowClient) {
     await dbClient.close();
-    throw new Error("OpenGeni API startup dependencies were not initialized");
+    throw new Error("Opengeni API startup dependencies were not initialized");
   }
+  // Compute sandboxes reach their agent over this process's bus and database.
+  installComputeAgentPlane({ db: dbClient.db, bus, settings });
   const objectStorage = createObjectStorage(settings);
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
   if (objectStorage && isArtifactRuntimeConfigured()) {
@@ -459,7 +490,33 @@ export async function startApi(
   const localBrowserBoundary = createLocalBrowserBoundary(settings, {
     warn: (message, attributes) => observability.warn(message, attributes),
   });
-  const webSocketUpgrades = [interactionFrameProxies, artifactWebSockets];
+  // The compute agent gateway: hosts of Opengeni compute link here to carry
+  // their sandboxes' agents (sandbox/compute-gateway.ts). Off unless configured.
+  let computeGateway: ComputeGatewayHandle | undefined;
+  try {
+    computeGateway = await startComputeAgentGateway({
+      db: dbClient.db,
+      settings,
+      natsAuth: controlPlaneAuth
+        ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+        : undefined,
+      maxWebSocketMessageBytes: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
+      observability,
+    });
+  } catch {
+    // Other planes keep working; compute sandboxes stay unreachable until it is up.
+    observability.error("Opengeni compute agent gateway failed to start", {
+      errorClass: "ComputeAgentGatewayError",
+      errorCode: "compute_gateway_start_failed",
+      origin: "api",
+    });
+  }
+  const webSocketUpgrades = [
+    interactionFrameProxies,
+    artifactWebSockets,
+    new OfficeWorkbookWebSocketTransport(officeWorkbookRelayFor(routeDeps)),
+    ...(computeGateway ? [computeGateway.gateway] : []),
+  ];
   const server = Bun.serve<ApiWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
@@ -484,6 +541,8 @@ export async function startApi(
       open: (socket) => socket.data.attach(socket),
       message: (socket, message) => socket.data.receive(message),
       close: (socket) => socket.data.transportClosed(),
+      ping: (socket) => socket.data.heard?.(),
+      pong: (socket) => socket.data.heard?.(),
     },
   });
   const metricsServer = startApiMetricsListener(settings, observability);
@@ -496,6 +555,11 @@ export async function startApi(
     settings,
     observability,
   });
+  const stopNativePushDispatchPump = startNativePushDispatchPump({
+    db: dbClient.db,
+    settings,
+    observability,
+  });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     cleanupConnectorAuthorization: async (claim) =>
@@ -503,6 +567,12 @@ export async function startApi(
     deleteSchedule: async (temporalScheduleId) => {
       await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
     },
+    observability,
+  });
+  const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
+    db: dbClient.db,
+    sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    bus,
     observability,
   });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
@@ -519,19 +589,28 @@ export async function startApi(
   // cannot connect — graceful). It runs on its OWN connection (the callout auth
   // user), separate from the privileged control-plane bus.
   let authCalloutResponder: ResponderConnection | undefined;
-  if (settings.sandboxSelfhostedEnabled) {
+  // Compute sandboxes run the same agent, so their heartbeats and Hellos are
+  // ingested whenever the compute gateway serves them.
+  if (settings.sandboxSelfhostedEnabled || computeGateway) {
     stopMetricsIngestion = startMetricsIngestion({
       db: dbClient.db,
       bus,
       observability,
+      agentUpdates: createAutomaticAgentUpdater({
+        db: dbClient.db,
+        bus,
+        settings,
+        observability,
+      }),
     });
     stopHelloIngestion = startHelloIngestion({
       db: dbClient.db,
       bus,
       observability,
     });
-    observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
-
+    observability.info("Opengeni machine-metrics + hello ingestion consumers started", {});
+  }
+  if (settings.sandboxSelfhostedEnabled) {
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
       try {
@@ -539,10 +618,11 @@ export async function startApi(
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch {
+      } catch (error) {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
-        observability.error("OpenGeni NATS auth-callout responder failed to start", {
+        observability.error("Opengeni NATS auth-callout responder failed to start", {
+          error,
           errorClass: "NatsAuthCalloutOperationError",
           errorCode: "nats_auth_callout_start_failed",
           origin: "api",
@@ -550,12 +630,12 @@ export async function startApi(
       }
     } else {
       observability.warn(
-        "OpenGeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
+        "Opengeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
         {},
       );
     }
   }
-  observability.info("OpenGeni API listening", {
+  observability.info("Opengeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
     ...(metricsServer ? { metricsPort: settings.apiMetricsPort } : {}),
@@ -564,18 +644,24 @@ export async function startApi(
     server,
     close: async () => {
       server.stop(true);
+      // Start private CLI session cleanup even if another service's drain stalls.
+      const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopScheduledTaskLifecyclePump();
       await stopWorkspaceWebhookDispatchPump();
+      await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
+        vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
+        computeGateway?.close(),
         bus.close(),
         workflowClient.close(),
         dbClient.close(),
@@ -590,7 +676,18 @@ if (import.meta.main) {
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
-    await startApi({ settings, observability });
+    // `kill -USR2 <pid>` samples the API for 30 s and logs where the event loop was busy.
+    installCpuSamplingSignal({
+      log: (message, attributes) => observability.info(message, attributes),
+    });
+    const api = await startApi({ settings, observability });
+    installApiShutdownHandlers({
+      close: api.close,
+      onFailure: () =>
+        observability.warn("Opengeni API shutdown did not finish cleanly", {
+          errorCode: "api_shutdown_failed",
+        }),
+    });
     fatalBoundary.markRunning();
   } catch (error) {
     await fatalBoundary.reportStartupFailure(error);
@@ -662,7 +759,7 @@ function temporalIntervalSpec(
   // Temporal interval schedules match Epoch + (n * every) + offset. Its
   // top-level startAt only filters matching times before that boundary, so it
   // does not itself anchor the cadence. Derive the phase from startAt to make
-  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // the stored Opengeni timestamp the first interval boundary rather than the
   // next epoch-aligned match.
   const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
   const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());

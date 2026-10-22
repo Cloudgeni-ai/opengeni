@@ -8,8 +8,8 @@
 //! id, which is its exact CRDT generation.
 
 use opengeni_artifact_kernel::{
-    Cell, CellCoord, CellRange, CellValue, DateValue, FormulaError, Number, StableId, ValueError,
-    Workbook,
+    Cell, CellCoord, CellRange, CellValue, DateValue, DimensionAxis, FormulaError, Number,
+    StableId, ValueError, Workbook, DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT,
 };
 
 use super::{checksum, read_u16, read_u32, read_u64, BindingError, MAX_STRING_BYTES};
@@ -31,6 +31,13 @@ const VIEWPORT_QUERY_PAYLOAD_BYTES: usize = 16 + 4 + 4 + 4 + 4;
 const VIEWPORT_RESPONSE_PREFIX_BYTES: usize = 16 + 16 + 4 + 4 + 4 + 4;
 const METADATA_RESPONSE_PREFIX_BYTES: usize = 4;
 const RESPONSE_FLAG_GENERATIONS: u16 = 1;
+const RESPONSE_FLAG_DIMENSIONS: u16 = 2;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetDimensions {
+    pub row_heights: Vec<(u32, u32)>,
+    pub column_widths: Vec<(u32, u32)>,
+}
 
 /// The query kind encoded in OGAKQ001 and echoed in OGAKV001.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +83,7 @@ pub struct ViewportCell {
 /// A complete, non-truncated viewport response.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewportResponse {
+    pub dimensions: Option<SheetDimensions>,
     pub revision: u64,
     pub sheet_id: StableId,
     /// The CRDT creation-operation id. `None` for non-collaborative sessions.
@@ -89,6 +97,7 @@ pub struct ViewportResponse {
 /// Authoritative metadata currently modeled by the workbook kernel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SheetMetadata {
+    pub dimensions: Option<SheetDimensions>,
     pub sheet_id: StableId,
     /// The CRDT creation-operation id. `None` for non-collaborative sessions.
     pub generation: Option<StableId>,
@@ -332,6 +341,11 @@ pub(crate) fn query_workbook(
             let cells = collect_viewport_cells(sheet, query, max_cells)?;
             encode_response(
                 ArtifactQueryResponse::Viewport(ViewportResponse {
+                    dimensions: Some(collect_dimensions(
+                        sheet,
+                        Some(query),
+                        effective_max_bytes(query.max_bytes),
+                    )?),
                     revision: workbook.revision(),
                     sheet_id: query.sheet_id,
                     generation,
@@ -355,6 +369,7 @@ pub(crate) fn query_workbook(
                 .try_reserve_exact(workbook.sheet_count())
                 .map_err(|_| BindingError::Limit("workbook metadata"))?;
             let mut scanned_cells = 0usize;
+            let mut dimension_budget = effective_max_bytes(query.max_bytes);
             for sheet in workbook.sheets() {
                 let generation = if include_generations {
                     Some(
@@ -387,7 +402,14 @@ pub(crate) fn query_workbook(
                         None => coord,
                     });
                 }
+                let dimensions = collect_dimensions(sheet, None, dimension_budget)?;
+                dimension_budget = dimension_budget
+                    .checked_sub(
+                        16 + (dimensions.row_heights.len() + dimensions.column_widths.len()) * 8,
+                    )
+                    .ok_or(BindingError::Limit("dimension projection"))?;
                 sheets.push(SheetMetadata {
+                    dimensions: Some(dimensions),
                     sheet_id: sheet.id(),
                     generation,
                     name: sheet.name().to_owned(),
@@ -399,7 +421,7 @@ pub(crate) fn query_workbook(
             encode_response(
                 ArtifactQueryResponse::WorkbookMetadata(WorkbookMetadataResponse {
                     revision: workbook.revision(),
-                    modeled_features: 0,
+                    modeled_features: 1,
                     sheets,
                 }),
                 effective_max_bytes(query.max_bytes),
@@ -432,8 +454,8 @@ fn collect_viewport_cells(
             }
         }
     } else {
-        let end_row = query.start.row + query.rows - 1;
-        let end_column = query.start.column + query.columns - 1;
+        let end_row = query.start.row + (query.rows - 1);
+        let end_column = query.start.column + (query.columns - 1);
         for (coord, cell) in sheet.cells() {
             if coord.row >= query.start.row
                 && coord.row <= end_row
@@ -452,6 +474,45 @@ fn collect_viewport_cells(
         cells.sort_unstable_by_key(|cell| (cell.relative_row, cell.relative_column));
     }
     Ok(cells)
+}
+
+fn collect_dimensions(
+    sheet: &opengeni_artifact_kernel::Sheet,
+    viewport: Option<ViewportQuery>,
+    maximum: usize,
+) -> Result<SheetDimensions, BindingError> {
+    let mut axes = [Vec::new(), Vec::new()];
+    let mut count = 0usize;
+    for (axis, entries) in [DimensionAxis::Row, DimensionAxis::Column]
+        .into_iter()
+        .zip(axes.iter_mut())
+    {
+        let (start, end) = match viewport {
+            Some(query) => {
+                let (start, length) = if axis == DimensionAxis::Row {
+                    (query.start.row, query.rows)
+                } else {
+                    (query.start.column, query.columns)
+                };
+                // Viewport geometry was checked before collection, including
+                // the inclusive end at u32::MAX.
+                (start, start + (length - 1))
+            }
+            None => (0, u32::MAX),
+        };
+        for (index, pixels) in sheet.dimension_range(axis, start, end) {
+            count += 1;
+            if count > maximum / 8 {
+                return Err(BindingError::Limit("dimension projection"));
+            }
+            entries.push((index, pixels));
+        }
+    }
+    let [row_heights, column_widths] = axes;
+    Ok(SheetDimensions {
+        row_heights,
+        column_widths,
+    })
 }
 
 fn push_viewport_cell(
@@ -479,8 +540,12 @@ fn encode_response(
 ) -> Result<Vec<u8>, BindingError> {
     let (kind, revision, flags, item_count, payload) = match response {
         ArtifactQueryResponse::Viewport(response) => {
-            let flags = if response.generation.is_some() {
+            let flags = (if response.generation.is_some() {
                 RESPONSE_FLAG_GENERATIONS
+            } else {
+                0
+            }) | if response.dimensions.is_some() {
+                RESPONSE_FLAG_DIMENSIONS
             } else {
                 0
             };
@@ -492,6 +557,9 @@ fn encode_response(
             writer.u32(response.start.column)?;
             writer.u32(response.rows)?;
             writer.u32(response.columns)?;
+            if let Some(dimensions) = &response.dimensions {
+                writer.dimensions(dimensions)?;
+            }
             for cell in &response.cells {
                 writer.u32(cell.relative_row)?;
                 writer.u32(cell.relative_column)?;
@@ -508,7 +576,7 @@ fn encode_response(
             )
         }
         ArtifactQueryResponse::WorkbookMetadata(response) => {
-            if response.modeled_features != 0 {
+            if response.modeled_features & !1 != 0 {
                 return Err(BindingError::NonCanonical(
                     "unknown workbook metadata feature bits are set",
                 ));
@@ -527,8 +595,12 @@ fn encode_response(
                     "workbook metadata generations must be uniformly present",
                 ));
             }
-            let flags = if has_generations {
+            let flags = (if has_generations {
                 RESPONSE_FLAG_GENERATIONS
+            } else {
+                0
+            }) | if response.modeled_features & 1 != 0 {
+                RESPONSE_FLAG_DIMENSIONS
             } else {
                 0
             };
@@ -548,6 +620,16 @@ fn encode_response(
                         writer.u32(bounds.end.column)?;
                     }
                     None => writer.u8(0)?,
+                }
+                if response.modeled_features & 1 != 0 {
+                    writer.dimensions(
+                        sheet
+                            .dimensions
+                            .as_ref()
+                            .ok_or(BindingError::NonCanonical("missing dimensions"))?,
+                    )?;
+                } else if sheet.dimensions.is_some() {
+                    return Err(BindingError::NonCanonical("unmodeled dimensions"));
                 }
             }
             let count = u32::try_from(response.sheets.len())
@@ -600,7 +682,9 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
         return Err(BindingError::UnsupportedVersion(version));
     }
     let flags = read_u16(&bytes[10..12])?;
-    if flags & !RESPONSE_FLAG_GENERATIONS != 0 || bytes[13..16] != [0; 3] {
+    if flags & !(RESPONSE_FLAG_GENERATIONS | RESPONSE_FLAG_DIMENSIONS) != 0
+        || bytes[13..16] != [0; 3]
+    {
         return Err(BindingError::NonCanonical(
             "unknown query response flags are set",
         ));
@@ -652,6 +736,11 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
             let start = CellCoord::new(reader.u32()?, reader.u32()?);
             let rows = reader.u32()?;
             let columns = reader.u32()?;
+            let dimensions = if flags & RESPONSE_FLAG_DIMENSIONS != 0 {
+                Some(reader.dimensions()?)
+            } else {
+                None
+            };
             validate_viewport_query(ViewportQuery {
                 sheet_id,
                 start,
@@ -660,6 +749,19 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                 max_cells: u32::try_from(item_count.max(1)).unwrap_or(u32::MAX),
                 max_bytes: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
             })?;
+            if let Some(dimensions) = &dimensions {
+                if dimensions
+                    .row_heights
+                    .iter()
+                    .any(|(index, _)| *index < start.row || *index - start.row >= rows)
+                    || dimensions
+                        .column_widths
+                        .iter()
+                        .any(|(index, _)| *index < start.column || *index - start.column >= columns)
+                {
+                    return Err(BindingError::NonCanonical("dimensions outside viewport"));
+                }
+            }
             let mut cells = Vec::new();
             cells
                 .try_reserve_exact(item_count)
@@ -694,6 +796,7 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                 });
             }
             ArtifactQueryResponse::Viewport(ViewportResponse {
+                dimensions,
                 revision,
                 sheet_id,
                 generation,
@@ -722,7 +825,9 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                 return Err(BindingError::Truncated);
             }
             let modeled_features = reader.u32()?;
-            if modeled_features != 0 {
+            if modeled_features & !1 != 0
+                || ((modeled_features & 1 != 0) != (flags & RESPONSE_FLAG_DIMENSIONS != 0))
+            {
                 return Err(BindingError::NonCanonical(
                     "unknown workbook metadata feature bits are set",
                 ));
@@ -763,6 +868,11 @@ pub fn decode_query_response(bytes: &[u8]) -> Result<ArtifactQueryResponse, Bind
                     tag => return Err(BindingError::InvalidTag(tag)),
                 };
                 sheets.push(SheetMetadata {
+                    dimensions: if flags & RESPONSE_FLAG_DIMENSIONS != 0 {
+                        Some(reader.dimensions()?)
+                    } else {
+                        None
+                    },
                     sheet_id,
                     generation,
                     name,
@@ -827,6 +937,29 @@ struct Writer {
 }
 
 impl Writer {
+    fn dimensions(&mut self, dimensions: &SheetDimensions) -> Result<(), BindingError> {
+        self.u32(DEFAULT_ROW_HEIGHT)?;
+        self.u32(DEFAULT_COLUMN_WIDTH)?;
+        for (axis, entries) in [
+            (DimensionAxis::Row, &dimensions.row_heights),
+            (DimensionAxis::Column, &dimensions.column_widths),
+        ] {
+            self.u32(u32::try_from(entries.len()).map_err(|_| BindingError::Limit("dimensions"))?)?;
+            let mut previous = None;
+            for (index, pixels) in entries {
+                if previous.is_some_and(|previous| *index <= previous)
+                    || !axis.valid_pixels(Some(*pixels))
+                    || *pixels == axis.default_pixels()
+                {
+                    return Err(BindingError::NonCanonical("invalid dimensions"));
+                }
+                previous = Some(*index);
+                self.u32(*index)?;
+                self.u32(*pixels)?;
+            }
+        }
+        Ok(())
+    }
     fn new(maximum: usize) -> Self {
         Self {
             bytes: Vec::new(),
@@ -978,6 +1111,43 @@ impl<'a> Reader<'a> {
         read_u32(self.take(4)?)
     }
 
+    fn dimensions(&mut self) -> Result<SheetDimensions, BindingError> {
+        if self.u32()? != DEFAULT_ROW_HEIGHT || self.u32()? != DEFAULT_COLUMN_WIDTH {
+            return Err(BindingError::NonCanonical("invalid dimension defaults"));
+        }
+        let mut axes = [Vec::new(), Vec::new()];
+        for (axis, entries) in [DimensionAxis::Row, DimensionAxis::Column]
+            .into_iter()
+            .zip(axes.iter_mut())
+        {
+            let count = self.u32()? as usize;
+            if count > self.bytes.len().saturating_sub(self.offset) / 8 {
+                return Err(BindingError::Truncated);
+            }
+            entries
+                .try_reserve_exact(count)
+                .map_err(|_| BindingError::Limit("dimensions"))?;
+            let mut previous = None;
+            for _ in 0..count {
+                let index = self.u32()?;
+                let pixels = self.u32()?;
+                if previous.is_some_and(|previous| index <= previous)
+                    || !axis.valid_pixels(Some(pixels))
+                    || pixels == axis.default_pixels()
+                {
+                    return Err(BindingError::NonCanonical("invalid dimensions"));
+                }
+                previous = Some(index);
+                entries.push((index, pixels));
+            }
+        }
+        let [row_heights, column_widths] = axes;
+        Ok(SheetDimensions {
+            row_heights,
+            column_widths,
+        })
+    }
+
     fn u64(&mut self) -> Result<u64, BindingError> {
         read_u64(self.take(8)?)
     }
@@ -1084,6 +1254,133 @@ mod tests {
             .unwrap_or_else(|| panic!("fixture field {key}"))
     }
 
+    #[test]
+    fn dimension_projection_matches_typescript_and_filters_viewport_axes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../contracts/test/fixtures/spreadsheet-artifact-dimensions.json"
+        ))
+        .unwrap();
+        let sheet_id = StableId::from_parts(1, 2);
+        let generation = StableId::from_parts(3, 4);
+        let mut workbook = Workbook::new(55).unwrap();
+        workbook
+            .apply_batch(&AtomicBatch::from_commands(vec![Command::CreateSheet {
+                id: sheet_id,
+                name: "Data".into(),
+            }]))
+            .unwrap();
+        for (axis, index, pixels) in [
+            (DimensionAxis::Row, 3, 48),
+            (DimensionAxis::Column, 5, 180),
+            (DimensionAxis::Row, 100, 64),
+        ] {
+            workbook
+                .apply_batch(&AtomicBatch::from_commands(vec![Command::SetDimension {
+                    sheet_id,
+                    axis,
+                    index,
+                    pixels: Some(pixels),
+                }]))
+                .unwrap();
+        }
+        let query = encode_viewport_query(ViewportQuery {
+            sheet_id,
+            start: CellCoord::new(3, 5),
+            rows: 1,
+            columns: 1,
+            max_cells: 1,
+            max_bytes: 1024,
+        })
+        .unwrap();
+        let response = query_workbook(&workbook, &query, true, |_| Some(generation)).unwrap();
+        assert_eq!(hex(&response), fixture_str(&fixture, "viewportHex"));
+        let ArtifactQueryResponse::Viewport(viewport) = decode_query_response(&response).unwrap()
+        else {
+            panic!("viewport")
+        };
+        assert_eq!(viewport.dimensions.unwrap().row_heights, vec![(3, 48)]);
+        let metadata = encode_workbook_metadata_query(WorkbookMetadataQuery {
+            max_sheets: 1,
+            max_bytes: 1024,
+        })
+        .unwrap();
+        let ArtifactQueryResponse::WorkbookMetadata(metadata) = decode_query_response(
+            &query_workbook(&workbook, &metadata, true, |_| Some(generation)).unwrap(),
+        )
+        .unwrap() else {
+            panic!("metadata")
+        };
+        assert_eq!(metadata.modeled_features, 1);
+        assert_eq!(metadata.sheets[0].used_bounds, None);
+        assert_eq!(
+            metadata.sheets[0].dimensions.as_ref().unwrap().row_heights,
+            vec![(3, 48), (100, 64)]
+        );
+    }
+
+    #[test]
+    fn dimension_ranges_exclude_large_offscreen_sets_and_include_terminal_indices() {
+        let sheet_id = StableId::from_parts(56, 2);
+        let mut workbook = Workbook::new(56).unwrap();
+        let mut commands = vec![Command::CreateSheet {
+            id: sheet_id,
+            name: "Sparse dimensions".into(),
+        }];
+        commands.extend((100..100_100).map(|index| Command::SetDimension {
+            sheet_id,
+            axis: DimensionAxis::Row,
+            index,
+            pixels: Some(48),
+        }));
+        commands.extend([
+            Command::SetDimension {
+                sheet_id,
+                axis: DimensionAxis::Row,
+                index: u32::MAX,
+                pixels: Some(64),
+            },
+            Command::SetDimension {
+                sheet_id,
+                axis: DimensionAxis::Column,
+                index: u32::MAX,
+                pixels: Some(180),
+            },
+        ]);
+        workbook
+            .apply_batch(&AtomicBatch::from_commands(commands))
+            .unwrap();
+        let sheet = workbook.sheet(sheet_id).unwrap();
+        assert_eq!(sheet.dimension_range(DimensionAxis::Row, 0, 0).count(), 0);
+        assert_eq!(
+            sheet.dimension_range(DimensionAxis::Row, 100, 100).count(),
+            1
+        );
+        for (start, expected_rows, expected_columns) in [
+            (0, vec![], vec![]),
+            (u32::MAX, vec![(u32::MAX, 64)], vec![(u32::MAX, 180)]),
+        ] {
+            let query = encode_viewport_query(ViewportQuery {
+                sheet_id,
+                start: CellCoord::new(start, start),
+                rows: 1,
+                columns: 1,
+                max_cells: 1,
+                max_bytes: 1024,
+            })
+            .unwrap();
+            let response = query_workbook(&workbook, &query, false, |_| None).unwrap();
+            let ArtifactQueryResponse::Viewport(viewport) =
+                decode_query_response(&response).unwrap()
+            else {
+                panic!("viewport")
+            };
+            let dimensions = viewport.dimensions.unwrap();
+            assert_eq!(dimensions.row_heights, expected_rows);
+            assert_eq!(dimensions.column_widths, expected_columns);
+            assert!(viewport.cells.is_empty());
+        }
+    }
+
     fn seeded_workbook() -> (Workbook, StableId) {
         let namespace = 0x5151;
         let sheet_id = StableId::from_parts(namespace, 9);
@@ -1167,7 +1464,7 @@ mod tests {
         else {
             panic!("metadata response")
         };
-        assert_eq!(response.modeled_features, 0);
+        assert_eq!(response.modeled_features, 1);
         assert_eq!(response.sheets.len(), 1);
         assert_eq!(response.sheets[0].sheet_id, sheet_id);
         assert_eq!(response.sheets[0].generation, Some(generation));
@@ -1286,7 +1583,7 @@ mod tests {
 
         let mut empty_sparse_cell = response;
         // Common header + viewport prefix + relative coordinates + formula tag.
-        empty_sparse_cell[RESPONSE_HEADER_BYTES + VIEWPORT_RESPONSE_PREFIX_BYTES + 9] = 0;
+        empty_sparse_cell[RESPONSE_HEADER_BYTES + VIEWPORT_RESPONSE_PREFIX_BYTES + 16 + 9] = 0;
         rewrite_checksum(&mut empty_sparse_cell);
         assert!(matches!(
             decode_query_response(&empty_sparse_cell),
@@ -1350,6 +1647,33 @@ mod tests {
             query_workbook(&workbook, &viewport, true, |_| Some(generation)).unwrap();
         let metadata_response =
             query_workbook(&workbook, &metadata, true, |_| Some(generation)).unwrap();
+        // Preserve the old private projection shape byte-for-byte. New live
+        // responses explicitly advertise dimensions; these are not a second
+        // model reader or a durable schema migration.
+        let ArtifactQueryResponse::Viewport(mut legacy_viewport) =
+            decode_query_response(&viewport_response).unwrap()
+        else {
+            panic!("viewport");
+        };
+        assert!(legacy_viewport.dimensions.is_some());
+        legacy_viewport.dimensions = None;
+        let viewport_response =
+            encode_response(ArtifactQueryResponse::Viewport(legacy_viewport), 1024).unwrap();
+        let ArtifactQueryResponse::WorkbookMetadata(mut legacy_metadata) =
+            decode_query_response(&metadata_response).unwrap()
+        else {
+            panic!("metadata");
+        };
+        assert_eq!(legacy_metadata.modeled_features, 1);
+        legacy_metadata.modeled_features = 0;
+        for sheet in &mut legacy_metadata.sheets {
+            sheet.dimensions = None;
+        }
+        let metadata_response = encode_response(
+            ArtifactQueryResponse::WorkbookMetadata(legacy_metadata),
+            2048,
+        )
+        .unwrap();
         assert_eq!(hex(&viewport), fixture_str(&fixture, "viewportQueryHex"));
         assert_eq!(hex(&metadata), fixture_str(&fixture, "metadataQueryHex"));
         assert_eq!(

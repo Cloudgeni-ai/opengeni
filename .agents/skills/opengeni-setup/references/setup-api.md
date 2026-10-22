@@ -82,7 +82,7 @@ The embedding proxy (`createSessionProxyRoute`, whose `resolve` returns
 use, so a chat needs no provisioning. Workspace-level setup (an installed API
 Integration, schedules, webhooks, budgets) needs the id of the same workspace:
 from a server-side script, `await og.workspaceId({ tenant })` (or `{ user }`)
-on the `OpenGeni` facade from `@opengeni/sdk/chat` returns it, creating it if
+on the `Opengeni` facade from `@opengeni/sdk/chat` returns it, creating it if
 needed.
 
 Explicit provisioning is advanced: only when the product manages workspaces

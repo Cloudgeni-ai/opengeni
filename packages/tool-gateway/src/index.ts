@@ -9,6 +9,8 @@ import Ajv, {
 } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
+import { schemaPatternEngine } from "./schema-pattern";
+import { repairStringEncodedArguments } from "./string-encoded-arguments";
 import {
   TOOL_GATEWAY_CATALOG_VERSION,
   ToolGatewayCallRequest,
@@ -34,6 +36,7 @@ import {
   ToolGatewayBlockedError,
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   ToolGatewayOutputValidationError,
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
@@ -88,6 +91,21 @@ export type ToolGatewayApprovalResolver = (input: {
   call: ToolGatewayCall;
   entry: ToolGatewayCatalogEntryValue;
 }) => Promise<"allow" | "ask" | "block"> | "allow" | "ask" | "block";
+
+/**
+ * Trusted, in-process argument resolution (for example secret references).
+ * Runs inside `execute`, after approval and before the lifecycle crosses the
+ * side-effect boundary, on a deep copy of the validated arguments. Only the
+ * executor receives the result: approval digests, lifecycle rows, journals and
+ * receipts keep the original arguments. Throwing prevents execution.
+ */
+export type ToolGatewayArgumentResolver = (input: {
+  call: ToolGatewayCall;
+  entry: ToolGatewayCatalogEntryValue;
+  /** Deep copy of `call.arguments`; the resolver may mutate or replace it. */
+  arguments: Record<string, unknown>;
+  context: ToolGatewayCallContext;
+}) => Promise<Record<string, unknown>> | Record<string, unknown>;
 
 export type ToolGatewayCall = {
   operationId: string;
@@ -175,6 +193,7 @@ export class PreparedToolGatewayDefinitions {
       modelName: string;
       subjectId: string;
     }) => boolean;
+    resolveArguments?: ToolGatewayArgumentResolver;
   }): ToolGateway {
     return new ToolGateway(
       input.catalogDigest,
@@ -183,6 +202,7 @@ export class PreparedToolGatewayDefinitions {
       input.requireApproval,
       input.confirmModelApproval,
       input.resolveApproval,
+      input.resolveArguments,
     );
   }
 }
@@ -210,6 +230,7 @@ export class ToolGateway {
         }) => boolean)
       | undefined,
     private readonly resolveApproval?: ToolGatewayApprovalResolver,
+    private readonly resolveArguments?: ToolGatewayArgumentResolver,
   ) {
     for (const definition of definitions) {
       this.byIdentity.set(identityKey(definition.entry.identity), definition);
@@ -267,8 +288,15 @@ export class ToolGateway {
     if (!this.resolveApproval && this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
-    if (!definition.validateInput(request.arguments)) {
-      throw inputValidationError(definition, request.arguments);
+    let callArguments = request.arguments;
+    if (!definition.validateInput(callArguments)) {
+      const repaired = repairableInputSize(callArguments)
+        ? repairStringEncodedArguments(callArguments, definition.diagnoseInput())
+        : undefined;
+      if (!repaired) throw inputValidationError(definition, callArguments);
+      // Report what is still wrong after the repair, not what it fixed.
+      if (!definition.validateInput(repaired)) throw inputValidationError(definition, repaired);
+      callArguments = repaired;
     }
     if (
       caller.kind === "model" &&
@@ -282,7 +310,7 @@ export class ToolGateway {
       operationId,
       catalogDigest: request.catalogDigest,
       identity: request.identity,
-      arguments: request.arguments,
+      arguments: callArguments,
       caller,
     } satisfies ToolGatewayCall;
     await measureMcpPhase("provider_authorization", () =>
@@ -339,11 +367,21 @@ export class ToolGateway {
           "execution",
           async () => {
             if (lifecycle?.waitingForApproval) throw new ToolGatewayApprovalRequiredError();
+            // Resolution failures behave like a refused begin: nothing crossed
+            // the side-effect boundary, so no lifecycle settlement is recorded.
+            const executeArguments = this.resolveArguments
+              ? await this.resolveArguments({
+                  call,
+                  entry: definition.entry,
+                  arguments: structuredClone(callArguments),
+                  context,
+                })
+              : callArguments;
             await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
             let result: ToolGatewayResultValue;
             try {
               result = ToolGatewayResult.parse(
-                await definition.execute(request.arguments, {
+                await definition.execute(executeArguments, {
                   operationId,
                   caller,
                   ...(context.sourceCallId === undefined
@@ -431,7 +469,7 @@ export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
 ): PreparedToolGatewayDefinitions {
   const paths = allocateToolPaths(definitions);
-  const schemaValidators = createSchemaValidators("first_error");
+  let schemaValidators: SchemaValidators | undefined;
   let diagnosticValidators: SchemaValidators | undefined;
   const compiled = definitions.map((definition, index): CompiledDefinition => {
     const {
@@ -454,6 +492,34 @@ export function prepareToolGatewayDefinitions(
       ...entryInput,
       codemodePath: paths[index],
     });
+    // Compilation used to snapshot these at preparation. Keep that boundary
+    // even though the compiler is now reached only by a call to this tool.
+    const inputSchema = structuredClone(entry.inputSchema);
+    const outputSchema = entry.outputSchema ? structuredClone(entry.outputSchema) : null;
+    let validators:
+      | {
+          input: ValidateFunction<unknown>;
+          output: ValidateFunction<unknown> | null;
+        }
+      | undefined;
+    let compilationFailure: ToolGatewaySchemaCompilationError | undefined;
+    const compile = () => {
+      if (validators) return validators;
+      if (compilationFailure) throw compilationFailure;
+      try {
+        const compiler = (schemaValidators ??= createSchemaValidators("first_error"));
+        // Compile both before argument admission, authorization or execution.
+        // A broken output schema must never fail after a side effect has run.
+        validators = {
+          input: compileCatalogSchema(compiler, inputSchema),
+          output: outputSchema ? compileCatalogSchema(compiler, outputSchema) : null,
+        };
+        return validators;
+      } catch (error) {
+        compilationFailure = new ToolGatewaySchemaCompilationError(error);
+        throw compilationFailure;
+      }
+    };
     let diagnoseInput: ValidateFunction<unknown> | undefined;
     return {
       entry,
@@ -462,15 +528,17 @@ export function prepareToolGatewayDefinitions(
       effectAuthorityDigest,
       preflightCall,
       lifecycle,
-      validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
+      get validateInput() {
+        return compile().input;
+      },
       diagnoseInput: () =>
         (diagnoseInput ??= compileCatalogSchema(
           (diagnosticValidators ??= createSchemaValidators("all_errors")),
-          entry.inputSchema,
+          inputSchema,
         )),
-      validateOutput: entry.outputSchema
-        ? compileCatalogSchema(schemaValidators, entry.outputSchema)
-        : null,
+      get validateOutput() {
+        return compile().output;
+      },
     };
   });
   return new PreparedToolGatewayDefinitions(compiled);
@@ -489,6 +557,7 @@ export function createWorkspaceToolGateway(input: {
     caller: ToolGatewayCaller,
     context: { transportMeta?: Record<string, unknown> | null },
   ) => boolean;
+  resolveArguments?: ToolGatewayArgumentResolver;
 }): { catalog: ToolGatewayCatalogValue; gateway: ToolGateway } {
   const prepared = prepareToolGatewayDefinitions(input.definitions);
   const unsigned = {
@@ -511,6 +580,7 @@ export function createWorkspaceToolGateway(input: {
       ...(input.authorize ? { authorize: input.authorize } : {}),
       ...(input.resolveApproval ? { resolveApproval: input.resolveApproval } : {}),
       ...(input.requireApproval ? { requireApproval: input.requireApproval } : {}),
+      ...(input.resolveArguments ? { resolveArguments: input.resolveArguments } : {}),
     }),
   };
 }
@@ -547,6 +617,8 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     strict: false,
     useDefaults: false,
     validateFormats: false,
+    // Remote schemas: a pattern invalid in Unicode mode must not fail the catalog.
+    code: { regExp: schemaPatternEngine },
   } as const;
   const validators = {
     draft7: new Ajv(options),
@@ -559,6 +631,15 @@ function createSchemaValidators(mode: SchemaValidatorMode): SchemaValidators {
     }
   }
   return { mode, ...validators };
+}
+
+function repairableInputSize(args: Record<string, unknown>): boolean {
+  try {
+    const serialized = JSON.stringify(args);
+    return serialized !== undefined && serialized.length <= TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS;
+  } catch {
+    return false;
+  }
 }
 
 function codePointLength(value: string): number {
@@ -665,21 +746,23 @@ function compileCatalogSchema(
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {
-  const requested = definitions.map((definition) =>
-    definition.codemodePath?.length
-      ? [...definition.codemodePath]
-      : [definition.identity.serverId, definition.identity.toolName],
-  );
-  const bases = requested.map((path) => path.map(safeNamespaceSegment));
-  const allocated = bases.map((base, index) => {
-    const path = requested[index]!;
-    if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
+  const allocated = definitions.map(projectToolGatewayPath);
   assertNoToolPathCollisions(allocated);
   return allocated;
+}
+
+/** Shared forward projection; never reverse-parse a namespace as authority. */
+export function projectToolGatewayPath(
+  definition: Pick<ToolGatewayDefinition, "identity" | "codemodePath">,
+): string[] {
+  const path = definition.codemodePath?.length
+    ? [...definition.codemodePath]
+    : [definition.identity.serverId, definition.identity.toolName];
+  const base = path.map(safeNamespaceSegment);
+  if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
+  const suffix = `_${shortIdentityDigest(definition.identity)}`;
+  const last = base.at(-1)!;
+  return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
 }
 
 type ToolPathNode = {
@@ -719,7 +802,7 @@ function compareToolPaths(left: readonly string[], right: readonly string[]): nu
   return left.length - right.length;
 }
 
-function safeNamespaceSegment(value: string): string {
+export function safeNamespaceSegment(value: string): string {
   let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
   if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
   if (["__proto__", "prototype", "constructor"].includes(normalized)) {

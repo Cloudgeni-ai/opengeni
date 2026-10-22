@@ -359,7 +359,7 @@ describe("the bot mention", () => {
 describe("what may address a message", () => {
   test("a message shortcut never takes a prefix out of someone else's message", () => {
     // The text belongs to the message being acted on, not to the person
-    // invoking OpenGeni, so a prefix there was never an instruction.
+    // invoking Opengeni, so a prefix there was never an instruction.
     expect(
       resolveSlackWorkspaceRoute(
         inputs({

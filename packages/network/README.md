@@ -1,6 +1,6 @@
 # `@opengeni/network`
 
-`@opengeni/network` is the low-level outbound transport used by OpenGeni's
+`@opengeni/network` is the low-level outbound transport used by Opengeni's
 credential-bearing MCP and OAuth paths. It resolves a destination hostname once,
 rejects private and special-use answers unless the caller has explicitly enabled
 the local/test or private-target escape, and supplies the vetted address through a
@@ -37,7 +37,7 @@ portable guarantee that an Undici `dispatcher` is honored. This package does not
 follow redirects; each caller must make a manual redirect decision and call the
 transport again so every hop is independently resolved and pinned.
 
-The default pinned request adapter sends `User-Agent: OpenGeni` unless the
+The default pinned request adapter sends `User-Agent: Opengeni` unless the
 caller supplies its own value, including through a `Request` object. This keeps
 OAuth discovery and provider requests compatible with servers that require an
 identified HTTP client.

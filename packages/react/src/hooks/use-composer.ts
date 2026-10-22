@@ -24,7 +24,9 @@ import {
   composerSubmissionErrorMessage,
 } from "../lib/format";
 import { normalizeError, useErrorMessage } from "../lib/error-message";
+import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ComposerPolicy = {
   model: string;
@@ -37,11 +39,26 @@ export type ComposerSendExtras = Omit<
   "text" | "clientEventId" | "annotations" | "model" | "reasoningEffort" | "latencyMode"
 >;
 
+/** Unsent local content handed off from a new-conversation composer. */
+export type InitialComposerDraft = {
+  text: string;
+  resources?: ResourceRef[] | undefined;
+  annotations?: DraftTimelineAnnotation[] | undefined;
+  policy?: ComposerPolicy | undefined;
+};
+
+/**
+ * What an ordinary Send does while the agent is working: `queue` runs it after
+ * the current turn, `steer` has the agent read it as soon as it can, usually
+ * within seconds.
+ */
+export type ComposerBusySend = "queue" | "steer";
+
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
-    /** Called synchronously after an ordinary Send is accepted by the local UI. */
+    /** Called synchronously after local submission. Observer errors never change delivery. */
     onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
-    /** Called with the exact accepted wire input after a successful send. */
+    /** Called with the accepted wire input. Observer errors never turn acceptance into failure. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the exact wire input after a delivery failure. */
     onDeliveryError?:
@@ -62,10 +79,36 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Immediate user-visible destination for an ordinary Send before admission replies. */
     sendDestination?: (() => "chat" | "queue") | undefined;
+    /**
+     * What an ordinary Send does while the agent is working (while
+     * `sendDestination` reports `queue`). `queue` (default) runs the message
+     * after the current turn. `steer` delivers it as a Steer instead: the
+     * agent reads it as soon as it can, usually within seconds (a reply still
+     * being written stops; running tools are not cut off). `sendToQueue`
+     * and `steer` stay explicit either way.
+     *
+     * Under `steer` the person has one Send and nothing to learn: no Queue
+     * choice beside it, no Queue or Steer words (`singleSend`). Set
+     * `offerQueue` to also offer Queue beside Send.
+     */
+    busySend?: ComposerBusySend | undefined;
+    /**
+     * Under `busySend: "steer"`, also offer Queue beside Send while the agent
+     * works (and on Cmd/Ctrl+Enter), for people who line up follow-ups. Off
+     * by default; under `busySend: "queue"` Steer is always offered.
+     */
+    offerQueue?: boolean | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
     initialPolicy?: ComposerPolicy | undefined;
+    /**
+     * Seed local unsent content once when this session is mounted/selected.
+     * The real server draft still supplies the revision used for persistence.
+     * A retained uncertain submission takes precedence over this handoff.
+     * An empty seed does not erase an existing server draft.
+     */
+    initialDraft?: InitialComposerDraft | undefined;
   };
 
 type ComposerDraftShadow = {
@@ -74,6 +117,19 @@ type ComposerDraftShadow = {
   annotations: DraftTimelineAnnotation[];
   policy?: ComposerPolicy | undefined;
 };
+
+function initialComposerShadow(
+  seed: InitialComposerDraft | undefined,
+): ComposerDraftShadow | undefined {
+  if (!seed || (!seed.text && !seed.resources?.length && !seed.annotations?.length && !seed.policy))
+    return undefined;
+  return {
+    text: seed.text,
+    resources: [...(seed.resources ?? [])],
+    annotations: cloneAnnotations(seed.annotations ?? []),
+    ...(seed.policy ? { policy: { ...seed.policy } } : {}),
+  };
+}
 
 type PendingComposerOperation = {
   delivery: "send" | "steer";
@@ -158,7 +214,10 @@ function optimisticSendStorageKey(key: string): string {
   return `${OPTIMISTIC_SEND_STORAGE_PREFIX}${encodeURIComponent(key)}`;
 }
 
-function restoreOptimisticSendOperations(key: string | null): OptimisticSendOperation[] {
+function restoreOptimisticSendOperations(
+  t: OpenGeniText,
+  key: string | null,
+): OptimisticSendOperation[] {
   if (!key) return [];
   let stored = optimisticSendOperations.get(key);
   if (!stored) {
@@ -197,15 +256,16 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
         : operation.outcomeUnknown,
     correlationId: restoredCorrelationId(operation.correlationId),
     error: restoredErrorReference(
+      t,
       operation.correlationId,
       hasMcpCredentialUpdates && (operation.state === "sending" || operation.outcomeUnknown)
-        ? composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())
+        ? composerSubmissionErrorMessage(t, new ComposerReconciliationRequiredError())
         : operation.state === "sending"
-          ? "Delivery was interrupted; retry to reconcile this message."
+          ? t("hooks.useComposer.deliveryWasInterruptedRetryTo")
           : operation.outcomeUnknown
-            ? "The request could not be confirmed. Check its status before retrying."
+            ? t("hooks.useComposer.theRequestCouldNotBe")
             : operation.error
-              ? composerSubmissionErrorMessage(new Error(operation.error))
+              ? composerSubmissionErrorMessage(t, new Error(operation.error))
               : undefined,
     ),
     retryable:
@@ -223,12 +283,16 @@ function restoredCorrelationId(value: unknown): string | undefined {
 }
 
 function restoredErrorReference(
+  t: OpenGeniText,
   reference: unknown,
   message: string | undefined,
 ): string | undefined {
   const correlationId = restoredCorrelationId(reference);
-  return message && correlationId && message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE
-    ? `${message} Reference: ${correlationId}.`
+  return message &&
+    correlationId &&
+    message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE &&
+    message !== t("lib.format.modelUnavailable")
+    ? t("hooks.useComposer.messageReferenceCorrelationid", { message, correlationId })
     : message;
 }
 
@@ -469,8 +533,30 @@ export type ComposerState = {
   requestAnnotationReview?: ((id?: string) => void) | undefined;
   /** Read the current draft synchronously before a destructive replacement. */
   hasDraftContent: () => boolean;
-  /** Append the draft behind prompts already visible in the queue. */
+  /**
+   * The ordinary Send. While the agent is working it follows `busySend`:
+   * queue behind the current turn (default) or Steer.
+   */
   send: (text?: string) => Promise<boolean>;
+  /** Append the draft behind prompts already visible in the queue, whatever `busySend` says. */
+  sendToQueue?: ((text?: string) => Promise<boolean>) | undefined;
+  /** What an ordinary Send does while the agent is working. */
+  busySend?: ComposerBusySend | undefined;
+  /**
+   * One Send and nothing to choose (`busySend: "steer"` without
+   * `offerQueue`): no alternate beside Send, Cmd/Ctrl+Enter sends normally,
+   * and stock surfaces avoid Queue and Steer words.
+   */
+  singleSend?: boolean | undefined;
+  /**
+   * The other way to send right now, or `null` when Send is not taking its
+   * busy path (nothing running or waiting, or the workstream is paused):
+   * `steer` when Send queues, `queue` when Send steers. Hosts offer it next to
+   * Send exactly when it is not `null`.
+   */
+  alternateSend?: ComposerBusySend | null | undefined;
+  /** Send the draft the other way: Steer when Send queues, queue when Send steers. */
+  sendAlternate?: ((text?: string) => Promise<boolean>) | undefined;
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
   optimisticMessages?: ComposerOptimisticMessage[] | undefined;
   retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
@@ -681,6 +767,7 @@ export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
 ): ComposerControllerState {
+  const t = useOpenGeniText();
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
@@ -690,9 +777,11 @@ export function useComposer(
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
-  const initialOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+  const initialOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
   const initialShadow =
-    initialPendingOperation?.newerShadow ?? initialOptimisticSends.at(-1)?.newerShadow;
+    initialPendingOperation?.newerShadow ??
+    initialOptimisticSends.at(-1)?.newerShadow ??
+    initialComposerShadow(options.initialDraft);
   const [value, setValue] = useState(() => initialShadow?.text ?? "");
   const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>(
     () => initialShadow?.annotations ?? [],
@@ -712,7 +801,7 @@ export function useComposer(
           clientEventId: initialPendingOperation.input.clientEventId ?? null,
           triggerEventId: null,
           turnId: null,
-          error: "Not confirmed. Retry to check the same direction change.",
+          error: t("hooks.useComposer.notConfirmedRetryToCheck"),
           outcomeUnknown: true,
         }
       : null,
@@ -762,8 +851,18 @@ export function useComposer(
   }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
-  const onSent = options.onSent;
-  const onSubmitted = options.onSubmitted;
+  const onSent = useCallback(
+    (text: string, input: SendMessageInput) => {
+      notifyComposerObserver(options.onSent, text, input);
+    },
+    [options.onSent],
+  );
+  const onSubmitted = useCallback(
+    (text: string, input: SendMessageInput) => {
+      notifyComposerObserver(options.onSubmitted, text, input);
+    },
+    [options.onSubmitted],
+  );
   const onDeliveryErrorRef = useRef(options.onDeliveryError);
   onDeliveryErrorRef.current = options.onDeliveryError;
   useLayoutEffect(() => {
@@ -775,6 +874,10 @@ export function useComposer(
   sendExtrasRef.current = options.sendExtras;
   const sendDestinationRef = useRef(options.sendDestination);
   sendDestinationRef.current = options.sendDestination;
+  const busySend: ComposerBusySend = options.busySend ?? "queue";
+  const busySendRef = useRef(busySend);
+  busySendRef.current = busySend;
+  const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
@@ -798,14 +901,16 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
-    const restoredOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+    const restoredOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
     optimisticSendsRef.current = restoredOptimisticSends;
     optimisticProcessorBusyRef.current = false;
     optimisticCallbackIdsRef.current = new Set();
     steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
     const shadow =
-      pendingOperationRef.current?.newerShadow ?? restoredOptimisticSends.at(-1)?.newerShadow;
+      pendingOperationRef.current?.newerShadow ??
+      restoredOptimisticSends.at(-1)?.newerShadow ??
+      initialComposerShadow(options.initialDraft);
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
     annotationsRef.current = shadow?.annotations ?? [];
@@ -831,7 +936,7 @@ export function useComposer(
             clientEventId: pendingOperationRef.current.input.clientEventId ?? null,
             triggerEventId: null,
             turnId: null,
-            error: "Not confirmed. Retry to check the same direction change.",
+            error: t("hooks.useComposer.notConfirmedRetryToCheck"),
             outcomeUnknown: true,
           }
         : null,
@@ -846,7 +951,15 @@ export function useComposer(
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
-  }, [durableDrafts, options.initialPolicy, pendingOperationKey, sessionId, targetKey]);
+  }, [
+    durableDrafts,
+    options.initialPolicy,
+    options.initialDraft,
+    pendingOperationKey,
+    sessionId,
+    targetKey,
+    t,
+  ]);
   useEffect(
     () => () => {
       if (draftReadRetryRef.current.timer !== null) {
@@ -1104,7 +1217,7 @@ export function useComposer(
           const timedOut = problem.name === "TimeoutError";
           setDraftReadError(
             timedOut
-              ? new ComposerStateError("Draft sync timed out. Retrying…", { cause })
+              ? new ComposerStateError(t("hooks.useComposer.draftSyncTimedOutRetrying"), { cause })
               : problem,
           );
           if (
@@ -1136,7 +1249,7 @@ export function useComposer(
         }
       }
     },
-    [client, durableDrafts, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, sessionId, targetKey, workspaceId, t],
   );
 
   useEffect(() => {
@@ -1431,8 +1544,12 @@ export function useComposer(
                     outcomeUnknown &&
                       !isOutcomeUnknownError(problem) &&
                       !(problem instanceof ComposerReconciliationRequiredError)
-                      ? `The request could not be confirmed. Check its status before retrying.${problem instanceof OpenGeniApiError && problem.correlationId ? ` Reference: ${problem.correlationId}.` : ""}`
-                      : composerSubmissionErrorMessage(problem),
+                      ? problem instanceof OpenGeniApiError && problem.correlationId
+                        ? t("hooks.useComposer.notConfirmedCheckStatusWithReference", {
+                            reference: problem.correlationId,
+                          })
+                        : t("hooks.useComposer.notConfirmedCheckStatus")
+                      : composerSubmissionErrorMessage(t, problem),
                   ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
@@ -1496,7 +1613,7 @@ export function useComposer(
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
           if (!(await persistPayload(operation.draftPayload))) {
-            throw new ComposerStateError("The message draft could not be saved before delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theMessageDraftCouldNot"));
           }
           expectedDraftRevision = draftRef.current?.revision;
         }
@@ -1514,7 +1631,7 @@ export function useComposer(
         let acceptedEvent: SessionEvent | null = null;
         if (durableDrafts) {
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
           }
           const result = await client
             .submitComposerDraft(workspaceId, sessionId, {
@@ -1605,7 +1722,7 @@ export function useComposer(
           return;
         }
         const problem = asError(cause);
-        onDeliveryErrorRef.current?.(problem, operation.input, "send");
+        notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
         // Only an actual mutation replay can replace prior uncertainty with a
         // definitive response. Local preparation failures remain retry-only.
         const outcomeUnknown =
@@ -1634,6 +1751,7 @@ export function useComposer(
     sessionId,
     targetKey,
     workspaceId,
+    t,
   ]);
 
   useEffect(() => {
@@ -1793,7 +1911,7 @@ export function useComposer(
             input.reasoningEffort === undefined ||
             input.latencyMode === undefined
           ) {
-            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
           }
           const result = await client.submitComposerDraft(workspaceId, sessionId, {
             text: input.text,
@@ -1869,7 +1987,7 @@ export function useComposer(
                   clientEventId: pending.input.clientEventId ?? null,
                   triggerEventId: null,
                   turnId: null,
-                  error: "Not confirmed. Retry.",
+                  error: t("hooks.useComposer.notConfirmedRetry"),
                   outcomeUnknown: true,
                 });
               }
@@ -1918,7 +2036,12 @@ export function useComposer(
           } catch (cause) {
             const problem = asError(cause);
             const outcomeUnknown = isOutcomeUnknownError(cause);
-            onDeliveryErrorRef.current?.(problem, pending.input, pending.delivery);
+            notifyComposerObserver(
+              onDeliveryErrorRef.current,
+              problem,
+              pending.input,
+              pending.delivery,
+            );
             if (!outcomeUnknown) {
               clearPending();
               keepSteering = false;
@@ -1930,7 +2053,7 @@ export function useComposer(
                 clientEventId: pending.input.clientEventId ?? null,
                 triggerEventId: null,
                 turnId: null,
-                error: "Not confirmed. Retry.",
+                error: t("hooks.useComposer.notConfirmedRetry"),
                 outcomeUnknown: true,
               });
             }
@@ -1956,7 +2079,7 @@ export function useComposer(
         // and submitted byte-for-byte, while file-only sends use the same
         // placeholder for both operations so the server content fence cannot
         // reject its own client.
-        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
+        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload && !(await persistPayload(payload))) return false;
@@ -2021,7 +2144,12 @@ export function useComposer(
             });
           }
         } catch (cause) {
-          onDeliveryErrorRef.current?.(asError(cause), operation.input, operation.delivery);
+          notifyComposerObserver(
+            onDeliveryErrorRef.current,
+            asError(cause),
+            operation.input,
+            operation.delivery,
+          );
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
           } else if (delivery === "steer") {
@@ -2032,7 +2160,7 @@ export function useComposer(
               clientEventId: operation.input.clientEventId ?? null,
               triggerEventId: null,
               turnId: null,
-              error: "Not confirmed. Retry.",
+              error: t("hooks.useComposer.notConfirmedRetry"),
               outcomeUnknown: true,
             });
           }
@@ -2077,10 +2205,11 @@ export function useComposer(
       value,
       workspaceId,
       loadDraft,
+      t,
     ],
   );
 
-  const send = useCallback(
+  const sendToQueue = useCallback(
     async (explicit?: string): Promise<boolean> => {
       if (pendingOperationRef.current?.delivery === "send") {
         return await dispatch("send", explicit);
@@ -2106,7 +2235,7 @@ export function useComposer(
       ) {
         return false;
       }
-      const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
+      const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
       const clientEventId = generateClientEventId();
       const effectiveControl = effectiveControlRef.current;
       const input = composeSendInput(sendText, clientEventId, extras, {
@@ -2172,9 +2301,40 @@ export function useComposer(
       sending,
       sessionId,
       targetKey,
+      t,
     ],
   );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
+  // Send takes its busy path while a turn runs or prompts wait, except in a
+  // paused workstream, where it keeps ordinary queueing so a Send never
+  // resumes it implicitly.
+  const takesBusyPath = useCallback(
+    (): boolean =>
+      effectiveControlRef.current?.state !== "paused" && sendDestinationRef.current?.() === "queue",
+    [],
+  );
+  const send = useCallback(
+    async (explicit?: string): Promise<boolean> => {
+      // A retained uncertain Send keeps its own delivery; only fresh input
+      // follows the busy-send preference.
+      if (
+        busySendRef.current === "steer" &&
+        pendingOperationRef.current?.delivery !== "send" &&
+        takesBusyPath()
+      ) {
+        return await steer(explicit);
+      }
+      return await sendToQueue(explicit);
+    },
+    [sendToQueue, steer, takesBusyPath],
+  );
+  const sendAlternate = useCallback(
+    async (explicit?: string): Promise<boolean> =>
+      busySendRef.current === "steer" ? await sendToQueue(explicit) : await steer(explicit),
+    [sendToQueue, steer],
+  );
+  const alternateSend: ComposerBusySend | null =
+    !singleSend && takesBusyPath() ? (busySend === "steer" ? "queue" : "steer") : null;
 
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
@@ -2493,10 +2653,6 @@ export function useComposer(
 
   const addAnnotation = useCallback(
     (annotation: DraftTimelineAnnotation) => {
-      if (annotationsRef.current.length >= 12) {
-        setError(new ComposerStateError("A message can include at most 12 timeline annotations."));
-        return;
-      }
       const next = [...annotationsRef.current, annotation];
       updateAnnotations(next, annotation.id);
     },
@@ -2764,6 +2920,11 @@ export function useComposer(
     requestAnnotationReview,
     hasDraftContent,
     send,
+    sendToQueue,
+    busySend,
+    singleSend,
+    alternateSend: identityMatches ? alternateSend : null,
+    sendAlternate: singleSend ? undefined : sendAlternate,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     restoreOptimisticMessage:
@@ -2828,7 +2989,8 @@ export function isComposerDraftEvent(event: Pick<SessionEvent, "type">): boolean
  * the worker's non-whitespace guard accept it. The export name is retained for
  * compatibility now that repositories can ride beside files in `resources`.
  */
-export const FILE_ONLY_MESSAGE_TEXT = "(see attached context)";
+export const FILE_ONLY_MESSAGE_TEXT = (t: OpenGeniText) =>
+  t("hooks.useComposer.seeAttachedContext");
 
 /** Resolve possibly-deferred extras to a concrete bag (function evaluated now). */
 export function resolveSendExtras(

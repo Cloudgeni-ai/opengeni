@@ -14,6 +14,7 @@
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { maybePersistWarmWorkspaceSnapshot } from "../sandbox-resume";
 import { publishDurableSessionEvents } from "../session-event-fanout";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
@@ -28,12 +29,22 @@ import {
   retainedProviderCommandPersistence,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
+  markWarmLeaseInstanceLost,
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
+  computeSandboxNamed,
+  computeSandboxOfEnrollment,
+  leaseMayHaveUntrackedWriters,
   releaseWorkspaceArchiveCapture,
+  revokeSandboxEnrollment,
+  listStaleComputeSandboxEnrollments,
+  revokeStaleComputeSandboxEnrollment,
+  listIdleCheckpointCandidates,
+  recordIdleCheckpointAttempt,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
+  getEnrollment,
   countActiveRetainedProcessesByOwnerState,
   countSandboxCheckpointArtifactsByState,
   countExpiredDrainingSandboxLeases,
@@ -61,18 +72,23 @@ import {
   registerSandboxCheckpointArtifact,
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
+  listEndedEpochWorkspaceBlockers,
+  listEndedEpochSandboxSetupUncertainties,
+  reconcileCompletedSandboxSetup,
   readLease,
+  settleEndedEpochWorkspaceBlockers,
   readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
   readSandboxRotationBacklog,
+  readSandboxCheckpointStaleness,
   readRecentSandboxRecoveryObservations,
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
   recoverManagedSessionBackgroundCommand,
-  settleClaimedConnectedMachineBackgroundCommand,
+  settleCollectedConnectedMachineBackgroundCommand,
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
@@ -83,19 +99,33 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  CONNECTED_COMMAND_CLAIM_TTL_MS,
   claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
-  recordConnectedMachineBackgroundCommandProof,
+  connectedCommandReconciliationRetryMs,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
-import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import {
+  SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
+  sandboxArchiveCaptureTimeoutMs,
+  sandboxDeadlineMandatoryCaptureLeadMs,
+  sandboxProviderMaxRemainingLifetimeMs,
+  sandboxWarmRateMicrosPerSecond,
+  type Settings,
+} from "@opengeni/config";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
+import {
+  agentConnectionCurrent,
+  connectedRunnerReleaseMode,
+  type ConnectedRunnerReleaseMode,
+  releaseStoredConnectedCommandOutput,
+} from "@opengeni/core";
 import {
   // Normal drain teardown builds the client and resumes the envelope directly:
   // a live box gets its /workspace persisted before termination, while a gone
@@ -119,28 +149,42 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   OpStreamExecClient,
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
   defaultSelfhostedRetryClock,
   stripExecBanner,
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForSession,
   querySelfhostedOp,
   resumeExactSandboxSession,
-  sandboxProviderContinuityForState,
   sandboxBackendForSdkBackendId,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxCommandExitCode,
   sandboxCommandStillRunning,
   SelfhostedControlError,
   subjectFor,
+  SUPERVISED_STOP_KILL_AFTER_SECONDS,
+  modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
+  ComputeControlClient,
+  wakeComputeSandboxOnNoResponders,
+  isOpTombstone,
+  isAgentNotAnswered,
+  withoutWaking,
+  createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
+  sweepComputeOrphans,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
   verifySandboxExecReadiness,
+  type DockerHostWorkspaceRelease,
   type ModalOrphanSweepTermination,
   type ModalCheckpointProviderBinding,
   type ProviderWorkspaceCapturePolicy,
@@ -153,8 +197,13 @@ import {
   SANDBOX_REAPER_CHILD_DISPATCH_LIMIT,
   type SandboxDrainActivityInput,
   type SandboxLeaseSweepMaintenanceInput,
+  sandboxDrainTimeoutClass,
+  sandboxIdleCheckpointWorkflowId,
+  type SandboxIdleCheckpointActivityInput,
+  type SandboxIdleCheckpointPlan,
 } from "../sandbox-reaper-contract";
 import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
+import { browserCheckpointPrerequisites } from "./browser-deadline-checkpoint";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -179,9 +228,12 @@ import {
   recordInteractionOnlyLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
+  recordSandboxIdleInteractionRelease,
   recordSandboxProviderMissingBeforeCapture,
+  recordSandboxDockerWorkspaceRelease,
   recordSandboxRecoveryObservationGauges,
   recordSandboxRotationBacklogGauges,
+  recordSandboxCheckpointStalenessGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
   recordManagedAuthNewSignupsSwitchGauge,
@@ -225,6 +277,10 @@ type DrainSandboxClient = {
   resume?: (state: unknown) => Promise<unknown>;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   delete?: (state: unknown) => Promise<void>;
+  attachWorkspaceForDrain?: (
+    state: unknown,
+    assertCurrentCapture: () => Promise<{ archivePublished: boolean }>,
+  ) => Promise<PersistableSession & { stopForCapture?: () => Promise<void> }>;
 };
 
 /**
@@ -261,7 +317,10 @@ export type ProviderTerminationOutcome = {
   providerMissingBeforeCapture: boolean;
 };
 
-export type DrainCaptureDisposition = "capture_required" | "archive_published";
+/** `discard`: the group ended (a compute sandbox whose chat or workspace was
+ * deleted), so the box is deleted under the same capture fence without
+ * capturing a workspace nothing will restore. */
+export type DrainCaptureDisposition = "capture_required" | "archive_published" | "discard";
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
@@ -282,6 +341,7 @@ export type TerminateBoxFn = (
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
+  beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -289,6 +349,9 @@ export type SweepModalOrphansFn = (
   db: ActivityServices["db"],
   observability: ActivityServices["observability"],
 ) => Promise<number>;
+
+/** Returns how many compute sandboxes it deleted. */
+export type SweepComputeOrphansFn = SweepModalOrphansFn;
 
 export type InspectOpenSandboxKubernetesInventoryFn = (input: {
   namespace: string;
@@ -301,6 +364,9 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override the compute orphan sweep (defaults to the control service's inventory
+   *  against Opengeni's records when compute is configured). */
+  sweepComputeOrphans?: SweepComputeOrphansFn;
   /** Only provider discovery is injected; durable recovery remains real. */
   findModalProviderCreateReceipt?: typeof findModalProviderCreateReceipt;
   /** Override the read-only bounded OpenSandbox Kubernetes projection. */
@@ -314,7 +380,19 @@ export type SandboxLeaseActivityOptions = {
   /** Override the read-only exact-instance readiness probe used before the
    * reaper settles blockers for a provider that has definitively vanished. */
   probeDrainableProvider?: DrainableProviderProbeFn;
+  /** Override only the resume-by-id of the box an idle checkpoint captures.
+   * Returns the live session, or null when the provider no longer has it. The
+   * capture claim, publication and release remain real. */
+  resumeIdleCheckpointSession?: ResumeIdleCheckpointSessionFn;
+  /** Override only the provider client factory of the default drain. The
+   * claim, capture, publication and teardown ordering remain real. */
+  createClientForBackend?: CreateSandboxClientForBackendFn;
 };
+
+export type ResumeIdleCheckpointSessionFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+) => Promise<unknown | null>;
 
 export type RetainedProcessProbeResult =
   | { status: "proved"; proof: RetainedProcessProviderProof }
@@ -368,6 +446,11 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+/** After a supervised stop, the probe waits this long for the exit, so the
+ * stop usually settles in the same reaper pass: the supervisor's KILL
+ * escalation plus a margin. */
+export const RETAINED_PROCESS_STOP_SETTLE_WAIT_MS =
+  SUPERVISED_STOP_KILL_AFTER_SECONDS * 1_000 + 2_000;
 /** Bounds on reading a command's output backlog: per claim, and across one
  * reconciliation sweep so the reaper activity stays well inside its timeout.
  * Each read returns up to one provider page per stream. */
@@ -381,7 +464,7 @@ export const RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES = 256 * 1024;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
-export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
+export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = CONNECTED_COMMAND_CLAIM_TTL_MS;
 
 export class SandboxProviderCaptureTimeoutError extends Error {
   readonly name = "SandboxProviderCaptureTimeoutError";
@@ -408,6 +491,9 @@ export async function awaitProviderCaptureWithLatePublication<T>(input: {
   publishLate: (value: T) => Promise<void>;
   observeLateFailure: (error: unknown) => void;
   observeLatePublicationFailure: (error: unknown) => void;
+  /** Called once the detached late path has fully settled (after publication
+   * or failure handling), never on the in-budget path. */
+  onLateSettled?: () => void;
 }): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutError = input.timeoutError;
@@ -425,9 +511,17 @@ export async function awaitProviderCaptureWithLatePublication<T>(input: {
     // durable archive publication: never provider teardown or a cold commit from
     // an activity Temporal has already rejected. A replaced claim fences this
     // callback; Modal candidates then flow to artifact-ledger GC.
+    const settled = () => {
+      try {
+        input.onLateSettled?.();
+      } catch {
+        // Settlement bookkeeping cannot surface as an unhandled rejection.
+      }
+    };
     void input.capture
       .then(input.publishLate, input.observeLateFailure)
-      .catch(input.observeLatePublicationFailure);
+      .catch(input.observeLatePublicationFailure)
+      .then(settled, settled);
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -469,6 +563,20 @@ export type SandboxLeaseSweepPlan = {
   rotationsRequested: number;
 };
 
+export type SandboxIdleCheckpointActivityResult = {
+  status: "checkpointed" | "skipped";
+  reason?: string;
+};
+
+/** Children per sweep; the next sweep continues with the least recently tried
+ * boxes (each box is tried at most once per snapshot interval). Half the
+ * lifecycle worker's activity slots, so a burst of captures never queues the
+ * drains that stop idle boxes behind it. */
+const SANDBOX_IDLE_CHECKPOINT_BATCH = Math.max(
+  1,
+  Math.floor(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES / 2),
+);
+
 export type SandboxLeaseSweepMaintenanceResult = {
   metered: number;
   forceDrained: number;
@@ -489,6 +597,55 @@ type SandboxDrainCaptureAttempt = {
 
 class SandboxDrainRecoveryDeferredError extends Error {
   readonly name = "SandboxDrainRecoveryDeferredError";
+}
+
+/**
+ * Drain captures still physically running in this worker, keyed by exact lease
+ * epoch and provider instance. A capture that outlives its attempt's budget
+ * keeps running and may publish late through its claim's provider-request
+ * lineage. A parallel-read provider (Docker, for one) also lets the next
+ * attempt replace that unpublished claim at once and start its own full read,
+ * so a capture slower than the retry interval used to gain one more concurrent
+ * read and host spool per retry. This keeps one physical capture per lease
+ * epoch and instance in each worker; the durable claim still decides which
+ * archive publishes, and a capture started by another worker (or one that died
+ * with its process) is handled by the ordinary claim replacement. An entry
+ * older than the longest durable capture window no longer defers, so a
+ * provider call that never settles cannot pin the lease to this worker forever.
+ */
+const settlingDrainCaptures = new Map<string, { startedAtMs: number }>();
+
+type DrainCaptureIdentity = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string | null;
+};
+
+function drainCaptureKey(lease: DrainCaptureIdentity & { instanceId: string }): string {
+  return JSON.stringify([lease.sandboxGroupId, lease.leaseEpoch, lease.instanceId]);
+}
+
+/** True while this worker still runs (or publishes, or removes the spool of)
+ * a drain capture of this exact lease epoch and instance. */
+function sandboxDrainCaptureSettlingInProcess(
+  lease: DrainCaptureIdentity,
+  nowMs = Date.now(),
+): boolean {
+  if (!lease.instanceId) return false;
+  const entry = settlingDrainCaptures.get(
+    drainCaptureKey({ ...lease, instanceId: lease.instanceId }),
+  );
+  return entry !== undefined && nowMs - entry.startedAtMs < SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS;
+}
+
+function trackSettlingDrainCapture(lease: DrainCaptureIdentity): () => void {
+  if (!lease.instanceId) return () => undefined;
+  const key = drainCaptureKey({ ...lease, instanceId: lease.instanceId });
+  const entry = { startedAtMs: Date.now() };
+  settlingDrainCaptures.set(key, entry);
+  return () => {
+    if (settlingDrainCaptures.get(key) === entry) settlingDrainCaptures.delete(key);
+  };
 }
 
 /** Stable UUID per logical operation + Temporal attempt. Attempt one uses the
@@ -546,13 +703,14 @@ export function createSandboxLeaseActivities(
       releaseFailedCapture,
       workspaceId,
       beforeProviderStop,
+      beforeWorkspaceCapture,
     ) =>
       await terminateProviderBox(
         settings,
         lease,
         observability,
         persistArchive,
-        createSandboxClientForBackend,
+        options.createClientForBackend ?? createSandboxClientForBackend,
         terminateModalSandboxById,
         providerCaptureRequestId,
         captureDisposition,
@@ -561,20 +719,38 @@ export function createSandboxLeaseActivities(
         releaseFailedCapture,
         workspaceId,
         beforeProviderStop,
+        beforeWorkspaceCapture,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const sweepComputeOrphanSandboxes: SweepComputeOrphansFn =
+    options.sweepComputeOrphans ?? sweepComputeOrphansForConfiguredBackend;
   const inspectOpenSandboxInventory =
     options.inspectOpenSandboxKubernetesInventory ?? inspectOpenSandboxKubernetesInventory;
   const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
   const probeDrainableProvider = options.probeDrainableProvider ?? probeDrainableProviderReadiness;
+  const resumeIdleCheckpointSession =
+    options.resumeIdleCheckpointSession ?? resumeIdleCheckpointSessionAtProvider;
+  /** Embedded idle checkpoints still running, by exact lease epoch. */
+  const embeddedIdleCheckpoints = new Set<string>();
+  const endedEpochProbeBackoff: EndedEpochProbeBackoff = new Map();
   async function prepareSandboxLeaseSweep(): Promise<SandboxLeaseSweepPlan> {
     const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "prepare" });
     try {
-      const { db, settings, observability } = await services();
+      const { db, settings, observability, objectStorage } = await services();
       const timing = sandboxDrainTiming(settings);
       const commandContainment = {
+        // Browsers and desktops follow the general idle grace: unused for it,
+        // they stop holding the box (saved browsers resume on demand).
+        // Never under a minute, so a visible live view's 30 s heartbeat
+        // always lands inside the window.
+        idleInteractionReleaseMs: Math.max(settings.sandboxIdleGraceMs, 60_000),
+        idleBrowserCheckpoints: browserCheckpointPrerequisites(settings, objectStorage),
+        onIdleInteractionRelease: (
+          outcome: Parameters<typeof recordSandboxIdleInteractionRelease>[1],
+        ) => recordSandboxIdleInteractionRelease(observability, outcome),
         idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
         onCommandContainment: (outcome: Parameters<typeof recordSandboxCommandContainment>[1]) =>
           recordSandboxCommandContainment(observability, outcome),
         onCommandContainmentError: (error: unknown) => {
@@ -654,6 +830,141 @@ export function createSandboxLeaseActivities(
         captureTimeoutMs: timing.captureTimeoutMs,
         rotationsRequested,
       };
+    } finally {
+      stopHeartbeat();
+    }
+  }
+
+  /** Inventory for the idle checkpoint sweep. DB only: warm boxes no turn
+   * holds, kept warm by viewers, interactions or running background commands,
+   * with writes no capture may cover yet and neither a capture attempt nor an
+   * idle checkpoint attempt within the snapshot interval.
+   * Least recently tried first; the next sweep continues past the batch. */
+  async function listIdleSandboxCheckpoints(): Promise<SandboxIdleCheckpointPlan> {
+    const stopHeartbeat = startSandboxReaperHeartbeat({ phase: "idle_checkpoint_inventory" });
+    try {
+      const { db, settings } = await services();
+      // The idle capture claims the warm checkpoint budget, not the drain's;
+      // freeze the matching activity class with each child.
+      const timeoutClass = sandboxDrainTimeoutClass(sandboxArchiveCaptureTimeoutMs(settings));
+      if (!settings.sandboxOwnershipEnabled || settings.sandboxSnapshotIntervalMs <= 0) {
+        return { targets: [], timeoutClass };
+      }
+      const rows = await listIdleCheckpointCandidates(db, {
+        limit: SANDBOX_IDLE_CHECKPOINT_BATCH,
+        intervalMs: settings.sandboxSnapshotIntervalMs,
+      });
+      return {
+        targets: rows.map(({ accountId: _accountId, ...target }) => target),
+        timeoutClass,
+      };
+    } finally {
+      stopHeartbeat();
+    }
+  }
+
+  /** Checkpoint one warm box between turns. Reuses the turn's warm checkpoint
+   * path with an idle owner: the exact capture claim requires that only
+   * viewers, interactions and active background commands hold the
+   * box and that no other request is open, then the native Modal snapshot runs
+   * around them and is published one generation behind the workspace. */
+  async function checkpointIdleSandboxLease(
+    input: SandboxIdleCheckpointActivityInput,
+  ): Promise<SandboxIdleCheckpointActivityResult> {
+    const target = input.target;
+    const stopHeartbeat = startSandboxReaperHeartbeat({
+      phase: "idle_checkpoint",
+      workspaceId: target.workspaceId,
+      sandboxGroupId: target.sandboxGroupId,
+      leaseEpoch: target.leaseEpoch,
+      instanceId: target.instanceId,
+    });
+    try {
+      const { db, settings, observability, objectStorage } = await services();
+      const fields = {
+        sandboxLeaseKey: sandboxLeaseTelemetryKey(target.workspaceId, target.sandboxGroupId),
+        leaseEpoch: target.leaseEpoch,
+      };
+      const skipped = (reason: string): SandboxIdleCheckpointActivityResult => {
+        observability.info("sandbox reaper: idle checkpoint skipped", { ...fields, reason });
+        return { status: "skipped", reason };
+      };
+      if (!settings.sandboxOwnershipEnabled || settings.sandboxSnapshotIntervalMs <= 0) {
+        return skipped("disabled");
+      }
+      const lease = await readLease(db, target.workspaceId, target.sandboxGroupId);
+      if (
+        !lease ||
+        lease.liveness !== "warm" ||
+        lease.leaseEpoch !== target.leaseEpoch ||
+        lease.instanceId !== target.instanceId
+      ) {
+        return skipped("lease_fenced");
+      }
+      // A turn's own checkpoints cover a box it holds; a box nothing holds
+      // belongs to the idle drain.
+      if (lease.turnHolders > 0) return skipped("turn_held");
+      if (lease.refcount === 0) return skipped("drain_owned");
+      const { accountId } = await rlsContextForWorkspace(db, target.workspaceId);
+      // Counted as tried whatever happens next, so a refused or failing box
+      // waits a full interval instead of taking a batch slot every sweep.
+      const stamped = await recordIdleCheckpointAttempt(db, {
+        accountId,
+        workspaceId: target.workspaceId,
+        sandboxGroupId: target.sandboxGroupId,
+        expectedEpoch: target.leaseEpoch,
+        expectedInstanceId: target.instanceId,
+      });
+      if (!stamped) return skipped("lease_fenced");
+      if (!providerWorkspaceCaptureIsPointInTime(lease.backend, lease.resumeState)) {
+        return skipped("capture_policy");
+      }
+      if (lease.archiveComplete && !leaseMayHaveUntrackedWriters(lease)) return skipped("clean");
+      if (lease.archiveCapture) {
+        const tookOver = await releaseWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: target.workspaceId,
+          sandboxGroupId: target.sandboxGroupId,
+          captureId: lease.archiveCapture.id,
+          expectedEpoch: target.leaseEpoch,
+          expectedInstanceId: target.instanceId,
+          onlyExpiredWarmTakeover: true,
+        });
+        if (!tookOver) return skipped("capture_in_progress");
+        observability.warn("sandbox reaper: released an expired warm capture claim", {
+          ...fields,
+          captureId: lease.archiveCapture.id,
+        });
+      }
+      let session: unknown;
+      try {
+        session = await resumeIdleCheckpointSession(settings, lease);
+      } catch (error) {
+        observability.warn("sandbox reaper: idle checkpoint resume failed", {
+          ...fields,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return skipped("provider_error");
+      }
+      if (session === null) return skipped("provider_missing");
+      const capture = maybePersistWarmWorkspaceSnapshot(
+        { db, settings, objectStorage, observability },
+        {
+          accountId,
+          workspaceId: target.workspaceId,
+          sandboxGroupId: target.sandboxGroupId,
+          idleCheckpoint: true,
+        },
+        session,
+        target.leaseEpoch,
+      );
+      const persisted = await capture;
+      // Return only after the provider capture settled and its exact claim
+      // was released, so the activity never outlives its own gate unobserved.
+      await capture.settled;
+      if (!persisted) return skipped("not_captured");
+      observability.info("sandbox reaper: idle checkpoint published", fields);
+      return { status: "checkpointed" };
     } finally {
       stopHeartbeat();
     }
@@ -846,11 +1157,32 @@ export function createSandboxLeaseActivities(
         service.bus,
       );
 
+      // A request or PTY left on a Modal box whose lease epoch has ended can
+      // never progress once that box is gone; settle it on exact proof.
+      await settleEndedEpochBlockers(
+        db,
+        settings,
+        observability,
+        options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
+        endedEpochProbeBackoff,
+      );
+
       try {
         modalOrphansTerminated = await sweepModalOrphans(settings, db, observability);
         recordSandboxOrphansTerminated(observability, modalOrphansTerminated);
       } catch (error) {
         observability.warn("sandbox reaper: Modal orphan sweep failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        recordSandboxOrphansTerminated(
+          observability,
+          await sweepComputeOrphanSandboxes(settings, db, observability),
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: compute orphan sweep failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -940,6 +1272,30 @@ export function createSandboxLeaseActivities(
         }),
       ),
     );
+    // The embedded path has no idle checkpoint sweep workflow; run the same
+    // inventory and per-box activity. Captures run detached so a provider
+    // snapshot never holds up this sweep's drains; a box whose capture is
+    // still running is not started twice. Failure defers to the next sweep.
+    try {
+      const { targets, timeoutClass } = await listIdleSandboxCheckpoints();
+      for (const target of targets) {
+        const key = sandboxIdleCheckpointWorkflowId(target);
+        if (embeddedIdleCheckpoints.has(key)) continue;
+        embeddedIdleCheckpoints.add(key);
+        void checkpointIdleSandboxLease({ target, timeoutClass })
+          .catch((error: unknown) => {
+            service.observability.warn("sandbox reaper: idle checkpoint failed", {
+              sandboxLeaseKey: sandboxLeaseTelemetryKey(target.workspaceId, target.sandboxGroupId),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(() => embeddedIdleCheckpoints.delete(key));
+      }
+    } catch (error) {
+      service.observability.warn("sandbox reaper: idle checkpoint inventory failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const terminated = outcomes.filter(
       (outcome) => outcome.status === "fulfilled" && outcome.value.status === "terminated",
     ).length;
@@ -964,13 +1320,63 @@ export function createSandboxLeaseActivities(
   return {
     prepareSandboxLeaseSweep,
     drainSandboxLease,
+    listIdleSandboxCheckpoints,
+    checkpointIdleSandboxLease,
     maintainSandboxLeaseSweep,
     reapSandboxLeases,
   };
 }
 
+/** Resume the exact warm box by id for an idle checkpoint, with no cold
+ * restore and no replacement. Returns null when the provider no longer has
+ * it; the ordinary loss paths own that box. The session is not closed: the
+ * box keeps running its commands. */
+export async function resumeIdleCheckpointSessionAtProvider(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+): Promise<unknown | null> {
+  const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
+  const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
+  if (backend !== "modal" || !lease.instanceId || !lease.resumeState) {
+    throw new Error(`sandbox backend ${backend} has no resumable idle checkpoint box`);
+  }
+  if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== lease.instanceId) {
+    throw new Error("idle checkpoint lease envelope does not name its provider instance");
+  }
+  const client = createSandboxClientForBackend(backend as never, settings) as
+    | RetainedProcessProbeClient
+    | undefined;
+  if (!client?.resume) {
+    throw new Error(`sandbox backend ${backend} cannot resume an idle checkpoint box`);
+  }
+  try {
+    const envelopeSessionState =
+      (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
+    const resumedState = await deserializeSandboxSessionStateEnvelope(
+      client as never,
+      envelopeSessionState,
+      lease.instanceId,
+    );
+    if (resumedState === undefined) {
+      throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
+    }
+    const resumed = await withRetainedProcessProbeTimeout(
+      resumeExactSandboxSession(client, backend, resumedState, lease.instanceId),
+    );
+    return resumed.session;
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      throw new Error("idle checkpoint provider resume timed out", { cause: error });
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) return null;
+    throw error;
+  }
+}
+
 const CHECKPOINT_GC_LIMIT = 50;
 const CHECKPOINT_GC_CLAIM_TTL_MS = 10 * 60_000;
+/** The checkpoint artifact GC claim TTL, which the reaper's work check previews. */
+export const SANDBOX_CHECKPOINT_GC_CLAIM_TTL_MS = CHECKPOINT_GC_CLAIM_TTL_MS;
 const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
 const SANDBOX_MAINTENANCE_ITEM_CONCURRENCY = 8;
@@ -979,6 +1385,7 @@ type ConnectedCommandReconciliationOutcome =
   | "claim_failed"
   | "provider_running"
   | "provider_offline"
+  | "provider_unanswered"
   | "provider_error"
   | "proof_exited"
   | "proof_lost"
@@ -988,6 +1395,7 @@ type ConnectedCommandReconciliationOutcome =
   | "output_unavailable"
   | "output_ack_published"
   | "output_released"
+  | "output_runner_reports"
   | "settlement_failed"
   | "defer_failed";
 
@@ -1000,6 +1408,65 @@ function recordConnectedCommandReconciliation(
     help: "Exact-locator Connected Machine background-command reconciliation outcomes.",
     labels: { outcome },
   });
+}
+
+/** Why a connected command's runner can never answer for it again. */
+type ConnectedRunnerRetirement =
+  | "enrollment_revoked"
+  | "connection_replaced"
+  | "connection_stopped";
+type ConnectedRunnerLookups = Map<string, Promise<ConnectedRunnerRetirement | null>>;
+
+/** Offline reasons after which the runner process has exited for good. */
+const CONNECTED_RUNNER_STOPPED_REASONS = new Set([
+  "GOING_OFFLINE_REASON_USER_STOP",
+  "GOING_OFFLINE_REASON_UPDATE",
+  "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+]);
+
+/**
+ * A connected command's operation lives in the memory of the runner process
+ * that launched it and is addressed through that process's connection
+ * instance. No responder on that exact address is not proof by itself: the
+ * machine may be offline or reconnecting. It is proof once the enrollment
+ * also retires that process, by the same rules the running-command claim
+ * applies: the enrollment was revoked, a different runner process now holds
+ * the connection, or the runner went offline by stopping, updating or shutting
+ * down. Anything else, including a failed read, keeps the existing retry. One
+ * read per runner address per sweep.
+ */
+async function connectedCommandRunnerRetirement(
+  db: ActivityServices["db"],
+  claim: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
+  error: unknown,
+  lookups: ConnectedRunnerLookups,
+): Promise<ConnectedRunnerRetirement | null> {
+  if (!(error instanceof SelfhostedControlError) || !error.agentOffline || !error.neverSent) {
+    return null;
+  }
+  const key = JSON.stringify([
+    claim.controlWorkspaceId,
+    claim.enrollmentId,
+    claim.connectionInstanceId,
+  ]);
+  let lookup = lookups.get(key);
+  if (!lookup) {
+    lookup = (async (): Promise<ConnectedRunnerRetirement | null> => {
+      const enrollment = await getEnrollment(db, claim.controlWorkspaceId, claim.enrollmentId);
+      if (!enrollment) return null;
+      if (enrollment.status === "revoked") return "enrollment_revoked";
+      if (enrollment.connectionInstanceId) {
+        return enrollment.connectionInstanceId === claim.connectionInstanceId
+          ? null
+          : "connection_replaced";
+      }
+      return CONNECTED_RUNNER_STOPPED_REASONS.has(enrollment.wentOfflineReason ?? "")
+        ? "connection_stopped"
+        : null;
+    })().catch(() => null);
+    lookups.set(key, lookup);
+  }
+  return await lookup;
 }
 
 async function forEachWithConcurrency<T>(
@@ -1147,19 +1614,66 @@ async function adoptLegacyModalCheckpointReceipts(
   return adopted;
 }
 
+/** A stop or query that no host receives wakes the compute sandbox it
+ * addresses, as any other request to that sandbox does, and is retried at the
+ * same locator; a Connected Machine keeps its ordinary offline retry. */
+function connectedCommandControlOptions(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  deadlineAtMs: number,
+): {
+  connectionCurrent: (subject: string) => Promise<boolean>;
+  onNoResponders?: (subject: string) => Promise<boolean>;
+} {
+  // A stop or query addressed to a replaced connection ends at once and never
+  // wakes a sandbox: runner retirement settles its command.
+  const connectionCurrent = agentConnectionCurrent(db);
+  if (!settings.computeApiUrl || !settings.computeApiKey) return { connectionCurrent };
+  return {
+    connectionCurrent,
+    onNoResponders: wakeComputeSandboxOnNoResponders({
+      connectionCurrent,
+      control: new ComputeControlClient({
+        baseUrl: settings.computeApiUrl,
+        apiKey: settings.computeApiKey,
+        requestTimeoutMs: 10_000,
+        maxAttempts: 2,
+      }),
+      sandboxOf: async (agent) => await computeSandboxOfEnrollment(db, agent, { deadlineAtMs }),
+    }),
+  };
+}
+
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
- * query or cancellation is ever rebound to it. */
+ * query or cancellation is ever rebound to it.
+ *
+ * Recovering a running command is housekeeping: its query and output replay
+ * are always sent without waking, whatever the runner (a Connected Machine's
+ * agent simply receives them). When a runner that reports its own operation
+ * inventory (every compute agent, and a Connected Machine advertising
+ * `op_release`) does not answer, nothing is recorded and the command is left
+ * to that runner, which reports the op again in its inventory while it is
+ * talking: the command is not claimed again until such a report, a stop or the
+ * runner's retirement. A runner that does not report its inventory is asked
+ * again on a later pass, as when it is offline. When what the runner reports
+ * cannot be read, the command is skipped for this pass with nothing recorded.
+ * A stop is the user's own request and is delivered as before. */
 export async function reconcileConnectedMachineBackgroundCommands(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
   bus: ActivityServices["bus"],
   controlRpcOverride?: ControlRpc,
+  runnerModeOverride?: typeof connectedRunnerReleaseMode,
 ): Promise<void> {
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
+  const unansweredConnections = new Set<string>();
+  const unreadableConnections = new Set<string>();
+  const runnerMode = runnerModeOverride ?? connectedRunnerReleaseMode;
+  const runnerModes = new Map<string, Promise<ConnectedRunnerReleaseMode | null>>();
   const firstConnectionProbes = new Map<string, Promise<void>>();
   // Drain the fixed due frontier with the existing concurrency. Yield to the
   // remaining maintenance work each period; retries belong to a later sweep.
@@ -1185,6 +1699,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
       controlRpcOverride ??
       new NatsControlRpc(
         async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
+        connectedCommandControlOptions(db, settings, deadline),
       );
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
       let proof = claim.proof;
@@ -1194,9 +1709,23 @@ export async function reconcileConnectedMachineBackgroundCommands(
         claim.enrollmentId,
         claim.connectionInstanceId,
       ]);
+      // Recovery never wakes; only delivering a stop may.
+      const recovery = !proof && claim.state === "running";
+      const rpc = recovery ? withoutWaking(controlRpc) : controlRpc;
       if (!proof) {
         const firstProbe = firstConnectionProbes.get(connectionKey);
         if (firstProbe) await firstProbe;
+        if (unreadableConnections.has(connectionKey)) return;
+        if (recovery && unansweredConnections.has(connectionKey)) {
+          await deferConnectedCommandClaim(
+            db,
+            settings,
+            observability,
+            claim,
+            "provider_unanswered",
+          );
+          return;
+        }
         if (offlineConnections.has(connectionKey)) {
           await deferConnectedCommandClaim(db, settings, observability, claim, "provider_offline");
           return;
@@ -1214,7 +1743,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
         try {
           proof = await probeConnectedMachineBackgroundCommand(
             claim,
-            controlRpc,
+            rpc,
             Math.min(
               settings.sandboxSelfhostedControlTimeoutMs,
               RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
@@ -1230,7 +1759,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               agentId: claim.enrollmentId,
               connectionInstanceId: claim.connectionInstanceId,
               epoch: 0,
-              controlRpc,
+              controlRpc: rpc,
               rpcSubject: subjectFor(
                 claim.controlWorkspaceId,
                 claim.enrollmentId,
@@ -1266,9 +1795,36 @@ export async function reconcileConnectedMachineBackgroundCommands(
             return;
           }
         } catch (error) {
+          if (recovery && isAgentNotAnswered(error)) {
+            let mode = runnerModes.get(connectionKey);
+            if (!mode) {
+              mode = runnerMode(db, claim).catch(() => null);
+              runnerModes.set(connectionKey, mode);
+            }
+            const runner = await mode;
+            if (runner === null) {
+              // Unknown whether the runner reports its inventory: nothing is
+              // recorded, and its commands wait for a later pass.
+              unreadableConnections.add(connectionKey);
+              return;
+            }
+            if (runner === "inventory") {
+              // Once: the runner's inventory takes over from here.
+              unansweredConnections.add(connectionKey);
+              await deferConnectedCommandClaim(
+                db,
+                settings,
+                observability,
+                claim,
+                "provider_unanswered",
+              );
+              return;
+            }
+          }
           const offline =
-            error instanceof SelfhostedControlError &&
-            (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
+            (recovery && isAgentNotAnswered(error)) ||
+            (error instanceof SelfhostedControlError &&
+              (error.agentOffline || error.reason === "agent_reconnecting" || error.draining));
           if (offline) offlineConnections.add(connectionKey);
           if (!offline) {
             observability.warn("sandbox reaper: connected-command provider probe failed", {
@@ -1289,48 +1845,49 @@ export async function reconcileConnectedMachineBackgroundCommands(
         } finally {
           finishFirstProbe?.();
         }
-
-        try {
-          await recordConnectedMachineBackgroundCommandProof(db, { claim, proof });
-          recordConnectedCommandReconciliation(observability, `proof_${proof.outcome}`);
-        } catch (error) {
-          recordConnectedCommandReconciliation(observability, "proof_checkpoint_failed");
-          observability.warn("sandbox reaper: connected-command proof checkpoint failed", {
-            commandId: claim.commandId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return;
-        }
       }
 
       try {
-        const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
-        if (!settlement.settled) {
-          throw new Error("Connected command settlement lost its exact claim or proof");
-        }
         const receipt =
           outputReplay?.outputReceipt ??
           (outputReplay?.status === "running" ? outputReplay.terminal?.outputReceipt : undefined);
         const terminal =
           outputReplay?.status === "completed" ? outputReplay : outputReplay?.terminal;
-        if (proof.outcome === "exited" && receipt && terminal) {
-          await recordConnectedCommandOutputConsumption(db, {
-            ...claim,
-            receipt,
-            exitCode: terminal.outcome.response.exitCode,
-          });
-        }
-        if (settlement.events.length > 0) {
-          try {
-            await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
-          } catch (error) {
-            observability.warn("sandbox reaper: connected-command event fanout failed", {
-              commandId: claim.commandId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
+        if (
+          terminal &&
+          proof.outcome === "exited" &&
+          terminal.outcome.response.exitCode !== proof.exitCode
+        )
+          throw new Error("Connected command replay conflicts with terminal provider proof");
+        const settled = await settleCollectedConnectedMachineBackgroundCommand(db, {
+          claim,
+          proof,
+          receipt,
+          publish: async (events) => {
+            try {
+              await bus.publish(claim.workspaceId, claim.sessionId, events);
+            } catch (error) {
+              observability.warn("sandbox reaper: connected-command event fanout failed", {
+                commandId: claim.commandId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          },
+        });
+        if (settled)
+          recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
+        // Stored: release it on the runner now, in one answered exchange. A
+        // runner without OpRelease, or a failure, leaves it to the release pass.
+        if (receipt && proof.outcome === "exited")
+          await releaseStoredConnectedCommandOutput(db, {
+            command: claim,
+            exitSeq: receipt.exitSeq,
+            controlRpc,
+            controlTimeoutMs: Math.min(
+              settings.sandboxSelfhostedControlTimeoutMs,
+              RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+            ),
+          }).catch(() => undefined);
       } catch (error) {
         recordConnectedCommandReconciliation(observability, "settlement_failed");
         observability.warn("sandbox reaper: connected-command settlement failed", {
@@ -1344,32 +1901,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
   } while (Date.now() < deadline);
 }
 
-export async function replayConnectedCommandOutput(
-  client: Pick<OpStreamExecClient, "readExisting">,
-  opId: string,
-  terminalKnown: boolean,
-  capture: Parameters<OpStreamExecClient["readExisting"]>[2],
-): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
-  // A completed operation can need several bounded reads to replay its retained
-  // frames. Keep the reader's integrity checkpoint until the exit is verified;
-  // replacing it after each partial read would restart forever at frame one.
-  let capturedThrough = 0n;
-  while (true) {
-    const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
-    if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
-    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
-    // chunk). These are real replay progress even when capture receives no
-    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
-    capturedThrough = BigInt(replay.replaySequence);
-    // This is a finite terminal drain, not a poller for a running command.
-    // Failed persistence, transport/integrity errors, and no-progress reads
-    // return control to normal reconciliation without licensing settlement.
-    if (capturedThrough === before) {
-      throw new Error("Connected command terminal output replay has not reached its exit frontier");
-    }
-  }
-}
+export { replayConnectedCommandOutput } from "@opengeni/runtime/sandbox";
 
 /** Drain the durable terminal-output obligation independently of the launching
  * attempt or model completion notice. Existing terminal rows receive no inferred
@@ -1385,6 +1917,7 @@ export async function reconcileConnectedCommandOutputReleases(
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const controlRpc =
     controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
+  const lookups: ConnectedOutputReleaseLookups = { runners: new Map(), modes: new Map() };
   do {
     let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
     try {
@@ -1401,109 +1934,192 @@ export async function reconcileConnectedCommandOutputReleases(
       });
       return;
     }
-    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
-      try {
-        if (!bus.getOpStreamConnection)
-          throw new Error("Connected command output transport unavailable");
-        const rpcSubject = subjectFor(
-          claim.controlWorkspaceId,
-          claim.enrollmentId,
-          claim.connectionInstanceId,
-        );
-        const controlTimeoutMs = Math.min(
-          settings.sandboxSelfhostedControlTimeoutMs,
-          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
-        );
-        const client = new OpStreamExecClient({
-          workspaceId: claim.controlWorkspaceId,
-          agentId: claim.enrollmentId,
-          connectionInstanceId: claim.connectionInstanceId,
-          epoch: 0,
-          controlRpc,
-          rpcSubject,
-          transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
-          controlTimeoutMs,
-          retryClock: defaultSelfhostedRetryClock,
-          journal: {
-            attachGeneration: () => String(Date.now()),
-            persistSettled: () => {
-              throw new Error("Background output release requires its database receipt");
-            },
-          },
-        });
-        let receipt = claim.receipt;
-        if (!receipt) {
-          const status = await querySelfhostedOp({
-            controlRpc,
-            rpcSubject,
-            opId: claim.opId,
-            controlTimeoutMs,
-          });
-          if (status.state === OpState.OP_STATE_LOST) {
-            if (
-              !(await settleConnectedCommandOutputReleaseClaim(db, {
-                claim,
-                outcome: "unavailable",
-                retryAfterMs: 0,
-              }))
-            )
-              throw new Error("Connected command output loss no longer owns its exact claim");
-            recordConnectedCommandReconciliation(observability, "output_unavailable");
-            return;
-          }
-          if (status.state !== OpState.OP_STATE_COMPLETE)
-            throw new Error("Terminal command output returned a live operation");
-          const replay = await replayConnectedCommandOutput(
-            client,
-            claim.opId,
-            true,
-            async (frames) =>
-              captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
-          );
-          const terminal = replay.status === "completed" ? replay : replay.terminal;
-          receipt =
-            replay.outputReceipt ??
-            (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
-            null;
-          if (!terminal || !receipt)
-            throw new Error("Connected command output replay has no complete custody receipt");
-          await recordConnectedCommandOutputConsumption(db, {
-            ...claim,
-            receipt,
-            exitCode: terminal.outcome.response.exitCode,
-          });
-        }
-        const outcome = await client.releaseCapturedOutput(claim.opId, receipt);
+    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) =>
+      releaseClaimedConnectedCommandOutput(
+        { db, settings, observability, bus, controlRpc, lookups },
+        claim,
+      ),
+    );
+    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
+  } while (Date.now() < deadline);
+}
+
+type ConnectedOutputReleaseLookups = {
+  runners: ConnectedRunnerLookups;
+  modes: Map<string, Promise<ConnectedRunnerReleaseMode | null>>;
+};
+
+function connectedOutputRetryMs(
+  settings: ActivityServices["settings"],
+  claim: { reconcileAttempts: number },
+): number {
+  return Math.min(
+    5 * 60_000,
+    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
+      2 ** Math.min(4, claim.reconcileAttempts - 1),
+  );
+}
+
+/** Recover one claimed output obligation. A runner that reports its own
+ * operation inventory (every compute sandbox agent, and a Connected Machine
+ * whose live connection advertised `op_release`) is sent nothing from here:
+ * its inventory, answered while it is talking, collects and releases what is
+ * left, so this pass never reaches a sleeping sandbox. The obligation is
+ * settled here only when that runner is retired (it retains nothing), and is
+ * otherwise rechecked later in the database alone. A Connected Machine
+ * without the capability keeps the attach and final ACK. */
+export async function releaseClaimedConnectedCommandOutput(
+  deps: {
+    db: ActivityServices["db"];
+    settings: ActivityServices["settings"];
+    observability: ActivityServices["observability"];
+    bus: ActivityServices["bus"];
+    controlRpc: ControlRpc;
+    lookups?: ConnectedOutputReleaseLookups;
+  },
+  claim: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>[number],
+): Promise<void> {
+  const { db, settings, observability, bus, controlRpc } = deps;
+  const lookups = deps.lookups ?? { runners: new Map(), modes: new Map() };
+  const modeKey = JSON.stringify([
+    claim.controlWorkspaceId,
+    claim.enrollmentId,
+    claim.connectionInstanceId,
+  ]);
+  let modeLookup = lookups.modes.get(modeKey);
+  if (!modeLookup) {
+    modeLookup = connectedRunnerReleaseMode(db, claim).catch(() => null);
+    lookups.modes.set(modeKey, modeLookup);
+  }
+  const mode = await modeLookup;
+  if (mode !== "legacy") {
+    const retired = mode === "retired";
+    const outcome = !retired ? "retry" : claim.receipt ? "not_retained" : "unavailable";
+    await settleConnectedCommandOutputReleaseClaim(db, {
+      claim,
+      outcome,
+      retryAfterMs: retired ? 0 : connectedOutputRetryMs(settings, claim),
+    }).catch(() => false);
+    recordConnectedCommandReconciliation(
+      observability,
+      outcome === "retry"
+        ? "output_runner_reports"
+        : outcome === "not_retained"
+          ? "output_released"
+          : "output_unavailable",
+    );
+    return;
+  }
+  let receipt = claim.receipt;
+  try {
+    if (!bus.getOpStreamConnection)
+      throw new Error("Connected command output transport unavailable");
+    const rpcSubject = subjectFor(
+      claim.controlWorkspaceId,
+      claim.enrollmentId,
+      claim.connectionInstanceId,
+    );
+    const controlTimeoutMs = Math.min(
+      settings.sandboxSelfhostedControlTimeoutMs,
+      RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+    );
+    const client = new OpStreamExecClient({
+      workspaceId: claim.controlWorkspaceId,
+      agentId: claim.enrollmentId,
+      connectionInstanceId: claim.connectionInstanceId,
+      epoch: 0,
+      controlRpc,
+      rpcSubject,
+      transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+      controlTimeoutMs,
+      retryClock: defaultSelfhostedRetryClock,
+      journal: {
+        attachGeneration: () => String(Date.now()),
+        persistSettled: () => {
+          throw new Error("Background output release requires its database receipt");
+        },
+      },
+    });
+    if (!receipt) {
+      const status = await querySelfhostedOp({
+        controlRpc,
+        rpcSubject,
+        opId: claim.opId,
+        controlTimeoutMs,
+      });
+      // Lost, or cancelled before it ever began (its tombstone): there is
+      // no output to read, so none is recorded and nothing is acknowledged.
+      if (status.state === OpState.OP_STATE_LOST || isOpTombstone(status, claim.opId)) {
         if (
           !(await settleConnectedCommandOutputReleaseClaim(db, {
             claim,
-            outcome,
-            retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+            outcome: "unavailable",
+            retryAfterMs: 0,
           }))
         )
-          throw new Error("Connected command output release no longer owns its exact claim");
-        recordConnectedCommandReconciliation(
-          observability,
-          outcome === "published" ? "output_ack_published" : "output_released",
-        );
-      } catch (error) {
-        await settleConnectedCommandOutputReleaseClaim(db, {
-          claim,
-          outcome: "retry",
-          retryAfterMs: Math.min(
-            5 * 60_000,
-            Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
-              2 ** Math.min(4, claim.reconcileAttempts - 1),
-          ),
-        }).catch(() => false);
-        observability.warn("sandbox reaper: connected-command output release deferred", {
-          commandId: claim.commandId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+          throw new Error("Connected command output loss no longer owns its exact claim");
+        recordConnectedCommandReconciliation(observability, "output_unavailable");
+        return;
       }
+      if (status.state !== OpState.OP_STATE_COMPLETE)
+        throw new Error("Terminal command output returned a live operation");
+      const replay = await replayConnectedCommandOutput(client, claim.opId, true, async (frames) =>
+        captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+      );
+      const terminal = replay.status === "completed" ? replay : replay.terminal;
+      receipt =
+        replay.outputReceipt ??
+        (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
+        null;
+      if (!terminal || !receipt)
+        throw new Error("Connected command output replay has no complete custody receipt");
+      await recordConnectedCommandOutputConsumption(db, {
+        ...claim,
+        receipt,
+        exitCode: terminal.outcome.response.exitCode,
+      });
+    }
+    const outcome = await client.releaseCapturedOutput(claim.opId, receipt);
+    if (
+      !(await settleConnectedCommandOutputReleaseClaim(db, {
+        claim,
+        outcome,
+        retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+      }))
+    )
+      throw new Error("Connected command output release no longer owns its exact claim");
+    recordConnectedCommandReconciliation(
+      observability,
+      outcome === "published" ? "output_ack_published" : "output_released",
+    );
+  } catch (error) {
+    const retired = await connectedCommandRunnerRetirement(db, claim, error, lookups.runners);
+    // A retired runner retains nothing: captured output is released, and
+    // output it never handed over is recorded as missing.
+    if (
+      retired &&
+      (await settleConnectedCommandOutputReleaseClaim(db, {
+        claim,
+        outcome: receipt ? "not_retained" : "unavailable",
+        retryAfterMs: 0,
+      }).catch(() => false))
+    ) {
+      recordConnectedCommandReconciliation(
+        observability,
+        receipt ? "output_released" : "output_unavailable",
+      );
+      return;
+    }
+    await settleConnectedCommandOutputReleaseClaim(db, {
+      claim,
+      outcome: "retry",
+      retryAfterMs: connectedOutputRetryMs(settings, claim),
+    }).catch(() => false);
+    observability.warn("sandbox reaper: connected-command output release deferred", {
+      commandId: claim.commandId,
+      error: error instanceof Error ? error.message : String(error),
     });
-    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
-  } while (Date.now() < deadline);
+  }
 }
 
 export async function probeConnectedMachineBackgroundCommand(
@@ -1540,25 +2156,7 @@ export function connectedCommandProofFromStatus(
       if (!exit) {
         throw new Error("Connected command completed without an exit record");
       }
-      const failureCode = exit.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
-      const reason = failureCode
-        ? `op_failure_${failureCode}`
-        : exit.cancelled
-          ? "op_cancelled"
-          : exit.timedOut
-            ? "op_timed_out"
-            : "op_exit";
-      return {
-        outcome: "exited",
-        exitCode: exit.exitCode,
-        reason,
-        ...(failureCode
-          ? {
-              failure: { code: failureCode, detail: exit.failureDetail, retryable: false as const },
-            }
-          : {}),
-        observedAt,
-      };
+      return connectedCommandExitProof(exit, observedAt);
     }
     case OpState.OP_STATE_LOST:
       return {
@@ -1582,12 +2180,16 @@ async function deferConnectedCommandClaim(
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
   claim: ConnectedMachineBackgroundCommandClaim,
-  outcome: "provider_running" | "provider_offline" | "provider_error" | "settlement_failed",
+  outcome:
+    | "provider_running"
+    | "provider_offline"
+    | "provider_unanswered"
+    | "provider_error"
+    | "settlement_failed",
 ): Promise<void> {
-  const exponent = Math.min(4, Math.max(0, claim.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  const retryAfterMs = connectedCommandReconciliationRetryMs(
+    claim.reconcileAttempts,
+    settings.sandboxLeaseReaperPeriodMs,
   );
   try {
     if (
@@ -1595,6 +2197,8 @@ async function deferConnectedCommandClaim(
         claim,
         outcome,
         retryAfterMs,
+        // The runner reports the op again; until then nothing is due.
+        leaveToRunner: outcome === "provider_unanswered",
       }))
     ) {
       throw new Error("Connected command defer lost its exact claim");
@@ -1607,6 +2211,195 @@ async function deferConnectedCommandClaim(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/** Tuples listed per sweep (random order, the next sweep lists again) and the
+ * share of the reaper tick the probes may use, so the pass never crowds out
+ * the orphan sweep and GC after it. A box the provider cannot yet prove gone is
+ * re-probed on an exponential backoff instead of on every tick. */
+const ENDED_EPOCH_BLOCKER_LIST_LIMIT = 200;
+const ENDED_EPOCH_BLOCKER_SWEEP_BUDGET_MS = 60_000;
+const ENDED_EPOCH_BLOCKER_BACKOFF_BASE_MS = 5 * 60_000;
+const ENDED_EPOCH_BLOCKER_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+
+/** Per worker process: when each historical box may be probed again. */
+export type EndedEpochProbeBackoff = Map<string, { failures: number; nextProbeAtMs: number }>;
+
+/**
+ * Settle open requests still recorded on a Modal box whose lease
+ * epoch has ended (a legacy loss, or a cold commit that left them). Lease
+ * succession alone proves nothing about the old box, so each exact tuple is
+ * settled only after its historical sandbox is observed terminated. NotFound
+ * is ambiguous here (deletion or a rotated Modal credential workspace) and,
+ * like a running or unreachable box, keeps the rows for a later probe (with
+ * backoff) or an operator.
+ *
+ * The same observation also ends a turn's wait on sandbox setup whose start
+ * outcome is unknown: once the exact box all its setup ran on is terminated,
+ * nothing it may have started can still run, so the turn's setup reruns its
+ * idempotent preparation (`reconcileCompletedSandboxSetup`). A start that
+ * failed before any process was recorded otherwise had nothing to exit and
+ * stayed recovering forever.
+ */
+async function settleEndedEpochBlockers(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
+  backoff: EndedEpochProbeBackoff,
+): Promise<void> {
+  // Same scope as the Modal orphan sweep: no Modal API calls from workers of
+  // a deployment that never configured Modal.
+  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
+    return;
+  }
+  const startedAtMs = Date.now();
+  // One observation per box: several tuples and turns can name the same box.
+  const observed = new Map<string, string>();
+  const kept: Record<string, number> = {};
+  /** The box's status, or null when it is backing off or the budget is spent. */
+  async function observe(
+    instanceId: string,
+    details: Record<string, unknown>,
+  ): Promise<string | null> {
+    const known = observed.get(instanceId);
+    if (known !== undefined) return known;
+    const nowMs = Date.now();
+    if ((backoff.get(instanceId)?.nextProbeAtMs ?? 0) > nowMs) return null;
+    if (nowMs - startedAtMs >= ENDED_EPOCH_BLOCKER_SWEEP_BUDGET_MS) return null;
+    let status: string;
+    try {
+      status = (
+        await withRetainedProcessProbeTimeout(
+          inspectHistoricalModalSandbox(settings, instanceId, null),
+        )
+      ).status;
+    } catch (error) {
+      status = error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "error";
+      observability.warn("sandbox reaper: ended-epoch box probe failed", {
+        ...details,
+        error:
+          error === RETAINED_PROCESS_PROBE_TIMEOUT
+            ? "provider_timeout"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+      });
+    }
+    observed.set(instanceId, status);
+    if (status === "terminated") {
+      backoff.delete(instanceId);
+    } else {
+      deferEndedEpochProbe(backoff, instanceId);
+      kept[status] = (kept[status] ?? 0) + 1;
+    }
+    return status;
+  }
+
+  let tuples: Awaited<ReturnType<typeof listEndedEpochWorkspaceBlockers>>;
+  try {
+    tuples = await listEndedEpochWorkspaceBlockers(db, { limit: ENDED_EPOCH_BLOCKER_LIST_LIMIT });
+  } catch (error) {
+    observability.warn("sandbox reaper: ended-epoch blocker inventory failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    tuples = [];
+  }
+  for (const tuple of tuples) {
+    const instanceId = tuple.lostInstanceId;
+    const details = {
+      workspaceId: tuple.workspaceId,
+      sandboxGroupId: tuple.sandboxGroupId,
+      lostEpoch: tuple.lostEpoch,
+      instanceId,
+    };
+    try {
+      const status = await observe(instanceId, details);
+      if (status !== "terminated") continue;
+      const settled = await settleEndedEpochWorkspaceBlockers(db, tuple);
+      if (settled) {
+        observability.info("sandbox reaper: settled blockers of an ended lease epoch", {
+          ...details,
+          ...settled,
+        });
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: ended-epoch blocker settlement failed", {
+        ...details,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  let setups: Awaited<ReturnType<typeof listEndedEpochSandboxSetupUncertainties>>;
+  try {
+    setups = await listEndedEpochSandboxSetupUncertainties(db, {
+      limit: ENDED_EPOCH_BLOCKER_LIST_LIMIT,
+    });
+  } catch (error) {
+    observability.warn("sandbox reaper: ended-epoch setup inventory failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    setups = [];
+  }
+  for (const setup of setups) {
+    const instanceId = setup.box.providerInstanceId;
+    // A turn whose reconciliation is refused on a terminated box (for example
+    // an ancestor is paused) backs off by turn, so it never re-probes per tick.
+    const turnKey = `setup:${setup.turnId}:${setup.attemptId}`;
+    if ((backoff.get(turnKey)?.nextProbeAtMs ?? 0) > Date.now()) continue;
+    const details = {
+      workspaceId: setup.workspaceId,
+      sessionId: setup.sessionId,
+      turnId: setup.turnId,
+      sandboxGroupId: setup.sandboxGroupId,
+      lostEpoch: setup.box.leaseEpoch,
+      instanceId,
+    };
+    try {
+      const status = await observe(instanceId, details);
+      if (status !== "terminated") continue;
+      const { reconciled } = await reconcileCompletedSandboxSetup(db, {
+        accountId: setup.accountId,
+        workspaceId: setup.workspaceId,
+        sessionId: setup.sessionId,
+        turnId: setup.turnId,
+        attemptId: setup.attemptId,
+        terminatedBox: setup.box,
+      });
+      if (reconciled) {
+        backoff.delete(turnKey);
+        observability.info(
+          "sandbox reaper: resumed a turn whose unknown setup ran on a terminated box",
+          details,
+        );
+      } else {
+        deferEndedEpochProbe(backoff, turnKey);
+      }
+    } catch (error) {
+      deferEndedEpochProbe(backoff, turnKey);
+      observability.warn("sandbox reaper: ended-epoch setup reconciliation failed", {
+        ...details,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (Object.keys(kept).length) {
+    observability.info("sandbox reaper: ended-epoch blockers kept without terminal proof", kept);
+  }
+}
+
+function deferEndedEpochProbe(backoff: EndedEpochProbeBackoff, key: string): void {
+  const failures = (backoff.get(key)?.failures ?? 0) + 1;
+  backoff.set(key, {
+    failures,
+    nextProbeAtMs:
+      Date.now() +
+      Math.min(
+        ENDED_EPOCH_BLOCKER_BACKOFF_MAX_MS,
+        ENDED_EPOCH_BLOCKER_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 16),
+      ),
+  });
 }
 
 async function reconcileTerminalRetainedProcesses(
@@ -1636,10 +2429,18 @@ async function reconcileTerminalRetainedProcesses(
   const drainBudget: RetainedProcessDrainBudget = {
     until: Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS,
   };
+  // Boxes already retired as lost in this batch: their other commands were
+  // settled by that same transaction and need no probe of their own.
+  const lostBoxes = new Set<string>();
   for (const claim of claims) {
     let process = claim.process;
+    if (lostBoxes.has(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`))
+      continue;
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
+    // The exact current box itself answered NotFound to this probe: that is
+    // loss proof for the whole box, not just this command.
+    let wholeBoxGone = false;
     const processScope = {
       accountId: process.accountId,
       workspaceId: process.workspaceId,
@@ -1905,6 +2706,10 @@ async function reconcileTerminalRetainedProcesses(
               throw new Error("Deadline cancellation no longer owns its rotating lease");
             if (!probeOutcome.ok) throw probeOutcome.error;
             observation = probeOutcome.value;
+            wholeBoxGone =
+              observation.status === "proved" &&
+              observation.proof.outcome === "lost" &&
+              observation.proof.reason === "provider_instance_not_found";
             if (supervised) {
               supervisionMetric(
                 (await commandPersistence.loadSupervisionReceipt())
@@ -1960,6 +2765,7 @@ async function reconcileTerminalRetainedProcesses(
           claim.claimId,
           observation.reason,
           observation.outputBacklog === true,
+          claim.ownerState === "background_stopping",
         );
         continue;
       }
@@ -1982,6 +2788,83 @@ async function reconcileTerminalRetainedProcesses(
       }
     }
 
+    if (wholeBoxGone) {
+      // Settle every blocker of the exact lost box in one transaction: all its
+      // commands, open requests, PTYs and process holders, then cold the lease
+      // and wake waiters. Settling one command per probe took a 20-per-sweep
+      // queue 11 minutes for 35 commands in staging session 5040c525 and kept
+      // the session waiting on a box that was already gone.
+      // Commands of this box that a closed turn never adopted get their
+      // session background record first, exactly as their own claim would
+      // have, so the agent hears about them when the box settles below.
+      const boxKey = `${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`;
+      for (const other of claims) {
+        const sibling = other.process;
+        if (
+          other === claim ||
+          `${sibling.leaseId}:${sibling.leaseEpoch}:${sibling.providerInstanceId}` !== boxKey ||
+          sibling.ownerActorKind !== "turn" ||
+          sibling.providerBackend !== "modal" ||
+          other.ownerState.startsWith("background_") ||
+          retainedProcessReconciliationProof(sibling)
+        )
+          continue;
+        try {
+          await recoverManagedSessionBackgroundCommand(db, {
+            accountId: sibling.accountId,
+            workspaceId: sibling.workspaceId,
+            sessionId: sibling.sessionId,
+            processId: sibling.id,
+            expected: retainedProcessSettlementIdentity(sibling),
+            reconciliationClaimId: other.claimId,
+          });
+        } catch (error) {
+          observability.warn("sandbox reaper: retained-command background recovery failed", {
+            processId: sibling.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      try {
+        const marked = await markWarmLeaseInstanceLost(db, {
+          accountId: process.accountId,
+          workspaceId: process.workspaceId,
+          sandboxGroupId: process.sandboxGroupId,
+          expectedEpoch: process.leaseEpoch,
+          expectedInstanceId: process.providerInstanceId,
+          expectedBackend: process.providerBackend,
+          providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+            settings,
+            process.providerBackend as Settings["sandboxBackend"],
+          ),
+        });
+        if (marked.status === "marked") {
+          lostBoxes.add(`${process.leaseId}:${process.leaseEpoch}:${process.providerInstanceId}`);
+          recordRetainedProcessReconciliation(observability, "provider_lost_whole_box");
+          if (marked.backgroundCommandEvents?.length) {
+            await publishDurableSessionEvents(
+              bus,
+              process.workspaceId,
+              marked.backgroundCommandEvents,
+              (error) => {
+                observability.warn("sandbox reaper: lost-box command event fanout failed", {
+                  sandboxGroupId: process.sandboxGroupId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
+          continue;
+        }
+      } catch (error) {
+        observability.warn("sandbox reaper: whole-box loss settlement failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      // Stale (a draining drain or another observer owns the box): fall back
+      // to this command's own exact settlement below.
+    }
     try {
       const settlement = await settleRetainedProcess(db, {
         accountId: process.accountId,
@@ -2041,8 +2924,15 @@ async function deferRetainedProcessClaim(
   claimId: string,
   outcome: RetainedProcessDeferralOutcome,
   outputBacklog = false,
+  stopping = false,
 ): Promise<void> {
-  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome, outputBacklog);
+  const deferral = retainedProcessReconciliationDeferral(
+    settings,
+    process,
+    outcome,
+    outputBacklog,
+    stopping,
+  );
   try {
     // A healthy long-lived command can already be on a five-minute backoff
     // when rotation becomes due. Wake it at the lead boundary, then at the
@@ -2080,6 +2970,8 @@ export function retainedProcessReconciliationDeferral(
   process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
   outcome: RetainedProcessDeferralOutcome,
   outputBacklog = false,
+  /** A stop was requested: the command is expected to exit within seconds. */
+  stopping = false,
 ): {
   durableOutcome: string;
   metricOutcome: RetainedProcessReconciliationOutcome;
@@ -2105,10 +2997,11 @@ export function retainedProcessReconciliationDeferral(
     };
   }
   const baseRetryMs = Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000);
-  // A backlog still being drained is progress, not an unhealthy provider:
+  // A backlog still being drained is progress, not an unhealthy provider, and
+  // a stopped command that has not exited yet will within seconds:
   // come back at the reaper cadence, without backoff.
   const exponent =
-    outcome === "provider_running" && outputBacklog
+    outcome === "provider_running" && (outputBacklog || stopping)
       ? 0
       : Math.min(4, Math.max(0, process.reconcileAttempts - 1));
   const retryAfterMs = Math.min(5 * 60_000, baseRetryMs * 2 ** exponent);
@@ -2209,7 +3102,7 @@ function retainedBacklogRemains(session: RetainedProcessProbeSession, result: un
   );
 }
 
-async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
+async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>, extraMs = 0): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -2217,7 +3110,7 @@ async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(RETAINED_PROCESS_PROBE_TIMEOUT),
-          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS + extraMs,
         );
         timer.unref?.();
       }),
@@ -2446,6 +3339,14 @@ export async function probeRetainedProcessAtProvider(
             lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
           )) ?? false)
         : false;
+    // A stopped command takes up to the supervisor's KILL escalation to exit.
+    // Wait for it here, within the sweep's budget, so the stop settles now
+    // instead of after a backoff; the read returns as soon as it exits.
+    const readWaitMs =
+      supervisedCancelled &&
+      Date.now() + RETAINED_PROCESS_STOP_SETTLE_WAIT_MS < (drainBudget?.until ?? Infinity)
+        ? RETAINED_PROCESS_STOP_SETTLE_WAIT_MS
+        : 1_000;
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
@@ -2457,9 +3358,10 @@ export async function probeRetainedProcessAtProvider(
           (process.providerBackend !== "modal" || legacyPty)
             ? "\u0003"
             : "",
-        yieldTimeMs: 1_000,
+        yieldTimeMs: readWaitMs,
         maxOutputTokens: 2_000,
       }),
+      readWaitMs - 1_000,
     );
   } catch (error) {
     if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
@@ -2631,6 +3533,54 @@ async function accrueWarmTick(
   return { accrued, workspaceIds };
 }
 
+/**
+ * The reaper maintenance pass's read-only projections, for a reaper tick that
+ * started no workflow because there was no work. Same gauges, same process:
+ * the control worker both runs the cadence and polls the lifecycle queue.
+ */
+export async function refreshIdleSandboxReaperProjections(input: {
+  db: ActivityServices["db"];
+  settings: ActivityServices["settings"];
+  observability: ActivityServices["observability"];
+  inspectOpenSandboxInventory?: InspectOpenSandboxKubernetesInventoryFn;
+}): Promise<void> {
+  await refreshQueueLeaseAndCreditGauges(
+    input.db,
+    input.settings,
+    input.observability,
+    input.inspectOpenSandboxInventory ?? inspectOpenSandboxKubernetesInventory,
+  );
+}
+
+/**
+ * Whether the Modal orphan sweep could act: the deployment uses Modal and its
+ * app has an unfinished sandbox. Called only once the database checks found no
+ * warm lease, so an empty listing is the sweep's complete, empty inventory and
+ * is projected exactly as the sweep would project it.
+ */
+export async function modalOrphanSweepMayHaveWork(input: {
+  settings: ActivityServices["settings"];
+  observability: ActivityServices["observability"];
+  hasRunningSandboxes?: (settings: ActivityServices["settings"]) => Promise<boolean>;
+}): Promise<boolean> {
+  const { settings, observability } = input;
+  if (!modalOrphanSweepConfigured(settings)) return false;
+  if (await (input.hasRunningSandboxes ?? modalAppHasRunningSandboxes)(settings)) return true;
+  recordModalSandboxInventoryGauges(observability, {
+    running: 0,
+    unleased: 0,
+    liveLeaseInstancesMissing: 0,
+  });
+  recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+  return false;
+}
+
+function modalOrphanSweepConfigured(settings: ActivityServices["settings"]): boolean {
+  return (
+    settings.sandboxBackend === "modal" || !!settings.modalTokenId || !!settings.modalTokenSecret
+  );
+}
+
 async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
@@ -2678,6 +3628,17 @@ async function refreshQueueLeaseAndCreditGauges(
       "rotation-backlog",
       async () => {
         recordSandboxRotationBacklogGauges(observability, await readSandboxRotationBacklog(db));
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
+      "checkpoint_staleness",
+      "checkpoint-staleness",
+      async () => {
+        recordSandboxCheckpointStalenessGauges(
+          observability,
+          await readSandboxCheckpointStaleness(db),
+        );
       },
     ),
     refreshSandboxInventoryGauge(
@@ -2935,6 +3896,124 @@ export function modalOrphanCandidateStillUnowned(
   );
 }
 
+/** How often one worker lists Opengeni compute for orphans. Orphans are
+ * rare (a lost create answer, a failed cleanup, a crash), so a few minutes'
+ * delay costs little and keeps the control service's listing off every 30 s maintenance tick. */
+export const COMPUTE_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;
+let lastComputeOrphanSweepAtMs = Number.NEGATIVE_INFINITY;
+/** This worker's traversal of the control service's inventory, carried between passes. */
+const computeOrphanSweepProgress = createComputeOrphanSweepProgress();
+/** This worker's traversal of the stale-enrollment inventory, likewise. */
+const staleComputeEnrollmentProgress = createComputeOrphanSweepProgress();
+
+/** The most one compute orphan sweep may take: the stale-enrollment reconcile,
+ * the control service's listing, every database check and revoke (lock waits included)
+ * and every delete. It shares a five-minute maintenance activity with the
+ * other sweeps; what it does not reach is the next sweep's. */
+export const COMPUTE_ORPHAN_SWEEP_BUDGET_MS = 60_000;
+/** The part of that budget the stale-enrollment reconcile may use, so the
+ * listing sweep always keeps the rest. */
+export const COMPUTE_STALE_ENROLLMENT_BUDGET_MS = 15_000;
+/** The most one candidate's database work may take (lock waits included), so
+ * a stuck one fails and sits out instead of holding a slot for the pass. */
+export const COMPUTE_SWEEP_ITEM_DB_BUDGET_MS = 5_000;
+
+/** The activity's cancellation, when this runs inside a Temporal activity. */
+function activityCancellationSignal(): AbortSignal | undefined {
+  try {
+    return Context.current().cancellationSignal;
+  } catch {
+    return undefined;
+  }
+}
+
+async function sweepComputeOrphansForConfiguredBackend(
+  settings: ActivityServices["settings"],
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+): Promise<number> {
+  const nowMs = Date.now();
+  if (nowMs - lastComputeOrphanSweepAtMs < COMPUTE_ORPHAN_SWEEP_INTERVAL_MS) return 0;
+  lastComputeOrphanSweepAtMs = nowMs;
+  const cancellation = activityCancellationSignal();
+  const budget = AbortSignal.timeout(COMPUTE_ORPHAN_SWEEP_BUDGET_MS);
+  const signal = cancellation ? AbortSignal.any([budget, cancellation]) : budget;
+  const bound = { deadlineAtMs: nowMs + COMPUTE_ORPHAN_SWEEP_BUDGET_MS, signal };
+  /** One candidate's database work: its own short deadline inside the pass. */
+  const itemBound = (outer: { deadlineAtMs: number; signal: AbortSignal }) => ({
+    deadlineAtMs: Math.min(outer.deadlineAtMs, Date.now() + COMPUTE_SWEEP_ITEM_DB_BUDGET_MS),
+    signal: outer.signal,
+  });
+  // Enrollments whose sandbox is already gone are not in any listing from the control service:
+  // revoke them from Opengeni's own records, whether or not compute is still
+  // configured. This uses only part of the budget, so the listing sweep runs too.
+  const staleSignal = AbortSignal.any([
+    signal,
+    AbortSignal.timeout(COMPUTE_STALE_ENROLLMENT_BUDGET_MS),
+  ]);
+  const staleBound = {
+    deadlineAtMs: Math.min(bound.deadlineAtMs, nowMs + COMPUTE_STALE_ENROLLMENT_BUDGET_MS),
+    signal: staleSignal,
+  };
+  try {
+    const stale = await reconcileStaleComputeEnrollments({
+      list: async (after) => await listStaleComputeSandboxEnrollments(db, after, staleBound),
+      revoke: async (candidate) =>
+        await revokeStaleComputeSandboxEnrollment(db, candidate, itemBound(staleBound)),
+      nowMs,
+      signal: staleSignal,
+      progress: staleComputeEnrollmentProgress,
+    });
+    for (const revoked of stale.revoked) {
+      observability.warn("sandbox reaper: revoked stale compute sandbox enrollment", {
+        ...revoked,
+      });
+    }
+    if (stale.failed > 0) {
+      observability.warn("sandbox reaper: stale compute enrollment revokes failed", {
+        failed: stale.failed,
+      });
+    }
+  } catch (error) {
+    observability.warn("sandbox reaper: stale compute enrollment inventory failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (!settings.computeApiUrl || !settings.computeApiKey || !settings.computeLinkUrl) return 0;
+  if (signal.aborted) return 0;
+  const result = await sweepComputeOrphans({
+    // Short requests that all end with the budget: an unreachable control service or a
+    // stalled delete must not hold up the rest of the maintenance pass.
+    control: new ComputeControlClient({
+      baseUrl: settings.computeApiUrl,
+      apiKey: settings.computeApiKey,
+      requestTimeoutMs: 20_000,
+      maxAttempts: 2,
+      signal,
+    }),
+    gateway: settings.computeLinkUrl,
+    named: async (identity) => await computeSandboxNamed(db, identity, itemBound(bound)),
+    revokeEnrollment: async (input) => {
+      await revokeSandboxEnrollment(db, input, itemBound(bound));
+    },
+    nowMs,
+    signal,
+    progress: computeOrphanSweepProgress,
+  });
+  for (const deleted of result.deleted) {
+    observability.warn("sandbox reaper: deleted compute orphan sandbox", { ...deleted });
+  }
+  if (result.examined > 0) {
+    observability.info("sandbox reaper: compute orphan sweep completed", {
+      examined: result.examined,
+      deleted: result.deleted.length,
+      failed: result.failed,
+      stoppedEarly: signal.aborted,
+    });
+  }
+  return result.deleted.length;
+}
+
 async function sweepModalOrphansForConfiguredBackend(
   settings: ActivityServices["settings"],
   db: ActivityServices["db"],
@@ -2943,7 +4022,7 @@ async function sweepModalOrphansForConfiguredBackend(
   // Keep the provider-side sweep tightly scoped to deployments that have a Modal
   // app path configured. Local/docker-only workers should not attempt Modal API
   // calls just because modalAppName has a default.
-  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
+  if (!modalOrphanSweepConfigured(settings)) {
     return 0;
   }
   let liveLeases: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>;
@@ -3162,11 +4241,27 @@ async function terminateDrainableBox(
   }
 
   const captureTimeoutMs = attempt.captureTimeoutMs;
+  if (
+    managedProvider &&
+    !lease.archiveCapture?.publishedAt &&
+    sandboxDrainCaptureSettlingInProcess(lease)
+  ) {
+    // An earlier attempt's capture is still reading, publishing late, or
+    // removing its spool in this worker. Leave its claim untouched and do not
+    // start a second physical capture of the same workspace; a later retry
+    // tears down from its published archive or, if it failed, captures anew.
+    // An already published archive still resumes teardown immediately.
+    throw new SandboxDrainRecoveryDeferredError(
+      `sandbox ${row.sandboxGroupId} epoch ${row.leaseEpoch} still has a workspace capture settling in this worker`,
+    );
+  }
   let captureClaim:
     | NonNullable<
         Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>
       >["claim"]
     | null = null;
+  // The lease as the fresh capture claim wrote it, under its row lock.
+  let captureClaimLease: LeaseSnapshot | null = null;
   let providerMissingBeforeCapture = false;
   let captureDisposition: DrainCaptureDisposition = "capture_required";
   if (lease.instanceId && managedProvider) {
@@ -3326,11 +4421,21 @@ async function terminateDrainableBox(
         liveness: "draining",
         captureTimeoutMs,
         minIntervalMs: 0,
+        // A drain captures a Modal native snapshot of the paused box, or a
+        // Docker host workspace after removing the exact container
+        // (terminateProviderBox), so it may capture around a request whose
+        // owner crashed. It terminates the box right after either way.
+        pointInTimeCapture: providerDrainCaptureIsPointInTime(backend, lease.resumeState),
+        deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
+        // An unknown-outcome setup request of a closed attempt never settles
+        // on a live box; after the idle grace it no longer pins the drain.
+        abandonedSetupCaptureAfterMs: Math.max(settings.sandboxIdleGraceMs, 60_000),
         providerReplaySafe: capturePolicy?.takeover === "same_request",
         takeoverSafe: capturePolicy !== null && capturePolicy.takeover !== "exclusive",
       });
       if (claimed.status === "claimed") {
         captureClaim = claimed.claim;
+        captureClaimLease = claimed.lease;
       } else if (claimed.status === "mutation_in_progress") {
         // An admission is normally authoritative proof that a provider
         // operation may still be running. It cannot, however, pin a draining
@@ -3352,6 +4457,27 @@ async function terminateDrainableBox(
         return false;
       }
     }
+  }
+
+  // A compute sandbox whose group ended (its chat or workspace was deleted) is
+  // deleted without a capture: nothing will restore it, and compute's own
+  // memory and disk were its persistence. The capture claim above still fences
+  // new holders until the cold commit. A rotation always captures. The choice
+  // reads the lease the claim itself returned under its row lock (a rotation
+  // can commit between the read above and the claim, never after it, since the
+  // claim fences every arrival), and the persist CAS below re-checks it under
+  // the same lock before anything is deleted. The claim stamps its own
+  // `teardown_claim` rotation, which is not a rotation of the workspace.
+  const dispositionLease = captureClaimLease ?? lease;
+  if (
+    captureDisposition === "capture_required" &&
+    captureClaim &&
+    backend === "compute" &&
+    dispositionLease.groupEndRequestedAt !== null &&
+    (dispositionLease.rotationRequestedAt === null ||
+      dispositionLease.rotationReason === "teardown_claim")
+  ) {
+    captureDisposition = "discard";
   }
 
   // The epoch-fenced PERSIST-onto-lease CAS the terminate seam calls AFTER it has
@@ -3421,10 +4547,28 @@ async function terminateDrainableBox(
     };
     let result: Awaited<ReturnType<typeof persistDrainSnapshot>>;
     if (archiveBase64 === null) {
+      const groupEndDiscard = captureDisposition === "discard";
       result = await persistDrainSnapshot(db, {
         ...baseInput,
         workspaceArchive: null,
+        ...(groupEndDiscard ? { groupEndDiscard: true as const } : {}),
       });
+      if (result.discardIneligible) {
+        // A rotation or re-arm landed after the discard was chosen. Give the
+        // claim back so the next sweep captures instead of deleting.
+        await releaseWorkspaceArchiveCapture(db, {
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          captureId: captureClaim.id,
+          expectedEpoch: row.leaseEpoch,
+          expectedInstanceId: lease.instanceId,
+        });
+        observability.info("sandbox reaper: group-end discard no longer eligible", {
+          sandboxGroupId: row.sandboxGroupId,
+          leaseEpoch: row.leaseEpoch,
+        });
+      }
     } else {
       if (!archiveMetadata) {
         throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
@@ -3537,6 +4681,23 @@ async function terminateDrainableBox(
         },
         row.workspaceId,
         beforeProviderStop,
+        backend === "docker"
+          ? async () => {
+              if (!captureClaim || !lease.instanceId)
+                throw new Error("Docker drain has no current claimed capture");
+              return await verifyDockerDrainCaptureFence(db, {
+                accountId,
+                workspaceId: row.workspaceId,
+                sandboxGroupId: row.sandboxGroupId,
+                leaseId: lease.id,
+                leaseEpoch: row.leaseEpoch,
+                instanceId: lease.instanceId,
+                workspaceGeneration: captureClaim.workspaceGeneration,
+                captureId: captureClaim.id,
+                providerRequestId: captureClaim.providerRequestId,
+              });
+            }
+          : undefined,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -3595,7 +4756,18 @@ async function terminateDrainableBox(
       expectedEpoch: row.leaseEpoch,
       ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
       providerMissingBeforeCapture: providerMissing,
+      ...(providerMissing
+        ? {
+            providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+              settings,
+              backend as Settings["sandboxBackend"],
+            ),
+          }
+        : {}),
       idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+      // Mirrors terminateProviderBox: a selfhosted machine is never stopped.
+      providerStopped:
+        managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
     },
   );
   // The command terminal events and agent inputs are already durable in the
@@ -3721,6 +4893,73 @@ function providerDrainLogIdentity(
  * draining until its adapter can prove termination. A truly instance-less or
  * `none`-backed row is a no-op.
  */
+/** Internal server pre-read fence; not a grant to arbitrary callers. The
+ * owning drain already derived account/workspace/group authority and claimed
+ * capture through the canonical DB lifecycle. No claim is fabricated here. */
+export async function verifyDockerDrainCaptureFence(
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    leaseId: string;
+    leaseEpoch: number;
+    instanceId: string;
+    workspaceGeneration: number;
+    captureId: string;
+    providerRequestId: string;
+  },
+  readers = { readLease, readWorkspaceArchiveCapturePreflight },
+): Promise<{ archivePublished: boolean }> {
+  const current = await readers.readLease(db, input.workspaceId, input.sandboxGroupId);
+  if (
+    !current ||
+    current.id !== input.leaseId ||
+    current.liveness !== "draining" ||
+    current.leaseEpoch !== input.leaseEpoch ||
+    current.instanceId !== input.instanceId ||
+    current.backend !== "docker" ||
+    current.workspaceGeneration !== input.workspaceGeneration ||
+    current.archiveCapture?.id !== input.captureId ||
+    current.archiveCapture.providerRequestId !== input.providerRequestId ||
+    current.archiveCapture.workspaceGeneration !== input.workspaceGeneration
+  )
+    throw new Error("Docker drain capture lease/epoch/claim changed");
+  const preflight = await readers.readWorkspaceArchiveCapturePreflight(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    expectedEpoch: input.leaseEpoch,
+    expectedInstanceId: input.instanceId,
+    liveness: "draining",
+  });
+  if (!preflight || preflight.workspaceGeneration !== input.workspaceGeneration)
+    throw new Error("Docker drain capture has an active writer or changed generation");
+  return {
+    archivePublished:
+      current.archiveCapture.publishedAt instanceof Date &&
+      Number.isFinite(current.archiveCapture.publishedAt.getTime()) &&
+      current.archiveComplete === true,
+  };
+}
+
+function observeDockerWorkspaceRelease(
+  observability: ActivityServices["observability"],
+  session: unknown,
+  logIdentity: ReturnType<typeof providerDrainLogIdentity>,
+): void {
+  const release = (session as { hostWorkspaceRelease?: DockerHostWorkspaceRelease | null })
+    .hostWorkspaceRelease;
+  if (!release) return;
+  recordSandboxDockerWorkspaceRelease(observability, release.status);
+  if (release.status === "retained") {
+    observability.warn(
+      "sandbox reaper: Docker drain kept its host workspace directory after teardown",
+      { ...logIdentity, reason: release.reason },
+    );
+  }
+}
+
 export async function terminateProviderBox(
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
@@ -3735,6 +4974,7 @@ export async function terminateProviderBox(
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
   beforeProviderStop?: () => Promise<void>,
+  beforeWorkspaceCapture?: () => Promise<{ archivePublished: boolean }>,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -3883,7 +5123,7 @@ export async function terminateProviderBox(
   let session: PersistableSession | undefined;
   let sessionState: Parameters<typeof terminateManagedSandboxSession>[1] | undefined;
   try {
-    if (!client.resume || !client.deserializeSessionState) {
+    if (!client.deserializeSessionState || (backend !== "docker" && !client.resume)) {
       // A cloud backend that cannot prove provider state is not safely
       // terminable: treating this as success would cold the lease while the
       // provider may still be live. Leave it draining for a later retry.
@@ -3910,16 +5150,44 @@ export async function terminateProviderBox(
     if (resumedState === undefined) {
       throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
     }
-    const continuity = sandboxProviderContinuityForState(backend, resumedState, lease.instanceId);
-    const resumed = await resumeExactSandboxSession(
-      client,
-      backend,
-      resumedState,
-      lease.instanceId,
-      continuity ? { continuity } : undefined,
-    );
-    session = resumed.session as PersistableSession;
-    sessionState = resumed.sessionState;
+    if (backend === "docker") {
+      if (!client.attachWorkspaceForDrain || !beforeWorkspaceCapture) {
+        throw new Error(
+          "Docker drain requires a creation-free attachment and current capture fence",
+        );
+      }
+      await beforeWorkspaceCapture();
+      const attached = await client.attachWorkspaceForDrain(resumedState, beforeWorkspaceCapture);
+      session = attached;
+      sessionState = resumedState;
+      if (
+        captureDisposition === "capture_required" &&
+        providerDrainCaptureIsPointInTime(backend, lease.resumeState)
+      ) {
+        // The capture claim may have run around a request whose owner crashed
+        // (a command that may still be writing). Remove the exact container
+        // first so the host workspace read is a point-in-time image. The
+        // drain terminates the box next anyway, so this is a stop, recorded
+        // as one for billing. A capture that fails afterwards leaves the
+        // workspace on the host: the durable receipt lets the next drain
+        // attempt re-attach to it, and a returning turn restores the lost
+        // container on the same workspace.
+        if (!attached.stopForCapture) {
+          throw new Error("Docker drain attachment cannot stop the container before capture");
+        }
+        await beforeProviderStop?.();
+        await attached.stopForCapture();
+      }
+    } else {
+      const resumed = await resumeExactSandboxSession(
+        client,
+        backend,
+        resumedState,
+        lease.instanceId,
+      );
+      session = resumed.session as PersistableSession;
+      sessionState = resumed.sessionState;
+    }
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
       observability.info("sandbox reaper: drainable box already gone before workspace capture", {
@@ -3927,7 +5195,7 @@ export async function terminateProviderBox(
       });
       return {
         terminated: true,
-        providerMissingBeforeCapture: captureDisposition !== "archive_published",
+        providerMissingBeforeCapture: captureDisposition === "capture_required",
       };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
@@ -3964,8 +5232,15 @@ export async function terminateProviderBox(
           resolveModalCheckpointProviderBindingForSession(settings, session),
         )
       : null;
+  // Physical capture bookkeeping for this worker: released once the capture
+  // and its spool are settled, or by the late path that inherits them.
+  let releaseSettlingCapture: () => void = () => undefined;
   try {
-    if (captureDisposition !== "archive_published" && session?.persistWorkspace) {
+    if (captureDisposition === "capture_required" && session?.persistWorkspace) {
+      releaseSettlingCapture = trackSettlingDrainCapture(lease);
+      // The budget bounds only this attempt's wait, never the capture: a slow
+      // but finite capture keeps reading and publishes late, and the retry
+      // that finds it still settling here defers instead of starting another.
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),
@@ -4017,9 +5292,13 @@ export async function terminateProviderBox(
           void releaseAfterCaptureFailure();
           warnCaptureFailure("sandbox reaper: timed-out provider capture later failed", error);
         },
+        onLateSettled: () => releaseSettlingCapture(),
       });
     }
   } catch (error) {
+    // Every rejection except the caller's own timeout means the capture has
+    // settled; a timed-out capture is released by its late path instead.
+    if (!(error instanceof SandboxProviderCaptureTimeoutError)) releaseSettlingCapture();
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
       observability.info("sandbox reaper: box gone during workspace capture", {
         ...logIdentity,
@@ -4051,6 +5330,17 @@ export async function terminateProviderBox(
     observability.info("sandbox reaper: resuming teardown from durable archive publication", {
       ...logIdentity,
     });
+  } else if (captureDisposition === "discard") {
+    // The group ended: no capture, only the exact capture-claim CAS before the
+    // delete. A miss means the lease was re-armed; leave the box running.
+    const { wrote } = await persistArchive(null);
+    if (!wrote) {
+      observability.info(
+        "sandbox reaper: lease re-armed before a group-end delete — leaving box RUNNING",
+        { ...logIdentity },
+      );
+      return { terminated: false, providerMissingBeforeCapture: false };
+    }
   } else if (verifiedArchive) {
     let wrote: boolean;
     try {
@@ -4061,7 +5351,11 @@ export async function terminateProviderBox(
         checkpointBinding,
       ));
     } finally {
-      await disposeWorkspaceArchive(verifiedArchive);
+      try {
+        await disposeWorkspaceArchive(verifiedArchive);
+      } finally {
+        releaseSettlingCapture();
+      }
     }
     if (!wrote) {
       observability.info(
@@ -4090,6 +5384,7 @@ export async function terminateProviderBox(
     prepareProviderForTeardownAfterCapture(backend, session);
     await beforeProviderStop?.();
     await terminateManagedSandboxSession(client, sessionState, session);
+    if (backend === "docker") observeDockerWorkspaceRelease(observability, session, logIdentity);
     return { terminated: true, providerMissingBeforeCapture: false };
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {

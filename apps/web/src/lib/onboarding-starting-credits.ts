@@ -7,30 +7,30 @@ import type {
   WorkspaceModelCatalogResponse,
 } from "@opengeni/sdk";
 
-import { confirmIncludedModel } from "./model-access-onboarding";
+import { confirmIncludedModel } from "@opengeni/react/app/lib/model-access-onboarding";
 
 // Onboarding-only helpers, kept apart from `model-access-onboarding.ts` because
 // the session route imports that module and these must stay out of its graph.
 
 /**
- * OpenGeni credits the organization already holds when the post-signup model
- * step opens (the one-time verified-signup trial grant, or any other credits).
+ * Opengeni credits the organization already holds when the post-signup model
+ * step opens (monthly Free plan funding, legacy promotions, or other credits).
  */
 export type StartingCreditsOnboarding = {
   /** The positive balance, or null when it could not be read. */
   balance:
     | ({ balanceMicros: number; currency: string } & Pick<
         BillingBalance,
-        "promotionalCredits" | "generalBalanceMicros"
+        "promotionalCredits" | "generalBalanceMicros" | "plan"
       >)
     | null;
-  /** The server-resolved default new chats use, billed in OpenGeni credits. */
+  /** The server-resolved default new chats use, billed in Opengeni credits. */
   model: { id: string; label: string; reasoningEffort: ReasoningEffort };
 };
 
 /**
  * The server-resolved default for new chats (`defaultSelection`) when it is a
- * selectable model billed in OpenGeni credits. Null on older servers that
+ * selectable model billed in Opengeni credits. Null on older servers that
  * publish no resolved default, and whenever a subscription, saved workspace
  * default, or free model is what new chats use.
  */
@@ -52,7 +52,7 @@ export function creditsBilledDefaultModel(
 
 /**
  * What the post-signup model step says about credits the organization already
- * holds. It applies only while the resolved default is billed in OpenGeni
+ * holds. It applies only while the resolved default is billed in Opengeni
  * credits and the balance is positive, so the step describes the model new
  * chats actually use. When the balance cannot be read, a resolved default
  * whose source is `credits` (the server reports it only while the balance is
@@ -80,6 +80,7 @@ export function startingCreditsForOnboarding(input: {
       ...(balance.generalBalanceMicros !== undefined
         ? { generalBalanceMicros: balance.generalBalanceMicros }
         : {}),
+      ...(balance.plan ? { plan: balance.plan } : {}),
     },
     model,
   };

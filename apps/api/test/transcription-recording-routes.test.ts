@@ -15,7 +15,7 @@ import {
 } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const SECRET = "test-delegation-secret";
@@ -1275,7 +1275,7 @@ describe("resumable transcription billing", () => {
       admit: async () => {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
-          message: "Voice input needs Opengeni credits.",
+          message: "Voice input needs credits.",
         });
       },
       transcribe: async () => {

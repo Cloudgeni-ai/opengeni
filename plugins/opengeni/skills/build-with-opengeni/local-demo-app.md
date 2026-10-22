@@ -62,7 +62,7 @@ node_modules
 ```ts server.ts
 // The app's server: holds the Opengeni API key, serves the page, and proxies the chat.
 import { createServer } from "node:http";
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import { toNodeMiddleware } from "@opengeni/sdk/express";
 import { createSessionProxyHandler } from "@opengeni/sdk/session-proxy";
 import react from "@vitejs/plugin-react";
@@ -78,7 +78,7 @@ const model = process.env.OPENGENI_MODEL?.trim(); // optional; omitted = the wor
 const port = Number(process.env.PORT ?? 5173);
 const origins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
 
-const og = new OpenGeni({ apiKey, baseUrl, workspaceName: () => "Local demo" });
+const og = new Opengeni({ apiKey, baseUrl, workspaceName: () => "Local demo" });
 
 // Fails fast on a wrong key or URL. Creates the "Local demo" workspace on first run.
 const workspaceId =

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import {
+  MODEL_TRANSPORT_HEADER,
+  isModelSocketTransportError,
+} from "@opengeni/network/responses-websocket";
 import { Agent, Runner } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenAIClientFromSettings,
   classifyModelStreamIdleTimeoutError,
@@ -11,6 +15,20 @@ import {
 
 const encoder = new TextEncoder();
 const MODEL_URL = "https://provider.test/v1/responses";
+
+test("generic stream timeout retains socket provenance without changing timeout classification", async () => {
+  const fetch = streamIdleTimeoutModelFetch(
+    "openai",
+    { idleTimeoutMs: 10 },
+    (async () =>
+      new Response(new ReadableStream({}), {
+        headers: { [MODEL_TRANSPORT_HEADER]: "websocket; connection=reused; input=incremental" },
+      })) as typeof globalThis.fetch,
+  );
+  const { error } = await drain(await fetch(MODEL_URL));
+  expect(error).toBeInstanceOf(ModelStreamIdleTimeoutError);
+  expect(isModelSocketTransportError(error)).toBe(true);
+});
 
 function sse(event: Record<string, unknown>): string {
   return `data: ${JSON.stringify(event)}\n\n`;

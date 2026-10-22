@@ -7,7 +7,7 @@ import {
   clientRequestAction,
   clientRequestFailureReason,
   createClientSignalReporter,
-} from "./client-signals";
+} from "@opengeni/react/app/lib/client-signals";
 
 const W = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 const S = "0b4f8f3e-3c55-4a8b-9a3e-2f43d93a9c11";
@@ -88,6 +88,25 @@ describe("signal reporter", () => {
 
   test("the contract lists every action the classifier can return", () => {
     expect(CLIENT_REQUEST_ACTIONS).toContain("create_session");
+  });
+
+  test("reports web vitals for read-only chats using the closed page label", () => {
+    const sent: unknown[] = [];
+    const reporter = createClientSignalReporter({
+      send: (body) => sent.push(JSON.parse(body)),
+      revision: "abc123",
+      routePattern: () => `/workspaces/${W}/read-only-chats`,
+    });
+    expect(reporter.webVital("lcp", "read-only-chats", 2.4)).toBe(true);
+    expect(sent).toEqual([
+      {
+        signal: "web_vital",
+        metric: "lcp",
+        page: "read-only-chats",
+        value: 2.4,
+        revision: "abc123",
+      },
+    ]);
   });
 
   test("the contract page list is exactly the journey page labels", () => {

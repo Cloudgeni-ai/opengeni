@@ -13,18 +13,47 @@ A Connected Machine is your own computer, enrolled once and then available as a 
   guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#connected-machines).
 </Note>
 
-## Enroll interactively
+## Connect your computer
+
+In the Opengeni desktop app, choose **Use this computer** in the conversation's
+computer card. The app connects it for your account. On macOS, follow any system
+permission prompts to let agents see and use the screen.
+
+In a web browser, choose **Connect a computer**, download the app for your
+operating system, and install it. Return to the card and choose **Open app and
+connect**. The app signs you in if needed, checks the account and workspace, and
+asks you to confirm access. No terminal command or setup code is needed. If you
+are on a phone, open the chat on the computer you want to connect.
+
+If the app opens without connecting, install the latest version using the
+download in the card, replacing the old app. Then choose **Open app and connect**
+again. Older desktop versions cannot complete this handoff.
+
+An application built on Opengeni can offer its own desktop app and connection
+flow instead. Connecting a computer does not automatically move an existing
+chat onto it; **Use in this chat** is available when you want to move the chat's
+working environment too.
+
+## Connect a server
+
+For a computer without the desktop app, choose **Connect a server instead** to
+reveal the advanced command-based setup. For interactive device-code pairing:
 
 <Steps>
   <Step title="Run the installer">
-    Open the Machines page in your workspace, copy the one-line installer, and run it on the
-    machine. It installs `opengeni-agent` as a background service and starts a device sign-in.
+    Open the Machines page in your workspace, choose **Connect a server instead** and **Pair with a
+    code instead**, copy the installer command, and run it on the machine. It installs
+    `opengeni-agent` as a background service and starts a device sign-in.
   </Step>
   <Step title="Approve the device">
     Open the printed URL, confirm the code, and choose who may use the machine: only you (the
     default), the workspace, or the organization. Screen control is a separate consent.
   </Step>
-  <Step title="Done">The machine appears on the Machines page, ready to use.</Step>
+  <Step title="Done">
+    The machine appears on the Machines page. On macOS, approve the agent's Screen Recording,
+    Accessibility and Input Monitoring requests for desktop use. A connected machine can run
+    commands before desktop permissions are granted.
+  </Step>
 </Steps>
 
 ## Enroll headlessly
@@ -43,6 +72,17 @@ OPENGENI_ENROLL_TOKEN=<token> \
 - **Later**: switch a session to the machine, or back to its managed sandbox. History is unaffected.
 
 The agent works in the chosen folder and uses the machine's own Git setup.
+
+### Large file writes
+
+On supported Linux and macOS filesystems, large file replacements are transferred
+in bounded chunks and published only after verification. Machine-addressed writes
+such as `run_on` need an agent that supports these transfers without a session
+route. If an older transactional agent is connected, writes above 262144 bytes
+(256 KiB) fail before writing, with an instruction to update the agent; smaller
+writes still work. Agents predating transactional transfers retain their original
+single-message size limit. Parent directories must already exist for a
+transactional replacement.
 
 ## Connect more workspaces
 

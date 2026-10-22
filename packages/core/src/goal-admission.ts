@@ -1,5 +1,6 @@
 import {
   isModelAvailableForNewSelection,
+  policyChargesCreditsForModel,
   policyProviderIdForModel,
   resolveModelProvider,
   runnableLatencyModesForModel,
@@ -13,7 +14,11 @@ import {
   type Session,
 } from "@opengeni/contracts";
 import { isCodexBilledModel } from "@opengeni/codex";
-import { getWorkspaceModelPolicy, type Database } from "@opengeni/db";
+import {
+  checkSessionUsageLimitAdmission,
+  getWorkspaceModelPolicy,
+  type Database,
+} from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "./model-catalog";
 import { agentRunAdmissionDenial } from "./billing/agent-run-admission";
 
@@ -51,17 +56,21 @@ export function goalContinuationModelDecision(input: {
       pausedReason: "model_unavailable",
     };
   }
-  if (
-    input.workspaceModelPolicy !== null &&
-    !evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
-      providerId: policyProviderIdForModel(catalogSettings, model),
-      modelId: model,
-    }).allowed
-  ) {
+  const policyVerdict =
+    input.workspaceModelPolicy === null
+      ? null
+      : evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
+          providerId: policyProviderIdForModel(catalogSettings, model),
+          modelId: model,
+          chargesCredits: policyChargesCreditsForModel(catalogSettings, model),
+        });
+  if (policyVerdict && !policyVerdict.allowed) {
     return {
       model,
       blocked:
-        "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
+        policyVerdict.reason === "credits"
+          ? "Credits are turned off in this workspace. Choose a model paid by a subscription or API key before resuming."
+          : "Workspace policy blocks the selected model. Choose an allowed model before resuming.",
       pausedReason: "model_policy",
     };
   }
@@ -130,11 +139,11 @@ export async function goalRunBudgetBlocked(
         }
       : {
           pausedReason: "credits",
-          message: "Insufficient Opengeni credits. Add credits before resuming.",
+          message: "Insufficient workspace credits. Add credits before resuming.",
         },
     allowance_exhausted: {
       pausedReason: "allowance",
-      message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+      message: "Usage allowance exhausted. Resume when your allowance is available.",
     },
     monthly_model_cost_limit: {
       pausedReason: "budget",
@@ -146,6 +155,22 @@ export async function goalRunBudgetBlocked(
     },
   };
   return blocks[denial];
+}
+
+/**
+ * Per-task usage limit gate for goal continuation and resume. A
+ * reached root limit blocks with its own reason; raising or clearing the limit
+ * never resumes a goal by itself. A read failure throws (never unlimited).
+ */
+export async function goalSessionUsageLimitBlocked(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<GoalAdmissionBlock | null> {
+  // Server-internal: the goal's session is already authorized, so a private
+  // root is enforced rather than read as missing; a missing tree fails closed.
+  const admission = await checkSessionUsageLimitAdmission(db, { ...input, runtime: true });
+  if (admission.allowed) return null;
+  return { pausedReason: "session_usage_limit", message: admission.refusal.message };
 }
 
 export class GoalResumeBlockedError extends Error {
@@ -162,9 +187,17 @@ export class GoalResumeBlockedError extends Error {
 export async function assertGoalResumeAllowed(
   services: Parameters<typeof agentRunAdmissionDenial>[0] & { catalogSourceSettings?: Settings },
   session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode"> &
-    Partial<Pick<Session, "latencyMode">>,
+    Partial<Pick<Session, "latencyMode" | "id">>,
   causalTurn: { initiatingHumanSubjectId: string | null } | null,
 ): Promise<void> {
+  if (session.id) {
+    const limit = await goalSessionUsageLimitBlocked(services.db, {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+    });
+    if (limit) throw new GoalResumeBlockedError(limit.pausedReason, limit.message);
+  }
   const decision = await resolveGoalModelAdmission(
     services.db,
     services.catalogSourceSettings ?? services.settings,

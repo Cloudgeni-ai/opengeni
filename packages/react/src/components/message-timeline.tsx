@@ -1,7 +1,21 @@
+import { QUESTION_NAV_MARGIN_PX, questionNavTarget } from "../timeline/question-nav-model";
+import { timelineGroupIndexAtSequence } from "../timeline/focus-sequence";
 import { RollingActivity } from "../timeline/rolling-activity";
+import {
+  clusterIsSettled,
+  compactedLandmarkCount,
+  durationBetween,
+  flattenActivityItems,
+  isPreparingWork,
+  readableWorkDefaultOpen,
+  readableWorkHasDetails,
+  readableWorkShowsPreview,
+  readableWorkStatus,
+} from "../timeline/work-presentation";
 import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
+import { TurnStepsAction, TurnStepsLoader } from "../timeline/turn-steps";
 import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
 import {
   isTimelineSearchTarget,
@@ -12,7 +26,11 @@ import {
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
-import { compactionSkipSubtitle } from "../timeline/compaction-copy";
+import {
+  compactionFailureDetails,
+  compactionSkipSubtitle,
+  compactionSkipTitle,
+} from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -27,7 +45,9 @@ import {
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
+  CornerDownRightIcon,
   PauseCircleIcon,
   PauseIcon,
   MessageCircleQuestionIcon,
@@ -42,9 +62,9 @@ import {
 } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Collapsible } from "radix-ui";
 import {
   Component,
+  Fragment,
   Suspense,
   createContext,
   lazy,
@@ -52,6 +72,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -59,6 +80,11 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import {
+  MessageSenderContext,
+  MessageSenderSlot,
+  type RenderMessageSender,
+} from "../timeline/message-sender";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
 import {
@@ -67,6 +93,7 @@ import {
   type OlderHistoryLoader,
 } from "../older-history";
 import { Markdown, type MarkdownProps } from "./markdown";
+import { linkifyText } from "./linkified-text";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -133,27 +160,49 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import { SecretAnswerChip } from "./secret-ref-chip";
+import { secretAnswerLabel } from "../human-input-model";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
+  agentMemberSessionId,
+  agentMemberText,
+  agentMemberTitle,
   cleanMachineInputSummary,
+  isAgentMember,
   machineInputBatchLabel,
   machineInputSummaryIsUseful,
   readableMachineInputSource,
 } from "./machine-input-display";
+import { AgentRow, AgentRowSection, AgentRowText } from "../timeline/agent-row";
+import {
+  AgentIdentityProvider,
+  useAgentIdentity,
+  type ResolveSessionTitle,
+} from "../timeline/agent-identity";
+import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import {
+  noticeDisplayText,
+  noticeIsResolvedApproval,
+  noticeTone,
+} from "../timeline/notice-presentation";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
+import { ProviderLogoProvider } from "../timeline/provider-logo";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import {
   AllowanceExhaustedRow,
   AllowancePresentationProvider,
   type RenderAllowanceExhausted,
 } from "../timeline/allowance-exhausted-row";
+import { SessionUsageLimitRow } from "../timeline/session-usage-limit-row";
+import { LearningRefusalRow } from "../timeline/learning-refusal-row";
 import type { AllowanceLabels } from "../usage/allowance-copy";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
@@ -161,6 +210,12 @@ const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-marke
 export type MessageTimelineProps = {
   /** Exact durable search hit; clearing it removes highlighting without moving the reader. */
   searchTarget?: TimelineSearchTarget | null | undefined;
+  /**
+   * A durable event sequence to open on once (an inbox item's or notification's
+   * moment): the timeline lands on the row that holds it, or the nearest row
+   * before it, instead of the latest message. Load the window around it first.
+   */
+  focusSequence?: number | null | undefined;
   /** Localized user-message disclosure actions, including custom UserMessageBody renderers. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   /** Raw session events (projected internally) … */
@@ -171,6 +226,12 @@ export type MessageTimelineProps = {
   status?: SessionStatus | null | undefined;
   /** Host-owned controls beside Copy and the timestamp on settled message rows. */
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Who sent a person's message, drawn above its bubble. Called only for
+   * messages that carry a sender; return null for the viewer's own messages
+   * or when the host has no identity to show. Omit to show no senders.
+   */
+  renderMessageSender?: RenderMessageSender | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
     | ((
@@ -187,11 +248,18 @@ export type MessageTimelineProps = {
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
   /**
+   * Name the agents this session spawns, messages, and hears from. Return the
+   * current display title for a session id, or null when unknown; the
+   * timeline falls back to the title given at spawn, then to generic copy.
+   * Keep the function identity stable across renders.
+   */
+  resolveSessionTitle?: ResolveSessionTitle | undefined;
+  /**
    * Deep-link a memory row (a `memory.saved` / `memory.corrected` step) to its
    * record in the host's memory pane. Opt-in, exactly like `onReconnect`: the
    * library draws no "View in memory" affordance without a handler — the memory
    * row is then non-interactive rich content. This is the switch that makes the
-   * deep-link a first-party OpenGeni capability without other SDK consumers
+   * deep-link a first-party Opengeni capability without other SDK consumers
    * opting into it. The app supplies it (it owns routing to the memory pane).
    */
   onMemoryClick?: ((memoryId: string) => void) | undefined;
@@ -235,7 +303,7 @@ export type MessageTimelineProps = {
    */
   toolRegistry?: ToolRegistry | undefined;
   /**
-   * Open OpenGeni object links the agent writes in replies and progress notes:
+   * Open Opengeni object links the agent writes in replies and progress notes:
    * `artifact:<file>`, `sandbox:<path>`, editable artifacts, and Sites. Return
    * a host URL (`{ href }`) or action (`{ open }`); unhandled targets render as
    * unavailable text instead of a console link that 404s inside the host.
@@ -338,8 +406,6 @@ const PIN_THRESHOLD_PX = 48;
  * line-sized streaming movement.
  */
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
-/** Breathing room above the question when following stops at an answer. */
-const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Floating timeline navigation: two identical small round arrow buttons at fixed
  * spots, centered on the conversation. Back to your message floats 12px below
@@ -505,25 +571,16 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
  */
 type QuestionNav = { key: string; belowHeader: boolean };
 
-/** How far a question's start must be above the viewport before navigation shows. */
-const QUESTION_NAV_HIDDEN_PX = 24;
-
 function readQuestionNav(node: HTMLElement): QuestionNav | null {
   const view = node.getBoundingClientRect();
-  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
-  // The last prompt before the reading position owns the response/work in view.
-  // A newer prompt farther down the conversation is not a navigation target.
-  const middle = view.top + view.height / 2;
-  const prompt = prompts
-    .reverse()
-    .find((candidate) => candidate.getBoundingClientRect().top <= middle);
-  const key = prompt?.dataset.ogGroupKey;
-  if (!prompt || !key) return null;
-  const bounds = prompt.getBoundingClientRect();
-  if (bounds.top >= view.top - QUESTION_NAV_HIDDEN_PX || bounds.bottom > view.top) {
-    return null;
-  }
-  return { key, belowHeader: workHeaderPinned(node, view) };
+  const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")].flatMap((prompt) => {
+    const key = prompt.dataset.ogGroupKey;
+    if (!key) return [];
+    const bounds = prompt.getBoundingClientRect();
+    return [{ key, top: bounds.top, bottom: bounds.bottom }];
+  });
+  const key = questionNavTarget(prompts, { top: view.top, height: view.height });
+  return key ? { key, belowHeader: workHeaderPinned(node, view) } : null;
 }
 
 /** True while an expanded outer work header is stuck to the scrollport's top edge. */
@@ -560,12 +617,15 @@ export function MessageTimeline({
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
+  focusSequence,
   events,
   items,
   status: _status,
   renderMessageActions,
+  renderMessageSender,
   renderMessageText,
   onOpenSession,
+  resolveSessionTitle,
   onMemoryClick,
   onReconnect,
   renderAuthNeeded,
@@ -598,16 +658,17 @@ export function MessageTimeline({
   emptyState,
   className,
 }: MessageTimelineProps) {
+  const t = useOpenGeniText();
   const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
-    const projectedItems = items ?? buildTimeline(events ?? []);
+    const projectedItems = items ?? buildTimeline(t, events ?? []);
     if (!shouldRenderAuthNeeded) {
       return projectedItems;
     }
     return projectedItems.filter(
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
-  }, [items, events, shouldRenderAuthNeeded]);
+  }, [items, events, shouldRenderAuthNeeded, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;
@@ -633,6 +694,7 @@ export function MessageTimeline({
             const body = (
               <Markdown
                 searchTarget={searchItem?.id === item.id ? searchTarget : null}
+                softLineBreaks
                 streaming={item.kind === "agent-message" && item.streaming}
                 renderInteractiveBlock={
                   item.kind === "agent-message" ? renderInteractiveBlock : undefined
@@ -729,8 +791,8 @@ export function MessageTimeline({
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
   const projectedGroups = useMemo(
-    () => groupTimeline(resolvedItems, { readableTurns }),
-    [resolvedItems, readableTurns],
+    () => groupTimeline(t, resolvedItems, { readableTurns }),
+    [resolvedItems, readableTurns, t],
   );
   // A new timeline revision (including session/turn replacement) owns layout.
   // Never leave an old decorative transform running on its retained rows.
@@ -1614,6 +1676,26 @@ export function MessageTimeline({
     syncScrollBaseline(node);
     scheduleQuestionNav();
   };
+
+  // Land once on the moment an inbox item or a notification points at.
+  // Deliberately dependency-free: it retries after every commit until the
+  // target row is laid out, and the ref guard makes the state update run once
+  // per focus sequence, so it cannot chain renders.
+  const focusedSequenceRef = useRef<number | null>(null);
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- retries each commit; ref-guarded to run once
+  useLayoutEffect(() => {
+    if (!focusSequence || focusedSequenceRef.current === focusSequence) return;
+    const index = timelineGroupIndexAtSequence(
+      groups.map((entry) => entry.group),
+      focusSequence,
+    );
+    const key = index >= 0 ? groups[index]?.key : undefined;
+    const node = scrollRef.current;
+    if (!key || !node || contentTopOf(node, key) === null) return;
+    focusedSequenceRef.current = focusSequence;
+    setRevealed(true);
+    jumpToQuestion(key);
+  });
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
     requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
@@ -2662,8 +2744,8 @@ export function MessageTimeline({
                                       <span className={LOADING_CHIP_CLASS}>
                                         <span className="og-shimmer-text">
                                           {loadingOldest
-                                            ? "Jumping to start…"
-                                            : "Loading earlier activity…"}
+                                            ? t("messageTimeline.jumpingToStart")
+                                            : t("messageTimeline.loadingEarlierActivity")}
                                         </span>
                                       </span>
                                     ) : null}
@@ -2725,9 +2807,9 @@ export function MessageTimeline({
                                       >
                                         {underfillRetryReady
                                           ? underfillSettledAttempt?.[2]?.tailPreserved
-                                            ? "Load earlier activity"
-                                            : "Retry earlier activity"
-                                          : "Jump to start"}
+                                            ? t("messageTimeline.loadEarlierActivity")
+                                            : t("messageTimeline.retryEarlierActivity")
+                                          : t("messageTimeline.jumpToStart")}
                                       </button>
                                     ) : null}
                                   </motion.div>
@@ -2736,7 +2818,7 @@ export function MessageTimeline({
                               {!groups.length
                                 ? (emptyState ?? (
                                     <p className="py-10 text-center text-og-menu text-og-fg-subtle">
-                                      No activity yet.
+                                      {t("messageTimeline.noActivityYet")}
                                     </p>
                                   ))
                                 : null}
@@ -2797,7 +2879,9 @@ export function MessageTimeline({
                                   className="flex flex-col items-center gap-2 px-4 py-3 text-center text-og-menu text-og-fg-muted"
                                 >
                                   <p role="status" className="max-w-prose [overflow-wrap:anywhere]">
-                                    Couldn’t load later activity. {newerFailure.message}
+                                    {t("messageTimeline.couldnTLoadLaterActivity", {
+                                      message: newerFailure.message,
+                                    })}
                                   </p>
                                   <button
                                     ref={newerRetryButtonRef}
@@ -2809,8 +2893,8 @@ export function MessageTimeline({
                                     onClick={() => requestNewer(true)}
                                   >
                                     {newerRetryPending
-                                      ? "Retrying later activity…"
-                                      : "Retry later activity"}
+                                      ? t("messageTimeline.retryingLaterActivity")
+                                      : t("messageTimeline.retryLaterActivity")}
                                   </button>
                                 </div>
                               ) : null}
@@ -2851,12 +2935,14 @@ export function MessageTimeline({
                                 type="button"
                                 data-og-question-nav=""
                                 data-og-jump-to-question=""
-                                title="Back to your message"
+                                title={t("messageTimeline.backToYourMessage")}
                                 onClick={() => jumpToQuestion(questionNav.key)}
                                 className={NAV_BUTTON_CLASS}
                               >
                                 <ArrowUpIcon aria-hidden className="size-4" />
-                                <span className="sr-only">Back to your message</span>
+                                <span className="sr-only">
+                                  {t("messageTimeline.backToYourMessage")}
+                                </span>
                               </motion.button>
                             ) : null}
                           </AnimatePresence>
@@ -2875,7 +2961,9 @@ export function MessageTimeline({
                                 className="flex max-w-full justify-center"
                               >
                                 <span className={LOADING_CHIP_CLASS}>
-                                  <span className="og-shimmer-text">Loading later activity…</span>
+                                  <span className="og-shimmer-text">
+                                    {t("messageTimeline.loadingLaterActivity")}
+                                  </span>
                                 </span>
                               </motion.div>
                             ) : null}
@@ -2885,7 +2973,7 @@ export function MessageTimeline({
                                 {...NAV_FADE}
                                 type="button"
                                 data-og-jump-to-latest=""
-                                title="Jump to latest"
+                                title={t("messageTimeline.jumpToLatest")}
                                 onClick={() => {
                                   // Returning to the tip explicitly releases reader-owned
                                   // prose. Clear only this timeline's selection before the
@@ -2947,7 +3035,7 @@ export function MessageTimeline({
                                 className={NAV_BUTTON_CLASS}
                               >
                                 <ArrowDownIcon aria-hidden className="size-4" />
-                                <span className="sr-only">Jump to latest</span>
+                                <span className="sr-only">{t("messageTimeline.jumpToLatest")}</span>
                               </motion.button>
                             ) : null}
                           </AnimatePresence>
@@ -2964,7 +3052,19 @@ export function MessageTimeline({
     </AllowancePresentationProvider>
   );
   // Agent-authored object links resolve through the host, never the console.
-  return <OpenGeniLinkProvider resolveLink={resolveLink}>{timeline}</OpenGeniLinkProvider>;
+  return (
+    <OpenGeniLinkProvider resolveLink={resolveLink}>
+      <MessageSenderContext.Provider value={renderMessageSender}>
+        <AgentIdentityProvider
+          items={resolvedItems}
+          resolveSessionTitle={resolveSessionTitle}
+          onOpenSession={onOpenSession}
+        >
+          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+        </AgentIdentityProvider>
+      </MessageSenderContext.Provider>
+    </OpenGeniLinkProvider>
+  );
 }
 
 type KeyedTimelineGroup = {
@@ -3106,6 +3206,23 @@ function timelineRenderResetKeysChanged(
  * entire conversation. Keep the boundary outside the row component so React
  * can replace an invalid element type (error #130) with a bounded fallback.
  */
+function TimelineGroupRenderError() {
+  const t = useOpenGeniText();
+  return (
+    <div
+      data-testid="timeline-group-render-error"
+      role="status"
+      className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
+    >
+      <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+      <div>
+        <p className="font-medium text-og-fg">{t("messageTimeline.timelineItemUnavailable")}</p>
+        <p>{t("messageTimeline.timelineItemUnavailableDetail")}</p>
+      </div>
+    </div>
+  );
+}
+
 class TimelineGroupRenderBoundary extends Component<
   TimelineGroupRenderBoundaryProps,
   TimelineGroupRenderBoundaryState
@@ -3131,21 +3248,7 @@ class TimelineGroupRenderBoundary extends Component<
 
   render(): ReactNode {
     if (this.state.failed) {
-      return (
-        <div
-          data-testid="timeline-group-render-error"
-          role="status"
-          className="flex items-start gap-2 rounded-lg border border-og-border bg-og-surface-muted px-3 py-2 text-og-menu text-og-fg-muted"
-        >
-          <TriangleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-          <div>
-            <p className="font-medium text-og-fg">Timeline item unavailable</p>
-            <p>
-              This item could not be displayed. The rest of the conversation is still available.
-            </p>
-          </div>
-        </div>
-      );
+      return <TimelineGroupRenderError />;
     }
     return this.props.children;
   }
@@ -3354,6 +3457,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
 }) {
+  const t = useOpenGeniText();
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
@@ -3401,18 +3505,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
-        const phases = group.items.filter((item) => item.kind === "startup-phase");
-        const preparing =
-          !startupDetails &&
-          !startupDismissed &&
-          !group.work.endedAt &&
-          !group.work.waiting &&
-          phases.length > 0 &&
-          group.items.every(
-            (item) =>
-              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
-          ) &&
-          !phases.some((item) => item.status === "failed" || item.status === "cancelled");
+        const preparing = isPreparingWork(group, { startupDetails, startupDismissed });
         if (preparing) {
           // Preparation is primary, never hidden in an activity disclosure.
           // Keep work.startedAt unchanged for the handoff and settled duration.
@@ -3429,22 +3522,51 @@ const TimelineGroupView = memo(function TimelineGroupView({
             />
           );
         }
-        const end = group.work.endedAt;
-        const status: TurnSummaryStatus = end
-          ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
-          : group.work.waiting
-            ? { kind: "waiting", ...group.work.waiting }
-            : {
-                kind: "working",
-                since: group.work.startedAt,
-                preview: containsPresentedImage ? undefined : (
+        const workStatus = readableWorkStatus(t, { ...group, work: group.work });
+        const status: TurnSummaryStatus =
+          workStatus.kind === "working"
+            ? {
+                ...workStatus,
+                preview: readableWorkShowsPreview(group) ? (
                   <RollingActivity
                     items={group.items}
                     toolRegistry={toolRegistry}
                     showCount={false}
                   />
-                ),
-              };
+                ) : undefined,
+              }
+            : workStatus.kind === "waiting"
+              ? {
+                  kind: "waiting",
+                  label: workStatus.label,
+                  since: workStatus.since,
+                  // One quiet line under the row saying what the wait needs,
+                  // kept visible when the work is expanded; never a second
+                  // warning banner.
+                  guidance: workStatus.detail ? (
+                    <span
+                      data-og-exchange-wait-detail=""
+                      className="block text-og-sm text-og-fg-subtle"
+                    >
+                      {workStatus.detail}
+                    </span>
+                  ) : undefined,
+                }
+              : group.work.cycles?.summary
+                ? {
+                    ...workStatus,
+                    // Folded quiet cycles say what the agent is waiting on.
+                    preview: (
+                      <p
+                        data-og-cycles-summary=""
+                        className="truncate text-og-sm text-og-fg-subtle"
+                        title={group.work.cycles.summary}
+                      >
+                        {group.work.cycles.summary}
+                      </p>
+                    ),
+                  }
+                : workStatus;
         return (
           // Marks this work row for the live-note fold (list keys can be carried
           // over from an earlier row, so they are not the work id).
@@ -3452,17 +3574,18 @@ const TimelineGroupView = memo(function TimelineGroupView({
             <TurnSummary
               key="work"
               items={group.items}
+              bare={insideTurn || undefined}
               status={status}
+              // A wait before any visible work has nothing to reveal.
+              expandable={readableWorkHasDetails(
+                { ...group, work: group.work },
+                { startupDetails },
+              )}
               outcome={group.outcome}
               failureText={group.failureText}
               foldKey={group.id}
-              defaultOpen={
-                containsPresentedImage ||
-                group.outcome === "failed" ||
-                phases.some((item) => item.status === "failed" || item.status === "cancelled")
-                  ? true
-                  : undefined
-              }
+              defaultOpen={readableWorkDefaultOpen(group)}
+              unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
               facets={turnSummary?.facets}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
@@ -3472,6 +3595,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
               }
             >
               <TurnRailFrame compact>
+                {group.work.steps ? (
+                  <TurnStepsLoader
+                    steps={group.work.steps}
+                    autoLoad={!readableWorkDefaultOpen(group)}
+                  />
+                ) : null}
                 {renderFoldedGroups(
                   group.work.details,
                   {
@@ -3737,7 +3866,30 @@ type FoldedGroupBehavior = {
   turnSummary?: TurnSummaryOptions | undefined;
 };
 
-/** Children of a folded turn or exchange, each on the shared rail. */
+/**
+ * A search hit inside a nested work row opens that row only. The reveal key
+ * is provided per top-level group, so without narrowing every nested row of
+ * a folded quiet-cycle run would open at once.
+ */
+function NestedSearchReveal({ group, children }: { group: TimelineGroup; children: ReactNode }) {
+  const revealKey = useContext(TimelineSearchRevealContext);
+  const itemId = useMemo(() => {
+    if (!revealKey) return null;
+    try {
+      const [id] = JSON.parse(revealKey) as unknown[];
+      return typeof id === "string" ? id : null;
+    } catch {
+      return null;
+    }
+  }, [revealKey]);
+  const value = itemId && timelineGroupItemIds(group).includes(itemId) ? revealKey : null;
+  return (
+    <TimelineSearchRevealContext.Provider value={value}>
+      {children}
+    </TimelineSearchRevealContext.Provider>
+  );
+}
+
 function renderFoldedGroups(
   groups: readonly TimelineGroup[],
   behavior: FoldedGroupBehavior,
@@ -3774,22 +3926,15 @@ function renderFoldedGroups(
               : undefined
           }
         >
-          <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          <NestedSearchReveal group={child}>
+            <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+          </NestedSearchReveal>
         </div>
       ) : (
         <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
       )}
     </TimelineGroupRenderBoundary>
   ));
-}
-
-function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
-  return groups.filter(
-    (group) =>
-      group.kind === "item" &&
-      group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
-  ).length;
 }
 
 /**
@@ -3892,18 +4037,6 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
 /** No item still running or streaming — the only state safe to fold live.
     Position alone is a broken proxy: a pending queued message (or any trailing
     item) can sit after the ACTIVE cluster, which must never fold mid-work. */
-function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
-  return group.items.every((item) => {
-    if (item.kind === "reasoning" || item.kind === "agent-message") {
-      return !item.streaming;
-    }
-    // Memory writes and fleet observations are discrete, already-settled events.
-    if (item.kind === "memory" || item.kind === "fleet-decision") {
-      return true;
-    }
-    return item.status !== "running";
-  });
-}
 
 /** Settled activity clusters that could become nested chips under a turn. */
 function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number {
@@ -3914,18 +4047,6 @@ function foldableActivityClusterCount(groups: readonly TimelineGroup[]): number 
     }
   }
   return count;
-}
-
-function flattenActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
-  const items: ActivityItem[] = [];
-  for (const group of groups) {
-    if (group.kind === "activity") {
-      items.push(...flattenActivityItems(group.work?.details ?? []), ...group.items);
-    } else if (group.kind === "turn") {
-      items.push(...flattenActivityItems(group.groups));
-    }
-  }
-  return items;
 }
 
 /** Assistant prose inside a turn fold (mid-turn narration), joined for copy. */
@@ -4026,15 +4147,6 @@ function collectTurnCopyText(
   return parts.join("\n\n");
 }
 
-function durationBetween(startedAt: string, endedAt: string): number | undefined {
-  const started = Date.parse(startedAt);
-  const ended = Date.parse(endedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
-    return undefined;
-  }
-  return ended - started;
-}
-
 /* --- single rows ------------------------------------------------------------ */
 
 /**
@@ -4101,6 +4213,8 @@ export function TimelineRow({
       return <NoticeRow item={item} />;
     case "context-compaction":
       return <CompactionRow item={item} />;
+    case "turn-steps":
+      return <TurnStepsAction steps={item} />;
     case "auth-needed":
       return (
         renderAuthNeeded?.(item) ?? (
@@ -4116,69 +4230,131 @@ export function TimelineRow({
   }
 }
 
-const COMPACTION_TRIGGER_LABEL: Record<NonNullable<ContextCompactionItem["trigger"]>, string> = {
-  auto: "Auto",
-  operator: "Manual",
-  proactive: "Auto",
-  overflow: "Overflow",
-};
+const COMPACTION_TRIGGER_LABEL = (
+  t: OpenGeniText,
+): Record<NonNullable<ContextCompactionItem["trigger"]>, string> => ({
+  auto: t("messageTimeline.auto"),
+  operator: t("messageTimeline.manual"),
+  proactive: t("messageTimeline.auto"),
+  overflow: t("messageTimeline.overflow"),
+});
 
 function CompactionRow({ item }: { item: ContextCompactionItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
+  const detailsId = useId();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const trigger =
-    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
+    item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL(t)[item.trigger] : null;
   const before =
     item.estimatedTokensBefore != null
-      ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
+      ? Math.round(item.estimatedTokensBefore).toLocaleString(t.locale)
       : null;
   const after =
     item.estimatedTokensAfter != null
-      ? Math.round(item.estimatedTokensAfter).toLocaleString("en-US")
+      ? Math.round(item.estimatedTokensAfter).toLocaleString(t.locale)
       : null;
   const title =
     item.phase === "started"
-      ? "Compacting conversation history…"
+      ? t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
         ? before && after
-          ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
-          : "Conversation history compacted"
-        : "Couldn’t compact conversation history";
+          ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+          : t("messageTimeline.conversationHistoryCompacted")
+        : compactionSkipTitle(t, item.skipReason);
   const subtitle =
     item.phase === "compacted"
-      ? "Chat history above is unchanged"
+      ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(item.skipReason, item.providerRejection)
+        ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection)
         : null;
-  const pill =
-    item.phase === "skipped" && item.skipReason === "summarization_failed"
-      ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.phase === "started"
-        ? WAITING_PILL_CLASS
-        : NEUTRAL_PILL;
+  // Provider identifiers are diagnostics: one short line up front, the rest on demand.
+  const details = compactionFailureDetails(t, item);
+  const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  const pill = failed
+    ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
+    : item.phase === "started"
+      ? WAITING_PILL_CLASS
+      : NEUTRAL_PILL;
   return (
-    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
+    <div className={cn(enter && "animate-og-enter", "flex min-w-0 flex-col items-center gap-1.5")}>
       <div
         className={cn(
-          "inline-flex max-w-full flex-col items-center gap-0.5 rounded-full border px-3 py-1.5 text-og-sm",
+          "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 border px-3 py-1.5 text-og-sm",
+          // A failure's recovery step may wrap on narrow screens; a full pill
+          // radius would pinch its second line.
+          failed ? "rounded-og-lg" : "rounded-full",
           pill,
         )}
         role="status"
       >
-        <span className="inline-flex max-w-full items-center gap-1.5">
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
           <ShrinkIcon className="size-3.5 shrink-0" />
-          <span className="truncate">
+          <span className="min-w-0 truncate">
             {title}
             {trigger ? ` · ${trigger}` : ""}
           </span>
         </span>
-        {subtitle ? <span className="truncate text-og-xs opacity-80">{subtitle}</span> : null}
+        {subtitle || details ? (
+          <span
+            className={cn(
+              "min-w-0 max-w-full text-og-xs",
+              failed ? "text-balance text-center" : "inline-flex items-center gap-1",
+            )}
+          >
+            {subtitle ? (
+              <span className={cn("opacity-80", !failed && "min-w-0 truncate")}>{subtitle}</span>
+            ) : null}
+            {subtitle && details && failed ? " " : null}
+            {details ? (
+              <button
+                type="button"
+                aria-expanded={detailsOpen}
+                aria-controls={detailsId}
+                onClick={() => setDetailsOpen((open) => !open)}
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-og-sm align-baseline font-medium underline-offset-2",
+                  "hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-current/40",
+                  "pointer-coarse:-my-2 pointer-coarse:px-1 pointer-coarse:py-2",
+                )}
+              >
+                {t("messageTimeline.details")}
+                <ChevronDownIcon
+                  aria-hidden
+                  className={cn("size-3 transition-transform", detailsOpen && "rotate-180")}
+                />
+              </button>
+            ) : null}
+          </span>
+        ) : null}
       </div>
+      {details ? (
+        <div
+          id={detailsId}
+          hidden={!detailsOpen}
+          data-og-compaction-details=""
+          className="w-full max-w-md rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-left text-og-xs text-og-fg-muted"
+        >
+          {details.note ? <p className="mb-2">{details.note}</p> : null}
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+            {details.facts.map((fact) => (
+              <Fragment key={fact.label}>
+                <dt className="text-og-fg-subtle">{fact.label}</dt>
+                <dd className="max-h-40 min-w-0 overflow-auto whitespace-pre-wrap break-words font-mono">
+                  {fact.value}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 /** Hover-reveal clock beside the copy control (sent / finished). */
 function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
+  const t = useOpenGeniText();
   return (
     <time
       dateTime={occurredAt}
@@ -4188,7 +4364,7 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
         "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-100",
       )}
     >
-      {formatClockTime(occurredAt)}
+      {formatClockTime(t, occurredAt)}
     </time>
   );
 }
@@ -4204,11 +4380,13 @@ function UserMessageRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const deliveryFailed = item.delivery?.state === "failed";
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        <MessageSenderSlot item={item} />
         <CopyHoverFrame
           copyText={
             item.text ||
@@ -4216,7 +4394,7 @@ function UserMessageRow({
               .map((annotation) => `${annotation.quote}\n${annotation.note}`)
               .join("\n\n")
           }
-          label="Copy message"
+          label={t("messageTimeline.copyMessage")}
           className="w-fit max-w-full min-w-0"
           trailing={
             <>
@@ -4235,7 +4413,7 @@ function UserMessageRow({
                   renderMessageText(item.text, item)
                 ) : (
                   <UserMessageBody messageId={item.id} text={item.text}>
-                    <Markdown>{item.text}</Markdown>
+                    <Markdown softLineBreaks>{item.text}</Markdown>
                   </UserMessageBody>
                 )}
               </div>
@@ -4256,7 +4434,7 @@ function UserMessageRow({
             <span className="flex min-w-0 items-start gap-1">
               <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
               <span className="min-w-0 break-words">
-                {item.delivery?.error || "Message not sent"}
+                {item.delivery?.error || t("messageTimeline.messageNotSent")}
               </span>
             </span>
             <div className="flex flex-wrap items-center gap-2">
@@ -4266,7 +4444,7 @@ function UserMessageRow({
                   className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onEdit}
                 >
-                  Edit message
+                  {t("messageTimeline.editMessage")}
                 </button>
               ) : null}
               {item.delivery?.onRetry ? (
@@ -4275,7 +4453,7 @@ function UserMessageRow({
                   className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onRetry}
                 >
-                  Retry
+                  {t("messageTimeline.retry")}
                 </button>
               ) : null}
               {item.delivery?.onRemove ? (
@@ -4284,7 +4462,7 @@ function UserMessageRow({
                   className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
                   onClick={item.delivery.onRemove}
                 >
-                  Remove
+                  {t("messageTimeline.remove")}
                 </button>
               ) : null}
             </div>
@@ -4296,6 +4474,7 @@ function UserMessageRow({
 }
 
 function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const multipleQuestions = Math.max(item.questions.length, item.answers.length) > 1;
   const questionNumberById = new Map(
@@ -4303,13 +4482,13 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
   const settledLabel =
     item.response.outcome === "answered"
-      ? "You answered"
+      ? t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
-        ? "Skipped"
+        ? t("messageTimeline.skipped")
         : item.response.outcome === "expired"
-          ? "Expired"
-          : "Cancelled";
-  const copyText = humanInputConversationCopyText(item, settledLabel);
+          ? t("messageTimeline.expired")
+          : t("messageTimeline.cancelled");
+  const copyText = humanInputConversationCopyText(t, item, settledLabel);
 
   return (
     <div
@@ -4321,13 +4500,15 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
           <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-og-xs font-medium text-og-fg-subtle">Agent asked</p>
+          <p className="text-og-xs font-medium text-og-fg-subtle">
+            {t("messageTimeline.agentAsked")}
+          </p>
           <div className="mt-1.5 space-y-3">
             {item.questions.length > 0 ? (
               item.questions.map((question, index) => (
                 <div key={question.id}>
                   {question.label ? (
-                    <p className="text-og-sm font-semibold text-og-fg">
+                    <p className="text-og-sm font-semibold text-og-fg [overflow-wrap:anywhere]">
                       {multipleQuestions ? (
                         <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                       ) : null}
@@ -4337,7 +4518,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                   ) : null}
                   <p
                     className={cn(
-                      "text-og-md leading-6 text-og-fg",
+                      "text-og-md leading-6 text-og-fg [overflow-wrap:anywhere]",
                       question.label && "mt-0.5 text-og-sm text-og-fg-muted",
                     )}
                   >
@@ -4345,12 +4526,14 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {question.prompt}
+                    {linkifyText(question.prompt)}
                   </p>
                 </div>
               ))
             ) : (
-              <p className="text-og-sm text-og-fg-muted">The agent requested structured input.</p>
+              <p className="text-og-sm text-og-fg-muted">
+                {t("messageTimeline.theAgentRequestedStructuredInput")}
+              </p>
             )}
           </div>
         </div>
@@ -4359,7 +4542,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
       <div className="flex justify-end">
         <CopyHoverFrame
           copyText={copyText}
-          label="Copy answer"
+          label={t("messageTimeline.copyAnswer")}
           className="w-fit max-w-[90%] min-w-0 sm:max-w-[82%]"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
@@ -4379,20 +4562,25 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                         </p>
                       ) : null}
                       <div className={cn("text-og-md text-og-fg", multipleQuestions && "mt-0.5")}>
-                        {answer.values.length > 1 ? (
+                        {answer.secret ? (
+                          <SecretAnswerChip
+                            result={answer.secret}
+                            label={secretAnswerLabel(t, answer.secret)}
+                          />
+                        ) : answer.values.length > 1 ? (
                           <ul className="list-disc space-y-0.5 pl-5">
                             {answer.values.map((value) => (
                               <li key={`${answer.questionId}-${value}`}>{value}</li>
                             ))}
                           </ul>
                         ) : (
-                          <p>{answer.values[0] || "Answered"}</p>
+                          <p>{answer.values[0] || t("messageTimeline.answered")}</p>
                         )}
                       </div>
                     </div>
                   ))
                 ) : (
-                  <p>Answered</p>
+                  <p>{t("messageTimeline.answered")}</p>
                 )}
               </div>
             ) : null}
@@ -4403,11 +4591,15 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
 }
 
-function humanInputConversationCopyText(item: HumanInputItem, settledLabel: string): string {
+function humanInputConversationCopyText(
+  t: OpenGeniText,
+  item: HumanInputItem,
+  settledLabel: string,
+): string {
   const questions = item.questions
     .map(
       (question, index) =>
-        `${item.questions.length > 1 ? `${index + 1}. ` : ""}${question.label || "Question"}: ${question.prompt}`,
+        `${item.questions.length > 1 ? `${index + 1}. ` : ""}${question.label || t("messageTimeline.question")}: ${question.prompt}`,
     )
     .join("\n\n");
   const questionNumberById = new Map(
@@ -4420,7 +4612,11 @@ function humanInputConversationCopyText(item: HumanInputItem, settledLabel: stri
           item.questions.length > 1
             ? `${questionNumberById.get(answer.questionId) ?? index + 1}. `
             : ""
-        }${answer.label}: ${answer.values.join(", ") || "Answered"}`,
+        }${answer.label}: ${
+          answer.secret
+            ? `${secretAnswerLabel(t, answer.secret)} (${answer.secret.reference})`
+            : answer.values.join(", ") || t("messageTimeline.answered")
+        }`,
     )
     .join("\n\n");
   return [questions, `${settledLabel}${answers ? `\n\n${answers}` : ""}`]
@@ -4439,20 +4635,23 @@ function AgentMessageRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   // No streaming caret: it fought the trailing block layout (inline ↔ block)
   // and snapped on exit. Live text carries the stream via tip ink.
   const body = renderMessageText ? (
     renderMessageText(item.text, item)
   ) : (
-    <Markdown streaming={item.streaming}>{item.text}</Markdown>
+    <Markdown softLineBreaks streaming={item.streaming}>
+      {item.text}
+    </Markdown>
   );
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).
   return (
     <CopyHoverFrame
       copyText={item.text}
-      label="Copy message"
+      label={t("messageTimeline.copyMessage")}
       align="start"
       className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
       trailing={
@@ -4476,56 +4675,64 @@ function AgentMessageRow({
 }
 
 /**
- * A worker session reporting back to its manager. The child's completion arrives
- * as a `user.message` carrying a `childCompletion` payload (the raw message text
- * used to render as an "ugly" user bubble); it projects to a `worker-completion`
- * item and draws here as a quietly-confident card — an inbound result, not
- * something the human said. One glyph + one line carry the outcome; the worker's
- * full report, evidence, and any paused reason live behind a collapsed
- * disclosure, and a "View session" affordance deep-links into the child.
- *
- * Color follows the timeline's restraint: green only for a completed goal, the
- * waiting hue only for a paused one, red only for a failed child — everything
- * else is a neutral inbound card.
+ * A worker session reporting back to its manager in older history: the child's
+ * completion arrived as a `user.message` carrying a `childCompletion` payload.
+ * It draws as the same named agent row as every other inbound agent update:
+ * the outcome and goal on the row, the report, evidence, and any paused
+ * reason behind the disclosure, and a deep link into the child.
  */
 type WorkerCompletionMeta = {
-  label: string;
+  title: AgentTitleParts;
   icon: ComponentType<{ className?: string }>;
-  iconClass: string;
-  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
-  accentClass: string;
+  failed: boolean;
 };
 
-function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+function workerCompletionMeta(
+  t: OpenGeniText,
+  item: WorkerCompletionItem,
+  name: string | null,
+): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
     return {
-      label: "Worker failed",
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.nameFailed", { name: agent }),
+        t("messageTimeline.workerFailed"),
+      ),
       icon: XCircleIcon,
-      iconClass: "text-og-status-failed",
-      accentClass: "border-og-status-failed/60",
+      failed: true,
     };
   }
   if (item.goalStatus === "paused") {
     return {
-      label: "Worker paused",
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.namePaused", { name: agent }),
+        t("messageTimeline.workerPaused"),
+      ),
       icon: PauseCircleIcon,
-      iconClass: "text-og-status-waiting",
-      accentClass: "border-og-status-waiting/50",
+      failed: false,
     };
   }
   if (item.goalStatus === "completed") {
     return {
-      label: "Worker completed",
+      title: namedAgentTitle(
+        name,
+        (agent) => t("messageTimeline.nameCompletedItsGoal", { name: agent }),
+        t("messageTimeline.workerCompleted"),
+      ),
       icon: CheckCircle2Icon,
-      iconClass: "text-og-status-idle",
-      accentClass: "border-og-status-idle/45",
+      failed: false,
     };
   }
   return {
-    label: "Worker reported back",
+    title: namedAgentTitle(
+      name,
+      (agent) => t("messageTimeline.resultFromName", { name: agent }),
+      t("messageTimeline.workerReportedBack"),
+    ),
     icon: BotIcon,
-    iconClass: "text-og-accent",
-    accentClass: "border-og-border-strong",
+    failed: false,
   };
 }
 
@@ -4536,95 +4743,52 @@ function WorkerCompletionRow({
   item: WorkerCompletionItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const [open, setOpen] = useState(false);
-  const meta = workerCompletionMeta(item);
+  const identity = useAgentIdentity();
+  const meta = workerCompletionMeta(t, item, identity.titleFor(item.childSessionId));
   const Icon = meta.icon;
-  // The worker's own report is the substance behind the fold; evidence and any
-  // paused reason sit alongside it as quieter, labelled context.
   // "Paused because" only when the outcome actually IS a pause — completion
   // payloads can carry a leftover pausedReason/rationale from earlier in the
-  // worker's life, and a "Worker completed" card must not show a pause section.
+  // worker's life, and a completed row must not show a pause section.
   const showPausedReason =
     item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
   const details: { label: string; value: string; muted?: boolean }[] = [
-    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
+    ...(item.text.trim() ? [{ label: t("messageTimeline.report"), value: item.text.trim() }] : []),
     ...(item.evidence?.trim()
-      ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
+      ? [{ label: t("messageTimeline.evidence"), value: item.evidence.trim(), muted: true }]
       : []),
     ...(showPausedReason
-      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      ? [
+          {
+            label: t("messageTimeline.pausedBecause"),
+            value: item.pausedReason!.trim(),
+            muted: true,
+          },
+        ]
       : []),
   ];
-  const hasDetails = details.length > 0;
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0")}>
-      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
-          no full frame, no surface fill. The report unfolds flush beneath. */}
-      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
-        <div className="flex items-start gap-2.5">
-          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
-            <Icon className="size-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-og-base leading-5 text-og-fg">
-              <span className="font-medium">{meta.label}</span>
-              {item.goalText ? (
-                <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span>
-              ) : null}
-            </p>
-          </div>
-          {item.childSessionId && onOpenSession ? (
-            <button
-              type="button"
-              onClick={() => onOpenSession(item.childSessionId)}
-              className={cn(
-                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-                "outline-hidden transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
-                "focus-visible:ring-2 focus-visible:ring-og-accent",
-              )}
-            >
-              View session
-              <ArrowRightIcon className="size-3.5" />
-            </button>
-          ) : null}
-        </div>
-        {hasDetails ? (
-          <Collapsible.Root open={open} onOpenChange={setOpen}>
-            <Collapsible.Trigger asChild>
-              <button
-                type="button"
-                className={cn(
-                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
-                  "outline-hidden transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
-                )}
-              >
-                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
-                {open ? "Hide details" : "Show details"}
-              </button>
-            </Collapsible.Trigger>
-            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
-              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
-                {details.map((detail) => (
-                  <div key={detail.label} className="min-w-0">
-                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
-                      {detail.label}
-                    </p>
-                    <p
-                      className={cn(
-                        "whitespace-pre-wrap break-words text-og-sm leading-6",
-                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
-                      )}
-                    >
-                      {detail.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </Collapsible.Content>
-          </Collapsible.Root>
-        ) : null}
-      </div>
+      <AgentRow
+        icon={<Icon />}
+        title={meta.title}
+        preview={item.goalText ? truncate(item.goalText, 240) : null}
+        previewLines={2}
+        sessionId={item.childSessionId}
+        onOpenSession={onOpenSession ?? identity.onOpenSession}
+        failed={meta.failed}
+      >
+        {details.length > 0 ? (
+          <>
+            {details.map((detail) => (
+              <AgentRowSection key={detail.label} label={detail.label} muted={detail.muted}>
+                {detail.value}
+              </AgentRowSection>
+            ))}
+          </>
+        ) : undefined}
+      </AgentRow>
     </div>
   );
 }
@@ -4632,10 +4796,17 @@ function WorkerCompletionRow({
 function SessionStatusRow({
   item,
 }: {
-  item: { status: SessionStatus; occurredAt: string; resolvedAt?: string };
+  item: {
+    status: SessionStatus;
+    blocked?: true;
+    occurredAt: string;
+    resolvedAt?: string;
+  };
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const meta = SESSION_STATUS_META[item.status];
+  const status = item.blocked ? "blocked" : item.status;
+  const meta = SESSION_STATUS_META(t)[status];
   return (
     <div
       className={cn(
@@ -4646,9 +4817,9 @@ function SessionStatusRow({
     >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
-        {item.resolvedAt ? null : <StatusDot status={item.status} className="size-1" />}
-        {item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} ·{" "}
-        {formatRelativeTime(item.resolvedAt ?? item.occurredAt)}
+        {item.resolvedAt ? null : <StatusDot status={status} className="size-1" />}
+        {item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} ·{" "}
+        {formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}
       </span>
       <span className="h-px flex-1 bg-og-border" />
     </div>
@@ -4678,32 +4849,36 @@ const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
 // Shared production chunks can be cyclic. Resolve icon bindings during render,
 // after their modules initialize, rather than permanently capturing undefined.
-function goalMeta(action: GoalItem["action"]): GoalMeta {
+function goalMeta(t: OpenGeniText, action: GoalItem["action"]): GoalMeta {
   const metadata: Record<GoalItem["action"], GoalMeta> = {
     set: {
-      label: "Goal set",
+      label: t("messageTimeline.goalSet"),
       pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
       icon: TargetIcon,
     },
-    updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+    updated: { label: t("messageTimeline.goalUpdated"), pill: NEUTRAL_PILL, icon: PencilLineIcon },
     completed: {
-      label: "Goal completed",
+      label: t("messageTimeline.goalCompleted"),
       pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
       icon: CheckIcon,
     },
     paused: {
-      label: "Goal paused",
+      label: t("messageTimeline.goalPaused"),
       pill: WAITING_PILL_CLASS,
       icon: PauseIcon,
     },
-    resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
-    cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+    resumed: { label: t("messageTimeline.goalResumed"), pill: NEUTRAL_PILL, icon: PlayIcon },
+    cleared: { label: t("messageTimeline.goalCleared"), pill: NEUTRAL_PILL, icon: Trash2Icon },
     held: {
-      label: "Goal held",
+      label: t("messageTimeline.goalHeld"),
       pill: WAITING_PILL_CLASS,
       icon: PauseCircleIcon,
     },
-    continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+    continuation: {
+      label: t("messageTimeline.continuingTowardTheGoal"),
+      pill: NEUTRAL_PILL,
+      icon: ArrowRightIcon,
+    },
   };
   return metadata[action];
 }
@@ -4714,8 +4889,9 @@ function goalMeta(action: GoalItem["action"]): GoalMeta {
  * palette stays restrained — see that table for the per-action rationale.
  */
 function GoalRow({ item }: { item: GoalItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = goalMeta(item.action);
+  const { label, pill, icon: Icon } = goalMeta(t, item.action);
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span
@@ -4743,8 +4919,10 @@ function MachineInputBatchRow({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
-  const label = machineInputBatchLabel(item.members);
+  const identity = useAgentIdentity();
+  const label = machineInputBatchLabel(t, item.members, identity.titleFor);
   const single = item.members.length === 1 ? item.members[0]! : null;
   if (single?.kind === "media_generation_result" && single.result) {
     return (
@@ -4755,15 +4933,22 @@ function MachineInputBatchRow({
     );
   }
   const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
+  // An agent's words live in its named row behind the pill; the pill already
+  // says who it is from, so nothing repeats beneath it.
   const showCollapsedSummary =
-    !item.compact && single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
+    !item.compact &&
+    single != null &&
+    !isAgentMember(single) &&
+    machineInputSummaryIsUseful(t, single.kind, singleSummary);
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
       <details
         className="group w-full max-w-full"
         data-og-machine-input-batch=""
-        title={`Received ${formatClockTime(item.occurredAt)}`}
+        title={t("messageTimeline.receivedClocktime", {
+          clockTime: formatClockTime(t, item.occurredAt),
+        })}
       >
         <summary className="flex cursor-pointer list-none justify-center [&::-webkit-details-marker]:hidden">
           <span
@@ -4779,18 +4964,27 @@ function MachineInputBatchRow({
             <span className="truncate">{label}</span>
           </span>
         </summary>
-        <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
+        <div className="mx-auto mt-2 w-full max-w-lg space-y-1.5 border-t border-og-border/50 pt-2">
           <p className="text-og-xs text-og-fg-subtle">
-            Received <time dateTime={item.occurredAt}>{formatClockTime(item.occurredAt)}</time>
+            {t("messageTimeline.received")}{" "}
+            <time dateTime={item.occurredAt}>{formatClockTime(t, item.occurredAt)}</time>
           </p>
-          {item.members.map((member) => (
-            <MachineInputRow
-              key={member.id}
-              member={member}
-              onOpenSession={onOpenSession}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-            />
-          ))}
+          {groupMachineInputMembers(item.members).map((group) =>
+            group.kind === "agent" ? (
+              <AgentMemberRow
+                key={group.members[0]!.id}
+                members={group.members}
+                onOpenSession={onOpenSession}
+              />
+            ) : (
+              <MachineInputRow
+                key={group.member.id}
+                member={group.member}
+                onOpenSession={onOpenSession}
+                loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+              />
+            ),
+          )}
         </div>
       </details>
       {showCollapsedSummary ? (
@@ -4799,6 +4993,88 @@ function MachineInputBatchRow({
         </p>
       ) : null}
     </div>
+  );
+}
+
+type MachineInputMemberGroup =
+  | { kind: "agent"; members: MachineInputBatchItem["members"] }
+  | { kind: "other"; member: MachineInputBatchItem["members"][number] };
+
+/**
+ * Agent members get named rows; repeated progress notes from one agent fold
+ * into its single row (latest note shown, earlier ones behind the disclosure).
+ */
+function groupMachineInputMembers(
+  members: MachineInputBatchItem["members"],
+): MachineInputMemberGroup[] {
+  const groups: MachineInputMemberGroup[] = [];
+  const progressBySource = new Map<string, MachineInputBatchItem["members"]>();
+  for (const member of members) {
+    if (!isAgentMember(member)) {
+      groups.push({ kind: "other", member });
+      continue;
+    }
+    if (member.kind === "child_progress") {
+      const existing = progressBySource.get(member.sourceId);
+      if (existing) {
+        existing.push(member);
+        continue;
+      }
+      const bucket = [member];
+      progressBySource.set(member.sourceId, bucket);
+      groups.push({ kind: "agent", members: bucket });
+      continue;
+    }
+    groups.push({ kind: "agent", members: [member] });
+  }
+  return groups;
+}
+
+function agentMemberIcon(member: MachineInputBatchItem["members"][number]): ReactNode {
+  if (member.kind === "child_terminal_result" && member.classification === "failure") {
+    return <XCircleIcon />;
+  }
+  if (member.kind === "child_paused") return <PauseCircleIcon />;
+  return <CornerDownRightIcon />;
+}
+
+/** One named row for an update sent by (or about) another agent. */
+function AgentMemberRow({
+  members,
+  onOpenSession,
+}: {
+  members: MachineInputBatchItem["members"];
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const identity = useAgentIdentity();
+  const latest = members[members.length - 1]!;
+  const sessionId = agentMemberSessionId(latest);
+  const title = agentMemberTitle(t, latest, identity.titleFor(sessionId));
+  const texts = members.map((member) => agentMemberText(t, member));
+  const latestText = texts[texts.length - 1]!;
+  const bodies = texts
+    .map((text, index) => ({ id: members[index]!.id, body: text.body }))
+    .filter((entry) => entry.body.length > 0);
+  return (
+    <AgentRow
+      icon={agentMemberIcon(latest)}
+      title={title}
+      preview={latestText.preview ? truncate(latestText.preview, 320) : null}
+      previewLines={2}
+      meta={members.length > 1 ? `+${members.length - 1} earlier` : null}
+      sessionId={sessionId}
+      onOpenSession={onOpenSession ?? identity.onOpenSession}
+      failed={latest.kind === "child_terminal_result" && latest.classification === "failure"}
+    >
+      {bodies.length > 0 ? (
+        <>
+          {bodies.map((entry) => (
+            <AgentRowText key={entry.id}>{entry.body}</AgentRowText>
+          ))}
+        </>
+      ) : undefined}
+    </AgentRow>
   );
 }
 
@@ -4811,6 +5087,7 @@ function MachineInputRow({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
+  const t = useOpenGeniText();
   if (member.kind === "media_generation_result" && member.result) {
     return (
       <VideoGenerationResultRow
@@ -4827,9 +5104,13 @@ function MachineInputRow({
       <span className="mt-2 size-1.5 shrink-0 rounded-full bg-og-fg-subtle" aria-hidden />
       <div className="min-w-0 flex-1">
         <span className="text-og-control font-medium text-og-fg-muted">
-          {MACHINE_INPUT_META[member.kind]}
+          {MACHINE_INPUT_META(t)[member.kind]}
         </span>
-        {source && <span className="ml-1.5 text-og-control text-og-fg-subtle">from {source}</span>}
+        {source && (
+          <span className="ml-1.5 text-og-control text-og-fg-subtle">
+            {t("messageTimeline.fromSource", { source })}
+          </span>
+        )}
         {summary ? (
           <p className="mt-0.5 whitespace-pre-wrap break-words text-og-menu leading-5 text-og-fg">
             {truncate(summary, 320)}
@@ -4854,6 +5135,7 @@ function VideoGenerationResultRow({
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
   compact?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   if (result.status !== "ready") {
     return (
@@ -4865,7 +5147,7 @@ function VideoGenerationResultRow({
       >
         <div className="flex items-center gap-2 text-og-sm font-medium text-og-status-failed">
           <XCircleIcon aria-hidden className="size-4" />
-          Video generation failed
+          {t("messageTimeline.videoGenerationFailed")}
         </div>
         <p className="mt-1 text-og-sm leading-5 text-og-fg-muted">{result.boundedPublicReason}</p>
       </div>
@@ -4875,7 +5157,7 @@ function VideoGenerationResultRow({
   const facts = receipt.video;
   return (
     <section
-      aria-label="Generated video"
+      aria-label={t("messageTimeline.generatedVideo")}
       className={cn(
         enter && "animate-og-enter",
         "mx-auto w-full max-w-2xl overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 shadow-sm",
@@ -4895,13 +5177,16 @@ function VideoGenerationResultRow({
       )}
       <div className="flex items-center justify-between gap-4 px-3.5 py-2.5">
         <div className="min-w-0">
-          <p className="text-og-sm font-medium text-og-fg">Generated video</p>
+          <p className="text-og-sm font-medium text-og-fg">{t("messageTimeline.generatedVideo")}</p>
           <p className="truncate text-og-xs text-og-fg-subtle">
             {facts.width}×{facts.height} · {formatVideoDuration(facts.durationSeconds)}
             {facts.hasAudio ? " · Audio" : ""}
           </p>
         </div>
-        <CheckCircle2Icon aria-label="Ready" className="size-4 shrink-0 text-og-status-success" />
+        <CheckCircle2Icon
+          aria-label={t("messageTimeline.ready")}
+          className="size-4 shrink-0 text-og-status-success"
+        />
       </div>
     </section>
   );
@@ -4912,8 +5197,11 @@ function formatVideoDuration(seconds: number): string {
 }
 
 function NoticeRow({ item }: { item: NoticeItem }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   if (item.allowance) return <AllowanceExhaustedRow refusal={item.allowance} />;
+  if (item.sessionUsageLimit) return <SessionUsageLimitRow stop={item.sessionUsageLimit} />;
+  if (item.learningRefusal) return <LearningRefusalRow refusal={item.learningRefusal} />;
   if (item.recordedOutcome) {
     return (
       <details
@@ -4926,19 +5214,20 @@ function NoticeRow({ item }: { item: NoticeItem }) {
             aria-hidden
             className="size-3.5 transition-transform group-open:rotate-90"
           />
-          <span title={new Date(item.occurredAt).toLocaleString()}>
-            {recordedWaitSummary(item)}
+          <span title={new Date(item.occurredAt).toLocaleString(t.locale)}>
+            {recordedWaitSummary(t, item)}
           </span>
         </summary>
         <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
       </details>
     );
   }
-  const resolvedApproval = Boolean(item.resolvedAt && item.text.startsWith("Approval needed"));
+  const presentedTone = noticeTone(item);
+  const resolvedApproval = noticeIsResolvedApproval(item);
   const tone =
-    item.tone === "failed"
+    presentedTone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
-      : item.tone === "waiting" && !item.resolvedAt
+      : presentedTone === "waiting"
         ? WAITING_PILL_CLASS
         : NEUTRAL_PILL;
   return (
@@ -4958,14 +5247,14 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         />
       )}
       <div className="min-w-0 flex-1">
-        <span className="whitespace-pre-wrap break-words">
-          {resolvedApproval ? "You responded to this approval." : item.text}
-        </span>
+        <span className="whitespace-pre-wrap break-words">{noticeDisplayText(t, item)}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono">
-              {JSON.stringify(item.details.value, null, 2)}
+              {typeof item.details.value === "string"
+                ? item.details.value
+                : JSON.stringify(item.details.value, null, 2)}
             </pre>
           </details>
         ) : null}
@@ -4989,32 +5278,56 @@ function NoticeRow({ item }: { item: NoticeItem }) {
  * "Waiting for 2 agents · since 10:32" (with the date on a later day). The
  * reason stays behind the disclosure.
  */
-function recordedWaitSummary(item: NoticeItem): ReactNode {
+function recordedWaitSummary(t: OpenGeniText, item: NoticeItem): ReactNode {
   const agents = item.waitingAgents ?? 0;
-  const target = agents > 0 ? ` for ${agents} ${agents === 1 ? "agent" : "agents"}` : "";
   const waitedMs = item.waitEndedAt
     ? durationBetween(item.occurredAt, item.waitEndedAt)
     : undefined;
   if (waitedMs !== undefined) {
-    return (
-      <>
-        Waited{target} ·{" "}
-        <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(waitedMs)}</time>
-      </>
+    return withSlot(
+      agents > 0
+        ? t("timeline.noticePresentation.waitedForAgentsElapsed", { count: agents, elapsed: SLOT })
+        : t("timeline.noticePresentation.waitedElapsed", { elapsed: SLOT }),
+      <time dateTime={`PT${Math.floor(waitedMs / 1000)}S`}>{formatElapsed(t, waitedMs)}</time>,
     );
   }
   // An open wait is historical once its day has passed; keep its date visible.
   const started = new Date(item.occurredAt);
   const sameDay = started.toDateString() === new Date().toDateString();
+  const text = item.waitEndedAt
+    ? agents > 0
+      ? t("timeline.noticePresentation.waitedForAgentsSince", { count: agents, since: SLOT })
+      : t("timeline.noticePresentation.waitedSince", { since: SLOT })
+    : agents > 0
+      ? t("timeline.noticePresentation.waitingForAgentsSince", { count: agents, since: SLOT })
+      : t("timeline.noticePresentation.waitingSince", { since: SLOT });
+  return withSlot(
+    text,
+    <time dateTime={item.occurredAt}>
+      {sameDay
+        ? formatClockTime(t, item.occurredAt)
+        : started.toLocaleString(t.locale, { dateStyle: "medium", timeStyle: "short" })}
+    </time>,
+  );
+}
+
+/** Marks where a rendered element goes inside translated text. */
+const SLOT = "\u0000";
+
+function withSlot(text: string, node: ReactNode): ReactNode {
+  const at = text.indexOf(SLOT);
+  if (at < 0) {
+    return (
+      <>
+        {text} {node}
+      </>
+    );
+  }
   return (
     <>
-      {item.waitEndedAt ? "Waited" : "Waiting"}
-      {target} · since{" "}
-      <time dateTime={item.occurredAt}>
-        {sameDay
-          ? formatClockTime(item.occurredAt)
-          : started.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
-      </time>
+      {text.slice(0, at)}
+      {node}
+      {text.slice(at + SLOT.length)}
     </>
   );
 }
@@ -5036,13 +5349,16 @@ function AuthNeededRow({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
+  const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const recommendation = item.capability ?? null;
   const provider =
     recommendation?.name ??
-    (item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain));
+    (item.serverId === "codex_apps"
+      ? t("messageTimeline.codexApps")
+      : providerLabel(t, item.providerDomain));
   const unavailable =
     item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||
@@ -5050,21 +5366,21 @@ function AuthNeededRow({
   const missing = item.reason === "missing_connection";
   const actionLabel = recommendation
     ? recommendation.action === "connect"
-      ? "Connect"
-      : "Review"
+      ? t("messageTimeline.connect")
+      : t("messageTimeline.review")
     : missing
-      ? "Connect"
-      : "Reconnect";
+      ? t("messageTimeline.connect")
+      : t("messageTimeline.reconnect");
   const title = recommendation
     ? recommendation.action === "connect"
-      ? `Connect ${provider}`
+      ? t("messageTimeline.connectProvider", { provider })
       : recommendation.action === "add_credentials"
-        ? `Set up ${provider}`
-        : `Enable ${provider}`
+        ? t("messageTimeline.setUpProvider", { provider })
+        : t("messageTimeline.enableProvider", { provider })
     : unavailable
-      ? `${provider} tools unavailable`
+      ? t("messageTimeline.providerToolsUnavailable", { provider })
       : `${actionLabel} ${provider}`;
-  const reasonLine = recommendation?.rationale ?? authReasonLine(item.reason);
+  const reasonLine = recommendation?.rationale ?? authReasonLine(t, item.reason);
   const hostAuthorizationUrl = item.authoritySource === "host" ? item.authorizationUrl : null;
 
   const start = async () => {
@@ -5085,6 +5401,15 @@ function AuthNeededRow({
     }
   };
 
+  if (recommendation?.id === "api:connected-machine") {
+    return (
+      <div className="og-session-capability-setup" role="status">
+        <p>{t("thisComputer.card.name")}</p>
+        <p>{t("thisComputer.card.hostSetupUnavailable")}</p>
+      </div>
+    );
+  }
+
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
@@ -5098,12 +5423,16 @@ function AuthNeededRow({
             <p className="line-clamp-2 text-og-sm text-og-fg-subtle">{reasonLine}</p>
             {recommendation ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                Provider: {item.providerDomain}
+                {t("messageTimeline.providerProviderdomain", {
+                  providerDomain: item.providerDomain,
+                })}
               </p>
             ) : null}
             {recommendation && recommendation.requiredVariables.length > 0 ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                Needs variables: {recommendation.requiredVariables.join(", ")}
+                {t("messageTimeline.needsVariablesJoin", {
+                  join: recommendation.requiredVariables.join(", "),
+                })}
               </p>
             ) : null}
           </div>
@@ -5132,7 +5461,7 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? "Opening…" : actionLabel}
+            {busy ? t("messageTimeline.opening") : actionLabel}
           </button>
         ) : item.authoritySource !== "host" && !unavailable && item.authorizationUrl ? (
           <a
@@ -5152,13 +5481,19 @@ function AuthNeededRow({
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
           {recommendation
-            ? "No access has been granted. Review and confirm the provider before continuing."
-            : `This tool call wasn't replayed. After ${missing ? "connecting" : "reconnecting"}, send a new message to try again.`}
+            ? t("messageTimeline.noAccessHasBeenGranted")
+            : t(
+                missing
+                  ? "messageTimeline.toolCallNotReplayedAfterConnecting"
+                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+              )}
         </p>
       ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
+          {t("messageTimeline.couldnTStart")}{" "}
+          {missing ? t("messageTimeline.connecting") : t("messageTimeline.reconnecting")}{" "}
+          {t("messageTimeline.providerTryAgain", { provider })}
         </p>
       ) : null}
     </div>
@@ -5214,7 +5549,7 @@ function monogram(label: string): string {
 
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
     name for the provider — never the raw domain shown as a label. */
-function providerLabel(domain: string): string {
+function providerLabel(t: OpenGeniText, domain: string): string {
   const host =
     domain
       .trim()
@@ -5223,29 +5558,29 @@ function providerLabel(domain: string): string {
       .split("/")[0] ?? "";
   const first = host.split(".")[0] ?? host;
   if (!first) {
-    return "this service";
+    return t("messageTimeline.thisService");
   }
   return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
 /** A calm, human helper line per reauth reason — the `reason` informs the copy
     but is never rendered as a raw enum/code. */
-function authReasonLine(reason: AuthNeededItem["reason"]): string {
+function authReasonLine(t: OpenGeniText, reason: AuthNeededItem["reason"]): string {
   switch (reason) {
     case "insufficient_scope":
-      return "It needs additional access to continue.";
+      return t("messageTimeline.itNeedsAdditionalAccessTo");
     case "missing_connection":
-      return "It isn't connected yet.";
+      return t("messageTimeline.itIsnTConnectedYet");
     case "expired":
     case "refresh_failed":
-      return "Its access expired.";
+      return t("messageTimeline.itsAccessExpired");
     case "personal_authority_unavailable":
-      return "This automation was not granted access to your personal connection.";
+      return t("messageTimeline.thisAutomationWasNotGranted");
     case "unsupported_auth":
-      return "This connection cannot authenticate the configured tool endpoint.";
+      return t("messageTimeline.thisConnectionCannotAuthenticateThe");
     case "resource_scope_unavailable":
-      return "This tool endpoint cannot enforce the selected repository access.";
+      return t("messageTimeline.thisToolEndpointCannotEnforce");
     default:
-      return "Its connection needs attention.";
+      return t("messageTimeline.itsConnectionNeedsAttention");
   }
 }

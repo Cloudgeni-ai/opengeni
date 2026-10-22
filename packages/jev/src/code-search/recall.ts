@@ -30,7 +30,7 @@ import {
 import { CODE_SEARCH_MAX_PATTERN_CHARS } from "./workspace";
 
 /**
- * Directories that hold platform credential material, never workspace code: OpenGeni's per-session sandbox
+ * Directories that hold platform credential material, never workspace code: Opengeni's per-session sandbox
  * state (`.opengeni/`: Codemode bearer tokens, Git credential files and bindings, delivered clients), the Azure
  * CLI login cache (`.azure/`, written by the sandbox's service-principal login in HOME=/workspace) and a
  * Connected Machine agent's enrollment credentials (`.config/opengeni/`, when the workspace is its HOME).

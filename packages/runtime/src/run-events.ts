@@ -14,6 +14,7 @@ import {
   approvalIdentifier,
   RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
+  normalizeSecretQuestion,
   canonicalSkillReviewQuestion,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
@@ -26,6 +27,8 @@ import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { isPreemptedModelResponse } from "./model-preemption";
+import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -36,6 +39,12 @@ export type NormalizedRuntimeEvent = {
 export type NormalizeSdkEventOptions = {
   /** Trusted worker replacement for one tool output (for example an artifact receipt). */
   toolOutputOverride?: unknown;
+  /**
+   * Trusted worker edit of one tool output before media normalization, for
+   * example replacing retained image blocks with their artifact receipts while
+   * keeping the result's text.
+   */
+  toolOutputTransform?: (output: unknown) => unknown;
   /** Separately trusted receipt for the event truncation boundary. */
   retainedOutputEvidence?: unknown;
   /** Per-stream phase memory; without it only a completion's own declared phase is known. */
@@ -155,7 +164,9 @@ export class AssistantMessagePhaseTracker {
       return [];
     }
     if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return [];
-    return this.responseDone(data.response.output);
+    // A Steer cut this response short: the turn goes on, so what it kept is a
+    // progress note, never the final answer.
+    return this.responseDone(data.response.output, isPreemptedModelResponse(data));
   }
 
   /** Phase for a streamed text delta, when the provider already declared it. */
@@ -212,8 +223,8 @@ export class AssistantMessagePhaseTracker {
     return due;
   }
 
-  private responseDone(output: unknown[]): NormalizedRuntimeEvent[] {
-    const asksForToolWork = output.some(isClientToolWork);
+  private responseDone(output: unknown[], preempted: boolean): NormalizedRuntimeEvent[] {
+    const asksForToolWork = preempted || output.some(isClientToolWork);
     const messages = output.filter(isAssistantMessageItem);
     const finalMessage = asksForToolWork ? undefined : messages.at(-1);
     this.anonymousPhases = [];
@@ -271,6 +282,8 @@ function assistantMessageText(rawItem: unknown): string | undefined {
 export type ModelResponseUsage = {
   responseId?: string;
   serviceTier?: string;
+  /** Provider-run web searches billed for this response, when the provider reports them. */
+  webSearchRequests?: number;
   gatewayBilling?: {
     finalProvider: string;
     inferenceCostUsd: string;
@@ -592,16 +605,25 @@ export function normalizeSdkEvent(
     });
   } else if (item.type === "tool_call_output_item") {
     const retainedMcpResult = mcpResultFromCustomData(item.customData);
+    const output =
+      "toolOutputOverride" in options
+        ? options.toolOutputOverride
+        : normalizeToolOutputForEvent(
+            options.toolOutputTransform
+              ? options.toolOutputTransform(retainedMcpResult ?? item.output)
+              : (retainedMcpResult ?? item.output),
+          );
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: toolCallIdFromSdkItem(item.rawItem) ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
-        output:
-          "toolOutputOverride" in options
-            ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
+        output,
+        // The shell intentionally returns a legible fault instead of throwing
+        // into the SDK's generic "Please try again" wrapper. Keep that text for
+        // the model, but do not present uncertain execution as a successful tool.
+        ...(isConnectedMachineOutcomeUnknownOutput(output) ? { error: true } : {}),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }
@@ -687,12 +709,23 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
+  const webSearchRequests = webSearchRequestsFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(gatewayBilling ? { gatewayBilling } : {}),
+    ...(webSearchRequests ? { webSearchRequests } : {}),
     usage,
   };
+}
+
+/** Claude reports its billed server-side searches; the transport keeps the count. */
+function webSearchRequestsFromResponse(response: unknown): number | undefined {
+  const value = (response as { providerData?: { anthropic?: { webSearchRequests?: unknown } } })
+    ?.providerData?.anthropic?.webSearchRequests;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 10_000
+    ? value
+    : undefined;
 }
 
 function modelResponseIdFromResponse(response: unknown): string | undefined {
@@ -728,6 +761,14 @@ function gatewayBillingFromResponse(
     Array.isArray(metadataCandidate)
   ) {
     return null;
+  }
+  const opper = (metadataCandidate as Record<string, unknown>).opper;
+  if (opper && typeof opper === "object" && !Array.isArray(opper)) {
+    // Attached only by the Chat adapter from Opper's `usage.opper.cost.total`.
+    const costUsd = (opper as Record<string, unknown>).costUsd;
+    return typeof costUsd === "string" && /^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(costUsd)
+      ? { finalProvider: "opper", inferenceCostUsd: costUsd }
+      : null;
   }
   const gateway = (metadataCandidate as Record<string, unknown>).gateway;
   if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
@@ -826,6 +867,14 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     return null;
   }
   const record = raw as Record<string, unknown>;
+  // Chat's SDK-facing usage is numeric-only. Its original provider detail
+  // snapshot also carries unknown/invalid counts for the shared normalizer;
+  // never replace those with a sanitized omission or SDK-defaulted zero.
+  const chatDetails = (
+    response as {
+      providerData?: { usage?: { prompt_tokens_details?: unknown } };
+    }
+  )?.providerData?.usage?.prompt_tokens_details;
   const usage = {
     ...numberProp(
       record,
@@ -844,7 +893,9 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
       "completion_tokens",
     ),
     ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
-    ...inputTokenDetailsProp(record),
+    ...inputTokenDetailsProp(
+      chatDetails === undefined ? record : { prompt_tokens_details: chatDetails },
+    ),
     ...outputTokenDetailsProp(record),
     ...requestUsageEntriesProp(record),
   };
@@ -977,9 +1028,11 @@ export function serializeHumanInputRequests(
         input: {
           ...input,
           questions: input.questions.map((question) =>
-            question.kind === "text" || question.allowOther || question.skillReview
-              ? question
-              : { ...question, allowOther: true },
+            question.kind === "secret"
+              ? normalizeSecretQuestion(question)
+              : question.kind === "text" || question.allowOther || question.skillReview
+                ? question
+                : { ...question, allowOther: true },
           ),
         },
       };

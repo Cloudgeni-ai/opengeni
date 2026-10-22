@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
-import { AppearanceProvider } from "../src/lib/appearance";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { AppearanceMenu } from "../src/components/appearance-menu";
 import {
   DropdownMenu,
@@ -8,8 +8,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
-import { Toaster } from "../src/components/ui/sonner";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import { toast } from "sonner";
 import "../src/styles.css";
 
@@ -17,7 +17,7 @@ createRoot(document.getElementById("root")!).render(
   <AppearanceProvider>
     <main className="flex h-screen bg-background text-foreground">
       <aside className="flex w-64 flex-col border-r bg-surface p-2">
-        <div className="p-3 text-sm font-medium">OpenGeni</div>
+        <div className="p-3 text-sm font-medium">Opengeni</div>
         <div className="mt-auto">
           <DropdownMenu>
             <DropdownMenuTrigger className="min-h-11 w-full rounded-md p-2 text-left text-sm hover:bg-surface-2">

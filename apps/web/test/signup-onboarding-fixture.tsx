@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { OrganizationOnboardingPanel } from "../src/components/organization-onboarding-panel";
-import { Toaster } from "../src/components/ui/sonner";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import "../src/styles.css";
 
 // Local fixture for the post-signup onboarding: a recording fake client, a
@@ -24,9 +24,11 @@ const client = {
   createWorkspace: record("createWorkspace", () => ({
     id: "33333333-3333-4333-8333-333333333333",
   })),
-  createVariableSet: record("createVariableSet", () => ({
-    id: "44444444-4444-4444-8444-444444444444",
-  })),
+  vaults: () => ({
+    listVaults: record("listVaults", () => []),
+    createVault: record("createVault", () => ({ id: "44444444-4444-4444-8444-444444444444" })),
+    createItem: record("createItem", () => ({ id: "55555555-5555-4555-8555-555555555555" })),
+  }),
   getNewSessionDraft: record("getNewSessionDraft", () => ({
     revision: 0,
     text: "",

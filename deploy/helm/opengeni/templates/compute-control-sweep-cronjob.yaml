@@ -1,0 +1,80 @@
+{{- if and .Values.computeControl.enabled .Values.computeControl.sweep.enabled }}
+{{- $cc := .Values.computeControl }}
+# The store's daily sweep (ADR 17): deletes chunks and manifests no stored
+# copy names any more, after the safety age. Safe while hosts archive; one
+# at a time.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-sweep" (include "opengeni.computeControl.name" .) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-sweep
+spec:
+  schedule: {{ $cc.sweep.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "opengeni.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: compute-sweep
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "opengeni.computeControl.serviceAccountName" . }}
+          enableServiceLinks: false
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sweep
+              image: {{ include "opengeni.computeControl.image" . | quote }}
+              imagePullPolicy: {{ $cc.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              command:
+                - /usr/local/bin/compute-host
+                - sweep
+                - --store={{ $cc.archive }}
+                - --delete
+              env:
+                - name: RUST_LOG
+                  value: info
+                {{- with $cc.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- with $cc.extraVolumeMounts }}
+              volumeMounts:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml $cc.resources | nindent 16 }}
+          {{- with $cc.extraVolumes }}
+          volumes:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $cc.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $cc.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

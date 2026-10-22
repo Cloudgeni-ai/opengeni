@@ -17,7 +17,6 @@ import {
   CreateFileUploadRequest as ContractCreateFileUploadRequest,
   CreateFileUploadResponse as ContractCreateFileUploadResponse,
   CreateScheduledTaskRequest as ContractCreateScheduledTaskRequest,
-  CreateWorkspaceEnvironmentRequest as ContractCreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest as ContractCreateWorkspaceRequest,
   EnsureWorkspaceRequest as ContractEnsureWorkspaceRequest,
   Document as ContractDocument,
@@ -58,15 +57,12 @@ import {
   SessionGoal as ContractSessionGoal,
   SessionGoalCreatedBy as ContractSessionGoalCreatedBy,
   SessionGoalStatus as ContractSessionGoalStatus,
-  SetWorkspaceEnvironmentVariableRequest as ContractSetVariableRequest,
   UpdateScheduledTaskRequest as ContractUpdateScheduledTaskRequest,
   UpdateSessionGoalRequest as ContractUpdateSessionGoalRequest,
-  UpdateWorkspaceEnvironmentRequest as ContractUpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest as ContractUpdateWorkspaceRequest,
   UsageEvent as ContractUsageEvent,
   UsageEventType as ContractUsageEventType,
   Workspace as ContractWorkspace,
-  WorkspaceEnvironment as ContractWorkspaceEnvironment,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import {
@@ -94,7 +90,6 @@ import type {
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,
   CreateScheduledTaskRequest,
-  CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   Document,
@@ -132,11 +127,9 @@ import type {
   ServiceTurnInitiatorContext,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
-  UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest,
   UsageEvent,
   Workspace,
-  WorkspaceEnvironment,
 } from "../src/types";
 
 // Parity pins for the full-coverage SDK types, in the same style as
@@ -256,9 +249,6 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptApiKey = (value: z.infer<typeof ContractApiKey>): ApiKey => value;
     const acceptGoal = (value: z.infer<typeof ContractSessionGoal>): SessionGoal => value;
     const acceptRun = (value: z.infer<typeof ContractScheduledTaskRun>): ScheduledTaskRun => value;
-    const acceptEnvironment = (
-      value: z.infer<typeof ContractWorkspaceEnvironment>,
-    ): WorkspaceEnvironment => value;
     const acceptFile = (value: z.infer<typeof ContractFileAsset>): FileAsset => value;
     const acceptRetainedReference = (
       value: z.infer<typeof ContractRetainedArtifactReference>,
@@ -308,7 +298,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptApiKey,
       acceptGoal,
       acceptRun,
-      acceptEnvironment,
       acceptFile,
       acceptRetainedReference,
       acceptRetainedUnavailable,
@@ -364,15 +353,6 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptUpdateTask = (
       value: UpdateScheduledTaskRequest,
     ): z.input<typeof ContractUpdateScheduledTaskRequest> => value;
-    const acceptCreateEnvironment = (
-      value: CreateWorkspaceEnvironmentRequest,
-    ): z.input<typeof ContractCreateWorkspaceEnvironmentRequest> => value;
-    const acceptUpdateEnvironment = (
-      value: UpdateWorkspaceEnvironmentRequest,
-    ): z.input<typeof ContractUpdateWorkspaceEnvironmentRequest> => value;
-    const acceptSetVariable = (value: {
-      value: string;
-    }): z.input<typeof ContractSetVariableRequest> => value;
     const acceptBeginUpload = (
       value: CreateFileUploadRequest,
     ): z.input<typeof ContractCreateFileUploadRequest> => value;
@@ -401,9 +381,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptUpdateGoal,
       acceptCreateTask,
       acceptUpdateTask,
-      acceptCreateEnvironment,
-      acceptUpdateEnvironment,
-      acceptSetVariable,
       acceptBeginUpload,
       acceptCreateBase,
 
@@ -422,12 +399,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       agentConfig: { prompt: "Check for infrastructure drift", goal: { text: "stay drift-free" } },
     };
     expect(ContractCreateScheduledTaskRequest.safeParse(task).success).toBe(true);
-
-    const environment: CreateWorkspaceEnvironmentRequest = {
-      name: "staging",
-      variables: [{ name: "EXAMPLE_TOKEN", value: "example-value" }],
-    };
-    expect(ContractCreateWorkspaceEnvironmentRequest.safeParse(environment).success).toBe(true);
 
     const goalUpdate: UpdateSessionGoalRequest = { status: "paused", rationale: "manual review" };
     expect(ContractUpdateSessionGoalRequest.safeParse(goalUpdate).success).toBe(true);

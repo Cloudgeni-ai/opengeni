@@ -132,6 +132,76 @@ test("bounded mobile frames keep one scale across rounded raster captures and vi
   }
 }, 10_000);
 
+async function dispatchViewport(
+  fixture: Awaited<ReturnType<typeof captureFixture>>,
+  viewport: { width: number; height: number; mobile: boolean },
+) {
+  const observation = await fixture.driver.observe("target-1");
+  await fixture.driver.dispatch({
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId: observation.browserSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: "target-1",
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration,
+    expectedFrameId: observation.frameId!,
+    actor: { kind: "agent", subjectId: "viewport-capture-test" },
+    action: { type: "viewport", deviceScaleFactor: 1, ...viewport },
+    observationMode: "none",
+  });
+}
+
+test("a capture right after a viewport change waits for the new surface instead of the old one", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    await dispatchViewport(fixture, { width: 390, height: 844, mobile: true });
+    fixture.setRaster({ width: 390, height: 844, density: 1 });
+    // Chromium still presents the previous 1280px surface twice.
+    fixture.presentStale({ width: 1280, height: 633, density: 1 }, 2);
+    fixture.calls.length = 0;
+    const shot = await fixture.driver.captureScreenshot("target-1", { format: "jpeg" });
+    expect([shot.width, shot.height, shot.deviceScaleFactor]).toEqual([390, 844, 1]);
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      3,
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a capture publishes what it has when the emulated surface never arrives", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    await dispatchViewport(fixture, { width: 390, height: 844, mobile: true });
+    fixture.setRaster({ width: 1280, height: 633, density: 1 });
+    const started = Date.now();
+    const shot = await fixture.driver.captureScreenshot("target-1", { format: "jpeg" });
+    expect([shot.width, shot.height]).toEqual([1280, 633]);
+    expect(Date.now() - started).toBeLessThan(2_500);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a capture without viewport emulation never waits for a particular size", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.setRaster({ width: 1280, height: 633, density: 1 });
+    fixture.calls.length = 0;
+    const shot = await fixture.driver.captureScreenshot("target-1", { format: "jpeg" });
+    expect([shot.width, shot.height]).toEqual([1280, 633]);
+    expect(fixture.calls.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(
+      1,
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test("Lightpanda rejects screenshots before CDP can return placeholder pixels", async () => {
   const fixture = await captureFixture(undefined, "lightpanda");
   try {
@@ -164,9 +234,7 @@ test.each(["Page.enable", "Emulation.setFocusEmulationEnabled", "Page.getFrameTr
       await fixture.waitUntilStalled();
       jest.advanceTimersByTime(30_000);
       await settle();
-      expect(await failed).toMatchObject(
-        method === "Page.getFrameTree" ? { code: "timeout", cause: { method } } : { method },
-      );
+      expect(await failed).toMatchObject({ code: "tab_not_responding", cause: { method } });
       const initialization = fixture.calls.find((call) => call.method === method)!;
       expect(fixture.calls.filter((call) => call.method === "Target.detachFromTarget")).toEqual([
         expect.objectContaining({ params: { sessionId: initialization.sessionId } }),
@@ -200,7 +268,10 @@ test("a stalled detach preserves the initialization failure and bounds cleanup",
     await fixture.waitUntilStalled();
     jest.advanceTimersByTime(500);
     await settle();
-    expect(await failed).toMatchObject({ method: "Page.enable" });
+    expect(await failed).toMatchObject({
+      code: "tab_not_responding",
+      cause: { method: "Page.enable" },
+    });
     expect(await fixture.driver.isAvailable()).toBe(true);
   } finally {
     jest.useRealTimers();
@@ -265,7 +336,6 @@ test("the supervisor preserves target authority when a failed capture has a slow
   let driverLifecycles = 0;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "s"),
     createDriver: async () => {
       driverLifecycles += 1;
       return fixture.driver;
@@ -376,7 +446,6 @@ test("a fully fenced action preserves a frame timeout before dispatch", async ()
   const directory = await mkdtemp("/tmp/ogb-frame-timeout-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "s"),
     createDriver: async () => fixture.driver,
   });
   try {
@@ -402,9 +471,9 @@ test("a fully fenced action preserves a frame timeout before dispatch", async ()
       state: "failed",
       dispatchedAt: null,
       error: {
-        code: "timeout",
-        retryable: true,
-        message: "browser frame inspection timed out during Page.getFrameTree",
+        code: "tab_not_responding",
+        retryable: false,
+        message: expect.stringMatching(/not responding.*close.*new tab/i),
       },
     });
     expect(fixture.calls.some((call) => call.method.startsWith("Input."))).toBe(false);
@@ -464,6 +533,8 @@ async function captureFixture(
     params?: Record<string, any>;
   }> = [];
   let raster: { width: number; height: number; density: number } | null = null;
+  // Surfaces Chromium still presents from before a viewport change.
+  const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
   let viewportFailure = false;
   let stalledMethod: string | null = null;
@@ -533,10 +604,11 @@ async function captureFixture(
     }
     if (command.method === "Page.captureScreenshot") {
       const data = Buffer.from(jpeg, "base64");
-      if (raster) {
-        const scale = Number(command.params?.clip.scale ?? 1) * raster.density;
-        data.writeUInt16BE(Math.floor(raster.height * scale), 7);
-        data.writeUInt16BE(Math.floor(raster.width * scale), 9);
+      const presented = staleRasters.shift() ?? raster;
+      if (presented) {
+        const scale = Number(command.params?.clip?.scale ?? 1) * presented.density;
+        data.writeUInt16BE(Math.floor(presented.height * scale), 7);
+        data.writeUInt16BE(Math.floor(presented.width * scale), 9);
       }
       result = { data: data.toString("base64") };
     }
@@ -595,6 +667,9 @@ async function captureFixture(
     calls,
     setRaster(value: NonNullable<typeof raster>) {
       raster = value;
+    },
+    presentStale(value: NonNullable<typeof raster>, captures: number) {
+      for (let index = 0; index < captures; index += 1) staleRasters.push(value);
     },
     setViewport(value: unknown) {
       viewport = value;

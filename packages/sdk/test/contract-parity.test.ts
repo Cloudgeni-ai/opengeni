@@ -530,13 +530,14 @@ describe("SDK / contracts parity", () => {
       "vercel",
       "selfhosted",
       "opensandbox",
+      "compute",
     ];
     const contracts = [...ContractSandboxBackend.options].sort();
     const deployment = [...DeploymentSandboxBackend.options].sort();
     const sdk = [...sdkBackends].sort();
     expect(contracts).toEqual(deployment);
     expect(contracts).toEqual(sdk);
-    expect(contracts).toHaveLength(12);
+    expect(contracts).toHaveLength(13);
   });
 
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
@@ -777,7 +778,6 @@ describe("SDK / contracts parity", () => {
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
-      defaultVariableSetIds: [],
     };
     const update: UpdateRigRequest = {
       name: "dev-machine-2",

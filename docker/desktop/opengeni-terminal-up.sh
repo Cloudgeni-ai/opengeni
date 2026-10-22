@@ -27,9 +27,20 @@ if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
   exit 0
 fi
 
+# Advertise only an installed, loadable, supported Bash ABI. Old images and
+# already-running daemons retain legacy behavior; this never restarts them.
+# The probe does NOT establish readiness of a future client's login shell.
+READY_ARGS=()
+SHELL_ARGS=(bash -l)
+if [[ -r /etc/profile.d/00-opengeni-terminal-ready.sh ]] &&
+  bash --noprofile --norc -c 'enable -f /usr/local/lib/opengeni/opengeni-terminal-ready.so opengeni_terminal_ready && opengeni_terminal_ready --probe' 2>/dev/null; then
+  READY_ARGS=(-t opengeniInputReady=bash-readline-v1)
+  SHELL_ARGS=(env OPENGENI_TERMINAL_READY=bash-readline-v1 bash -l)
+fi
+
 # Launch ttyd DETACHED so it outlives the exec stream that spawned it.
 setsid env HOME=/workspace ttyd --writable --port "${PORT}" --interface 0.0.0.0 \
-  --cwd /workspace --max-clients 8 bash -l \
+  --cwd /workspace --max-clients 8 "${READY_ARGS[@]}" -- "${SHELL_ARGS[@]}" \
   >"$RUN/ttyd.log" 2>&1 </dev/null &
 
 # Readiness gate: block until ttyd answers HTTP on the port.

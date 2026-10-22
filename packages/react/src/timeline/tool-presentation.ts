@@ -1,0 +1,1696 @@
+import { isConnectedMachineOutcomeUnknownOutput, type GitFileDiff } from "@opengeni/sdk";
+import { stringifyPayload, tryParseJson } from "../lib/format";
+import {
+  applyPatchOpsFromToolItem,
+  controlCaret,
+  execTruncated,
+  isExecSessionLostBanner,
+  looksBinary,
+  parseExecBannerSessionId,
+  parseToolArgs,
+  retainedToolResultImages,
+  sandboxCommandExitCode,
+  stripExecBanner,
+  tailPeek,
+  unwrapMcpOutput,
+  v4aToGitFileDiff,
+  type ApplyPatchOperation,
+} from "./parsers";
+import { invokedToolCall } from "./invoked-tool";
+import { rawTypeOf } from "./registry";
+import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { toolStepLabel, toolStepPhase, type ToolStepPhase } from "./tool-steps";
+import type { ToolCallItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
+
+/* ----------------------------------------------------------------------------
+   Tool row presentation model (renderer-neutral)
+
+   The collapsed-row decisions every tool renderer makes — icon, tint, title,
+   preview, settle chip and what the expanded body holds — expressed as plain
+   data so DOM and non-DOM renderers draw the same row from one source of truth.
+   Web renderers consume these functions; a change here changes every surface.
+   -------------------------------------------------------------------------- */
+
+export type ToolIconKind =
+  | "terminal"
+  | "keyboard"
+  | "file-diff"
+  | "search"
+  | "question"
+  | "target"
+  | "brain"
+  | "sessions"
+  | "server"
+  | "server-cog"
+  | "calendar"
+  | "panels"
+  | "share"
+  | "message"
+  | "git"
+  | "box"
+  | "key"
+  | "file-search"
+  | "package-search"
+  | "plug"
+  | "wrench";
+
+export type ToolIconTone = "accent" | "failed" | "running" | "muted";
+
+export type ToolChip = {
+  tone: "ok" | "bad" | "muted" | "interrupted";
+  text: string;
+};
+
+/** The collapsed-row secondary line. `running` previews carry the pulse locus. */
+export type ToolPreview =
+  | { kind: "text"; text: string; running?: boolean | undefined }
+  | {
+      kind: "path";
+      path: string;
+      add?: number | undefined;
+      del?: number | undefined;
+    }
+  | { kind: "files"; count: number; add: number; del: number }
+  | { kind: "malformed"; name: string };
+
+export type ToolPatchFile = {
+  key: string;
+  path: string;
+  file: GitFileDiff | null;
+  diff: string;
+};
+
+export type WebSearchResult = {
+  title: string;
+  domain: string;
+  snippet: string;
+};
+
+/** What the expanded body holds; renderers draw these with their own primitives. */
+export type ToolBody =
+  | {
+      kind: "term";
+      command: string | null;
+      workdir: string | null;
+      output: string;
+      live?: boolean | undefined;
+      failed?: boolean | undefined;
+      note?: string | undefined;
+    }
+  | { kind: "note"; text: string; tone?: "error" | undefined }
+  | {
+      kind: "payloads";
+      /** A short explanation above the payloads. */
+      note?: string | undefined;
+      blocks: Array<{ label: string; value: unknown; failed?: boolean }>;
+    }
+  | {
+      kind: "patch";
+      files: ToolPatchFile[];
+      /** A single malformed op renders its raw patch without the path caption. */
+      bare?: boolean | undefined;
+    }
+  | { kind: "web-results"; results: WebSearchResult[] | null }
+  | {
+      /** A short labelled listing (disclosed tools, search hits) above payloads. */
+      kind: "listing";
+      note?: string | undefined;
+      entries: ToolListingEntry[];
+      /** Entries beyond the visible list ("+N more"). */
+      more?: number | undefined;
+      /** Shown instead of the list when it is known to be empty. */
+      empty?: string | undefined;
+      blocks: Array<{ label: string; value: unknown; failed?: boolean }>;
+    }
+  /** Nothing to expand: the row says everything a person needs. */
+  | { kind: "none" };
+
+export type ToolListingEntry = {
+  key: string;
+  title: string;
+  /** Quiet leading label (the tool's server). */
+  eyebrow?: string | null | undefined;
+  mono?: boolean | undefined;
+  /** Secondary text under the title (a search snippet). */
+  snippet?: string | undefined;
+};
+
+export type PresentedToolKind =
+  | "exec"
+  | "write_stdin"
+  | "apply_patch"
+  | "web_search"
+  | "ask"
+  | "run_on"
+  | "tool_search"
+  | "docs_search"
+  | "session_title"
+  | "machine"
+  | "generic";
+
+export type ToolRowPresentation = {
+  tool: PresentedToolKind;
+  icon: ToolIconKind;
+  iconTone: ToolIconTone;
+  title: string;
+  titleMono?: boolean | undefined;
+  running?: boolean | undefined;
+  preview?: ToolPreview | undefined;
+  chip?: ToolChip | undefined;
+  failed?: boolean | undefined;
+  cancelled?: boolean | undefined;
+  /**
+   * The preview quotes raw tool detail (command output, an error payload, tool
+   * names), so plain rows leave it out.
+   */
+  detailPreview?: boolean | undefined;
+  body: ToolBody;
+};
+
+/**
+ * How much of a tool call a row shows. `full` (the default) shows commands,
+ * arguments, output and diffs; `plain` shows only the plain step, its status
+ * and human-readable results, never raw arguments, output or JSON.
+ */
+export type ToolDetails = "full" | "plain";
+
+export type ToolPresentationContext = {
+  /** Host-supplied active compute label ("on <label> · …" preview prefix). */
+  computeLabel?: string | null | undefined;
+  /** See `ToolDetails`. Defaults to `full`. */
+  details?: ToolDetails | undefined;
+};
+
+/** Prefix a collapsed preview with the host-supplied active compute label. */
+export function withComputePreview(label: string | null | undefined, preview: string): string {
+  if (!label) {
+    return preview;
+  }
+  return `on ${label} · ${preview}`;
+}
+
+export function truncatePreview(text: string, max: number): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) {
+    return "";
+  }
+  return cleaned.length > max ? `${cleaned.slice(0, max - 1)}…` : cleaned;
+}
+
+/**
+ * The readable part of a tool error, for a one-line preview: the message inside
+ * a JSON error envelope, without the runtime's "please try again" wrapper, an
+ * HTTP status prefix or a trailing support reference. The full error stays in
+ * the row body.
+ */
+export function readableToolError(text: string): string {
+  const stripTransport = (value: string) =>
+    value
+      .trim()
+      .replace(/^An error occurred while running the tool\. Please try again\.\s*(Error:\s*)?/, "")
+      .replace(/^(?:[A-Za-z][\w.-]{0,40} )?API \d{3}:\s*/, "");
+  let message = stripTransport(text);
+  const parsed = tryParseJson(message);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const envelope = parsed as { error?: unknown; message?: unknown };
+    const inner =
+      typeof envelope.error === "string"
+        ? envelope.error
+        : envelope.error && typeof envelope.error === "object"
+          ? (envelope.error as { message?: unknown }).message
+          : envelope.message;
+    if (typeof inner === "string" && inner.trim()) message = stripTransport(inner);
+  }
+  return message.replace(/\s*\(?Reference: [\w-]+\)?\.?$/, "").trim();
+}
+
+function textPreview(text: string, running?: boolean): ToolPreview {
+  return running ? { kind: "text", text, running: true } : { kind: "text", text };
+}
+
+/* ---- exec_command ---------------------------------------------------------- */
+
+export function execPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  context: ToolPresentationContext = {},
+): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const cmd = typeof args.cmd === "string" ? args.cmd : "";
+  const workdir = typeof args.workdir === "string" ? args.workdir : null;
+  const out = item.output;
+  const title = `$ ${cmd}`;
+  const computeLabel = context.computeLabel ?? null;
+  const base = {
+    tool: "exec" as const,
+    icon: "terminal" as const,
+    title,
+    titleMono: true,
+  };
+
+  if (isConnectedMachineOutcomeUnknownOutput(out)) {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
+      body: { kind: "term", command: null, workdir, output: out, failed: true },
+    };
+  }
+
+  // No output event ever arrived: the turn failed before the output insert —
+  // most likely a NUL byte in the command output prevented storage.
+  if (item.status === "failed" && out === undefined) {
+    return {
+      ...base,
+      iconTone: "failed",
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
+      preview: textPreview(
+        withComputePreview(computeLabel, t("timeline.toolPresentation.outputLostNulByteCould")),
+      ),
+      body: {
+        kind: "note",
+        tone: "error",
+        text: t("timeline.toolPresentation.outputContainedANulByte"),
+      },
+    };
+  }
+
+  if (item.status === "failed" && (out == null || out === "")) {
+    return {
+      ...base,
+      iconTone: "failed",
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
+      preview: textPreview(
+        withComputePreview(computeLabel, t("timeline.toolPresentation.toolCallFailed")),
+      ),
+      body: {
+        kind: "note",
+        tone: "error",
+        text: t("timeline.toolPresentation.theToolCallFailedWith"),
+      },
+    };
+  }
+
+  if (item.status === "running") {
+    const streamed = typeof out === "string" ? stripExecBanner(out) : "";
+    const runningPreview = streamed ? `${streamed.split("\n").length} lines` : "running…";
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview(withComputePreview(computeLabel, runningPreview), true),
+      body: {
+        kind: "term",
+        command: null,
+        workdir,
+        output: streamed,
+        live: true,
+      },
+    };
+  }
+
+  const text = typeof out === "string" ? out : stringifyPayload(out);
+  const stripped = stripExecBanner(text);
+  const bgSession = parseExecBannerSessionId(text);
+  const exitCode = sandboxCommandExitCode(text);
+  const binary = looksBinary(stripped);
+
+  // Color is spent on the exception only: a clean exit earns no chip.
+  let chip: ToolChip | undefined;
+  let iconTone: ToolIconTone = "muted";
+  if (bgSession != null) {
+    chip = { tone: "muted", text: `session ${bgSession}` };
+  } else if (exitCode != null && exitCode !== 0) {
+    chip = { tone: "bad", text: `exit ${exitCode}` };
+    iconTone = "failed";
+  }
+
+  const peek = binary
+    ? t("timeline.toolPresentation.binaryOutput")
+    : tailPeek(stripped) || t("timeline.toolPresentation.noOutput");
+  const truncated = execTruncated(text);
+  const preview = withComputePreview(
+    computeLabel,
+    truncated ? t("timeline.toolPresentation.truncatedPeek", { peek }) : peek,
+  );
+  return {
+    ...base,
+    iconTone,
+    ...(chip ? { chip } : {}),
+    failed: item.status === "failed",
+    cancelled: item.status === "cancelled",
+    preview: textPreview(preview),
+    body: {
+      kind: "term",
+      command: null,
+      workdir,
+      output: binary ? t("timeline.toolPresentation.binaryOutputSuppressed") : stripped,
+      failed: item.status === "failed" || (exitCode != null && exitCode !== 0),
+      ...(bgSession != null
+        ? {
+            note: t("timeline.toolPresentation.sessionBgsessionALaterWrite", { bgSession }),
+          }
+        : {}),
+    },
+  };
+}
+
+/* ---- write_stdin ----------------------------------------------------------- */
+
+export function writeStdinPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const sessionId =
+    typeof args.session_id === "string" || typeof args.session_id === "number"
+      ? args.session_id
+      : undefined;
+  const text = typeof item.output === "string" ? item.output : stringifyPayload(item.output);
+  const lost = isExecSessionLostBanner(text);
+  const keys = controlCaret(typeof args.chars === "string" ? args.chars : "");
+  const exitCode = sandboxCommandExitCode(text);
+  const stripped = stripExecBanner(text);
+  const title = `session ${sessionId} ← ${keys || "∅"}`;
+  const base = {
+    tool: "write_stdin" as const,
+    icon: "keyboard" as const,
+    title,
+    titleMono: true,
+  };
+
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview("sending…", true),
+      body: {
+        kind: "note",
+        text: t("timeline.toolPresentation.sendingInputToSessionSessionid", { sessionId }),
+      },
+    };
+  }
+
+  let chip: ToolChip | undefined;
+  if (lost) {
+    chip = { tone: "bad", text: t("timeline.chip.lost") };
+  } else if (exitCode != null && exitCode !== 0) {
+    chip = { tone: "bad", text: `exit ${exitCode}` };
+  }
+
+  return {
+    ...base,
+    iconTone: lost ? "failed" : "muted",
+    ...(chip ? { chip } : {}),
+    failed: item.status === "failed",
+    cancelled: item.status === "cancelled",
+    preview: textPreview(
+      lost
+        ? t("timeline.toolPresentation.sessionSessionidPtyVanished", { sessionId })
+        : tailPeek(stripped) || "sent",
+    ),
+    body: lost
+      ? { kind: "note", tone: "error", text: stripped || text }
+      : {
+          kind: "term",
+          command: `write_stdin → session ${sessionId}`,
+          workdir: null,
+          output: stripped,
+        },
+  };
+}
+
+/* ---- apply_patch ----------------------------------------------------------- */
+
+export function patchVerb(t: OpenGeniText, op: ApplyPatchOperation | undefined): string {
+  if (!op) {
+    return t("timeline.toolPresentation.edited");
+  }
+  return op.type === "create_file"
+    ? t("timeline.toolPresentation.created")
+    : op.type === "delete_file"
+      ? t("timeline.toolPresentation.deleted")
+      : op.moveTo
+        ? t("timeline.toolPresentation.renamed")
+        : t("timeline.toolPresentation.edited");
+}
+
+export function pathBasename(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1]! : path;
+}
+
+export function pathDirname(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx >= 0 ? path.slice(0, idx + 1) : "";
+}
+
+export function safeParsePatchOp(op: ApplyPatchOperation): GitFileDiff | null {
+  try {
+    return v4aToGitFileDiff(op);
+  } catch {
+    return null;
+  }
+}
+
+function patchFiles(
+  ops: ApplyPatchOperation[],
+  parsed?: Array<GitFileDiff | null>,
+): ToolPatchFile[] {
+  return ops.map((op, index) => ({
+    key: `${op.type}:${op.path}:${index}`,
+    path: op.path,
+    file: parsed ? (parsed[index] ?? null) : safeParsePatchOp(op),
+    diff: op.diff ?? "",
+  }));
+}
+
+/** Returns null when a settled patch has no op (renderers fall back to generic). */
+export function applyPatchPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+): ToolRowPresentation | null {
+  const ops = applyPatchOpsFromToolItem(item);
+  const cancelled = item.status === "cancelled";
+  const firstOp = ops[0];
+  const base = { tool: "apply_patch" as const, icon: "file-diff" as const };
+
+  if (item.status === "running") {
+    // Show the patch structure from the arguments, marked clearly in-progress.
+    const fileCount = ops.length;
+    const titleVerb = firstOp
+      ? t("timeline.toolPresentation.applyingPathbasename", {
+          pathBasename: pathBasename(firstOp.path),
+        })
+      : t("timeline.toolPresentation.applyingPatch");
+    return {
+      ...base,
+      iconTone: "running",
+      title:
+        fileCount > 1
+          ? t("timeline.toolPresentation.applyingFilecountFiles", { fileCount })
+          : titleVerb,
+      running: true,
+      preview: textPreview(
+        fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…",
+        true,
+      ),
+      body: { kind: "patch", files: patchFiles(ops) },
+    };
+  }
+
+  if (item.status === "failed") {
+    return {
+      ...base,
+      iconTone: "failed",
+      title: firstOp ? `${patchVerb(t, firstOp)} ${pathBasename(firstOp.path)}` : "apply_patch",
+      chip: { tone: "bad", text: t("timeline.chip.failed") },
+      preview: textPreview(
+        typeof item.output === "string" ? item.output : t("timeline.toolPresentation.patchFailed"),
+      ),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.error"), value: item.output, failed: true }],
+      },
+    };
+  }
+
+  // Multi-file edit: magnitude stays a single muted glyph pair.
+  if (ops.length > 1) {
+    const parsed = ops.map((op) => safeParsePatchOp(op));
+    const goodFiles = parsed.filter((f): f is GitFileDiff => f !== null);
+    const add = goodFiles.reduce((n, f) => n + f.additions, 0);
+    const del = goodFiles.reduce((n, f) => n + f.deletions, 0);
+    return {
+      ...base,
+      iconTone: "accent",
+      title: t("timeline.toolPresentation.editedLengthFiles", { length: ops.length }),
+      cancelled,
+      preview: { kind: "files", count: ops.length, add, del },
+      body: { kind: "patch", files: patchFiles(ops, parsed) },
+    };
+  }
+
+  if (!firstOp) {
+    return null;
+  }
+  if (firstOp.type === "delete_file") {
+    return {
+      ...base,
+      iconTone: "failed",
+      title: t("timeline.toolPresentation.deletedPathbasename", {
+        pathBasename: pathBasename(firstOp.path),
+      }),
+      cancelled,
+      preview: { kind: "path", path: firstOp.path },
+      body: { kind: "note", text: t("timeline.toolPresentation.fileDeletedNoDiffTo") },
+    };
+  }
+
+  const file = safeParsePatchOp(firstOp);
+  if (!file) {
+    return {
+      ...base,
+      iconTone: "accent",
+      title: `${patchVerb(t, firstOp)} ${pathBasename(firstOp.path)}`,
+      cancelled,
+      preview: { kind: "malformed", name: pathBasename(firstOp.path) },
+      body: { kind: "patch", files: patchFiles([firstOp], [null]), bare: true },
+    };
+  }
+
+  return {
+    ...base,
+    iconTone: "accent",
+    title: `${patchVerb(t, firstOp)} ${pathBasename(file.path)}`,
+    cancelled,
+    preview: {
+      kind: "path",
+      path: file.path,
+      add: file.additions,
+      del: file.deletions,
+    },
+    body: { kind: "patch", files: patchFiles([firstOp], [file]) },
+  };
+}
+
+/* ---- web search ------------------------------------------------------------ */
+
+export function webSearchQueryFromArguments(args: unknown): string | null {
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      return webSearchQueryFromArguments(JSON.parse(trimmed));
+    } catch {
+      return trimmed;
+    }
+  }
+  if (!args || typeof args !== "object") {
+    return null;
+  }
+  const record = args as Record<string, unknown>;
+  if (typeof record.query === "string" && record.query.trim().length > 0) {
+    return record.query;
+  }
+  if (Array.isArray(record.queries)) {
+    const first = record.queries.find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
+    if (first) {
+      return first;
+    }
+  }
+  return null;
+}
+
+export function webSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const raw = (item.raw ?? {}) as {
+    providerData?: {
+      action?: {
+        type?: string;
+        query?: string;
+        queries?: string[];
+        url?: string;
+        pattern?: string;
+      };
+    };
+  };
+  const action = raw.providerData?.action ?? {};
+  const actionType = action.type ?? "search";
+  const queries = (action.queries ?? []).filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const searchQuery =
+    (typeof action.query === "string" && action.query.trim().length > 0 ? action.query : null) ??
+    queries[0] ??
+    webSearchQueryFromArguments(item.arguments);
+  const running = item.status === "running";
+  const query =
+    actionType === "open_page"
+      ? (action.url ?? t("timeline.toolPresentation.pageUnavailable"))
+      : actionType === "find_in_page"
+        ? action.pattern && action.url
+          ? `"${action.pattern}" in ${action.url}`
+          : (action.pattern ?? action.url ?? t("timeline.toolPresentation.pageUnavailable"))
+        : // Codex often emits the live card before action.query/queries land.
+          (searchQuery ?? (running ? "…" : t("timeline.toolPresentation.queryUnavailable")));
+  const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
+  const base = { tool: "web_search" as const, icon: "search" as const };
+
+  if (running) {
+    return {
+      ...base,
+      iconTone: "running",
+      title:
+        actionType === "open_page"
+          ? t("timeline.toolPresentation.openingWebPage")
+          : actionType === "find_in_page"
+            ? t("timeline.toolPresentation.searchingWithinPage")
+            : t("timeline.toolPresentation.searchingTheWeb"),
+      running: true,
+      preview: textPreview(`${query}${variants}`, true),
+      body: {
+        kind: "note",
+        text: t("timeline.toolPresentation.searchingResultsFoldIntoThe"),
+      },
+    };
+  }
+
+  const rawResults = (item.output as { results?: unknown } | undefined)?.results;
+  const results = Array.isArray(rawResults)
+    ? (rawResults as unknown[]).filter((r): r is WebSearchResult => !!r && typeof r === "object")
+    : null;
+  return {
+    ...base,
+    iconTone: "muted",
+    title:
+      actionType === "open_page"
+        ? t("timeline.toolPresentation.openedWebPage")
+        : actionType === "find_in_page"
+          ? t("timeline.toolPresentation.searchedWithinPage")
+          : t("timeline.toolPresentation.searchedTheWeb"),
+    preview: textPreview(`${query}${variants}`),
+    failed: item.status === "failed",
+    cancelled: item.status === "cancelled",
+    body: { kind: "web-results", results },
+  };
+}
+
+/* ---- MCP-shaped tools: ask, run_on, generic -------------------------------- */
+
+export function askToolPreview(args: unknown): string | null {
+  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
+  const questions = Array.isArray(record?.questions) ? record.questions : null;
+  if (!questions || questions.length === 0) {
+    return null;
+  }
+  const first = questions[0];
+  if (!first || typeof first !== "object") {
+    return null;
+  }
+  const q = first as Record<string, unknown>;
+  const text =
+    typeof q.label === "string" && q.label.trim()
+      ? q.label.trim()
+      : typeof q.prompt === "string" && q.prompt.trim()
+        ? q.prompt.trim()
+        : null;
+  if (!text) {
+    return null;
+  }
+  const preview = truncatePreview(text, 90);
+  return questions.length > 1 ? `${preview} · ${questions.length} questions` : preview;
+}
+
+export function runOnTargetName(output: unknown): string | null {
+  const { text } = unwrapMcpOutput(output);
+  const parsed = tryParseJson(text);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const name = (parsed as { targetName?: unknown }).targetName;
+    if (typeof name === "string" && name.trim()) {
+      return name.trim();
+    }
+  }
+  return null;
+}
+
+export function runOnOpPreview(args: Record<string, unknown>): string | null {
+  const op = args.op;
+  if (!op || typeof op !== "object" || Array.isArray(op)) {
+    return null;
+  }
+  const record = op as Record<string, unknown>;
+  if (record.kind === "exec" && typeof record.cmd === "string" && record.cmd.trim()) {
+    return `$ ${record.cmd.trim()}`;
+  }
+  if (
+    (record.kind === "read" || record.kind === "write") &&
+    typeof record.path === "string" &&
+    record.path.trim()
+  ) {
+    return truncatePreview(record.path.trim(), 72);
+  }
+  return null;
+}
+
+export function goalToolPreview(name: string, args: unknown): string | null {
+  const leaf = mcpToolLeaf(name);
+  if (
+    leaf !== "goal_set" &&
+    leaf !== "goal_update" &&
+    leaf !== "goal_complete" &&
+    leaf !== "goal_pause" &&
+    leaf !== "wait_for_input"
+  ) {
+    return null;
+  }
+  const record = args && typeof args === "object" ? (args as Record<string, unknown>) : null;
+  if (!record) {
+    return null;
+  }
+  const text =
+    typeof record.text === "string"
+      ? record.text
+      : typeof record.evidence === "string"
+        ? record.evidence
+        : typeof record.rationale === "string"
+          ? record.rationale
+          : typeof record.reason === "string"
+            ? record.reason
+            : typeof record.progressNote === "string"
+              ? record.progressNote
+              : null;
+  return text ? truncatePreview(text, 90) : null;
+}
+
+/** Explicit first-party leaf/prefix → canonical product icon kind. */
+export function genericToolIconKind(name: string): ToolIconKind {
+  const leaf = mcpToolLeaf(name);
+  return leaf === "request_human_input"
+    ? "question"
+    : leaf.startsWith("goal_")
+      ? "target"
+      : leaf.startsWith("memory_") ||
+          leaf === "preference_registry_summary" ||
+          leaf === "preference_registry_get"
+        ? "brain"
+        : leaf.startsWith("session_") ||
+            leaf === "sessions_list" ||
+            leaf === "set_session_title" ||
+            leaf === "set_other_session_title"
+          ? "sessions"
+          : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
+            ? "server"
+            : leaf.startsWith("rig_")
+              ? "server-cog"
+              : leaf.startsWith("scheduled_")
+                ? "calendar"
+                : leaf.startsWith("artifacts_")
+                  ? "panels"
+                  : leaf.startsWith("social_")
+                    ? "share"
+                    : leaf.startsWith("slack_")
+                      ? "message"
+                      : leaf.startsWith("github_")
+                        ? "git"
+                        : leaf.startsWith("variable_")
+                          ? "box"
+                          : leaf.startsWith("environment_")
+                            ? "key"
+                            : leaf.includes("document") ||
+                                leaf.includes("knowledge") ||
+                                leaf === "list_document_bases"
+                              ? "file-search"
+                              : leaf === "tool_search"
+                                ? "package-search"
+                                : leaf.startsWith("skill_")
+                                  ? "plug"
+                                  : "wrench";
+}
+
+type McpRowOptions = {
+  tool: PresentedToolKind;
+  icon: ToolIconKind;
+  title: string;
+  /** Preview while running (falls back to `runningFallback`). */
+  runningPreview: string | null;
+  runningFallback: string;
+  /** Settled preview (null → none); ask/run_on also use it as the error fallback. */
+  settledPreview: string | null;
+  /** Generic shows "Done" when no settled preview exists and skips the error fallback. */
+  settledFallback?: string | undefined;
+  /** Ask/run_on omit an empty Result block. */
+  omitEmptyResult?: boolean | undefined;
+  /** Generic shows a goal preview as plain text (no pulse) while running. */
+  plainRunningPreview?: boolean | undefined;
+  /** Machine steps say they failed in the title, so the preview stays empty. */
+  quietError?: boolean | undefined;
+};
+
+function mcpRowPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  options: McpRowOptions,
+): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const base = { tool: options.tool, icon: options.icon, title: options.title };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview:
+        options.runningPreview != null && options.plainRunningPreview
+          ? textPreview(options.runningPreview)
+          : textPreview(options.runningPreview ?? options.runningFallback, true),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  // Cancelled is not an error, even if the payload carries an isError flag.
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    const errorFallback = options.settledFallback === undefined ? options.settledPreview : null;
+    return {
+      ...base,
+      iconTone: "failed",
+      chip: { tone: "bad", text: t("timeline.chip.error") },
+      ...(options.quietError
+        ? {}
+        : {
+            detailPreview: true,
+            preview: textPreview(
+              truncatePreview(readableToolError(outText), 80) ||
+                errorFallback ||
+                t("timeline.toolPresentation.error"),
+            ),
+          }),
+      body: {
+        kind: "payloads",
+        blocks: [
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  const settled =
+    item.status === "cancelled"
+      ? null
+      : (options.settledPreview ?? options.settledFallback ?? null);
+  return {
+    ...base,
+    iconTone: "muted",
+    cancelled: item.status === "cancelled",
+    ...(settled != null ? { preview: textPreview(settled) } : {}),
+    body: {
+      kind: "payloads",
+      blocks:
+        options.omitEmptyResult && !outText
+          ? [{ label: t("timeline.toolPresentation.arguments"), value: args }]
+          : [
+              { label: t("timeline.toolPresentation.arguments"), value: args },
+              { label: t("timeline.toolPresentation.result"), value: outText },
+            ],
+    },
+  };
+}
+
+export function askPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const preview = askToolPreview(parseToolArgs(item.arguments));
+  return mcpRowPresentation(t, item, {
+    tool: "ask",
+    icon: "question",
+    title: t("timeline.toolPresentation.ask"),
+    runningPreview: preview,
+    runningFallback: t("timeline.toolPresentation.waiting"),
+    settledPreview: preview,
+    omitEmptyResult: true,
+  });
+}
+
+export function runOnPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const targetName = runOnTargetName(item.output);
+  const opPreview = runOnOpPreview(parseToolArgs(item.arguments));
+  return mcpRowPresentation(t, item, {
+    tool: "run_on",
+    icon: "server",
+    title: targetName
+      ? t("timeline.toolPresentation.runOnTargetname", { targetName })
+      : t("timeline.toolPresentation.runOn"),
+    runningPreview: opPreview,
+    runningFallback: t("timeline.toolPresentation.running"),
+    settledPreview: opPreview,
+    omitEmptyResult: true,
+  });
+}
+
+/**
+ * Finding machines, moving onto one and back, and using its screen, said the
+ * way a person would describe it: "Looked at the screen", "Typed “hello”".
+ */
+export function machinePresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const leaf = mcpToolLeaf(item.name);
+  const args = parseToolArgs(item.arguments);
+  const action = leaf === "computer_act" ? computerActAction(args) : null;
+  const preview = (action && computerActPreview(action)) ?? null;
+  // A step that didn't work says so in words; the error itself stays one click
+  // away in the row body instead of leaking a raw API payload into the preview.
+  const failed =
+    item.status !== "running" &&
+    item.status !== "cancelled" &&
+    (item.status === "failed" || unwrapMcpOutput(item.output).isError);
+  return mcpRowPresentation(t, item, {
+    tool: "machine",
+    icon: isScreenTool(leaf) ? "panels" : "server",
+    title: failed ? machineFailureTitle(t, leaf) : machineTitle(t, leaf, args, action, item.output),
+    runningPreview: preview,
+    runningFallback: t("timeline.toolPresentation.running"),
+    settledPreview: preview,
+    settledFallback: t("timeline.toolPresentation.done"),
+    plainRunningPreview: true,
+    quietError: true,
+  });
+}
+
+function isScreenTool(leaf: string): boolean {
+  return leaf.startsWith("computer_") || leaf.startsWith("cua_") || leaf === "interaction_discover";
+}
+
+function machineFailureTitle(t: OpenGeniText, leaf: string): string {
+  switch (leaf) {
+    case "sandboxes_list":
+      return t("timeline.toolPresentation.couldNotLookForMachines");
+    case "sandbox_swap":
+      return t("timeline.toolPresentation.couldNotMoveToTheMachine");
+    case "computer_open":
+      return t("timeline.toolPresentation.couldNotOpenTheScreen");
+    default:
+      return t("timeline.toolPresentation.couldNotUseTheScreen");
+  }
+}
+
+/** Direct screen-driver steps, named by what they did on the screen. */
+function cuaTitle(t: OpenGeniText, leaf: string): string {
+  if (/^cua_(get_|list_|verify_|parse_|zoom$)/.test(leaf)) {
+    return t("timeline.toolPresentation.lookedAtTheScreen");
+  }
+  if (/^cua_(click|double_click|right_click)$/.test(leaf)) {
+    return t("timeline.toolPresentation.clickedOnTheScreen");
+  }
+  if (/^cua_(type_text|press_key|hotkey)$/.test(leaf)) {
+    return t("timeline.toolPresentation.typedOnTheKeyboard");
+  }
+  return t("timeline.toolPresentation.usedTheScreen");
+}
+
+type ComputerActAction = { type?: unknown; value?: unknown; locator?: unknown };
+
+function computerActAction(args: Record<string, unknown>): ComputerActAction | null {
+  const action = args.action;
+  return action && typeof action === "object" ? (action as ComputerActAction) : null;
+}
+
+function machineTitle(
+  t: OpenGeniText,
+  leaf: string,
+  args: Record<string, unknown>,
+  action: ComputerActAction | null,
+  output: unknown,
+): string {
+  switch (leaf) {
+    case "sandboxes_list":
+      return t("timeline.toolPresentation.lookedForMachines");
+    case "interaction_discover":
+      return t("timeline.toolPresentation.lookedForScreens");
+    case "sandbox_swap": {
+      if (args.target === "session") return t("timeline.toolPresentation.movedBack");
+      const targetName = runOnTargetName(output);
+      return targetName
+        ? t("timeline.toolPresentation.movedToTargetname", { targetName })
+        : t("timeline.toolPresentation.movedToAMachine");
+    }
+    case "computer_open":
+      return t("timeline.toolPresentation.openedTheScreen");
+    case "computer_act":
+      return action?.type === "pointer"
+        ? t("timeline.toolPresentation.clickedOnTheScreen")
+        : action?.type === "keyboard"
+          ? t("timeline.toolPresentation.typedOnTheKeyboard")
+          : t("timeline.toolPresentation.usedTheScreen");
+    default:
+      return leaf.startsWith("cua_")
+        ? cuaTitle(t, leaf)
+        : t("timeline.toolPresentation.lookedAtTheScreen");
+  }
+}
+
+/** What a screen action typed or chose, when it says so: “hello”, “Save”. */
+function computerActPreview(action: ComputerActAction): string | undefined {
+  const locator =
+    action.locator && typeof action.locator === "object"
+      ? (action.locator as { name?: unknown; text?: unknown })
+      : undefined;
+  const named =
+    typeof locator?.name === "string"
+      ? locator.name
+      : typeof locator?.text === "string"
+        ? locator.text
+        : undefined;
+  const shown = (
+    action.type === "keyboard" && typeof action.value === "string" ? action.value : named
+  )?.trim();
+  if (!shown) return undefined;
+  return `\u201c${shown.length > 60 ? `${shown.slice(0, 59)}…` : shown}\u201d`;
+}
+
+/**
+ * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
+ * status preview (Running… / Done / error snippet).
+ */
+export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
+  const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
+  if (item.status !== "running") {
+    const { text: outText, isError } = unwrapMcpOutput(item.output);
+    const base = {
+      tool: "generic" as const,
+      icon: genericToolIconKind(item.name),
+      title,
+    };
+    const args = parseToolArgs(item.arguments);
+    // A permission Block is a decision, not a tool failure: say so plainly instead
+    // of the generic "error occurred, please try again" wrapper.
+    if (isError && BLOCKED_OUTPUT.test(outText)) {
+      return {
+        ...base,
+        iconTone: "muted",
+        chip: { tone: "interrupted", text: t("timeline.chip.blocked") },
+        preview: textPreview(t("timeline.toolPresentation.blockedByYourPermissionSettings")),
+        body: {
+          kind: "payloads",
+          note: t("timeline.toolPresentation.yourPermissionSettingsBlockThis"),
+          blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+        },
+      };
+    }
+    // An interrupted approved action may have run. Never invite a blind retry.
+    if (isError && UNCERTAIN_OUTPUT.test(outText)) {
+      return {
+        ...base,
+        iconTone: "failed",
+        chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
+        preview: textPreview(t("timeline.toolPresentation.itMayHaveRun")),
+        body: {
+          kind: "payloads",
+          note: t("timeline.toolPresentation.thisActionMayHaveRun"),
+          blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+        },
+      };
+    }
+  }
+  return mcpRowPresentation(t, item, {
+    tool: "generic",
+    icon: genericToolIconKind(item.name),
+    title,
+    runningPreview: goalPreview,
+    runningFallback: t("timeline.toolPresentation.running"),
+    settledPreview: goalPreview,
+    settledFallback: t("timeline.toolPresentation.done"),
+    plainRunningPreview: true,
+  });
+}
+
+/** The runtime's exact refusal for a tool whose effective permission is Block. */
+const BLOCKED_OUTPUT = /Connector action was not executed: blocked\b/;
+/** The runtime's refusal to guess whether an approved action ran. */
+const UNCERTAIN_OUTPUT = /Connector action outcome is uncertain\b/;
+
+/* ---- tool_search (progressive MCP disclosure) ------------------------------ */
+
+export type DisclosedTool = {
+  /** Full wire name (`server__leaf` or bare). */
+  name: string;
+  /** Server / namespace prefix before `__`, when present. */
+  source: string | null;
+  /** Leaf tool name after `__`. */
+  leaf: string;
+};
+
+export function splitToolWireName(name: string): DisclosedTool {
+  const boundary = name.indexOf("__");
+  if (boundary <= 0) {
+    return { name, source: null, leaf: name };
+  }
+  return {
+    name,
+    source: name.slice(0, boundary),
+    leaf: name.slice(boundary + 2),
+  };
+}
+
+/** Capability query from live tool_search args (object or JSON string). */
+export function toolSearchQuery(item: ToolCallItem): string {
+  const fromArgs = parseToolArgs(item.arguments);
+  if (typeof fromArgs.query === "string" && fromArgs.query.trim()) {
+    return fromArgs.query.trim();
+  }
+  const raw = item.raw;
+  if (raw && typeof raw === "object") {
+    const rawArgs = (raw as { arguments?: unknown }).arguments;
+    if (typeof rawArgs === "string" && rawArgs.trim()) {
+      const parsed = tryParseJson(rawArgs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const query = (parsed as { query?: unknown }).query;
+        if (typeof query === "string" && query.trim()) {
+          return query.trim();
+        }
+      }
+    } else if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+      const query = (rawArgs as { query?: unknown }).query;
+      if (typeof query === "string" && query.trim()) {
+        return query.trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Parse disclosed tools from the runtime event shape.
+ * `normalizeSdkEvent` collapses `tool_search_output.tools[]` into text:
+ *   "Disclosed tools: a, b" | "No matching tools found."
+ * Also accept a structured `tools` array when a host/enricher preserves it.
+ */
+export function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const tools = (output as { tools?: unknown }).tools;
+    if (Array.isArray(tools)) {
+      return tools
+        .map((tool) => {
+          if (typeof tool === "string" && tool.trim()) {
+            return splitToolWireName(tool.trim());
+          }
+          if (
+            tool &&
+            typeof tool === "object" &&
+            typeof (tool as { name?: unknown }).name === "string"
+          ) {
+            const name = (tool as { name: string }).name.trim();
+            return name ? splitToolWireName(name) : null;
+          }
+          return null;
+        })
+        .filter((tool): tool is DisclosedTool => tool != null);
+    }
+  }
+
+  const { text } = unwrapMcpOutput(output);
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^no matching tools found\.?$/i.test(trimmed)) {
+    return [];
+  }
+  const disclosed = trimmed.match(/^disclosed tools:\s*(.+)$/i);
+  if (disclosed?.[1]) {
+    return disclosed[1]
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map(splitToolWireName);
+  }
+  const parsed = tryParseJson(trimmed);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return parseDisclosedTools(parsed);
+  }
+  return null;
+}
+
+export function toolSearchPreview(
+  t: OpenGeniText,
+  tools: DisclosedTool[] | null,
+  cancelled: boolean,
+): string | undefined {
+  if (cancelled) {
+    return undefined;
+  }
+  if (!tools) {
+    return t("timeline.toolPresentation.done");
+  }
+  if (tools.length === 0) {
+    return t("timeline.toolPresentation.noMatches");
+  }
+  if (tools.length === 1) {
+    return tools[0]!.leaf;
+  }
+  const head = tools[0]!.leaf;
+  return t("timeline.toolPresentation.lengthToolsTruncatepreview", {
+    length: tools.length,
+    truncatePreview: truncatePreview(head, 28),
+  });
+}
+
+export function toolSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const query = toolSearchQuery(item);
+  const queryPreview = query ? truncatePreview(query, 64) : "";
+  const note = query ? `capability query: ${query}` : undefined;
+  const args = parseToolArgs(item.arguments);
+  const base = { tool: "tool_search" as const, icon: "package-search" as const };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      title: t("timeline.toolPresentation.lookingUpTools"),
+      running: true,
+      preview: textPreview(
+        queryPreview || t("timeline.toolPresentation.matchingCapabilities"),
+        true,
+      ),
+      body: {
+        kind: "listing",
+        note,
+        entries: [],
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      title: t("timeline.toolPresentation.toolLookupFailed"),
+      failed: true,
+      preview: textPreview(
+        truncatePreview(outText, 80) || queryPreview || t("timeline.toolPresentation.lookupFailed"),
+      ),
+      body: {
+        kind: "listing",
+        note,
+        entries: [],
+        blocks: [
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  const tools = parseDisclosedTools(item.output);
+  const preview = toolSearchPreview(t, tools, item.status === "cancelled");
+  return {
+    ...base,
+    iconTone: "muted",
+    title: t("timeline.toolPresentation.lookedUpTools"),
+    detailPreview: true,
+    cancelled: item.status === "cancelled",
+    ...(preview ? { preview: textPreview(preview) } : {}),
+    body: {
+      kind: "listing",
+      note,
+      entries: (tools ?? []).slice(0, 12).map((tool) => ({
+        key: tool.name,
+        title: tool.leaf,
+        eyebrow: tool.source,
+        mono: true,
+      })),
+      more: tools && tools.length > 12 ? tools.length - 12 : undefined,
+      empty:
+        tools && tools.length === 0
+          ? t("timeline.toolPresentation.noDeferredToolsMatchedThis")
+          : undefined,
+      blocks:
+        tools == null && outText
+          ? [
+              { label: t("timeline.toolPresentation.arguments"), value: args },
+              { label: t("timeline.toolPresentation.result"), value: outText },
+            ]
+          : [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+    },
+  };
+}
+
+/* ---- docs / knowledge search ----------------------------------------------- */
+
+export type SearchHit = { title: string; snippet: string };
+
+export function parseSearchHits(t: OpenGeniText, outText: string): SearchHit[] | null {
+  const parsed = tryParseJson(outText);
+  if (parsed == null) {
+    return null;
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as { results?: unknown }).results)
+      ? (parsed as { results: unknown[] }).results
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown }).hits)
+        ? (parsed as { hits: unknown[] }).hits
+        : null;
+  if (!list) {
+    return null;
+  }
+  return list.map((row) => {
+    const r = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+    const title =
+      (typeof r.title === "string" && r.title) ||
+      (typeof r.name === "string" && r.name) ||
+      (typeof r.documentTitle === "string" && r.documentTitle) ||
+      (typeof r.path === "string" && r.path) ||
+      (typeof r.id === "string" && r.id) ||
+      t("timeline.toolPresentation.result");
+    const snippet =
+      (typeof r.snippet === "string" && r.snippet) ||
+      (typeof r.text === "string" && r.text) ||
+      (typeof r.content === "string" && r.content) ||
+      "";
+    return { title, snippet: truncatePreview(snippet, 160) };
+  });
+}
+
+export function docsSearchPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const base = {
+    tool: "docs_search" as const,
+    icon: "file-search" as const,
+    title: query
+      ? t("timeline.toolPresentation.searchTruncatepreview", {
+          truncatePreview: truncatePreview(query, 48),
+        })
+      : toolDisplayName(t, item.name, item.display, callStepPhase(item)),
+  };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview(t("timeline.toolPresentation.searching"), true),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      preview: textPreview(
+        truncatePreview(outText, 80) || t("timeline.toolPresentation.searchFailed"),
+      ),
+      body: {
+        kind: "payloads",
+        blocks: [
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  const hits = parseSearchHits(t, outText);
+  const preview =
+    item.status === "cancelled"
+      ? undefined
+      : hits
+        ? hits.length === 0
+          ? t("timeline.toolPresentation.noHits")
+          : t("counts.hits", { count: hits.length })
+        : t("timeline.toolPresentation.done");
+  return {
+    ...base,
+    iconTone: "muted",
+    cancelled: item.status === "cancelled",
+    ...(preview ? { preview: textPreview(preview) } : {}),
+    body: {
+      kind: "listing",
+      entries: (hits ?? []).slice(0, 8).map((hit) => ({
+        key: `${hit.title}\u0000${hit.snippet}`,
+        title: hit.title,
+        snippet: hit.snippet || undefined,
+      })),
+      blocks: [
+        { label: t("timeline.toolPresentation.arguments"), value: args },
+        { label: t("timeline.toolPresentation.result"), value: outText },
+      ],
+    },
+  };
+}
+
+/* ---- set_session_title / set_other_session_title --------------------------- */
+
+export function sessionTitlePresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const titleArg = typeof args.title === "string" ? args.title.trim() : "";
+  const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
+  const base = {
+    tool: "session_title" as const,
+    icon: "sessions" as const,
+    title: toolDisplayName(t, item.name, item.display, callStepPhase(item)),
+  };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview(previewTitle || t("timeline.toolPresentation.settingTitle"), true),
+      body: {
+        kind: "payloads",
+        blocks: [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+      },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      preview: textPreview(
+        truncatePreview(outText, 80) || t("timeline.toolPresentation.renameFailed"),
+      ),
+      body: {
+        kind: "payloads",
+        blocks: [
+          { label: t("timeline.toolPresentation.arguments"), value: args },
+          { label: t("timeline.toolPresentation.error"), value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  // Prefer the submitted title; fall back to a title field in the tool result.
+  let settledTitle = previewTitle;
+  if (!settledTitle) {
+    const parsed = tryParseJson(outText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const fromResult = (parsed as { title?: unknown }).title;
+      if (typeof fromResult === "string" && fromResult.trim()) {
+        settledTitle = truncatePreview(fromResult.trim(), 72);
+      }
+    }
+  }
+  return {
+    ...base,
+    iconTone: "muted",
+    cancelled: item.status === "cancelled",
+    ...(item.status !== "cancelled" && settledTitle ? { preview: textPreview(settledTitle) } : {}),
+    body: {
+      kind: "payloads",
+      blocks: outText
+        ? [
+            { label: t("timeline.toolPresentation.arguments"), value: args },
+            { label: t("timeline.toolPresentation.result"), value: outText },
+          ]
+        : [{ label: t("timeline.toolPresentation.arguments"), value: args }],
+    },
+  };
+}
+
+/* ---- resolution ------------------------------------------------------------ */
+
+const PRESENTERS_BY_RAW_TYPE: Record<string, PresentedToolKind> = {
+  apply_patch_call: "apply_patch",
+  // Web renders these with richer media renderers; keep them off name matches.
+  computer_call: "generic",
+  tool_search_call: "tool_search",
+};
+
+const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
+  exec_command: "exec",
+  request_human_input: "ask",
+  run_on: "run_on",
+  write_stdin: "write_stdin",
+  apply_patch_call: "apply_patch",
+  apply_patch: "apply_patch",
+  web_search_call: "web_search",
+  tool_search: "tool_search",
+  search_documents: "docs_search",
+  knowledge_search: "docs_search",
+  set_session_title: "session_title",
+  set_other_session_title: "session_title",
+  sandboxes_list: "machine",
+  sandbox_swap: "machine",
+  computer_open: "machine",
+  computer_observe: "machine",
+  computer_act: "machine",
+  interaction_discover: "machine",
+};
+
+/**
+ * The phase a call's step name reads in. A call that finished with an error
+ * result keeps the ongoing form ("Sending a message" · Error), like a failed one.
+ */
+export function callStepPhase(item: ToolCallItem): ToolStepPhase {
+  if (item.status === "complete" && unwrapMcpOutput(item.output).isError) return "running";
+  return toolStepPhase(item.status);
+}
+
+/**
+ * A row reduced to what a person needs: the plain step, its status and any
+ * human-readable result. Commands, arguments, output, diffs and JSON are left
+ * out, and a row with nothing human left to show does not expand.
+ */
+export function plainToolRow(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  row: ToolRowPresentation,
+  context: Pick<ToolPresentationContext, "computeLabel"> = {},
+): ToolRowPresentation {
+  const { detailPreview: _detailPreview, titleMono: _titleMono, ...rest } = row;
+  const plain: ToolRowPresentation = { ...rest, body: plainBody(row.body) };
+  if (row.detailPreview) delete plain.preview;
+  if (row.tool === "exec" || row.tool === "write_stdin") {
+    const failed =
+      row.iconTone === "failed" || row.chip?.tone === "bad" || item.status === "failed";
+    plain.title = toolStepLabel(t, "runCommand", failed ? "running" : toolStepPhase(item.status));
+    if (isConnectedMachineOutcomeUnknownOutput(item.output)) {
+      // The call has ended, but its effects remain unknown. Keep that verdict
+      // in the chip, with the explanation available without raw command output.
+      return {
+        ...plain,
+        title: toolStepLabel(t, "runCommand", "done"),
+        body: { kind: "note", tone: "error", text: t("toolActionReview.itMayHaveRunCheck") },
+      };
+    }
+    const computeLabel = context.computeLabel ?? null;
+    if (computeLabel) plain.preview = textPreview(computeLabel, row.running);
+    else delete plain.preview;
+    if (row.chip?.tone === "bad") plain.chip = { tone: "bad", text: t("timeline.chip.failed") };
+    else delete plain.chip;
+  } else if (row.tool === "apply_patch") {
+    delete plain.preview;
+  }
+  return plain;
+}
+
+function plainBody(body: ToolBody): ToolBody {
+  switch (body.kind) {
+    case "term":
+    case "patch":
+      return { kind: "none" };
+    case "payloads":
+      return body.note ? { kind: "note", text: body.note } : { kind: "none" };
+    case "listing": {
+      // Mono entries are wire names (disclosed tools); plain rows keep readable hits only.
+      const entries = body.entries.filter((entry) => !entry.mono);
+      return entries.length ? { ...body, entries, blocks: [] } : { kind: "none" };
+    }
+    default:
+      return body;
+  }
+}
+
+/**
+ * Resolve the shared presenter for a call with the web registry's precedence
+ * (raw.type, exact name, MCP leaf). Tools whose web renderer is richer than the
+ * shared model (computer use, media, knowledge receipts, …) resolve to
+ * `generic`; non-DOM renderers may layer their own presenters on top.
+ */
+export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
+  const rawType = rawTypeOf(item);
+  if (rawType && PRESENTERS_BY_RAW_TYPE[rawType]) {
+    return PRESENTERS_BY_RAW_TYPE[rawType];
+  }
+  const exact = PRESENTERS_BY_NAME[item.name];
+  if (exact) {
+    return exact;
+  }
+  const leaf = mcpToolLeaf(item.name);
+  if (leaf !== item.name && PRESENTERS_BY_NAME[leaf]) {
+    return PRESENTERS_BY_NAME[leaf];
+  }
+  if (leaf.startsWith("cua_")) {
+    return "machine";
+  }
+  return "generic";
+}
+
+/** Presentations whose collapsed row reads correctly from an output preview. */
+const PREVIEW_READABLE_KINDS: ReadonlySet<PresentedToolKind> = new Set([
+  "exec",
+  "write_stdin",
+  "apply_patch",
+  "generic",
+]);
+
+/**
+ * Whether the shared presentation of `item` reads correctly while its output
+ * is a bounded preview (`item.outputPreview`): long strings keep their head and
+ * tail, so an exit code, a tail peek, a patch summary or an error snippet stay
+ * right, and the body is shown only after the exact output is read. Every
+ * other tool needs its exact output first. True for an exact output.
+ */
+export function presentsToolOutputPreview(item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  if (item.outputPreview.shape !== "structured") return false;
+  const shown = invokedToolCall(item);
+  const kind = presentedToolKind(shown);
+  if (!PREVIEW_READABLE_KINDS.has(kind)) return false;
+  if (kind !== "generic") return true;
+  // A generic row draws retained images from its result, and parses JSON
+  // result text whole (an MCP `content[].text` included) for its error flag:
+  // cut JSON would not parse.
+  if (hasCutJsonText(shown.output, 0)) return false;
+  return retainedToolResultImages(shown.output).images.length === 0;
+}
+
+const OUTPUT_PREVIEW_OMISSION = / characters omitted from this preview\]…\n/u;
+
+function hasCutJsonText(value: unknown, depth: number): boolean {
+  if (typeof value === "string") {
+    return /^\s*[[{]/u.test(value) && OUTPUT_PREVIEW_OMISSION.test(value);
+  }
+  if (depth >= 4 || value === null || typeof value !== "object") return false;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  return children.some((child) => hasCutJsonText(child, depth + 1));
+}
+
+export function toolRowPresentation(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  context: ToolPresentationContext = {},
+): ToolRowPresentation {
+  item = invokedToolCall(item);
+  const row = presentedToolRow(t, item, context);
+  return context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+}
+
+function presentedToolRow(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  context: ToolPresentationContext,
+): ToolRowPresentation {
+  switch (presentedToolKind(item)) {
+    case "exec":
+      return execPresentation(t, item, context);
+    case "write_stdin":
+      return writeStdinPresentation(t, item);
+    case "apply_patch":
+      return applyPatchPresentation(t, item) ?? genericToolPresentation(t, item);
+    case "web_search":
+      return webSearchPresentation(t, item);
+    case "ask":
+      return askPresentation(t, item);
+    case "run_on":
+      return runOnPresentation(t, item);
+    case "tool_search":
+      return toolSearchPresentation(t, item);
+    case "docs_search":
+      return docsSearchPresentation(t, item);
+    case "session_title":
+      return sessionTitlePresentation(t, item);
+    case "machine":
+      return machinePresentation(t, item);
+    default:
+      return genericToolPresentation(t, item);
+  }
+}

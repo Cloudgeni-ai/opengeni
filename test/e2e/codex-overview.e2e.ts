@@ -5,27 +5,28 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type { AccessContext } from "@opengeni/contracts";
 import {
   claimCodexResetRedemption,
-  completeCodexResetRedemption,
   createDb,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
   fenceCodexResetRedemptionSend,
-  recordCodexAccountUsage,
-  setInitialActiveCodexCredential,
   synchronizeCanonicalHumanLoginBindings,
-  upsertCodexSubscriptionCredential,
   type DbClient,
+} from "@opengeni/db";
+import {
+  completeSubscriptionCoreCodexResetRedemption,
+  connectSubscriptionCoreCodexConnection,
+  recordSubscriptionCoreCodexUsageObservation,
+  setSubscriptionCoreCodexPrimary,
+  subscriptionCoreCodexResetAuthority,
+  subscriptionCoreCodexResetCreditFence,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createApp } from "../../apps/api/src/app";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -64,7 +65,10 @@ const provider = {
       provider.activeOverviewCalls,
     );
     try {
-      await Bun.sleep(20);
+      // Keep reads in flight long enough for organization account prefetches
+      // and the workspace batch to overlap on a fast runner too. Both routes
+      // must share the same four-call provider budget.
+      await Bun.sleep(200);
       return await operation();
     } finally {
       provider.activeOverviewCalls -= 1;
@@ -171,41 +175,55 @@ async function completePriorNoCreditAttempt(
   creditId: string,
   browserSessionHash: string,
 ): Promise<{ attemptId: string; upstreamIdempotencyKey: string }> {
-  const attemptId = crypto.randomUUID();
-  const claimHolderId = crypto.randomUUID();
-  const priorAttempt = await claimCodexResetRedemption(client.db, {
-    id: attemptId,
-    accountId: defaultAccountId,
-    workspaceId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash,
-    creditId,
-    confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
-    claimHolderId,
-  });
-  if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
-  const priorFence = await fenceCodexResetRedemptionSend(client.db, {
-    accountId: defaultAccountId,
-    workspaceId,
-    attemptId,
-    claimHolderId,
-    credentialId: detailedCredentialId,
-    subjectId: `user:${OWNER_USER_ID}`,
-    browserSessionHash,
-  });
-  if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
-  const priorCompletion = await completeCodexResetRedemption(client.db, {
-    accountId: defaultAccountId,
-    workspaceId,
-    attemptId,
-    claimHolderId,
-    outcome: "noCredit",
-  });
-  if (priorCompletion.result?.outcome !== "noCredit") {
-    throw new Error("expected prior non-consuming completion");
-  }
-  return { attemptId, upstreamIdempotencyKey: priorAttempt.attempt.upstreamIdempotencyKey };
+  return await withSessionRlsActorContext(
+    { subjectId: `user:${OWNER_USER_ID}`, initiatingHumanSubjectId: `user:${OWNER_USER_ID}` },
+    async () => {
+      const attemptId = crypto.randomUUID();
+      const claimHolderId = crypto.randomUUID();
+      const priorAttempt = await claimCodexResetRedemption(
+        client.db,
+        {
+          id: attemptId,
+          accountId: defaultAccountId,
+          workspaceId,
+          credentialId: detailedCredentialId,
+          subjectId: `user:${OWNER_USER_ID}`,
+          browserSessionHash,
+          creditId,
+          confirmationExpiresAt: new Date(Date.now() + 5 * 60_000),
+          claimHolderId,
+        },
+        subscriptionCoreCodexResetAuthority,
+        subscriptionCoreCodexResetCreditFence,
+      );
+      if (priorAttempt.kind !== "claimed") throw new Error("expected prior non-consuming claim");
+      const priorFence = await fenceCodexResetRedemptionSend(
+        client.db,
+        {
+          accountId: defaultAccountId,
+          workspaceId,
+          attemptId,
+          claimHolderId,
+          credentialId: detailedCredentialId,
+          subjectId: `user:${OWNER_USER_ID}`,
+          browserSessionHash,
+        },
+        subscriptionCoreCodexResetAuthority,
+      );
+      if (priorFence.kind !== "ready") throw new Error("expected prior non-consuming send fence");
+      const priorCompletion = await completeSubscriptionCoreCodexResetRedemption(client.db, {
+        accountId: defaultAccountId,
+        workspaceId,
+        attemptId,
+        claimHolderId,
+        outcome: "noCredit",
+      });
+      if (priorCompletion.attempt?.outcome !== "noCredit") {
+        throw new Error("expected prior non-consuming completion");
+      }
+      return { attemptId, upstreamIdempotencyKey: priorAttempt.attempt.upstreamIdempotencyKey };
+    },
+  );
 }
 
 async function expectNoWcagAxeViolations(page: Page, include: string): Promise<void> {
@@ -275,10 +293,12 @@ function failureDiagnostics(page: Page): string {
 /** The shared workspace's page in Organization settings > Models names it in back links. */
 const WORKSPACE_NAME = "Codex quota workspace";
 
-/** A workspace's Models page: the Accounts section renders before the async account rows. */
+/** A workspace's Models page: the Model providers section renders before the async account rows. */
 async function waitForAccountsSection(page: Page): Promise<void> {
   try {
-    await page.getByRole("heading", { name: "Accounts", exact: true }).waitFor({ timeout: 20_000 });
+    await page
+      .getByRole("heading", { name: "Model providers", exact: true })
+      .waitFor({ timeout: 20_000 });
   } catch (error) {
     const [title, body] = await Promise.all([
       page.title().catch(() => "<unavailable>"),
@@ -351,6 +371,7 @@ beforeAll(async () => {
   if (!shared) {
     throw new Error("Codex quota browser E2E requires real PostgreSQL; no skip is permitted");
   }
+  // Current HTTP/browser coverage retains the enabled core cutover gate.
   client = createDb(shared.appUrl, { max: 16 });
   browser = await chromium.launch(
     process.env.OPENGENI_BROWSER_BIN
@@ -528,7 +549,7 @@ beforeAll(async () => {
     ["cached", "Cached account"],
     ["unowned", "Unowned account"],
   ] as const) {
-    const connected = await upsertCodexSubscriptionCredential(client.db, {
+    const connected = await connectSubscriptionCoreCodexConnection(client.db, {
       accountId,
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
@@ -539,31 +560,53 @@ beforeAll(async () => {
           id_token: "id",
         }),
       ),
-      chatgptAccountId: externalId,
-      scopes: null,
+      providerAccountId: externalId,
+      providerSubjectId: `fixture:${externalId}`,
+      accountEmail: null,
       planType: "pro",
       isFedramp: false,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       lastRefreshAt: new Date(),
-      connectedBySubjectId: externalId === "unowned" ? null : `user:${OWNER_USER_ID}`,
+      subjectId: `user:${OWNER_USER_ID}`,
       label,
     });
+    if (connected.kind !== "connected")
+      throw new Error(`core fixture refused: ${connected.reason}`);
+    if (externalId === "unowned")
+      await shared.admin`update subscription_connections
+      set connected_by_subject_id = null where id = ${connected.id}`;
     if (externalId === "detailed") detailedCredentialId = connected.id;
     if (externalId === "cached") {
       const old = new Date(Date.now() - 20 * 60_000);
-      await recordCodexAccountUsage(client.db, workspaceId, connected.id, {
-        primaryUsedPercent: 44,
-        primaryResetAt: new Date(Date.now() + 60_000),
-        secondaryUsedPercent: 22,
-        secondaryResetAt: new Date(Date.now() + 120_000),
-        checkedAt: old,
-        resetCreditAvailableCount: 2,
-        resetCreditsCheckedAt: old,
-      });
+      await recordSubscriptionCoreCodexUsageObservation(
+        client.db,
+        { kind: "workspace", accountId, workspaceId, subjectId: `user:${OWNER_USER_ID}` },
+        connected.id,
+        {
+          windows: [
+            { id: "primary", usedPercent: 44, resetsAt: Date.now() + 60_000, status: "ok" },
+            { id: "secondary", usedPercent: 22, resetsAt: Date.now() + 120_000, status: "ok" },
+          ],
+          modelCooldowns: {},
+          exhaustedUntil: null,
+          exhaustedKind: null,
+          revision: 0,
+          observedAt: old.getTime(),
+          observedRefreshGeneration: 1,
+          source: "usage_endpoint",
+        },
+      );
+      await shared.admin`update subscription_connections
+        set provider_state = provider_state || ${shared.admin.json({ resetCreditAvailableCount: 2, resetCreditsCheckedAt: old.toISOString() })}::jsonb
+        where id = ${connected.id}`;
     }
   }
-  await ensureCodexRotationSettings(client.db, accountId, workspaceId);
-  await setInitialActiveCodexCredential(client.db, workspaceId, detailedCredentialId);
+  await setSubscriptionCoreCodexPrimary(client.db, {
+    accountId,
+    workspaceId,
+    subjectId: `user:${OWNER_USER_ID}`,
+    connectionId: detailedCredentialId,
+  });
   const priorAttempt = await completePriorNoCreditAttempt(
     "detailed-credit",
     "prior-browser-session",
@@ -639,7 +682,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(await resets.getByText(/available again\./).count()).toBe(1);
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
     const aria = await detailed.ariaSnapshot();
-    expect(aria).toContain('switch "Detailed account is available for new chats"');
+    expect(aria).toContain('switch "Enable Detailed account"');
     expect(aria).toContain('button "Redeem Full reset"');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -673,7 +716,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const unsupported = await openCodexAccount(page, "Unsupported account");
     await unsupported.getByRole("heading", { name: "Usage", exact: true }).waitFor();
     expect(await unsupported.getByRole("heading", { name: /^Usage limit resets/ }).count()).toBe(0);
-    // A provider outage falls back to OpenGeni's saved reading, marked stale.
+    // A provider outage falls back to Opengeni's saved reading, marked stale.
     await backToModels(page);
     const cached = await openCodexAccount(page, "Cached account");
     await cached
@@ -682,11 +725,14 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       .waitFor({ timeout: 20_000 });
     await backToModels(page);
     const unowned = await openCodexAccount(page, "Unowned account");
+    // Shared core administration does not borrow a historical connector's
+    // identity. A missing connected-by label never asks an admin to claim it.
+    expect(await unowned.getByText(/No one is recorded as the owner/).count()).toBe(0);
     await unowned
-      .getByText(/No one is recorded as the owner.+view only\. Reconnect the same ChatGPT account/)
-      .waitFor({ timeout: 20_000 });
-    expect(await unowned.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
-    await unowned.getByRole("button", { name: "Reconnect same account" }).waitFor();
+      .getByRole("button", { name: /^Redeem / })
+      .first()
+      .waitFor();
+    expect(await unowned.getByRole("button", { name: "Reconnect same account" }).count()).toBe(0);
     expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
 
     const { context: mobileContext, page: mobile } = await ownerContext(
@@ -694,25 +740,18 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       mobileOptions,
     );
     const mobileUnowned = await openCodexAccount(mobile, "Unowned account", "tap");
-    await mobileUnowned
-      .getByText(/No one is recorded as the owner.+view only\. Reconnect the same ChatGPT account/)
-      .waitFor({ timeout: 20_000 });
-    expect(await mobileUnowned.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
-    expect(
-      (await mobileUnowned.getByRole("button", { name: "Reconnect same account" }).boundingBox())
-        ?.height ?? 0,
-    ).toBeGreaterThanOrEqual(44);
+    expect(await mobileUnowned.getByText(/No one is recorded as the owner/).count()).toBe(0);
+    const sharedRedeem = mobileUnowned.getByRole("button", { name: /^Redeem / }).first();
+    await sharedRedeem.waitFor();
+    expect((await sharedRedeem.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     await backToModels(mobile, "tap");
     const mobileDetailed = await openCodexAccount(mobile, "Detailed account", "tap");
     const mobileRedeem = mobileDetailed.getByRole("button", { name: "Redeem Full reset" });
     await mobileRedeem.waitFor({ timeout: 20_000 });
     expect((await mobileRedeem.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect(
-      (
-        await mobileDetailed
-          .getByRole("switch", { name: "Detailed account is available for new chats" })
-          .boundingBox()
-      )?.height ?? 0,
+      (await mobileDetailed.getByRole("switch", { name: "Enable Detailed account" }).boundingBox())
+        ?.height ?? 0,
     ).toBeGreaterThan(0);
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -746,7 +785,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await backToModels(page);
     const detailedAgain = await openCodexAccount(page, "Detailed account");
     const allocator = detailedAgain.getByRole("switch", {
-      name: "Detailed account is available for new chats",
+      name: "Enable Detailed account",
     });
     await allocator.click();
     await waitFor(async () => (await allocator.getAttribute("aria-checked")) === "false", {
@@ -821,7 +860,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // Redemption never touched the allocator choice made earlier.
     expect(
       await recoveryDetailed
-        .getByRole("switch", { name: "Detailed account is available for new chats" })
+        .getByRole("switch", { name: "Enable Detailed account" })
         .getAttribute("aria-checked"),
     ).toBe("false");
     expect(

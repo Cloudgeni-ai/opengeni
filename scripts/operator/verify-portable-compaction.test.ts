@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   assertOpaqueKickoff,
   createVerificationClient,

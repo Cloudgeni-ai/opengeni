@@ -64,8 +64,10 @@ describe("organization private-session product surface", () => {
       "utf8",
     );
     expect(tenancy).toContain("getPrivateSessionCreatePolicy(deps.db");
-    expect(tenancy).toContain(
-      "policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled",
+    // Personal workspaces follow the platform; shared workspaces need the
+    // organization setting and the deployment's "only me" allowance.
+    expect(tenancy.replace(/\s+/g, " ")).toContain(
+      "policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled && privacyDeploymentLimits(deps.settings).onlyMeAllowed",
     );
     // A missing active membership is a capability answer, never an unmapped 500.
     expect(tenancy).toContain('nestedPostgresSqlState(error) !== "42501"');

@@ -12,7 +12,7 @@ import {
   CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
 } from "@opengeni/codex";
 import { buildOpenGeniAgent, compactionThresholdTokens } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database } from "@opengeni/db";
 import {
   enabledCapabilityMcpToolRefs,
@@ -157,7 +157,7 @@ describe("withCodexAppsMcpServer", () => {
     const settings = testSettings({
       codexConnectedAppsEnabled: true,
       mcpServers: [
-        { id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false },
+        { id: "opengeni", name: "Opengeni", url: "http://x/mcp", cacheToolsList: false },
       ],
     });
     const result = settingsWithCodexAppsMcpServer(settings, true);
@@ -182,7 +182,7 @@ describe("withCodexAppsMcpServer", () => {
       mcpServers: [
         {
           id: "opengeni",
-          name: "OpenGeni",
+          name: "Opengeni",
           url: "http://localhost/mcp",
           cacheToolsList: false,
         },

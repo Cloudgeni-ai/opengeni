@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -226,7 +226,7 @@ describe("migration 0301 session list snapshot and pin visibility", () => {
     `;
     expect(pinPolicy?.permissive).toBe(false);
     expect(pinPolicy?.using).toContain("current_subject_id()");
-    expect(pinPolicy?.check).toContain("session_reference_visible");
+    expect(pinPolicy?.check).toMatch(/session_reference_visible|FROM sessions session_row/);
     expect(pinPolicy?.check).not.toContain("current_subject_id()");
   }, 180_000);
 

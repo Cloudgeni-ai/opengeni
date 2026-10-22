@@ -1,6 +1,6 @@
 import {
   agentConfigDeploymentPolicy,
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -8,6 +8,7 @@ import {
   agentConfigFirstPartyMcpTools,
   agentConfigToolRefs,
   legacyEffectiveAgentCapabilities,
+  mergeToolRefEager,
   resolveAgentConfig,
   resolveWorkspaceAgentDefaults,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -22,6 +23,31 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+
+/** Creation only: save the normal eager selection; never rewrite an existing session. */
+export function newSessionKnowledgeSearchTools(
+  tools: ToolRef[],
+  config: ResolvedAgentConfig | null,
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+): ToolRef[] {
+  if (!config?.capabilities.knowledge) return tools;
+  const canSearch = (tool: ToolRef) =>
+    tool.kind === "mcp" &&
+    (tool.allowedTools === undefined || tool.allowedTools.includes("knowledge_search"));
+  const serverId =
+    firstPartyMcpTools.includes("knowledge_search") &&
+    tools.some((tool) => tool.id === "opengeni" && canSearch(tool))
+      ? "opengeni"
+      : tools.some((tool) => tool.id === "docs" && canSearch(tool))
+        ? "docs"
+        : null;
+  if (!serverId) return tools;
+  return tools.map((tool) =>
+    tool.id === serverId && canSearch(tool)
+      ? { ...tool, eager: mergeToolRefEager(tool.eager, ["knowledge_search"]) }
+      : tool,
+  );
+}
 
 /**
  * Run an agent-config resolution step and surface its typed failure as a 422
@@ -48,7 +74,7 @@ export function legacySessionAgentCapabilities(
   defaultServerIds?: Iterable<string>,
 ): ResolvedAgentCapabilities {
   return legacyEffectiveAgentCapabilities({
-    firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(settings, session.firstPartyMcpTools),
+    firstPartyMcpTools: resolveSessionFirstPartyMcpTools(settings, session, workspaceSettings),
     tools: session.tools,
     toolPolicy: session.toolPolicy,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspaceSettings),

@@ -9,14 +9,22 @@ import { PhoneFrame } from "./phone-frame";
 import { ScenarioFilter, useGalleryScenarios } from "./scenario-matrix";
 import { ScenarioStack } from "./scenario-stack";
 
-type ViewMode = "phone" | "gallery";
+type ViewMode = "phone" | "gallery" | "queue";
 
 export function ComposerChromeGalleryRoute() {
   const composer = useMemo(() => idleComposer(), []);
   const scenarios = useGalleryScenarios();
-  const [mode, setMode] = useState<ViewMode>("gallery");
+  const [mode, setMode] = useState<ViewMode>(() =>
+    new URLSearchParams(window.location.search).get("view") === "queue" ? "queue" : "gallery",
+  );
   const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("activity-load");
   const [galleryFilter, setGalleryFilter] = useState<"all" | ChromeScenarioId>("activity-load");
+  // Starts empty so a simulated Send shows the real collapsed queue chip.
+  const queueScenario = useMemo(() => {
+    const base = scenarios.find((row) => row.id === "queued-only");
+    if (!base) return null;
+    return { ...base, queue: { ...base.queue, queue: [] } };
+  }, [scenarios]);
 
   const phoneScenario = scenarios.find((row) => row.id === phoneScenarioId) ?? scenarios[0] ?? null;
   const galleryVisible =
@@ -64,6 +72,17 @@ export function ComposerChromeGalleryRoute() {
               >
                 All scenarios
               </button>
+              <button
+                type="button"
+                className={
+                  mode === "queue"
+                    ? "rounded-md bg-fg px-3 py-1.5 text-xs font-medium text-bg"
+                    : "rounded-md px-3 py-1.5 text-xs font-medium text-fg-muted hover:text-fg"
+                }
+                onClick={() => setMode("queue")}
+              >
+                Queued message
+              </button>
             </div>
             {mode === "gallery" ? (
               <ScenarioFilter
@@ -75,7 +94,14 @@ export function ComposerChromeGalleryRoute() {
           </div>
         </header>
 
-        {mode === "phone" && phoneScenario ? (
+        {mode === "queue" && queueScenario ? (
+          <section
+            data-queue-preview=""
+            className="overflow-hidden rounded-xl border border-border bg-surface/30 p-3 sm:p-4"
+          >
+            <ScenarioStack scenario={queueScenario} composer={composer} queueSimulator />
+          </section>
+        ) : mode === "phone" && phoneScenario ? (
           <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:gap-8">
             <aside className="w-full shrink-0 space-y-2 lg:w-64">
               <p className="text-2xs font-medium uppercase tracking-[0.12em] text-fg-subtle">

@@ -1,4 +1,4 @@
-import type { ManagedAuthMode } from "./managed-auth-form";
+import type { ManagedAuthMode } from "@opengeni/react/app/lib/managed-auth-transition";
 
 /**
  * `?mode=signup` deep links (marketing "Get started" CTAs) and the `/sign-up`

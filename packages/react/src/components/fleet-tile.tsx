@@ -2,7 +2,9 @@ import { deriveSessionDisplayTitle, type Session } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { sessionAdmissionBlocked, sessionDisplayStatus } from "../session-status-model";
 import { SessionStatus } from "./session-status";
+import { useOpenGeniText } from "../messages/runtime";
 
 const SESSION_METADATA_TITLE_KEYS = ["title", "name"] as const;
 
@@ -27,8 +29,9 @@ export function sessionDisplayTitle(session: Session): string {
  * and a faint accent edge so the live ones read at a glance.
  */
 export function FleetTile({ session, title, subtitle, onOpen, className }: FleetTileProps) {
+  const msg = useOpenGeniText();
   const running = session.status === "running" || session.status === "queued";
-  const needsYou = session.status === "requires_action";
+  const needsYou = session.status === "requires_action" && !sessionAdmissionBlocked(session);
   return (
     <button
       type="button"
@@ -60,7 +63,7 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         <span className="line-clamp-2 min-w-0 text-og-base font-medium leading-snug text-og-fg">
           {title ?? sessionDisplayTitle(session)}
         </span>
-        <SessionStatus status={session.status} size="sm" className="mt-px" />
+        <SessionStatus status={sessionDisplayStatus(session)} size="sm" className="mt-px" />
       </span>
       {subtitle ? (
         <span className="line-clamp-1 text-og-sm text-og-fg-muted">{subtitle}</span>
@@ -70,7 +73,7 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         <span aria-hidden>·</span>
         <span className="truncate">{modelDisplayName(session.model)}</span>
         <span className="ml-auto shrink-0" title={session.updatedAt}>
-          {formatRelativeTime(session.updatedAt)}
+          {formatRelativeTime(msg, session.updatedAt)}
         </span>
       </span>
     </button>

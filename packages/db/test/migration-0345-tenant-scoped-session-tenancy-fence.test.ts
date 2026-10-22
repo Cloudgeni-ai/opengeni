@@ -8,6 +8,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "../../testing/src/shared-pg";
 import { migrate } from "../src/migrate";
+import { migrationSqlForServer } from "../src/migration-postgres-compatibility";
 import {
   canonicalSessionVisibilityTransitionHash,
   createDb,
@@ -117,6 +118,7 @@ function expectInstalledFenceCoverage(installed: InstalledFenceTrigger[]): void 
 const directHotMutatorInventory = [
   "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
   "backfill_organization_session_ownership(uuid,integer,boolean,text)",
+  "change_connected_machine_audience(uuid,uuid,uuid,bigint,text,text,boolean)",
   "detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)",
   "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
   "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)",
@@ -124,16 +126,20 @@ const directHotMutatorInventory = [
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.browser_deadline_checkpoint(jsonb,boolean,boolean)",
-  "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
+  "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint,integer)",
+  "opengeni_private.abandon_session_content_archive(uuid,uuid)",
   "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
   "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
+  "opengeni_private.pause_private_scheduled_task(uuid,uuid,text,uuid)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
+  "opengeni_private.purge_archived_session_content(uuid,uuid,text,integer)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",
   "opengeni_private.record_archived_session_import_batch(uuid,uuid,uuid,text,text,text,text,integer,integer)",
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
   "organization_membership_command(jsonb)",
   "organization_membership_command_0263(jsonb)",
   "release_session_work_claim_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text)",
+  "set_session_vault_policy(uuid,jsonb,jsonb)",
   "transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)",
   "upsert_session_work_claim_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,integer,text,text,text,text,text,text,text)",
   "workspace_membership_removal_command(jsonb)",
@@ -264,7 +270,23 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const tenancy = await readFile(new URL("../src/session-tenancy.ts", import.meta.url), "utf8");
     const agents = await readFile(new URL("../../../AGENTS.md", import.meta.url), "utf8");
     expect(database).toContain("pg_advisory_xact_lock_shared");
-    expect(database).toContain("session-tenancy:${context.workspaceId}");
+    expect(database).toMatch(
+      /function sessionTenancyLock\(workspaceId: string\)[^{]*\{\s*return \{ key: `session-tenancy:\$\{workspaceId\}`, mode: "shared", hash: "extended" \}/u,
+    );
+    const activityScope = database.slice(
+      database.indexOf("async function withSessionActivityRlsScope<T>"),
+      database.indexOf("export async function withWorkspaceSessionActivityRls<T>"),
+    );
+    expect(activityScope).toMatch(
+      /accountPrefix: "organization-membership:"[\s\S]*fenceMode === "shared" \? \[sessionTenancyLock\(scope.workspaceId\)\][\s\S]*return await withRlsScope\([\s\S]*locks,[\s\S]*await assertRlsContextApplied/u,
+    );
+    const rlsScope = database.slice(
+      database.indexOf("async function withRlsScope<T>"),
+      database.indexOf("export async function withWorkspaceRls<T>"),
+    );
+    expect(rlsScope).toMatch(
+      /await applyRlsScope\(scoped,[\s\S]*await fn\(scoped, applied.context\)/u,
+    );
     expect(tenancy).toMatch(/transitionSessionVisibility[\s\S]*?undefined,\s*"none"/u);
     expect(agents).toContain("never restart a pre-0345 image");
   });
@@ -345,7 +367,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       // Full-schema coverage above still applies the complete migration chain.
       await setup`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(driftOwned.ownerUrl);
-      const migration = await readFile(migrationUrl, "utf8");
+      const migration = await migrationSqlForServer(
+        setup,
+        "0345_tenant_scoped_session_tenancy_fence.sql",
+        await readFile(migrationUrl, "utf8"),
+      );
       const sessionEventCursorMigration = await readFile(sessionEventCursorMigrationUrl, "utf8");
       const blockStart = migration.indexOf("DO $repair_owner_fenced_access_scopes$");
       const blockTerminator = "$repair_owner_fenced_access_scopes$;";
@@ -1204,7 +1230,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         prepare: false,
         onnotice: () => undefined,
       });
-      const migration0345 = await readFile(migrationUrl, "utf8");
+      const migration0345 = await migrationSqlForServer(
+        ownerSetup,
+        "0345_tenant_scoped_session_tenancy_fence.sql",
+        await readFile(migrationUrl, "utf8"),
+      );
       const pre0345Files = (await readdir(migrationsDir))
         .filter((file) => file.endsWith(".sql") && file < "0345_")
         .sort();
@@ -1469,6 +1499,9 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
               || pg_get_constraintdef(constraint_value.oid, false)
             from pg_constraint constraint_value
             where constraint_value.conrelid = relation.oid
+              -- PostgreSQL 18 also lists column NOT NULL constraints, which
+              -- the columns snapshot above already covers.
+              and constraint_value.contype <> 'n'
             order by constraint_value.conname
           ) as constraints,
           (select count(*)::int from aclexplode(coalesce(
@@ -1697,7 +1730,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         await ownerAclReplay.unsafe(`SET search_path = "${targetA}", opengeni_private, public`);
         let aclDriftError: unknown;
         try {
-          await ownerAclReplay.unsafe(await readFile(migrationUrl, "utf8"));
+          await ownerAclReplay.unsafe(migration0345);
         } catch (error) {
           aclDriftError = error;
         }

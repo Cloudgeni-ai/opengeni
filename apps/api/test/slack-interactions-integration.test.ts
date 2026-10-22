@@ -25,13 +25,9 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createConnection,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   createDb,
   createRig,
   setWorkspaceDefaultRig,
-  createVariableSet,
   bindAuthorizedGitHubInstallationRepositories,
   enableCapabilityInstallation,
   upsertCapabilityCatalogItem,
@@ -63,12 +59,9 @@ import {
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -711,19 +704,17 @@ function encryptedBotCredential(settings: Settings): string {
 }
 
 async function connectModelPreferenceCodex(grant: AccessGrant) {
-  await upsertCodexSubscriptionCredential(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    credentialEncrypted: "metadata-only-model-preference-fixture",
-    chatgptAccountId: `fixture-${grant.workspaceId}`,
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: null,
-    lastRefreshAt: null,
-  });
-  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-  await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+  // Connected Codex after the drained cutover (0680 seeds every organization
+  // enabled): a shared core connection; the legacy tables are frozen.
+  await shared!.admin`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type
+    ) values (
+      ${grant.accountId}::uuid, 'codex', 'subscription',
+      'metadata-only-model-preference-fixture', 'shared', 'organization',
+      ${`fixture-${grant.workspaceId}`}, 'pro'
+    )`;
 }
 
 async function fixture(
@@ -816,7 +807,7 @@ async function fixture(
       slackTeamName: "Slack interaction test",
       botId,
       botUserId,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
     createdBySubjectId: owner.subjectId,
@@ -1337,7 +1328,7 @@ async function seedRecentSession(
   return created.id;
 }
 
-describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
   test.each(["workspace", "member"] as const)(
     "exhausted %s counter gives allowance remedies for signed Slack create and thread reply",
     async (scope) => {
@@ -1534,11 +1525,6 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         kind: "mcp",
         metadata: { mcpConnectivity: { status: "ok" } },
       });
-      const variables = await createVariableSet(client.db, {
-        ...target,
-        subjectId: value.owner.subjectId,
-        name: "Build credentials",
-      });
       const checkedAt = new Date();
       await bindAuthorizedGitHubInstallationRepositories(client.db, {
         ...target,
@@ -1631,7 +1617,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         ),
       ];
       // The website draft is one chat's explicit narrowing: no connectors, no
-      // OpenGeni tools, an extra Variable Set, a restricted permission set and
+      // Opengeni tools, an extra Variable Set, a restricted permission set and
       // a different repository. None of it may reach a Slack task.
       const draftRepository = {
         kind: "repository" as const,
@@ -1657,7 +1643,6 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
             reasoningEffort: "high",
             latencyMode: "standard",
             options: {
-              variableSetIds: [variables.id],
               firstPartyMcpTools: [],
               firstPartyMcpPermissions: ["sessions:read"],
               goal: { text: "UNSENT GOAL", successCriteria: "never" },
@@ -1748,7 +1733,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           resources: Array<Record<string, unknown>>;
           variable_set_ids: string[];
           tools: Array<{ kind: string; id: string }>;
-          tool_policy: { mode: string };
+          tool_policy: { mode: string; firstPartyMode?: string; firstPartyAdditions?: string[] };
           first_party_mcp_tools: string[];
           first_party_mcp_permissions: string[] | null;
           initial_message: string;
@@ -1794,6 +1779,16 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       );
       expect(new Set(session!.first_party_mcp_tools).size).toBe(
         session!.first_party_mcp_tools.length,
+      );
+      // Built-ins follow the workspace defaults (so later built-ins arrive);
+      // the Slack read tools are guaranteed on top rather than frozen in.
+      expect(session!.tool_policy.firstPartyMode).toBe("workspace_default");
+      expect(session!.tool_policy.firstPartyAdditions).toEqual(
+        trigger === "reaction"
+          ? undefined
+          : SLACK_READ_ONLY_CONTEXT_TOOLS.filter(
+              (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+            ),
       );
       // An explicitly chosen model narrows nothing and still carries over.
       expect(session!.reasoning_effort).toBe("high");
@@ -2627,7 +2622,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
   test("a routed workspace the person cannot reach never falls back to another one", async () => {
     if (!available) return;
-    // The headline rule: OpenGeni does not quietly serve this from a workspace
+    // The headline rule: Opengeni does not quietly serve this from a workspace
     // the person does happen to belong to.
     const value = await fixture({
       slackWorkspaceRouting: true,
@@ -3323,7 +3318,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Opengeni started this task> from the :genie: reaction\. If the request is unclear, Opengeni will ask in this thread\. Reply here to continue, or reply `stop` to stop\.$/u,
     );
     expect(value.slack.posts[0]!.blocks).toBeNull();
-    expect(value.slack.posts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(value.slack.posts[0]!.text).not.toContain("Open in Opengeni");
 
     const postsBeforeCompletion = value.slack.posts.length;
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
@@ -3354,7 +3349,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(completionPosts[0]!.text).not.toContain("Reply in this thread");
     expect(completionPosts[0]!.text).not.toContain("Make recurring");
     expect(completionPosts[0]!.text).not.toContain("Compare the logs");
-    expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(completionPosts[0]!.text).not.toContain("Open in Opengeni");
     expect(completionPosts[0]!.text).not.toContain("/sessions/");
 
     const [session] = await shared!.admin<
@@ -3381,7 +3376,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "Execute a direct, safe, sufficiently specified request immediately",
     );
     expect(session!.initial_message).toContain("Ask one concise clarifying question only when");
-    expect(session!.initial_message).toContain("Do not infer permission to ingest or persist");
+    expect(session!.instructions).toContain("accepted learning policy and scope");
     expect(session!.initial_message).toContain("bounded Slack context limit");
     const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
       select
@@ -4694,7 +4689,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.posts[0]!.text.split("\n\n")[0]).toMatch(
       /^<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Opengeni started this task>\.$/u,
     );
-    expect(value.slack.posts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(value.slack.posts[0]!.text).not.toContain("Open in Opengeni");
     expect(value.slack.posts[0]!.text).not.toContain("Using connectors:");
     expect(value.slack.posts[0]!.text).toContain("First time here:");
     const firstAckPostCount = value.slack.posts.length;
@@ -4933,6 +4928,121 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ]);
   }, 60_000);
 
+  test("refuses a thread reply while a secret question is pending (AC-5)", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const rootTimestamp = "1712600000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_SECRET_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_SECRET_REPLY",
+            ts: rootTimestamp,
+            text: "Sign in to the CRM for me",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [interaction] = await interactions(value.owner.workspaceId);
+    if (!interaction) throw new Error("Slack route was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      workflowId: `session-${interaction.session_id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
+    const requestId = crypto.randomUUID();
+    const questions: HumanInputQuestion[] = [
+      {
+        id: "secret_1",
+        kind: "secret",
+        prompt: "Enter the password for CRM.",
+        options: [],
+        required: true,
+        allowOther: false,
+        secret: { item: "CRM", field: "password", saveTo: "user" },
+      } as HumanInputQuestion,
+    ];
+    const settled = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [],
+        humanInputRequests: [
+          {
+            id: requestId,
+            toolCallId: "slack-secret",
+            questions,
+            allowSkip: true,
+            expiresAt: null,
+          },
+        ],
+      },
+      events: [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: requestId, questions, allowSkip: true, expiresAt: null } },
+        },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+    await drainAll(value.deps);
+    const card = value.slack.postAttempts.find((post) => post.text.includes("Enter the password"));
+    expect(card?.text).toContain("Answer in Opengeni");
+    expect(card?.text).not.toContain("Reply in this thread");
+
+    const pasted = "canary-slack-pasted-9d1e";
+    const replyEventId = `E_DM_SECRET_REPLY_${crypto.randomUUID()}`;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: replyEventId,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: "D_SECRET_REPLY",
+            ts: "1712600000.000002",
+            thread_ts: rootTimestamp,
+            text: pasted,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const leaked = await shared!.admin<Array<{ type: string }>>`
+      select type from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${interaction.session_id}
+        and payload::text like ${`%${pasted}%`}`;
+    expect(leaked).toEqual([]);
+    const [request] = await shared!.admin<Array<{ status: string }>>`
+      select status from session_human_input_requests where id = ${requestId}`;
+    expect(request?.status).toBe("pending");
+    const refusal = value.slack.postAttempts.at(-1)!;
+    expect(refusal.threadTimestamp).toBe(rootTimestamp);
+    expect(refusal.text).toContain("can only be answered in Opengeni");
+    expect(refusal.text).not.toContain(pasted);
+  }, 60_000);
+
   test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
     if (!available) return;
     const value = await fixture({
@@ -5005,7 +5115,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
             user: value.ownerSlackUserId,
             channel: "D_PRIVATE",
             ts: "1710000002.000001",
-            text: "Use my current OpenGeni model",
+            text: "Use my current Opengeni model",
           },
         })
       ).status,
@@ -5255,7 +5365,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
             user: value.ownerSlackUserId,
             channel: "D_PRIVATE",
             ts: "1710000002.000001",
-            text: "Use my current OpenGeni model",
+            text: "Use my current Opengeni model",
           },
         })
       ).status,
@@ -5465,7 +5575,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         {
           ts: rootTimestamp,
           user: value.ownerSlackUserId,
-          text: "Do we support Google Drive integration in OpenGeni currently?",
+          text: "Do we support Google Drive integration in Opengeni currently?",
         },
         {
           ts: mentionTimestamp,
@@ -5510,7 +5620,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       limit 1`;
     expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can check this out?`);
     expect(initialMessage!.model_context).toContain(
-      "Do we support Google Drive integration in OpenGeni currently?",
+      "Do we support Google Drive integration in Opengeni currently?",
     );
     expect(initialMessage!.model_context).not.toContain("Can check this out?");
 
@@ -5957,7 +6067,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     // Byte for byte what the previous release posted: a separate session link,
     // the previous one-time hint, and the Status and Stop buttons.
-    const legacyText = `OpenGeni started this task. <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${sessionId}|Open in OpenGeni>\n\nFirst time here: reply in this thread to continue this task, or reply \`stop\` to stop it. Start a new top-level DM or run \`/opengeni\` again for a new task. Run \`/opengeni info\` any time for the full summary.`;
+    const legacyText = `Opengeni started this task. <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${sessionId}|Open in Opengeni>\n\nFirst time here: reply in this thread to continue this task, or reply \`stop\` to stop it. Start a new top-level DM or run \`/opengeni\` again for a new task. Run \`/opengeni info\` any time for the full summary.`;
     expect(ack.text).toBe(legacyText);
     expect(ack.clientMessageId).toBe(deterministicUuidForTest(`slack-ack:${interactionId}`));
     const statusHandle = await pendingHandle(ack, "session_status");
@@ -6011,13 +6121,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       handleId: statusHandle,
       actionTs: "1760000000.000002",
     });
-    expect(ack.text).toContain("OpenGeni task status:");
+    expect(ack.text).toContain("Opengeni task status:");
     expect(ack.text).toContain("First time here: reply in this thread to continue this task");
     expect(value.slack.posts).toHaveLength(2);
     expect(value.slack.posts[1]).toMatchObject({
       channel: channelId,
       threadTimestamp: rootTimestamp,
-      text: "OpenGeni task controls.",
+      text: "Opengeni task controls.",
     });
     const handles = await shared!.admin<
       { action_kind: string; status: string; result: string | null }[]
@@ -6293,7 +6403,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where id = ${route!.id}`;
     expect(value.slack.posts).toHaveLength(2);
     const older = value.slack.posts[1]!;
-    expect(older.text).toContain("|Open in OpenGeni>");
+    expect(older.text).toContain("|Open in Opengeni>");
 
     await pressSlackButton(value, {
       post: older,
@@ -6302,9 +6412,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       handleId: await pendingHandle(older, "session_pause"),
       actionTs: "1760500000.000002",
     });
-    expect(older.text).toBe("OpenGeni task paused.");
+    expect(older.text).toBe("Opengeni task paused.");
     const card = value.slack.posts.at(-1)!;
-    expect(card.text).toBe("OpenGeni task controls.");
+    expect(card.text).toBe("Opengeni task controls.");
     await pendingHandle(card, "session_resume");
   }, 60_000);
 
@@ -7148,17 +7258,17 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     // only copy of the hint this Slack identity ever sees would be destroyed by
     // the very button the hint invites them to press.
     await pressStatus(acknowledgement, "1768000000.000002");
-    expect(acknowledgement.text).toContain("OpenGeni task status:");
+    expect(acknowledgement.text).toContain("Opengeni task status:");
     expect(acknowledgement.text).toContain("First time here:");
     expect(acknowledgement.text).not.toContain("Using connectors:");
 
     // The control card posted afterwards is not the acknowledgement, so the
     // hint still appears exactly once.
     const controlCard = value.slack.posts.at(-1)!;
-    expect(controlCard.text).toContain("OpenGeni task controls");
+    expect(controlCard.text).toContain("Opengeni task controls");
     expect(controlCard.text).not.toContain("First time here:");
     await pressStatus(controlCard, "1768000000.000003");
-    expect(controlCard.text).toContain("OpenGeni task status:");
+    expect(controlCard.text).toContain("Opengeni task status:");
     expect(controlCard.text).not.toContain("First time here:");
     expect(controlCard.text).not.toContain("Using connectors:");
   }, 60_000);
@@ -7299,7 +7409,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
 
     const [route] = await interactions(value.owner.workspaceId);
-    expect(acknowledgement.text).toContain("OpenGeni task status:");
+    expect(acknowledgement.text).toContain("Opengeni task status:");
     expect(acknowledgement.text).toContain(
       `<https://app.example.test/workspaces/${value.owner.workspaceId}/schedules?sourceSessionId=${route!.session_id}|Make recurring>`,
     );
@@ -7495,7 +7605,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(unlinkedBody.text).not.toContain("Slack interactions");
     expect(unlinkedBody.text).not.toContain("Where work lands");
 
-    // A linked identity whose OpenGeni subject holds no live workspace grant
+    // A linked identity whose Opengeni subject holds no live workspace grant
     // is told to request access, never given workspace-identifying text.
     const revokedSlackUserId = `U_REVOKED_${crypto.randomUUID()}`;
     await saveSlackBotUserLink(client.db, {
@@ -7552,7 +7662,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       channel: { id: "C_SHORTCUT" },
       message: {
         ts: "1725000000.000001",
-        text: "Explicitly send this channel message to OpenGeni",
+        text: "Explicitly send this channel message to Opengeni",
       },
     });
     const shortcut = new URLSearchParams({
@@ -7674,7 +7784,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         channel: { id: sourceDm },
         message: {
           ts: "1725000000.000001",
-          text: "Explicitly send this human DM message to OpenGeni",
+          text: "Explicitly send this human DM message to Opengeni",
         },
       });
       return await value.app.request(
@@ -9065,7 +9175,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "completed",
     );
     expect(
-      value.slack.posts.some((post) => post.text.includes("OpenGeni finished this task.")),
+      value.slack.posts.some((post) => post.text.includes("Opengeni finished this task.")),
     ).toBe(false);
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
   });
@@ -9101,7 +9211,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     const posts = value.slack.posts.slice(initialPosts);
     expect(posts).toHaveLength(1);
-    expect(posts[0]!.text).toContain("OpenGeni reached a billing or usage limit.");
+    expect(posts[0]!.text).toContain("Opengeni reached a billing or usage limit.");
     expect(posts[0]!.text).toContain(
       "Ask your organization owner to check credits and usage limits, then reply in this thread to resume.",
     );
@@ -9230,7 +9340,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
     expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
-    expect(delivered.at(-1)?.text).not.toContain("Open in OpenGeni");
+    expect(delivered.at(-1)?.text).not.toContain("Open in Opengeni");
     expect(delivered.at(-1)?.text).not.toContain("/sessions/");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
     const progressLedger = await shared!.admin<
@@ -9318,7 +9428,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const resultPosts = value.slack.posts.slice(postsBeforeResult);
     expect(resultPosts).toHaveLength(1);
     expect(resultPosts[0]!.text).toBe("Production-shaped final result");
-    expect(resultPosts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(resultPosts[0]!.text).not.toContain("Open in Opengeni");
     expect(resultPosts[0]!.text).not.toContain("/sessions/");
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
@@ -9787,7 +9897,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       [
         "A worker you started needs input.",
         "> Which environment should I deploy to? (+1 more)",
-        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in Opengeni>`,
       ].join("\n"),
     );
     expect(delivered[0]!.threadTimestamp).toBe("1770000000.000001");
@@ -9928,7 +10038,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const [route] = await interactions(value.owner.workspaceId);
     const postsBefore = value.slack.posts.length;
     const goalId = crypto.randomUUID();
-    const sessionLink = `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`;
+    const sessionLink = `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in Opengeni>`;
 
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       { type: "goal.paused", payload: { goalId, actor: "system", reason: "limits" } },
@@ -10076,7 +10186,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       [
         "A worker you started needs input.",
         "> Which environment should I deploy to?",
-        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in Opengeni>`,
       ].join("\n"),
     ]);
   }, 60_000);
@@ -10287,9 +10397,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       [
         "A worker you started needs input.",
         "> Which environment should I deploy to?",
-        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in Opengeni>`,
       ].join("\n"),
-      `Goal paused (continuation cap). <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`,
+      `Goal paused (continuation cap). <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in Opengeni>`,
     ]);
   }, 60_000);
 });

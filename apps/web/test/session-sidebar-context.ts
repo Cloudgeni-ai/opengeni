@@ -1,9 +1,14 @@
 // Preview-only data/context wiring. SessionList, its hooks, and its styles are real.
-import type { OpenGeniClient, SessionListPageOptions } from "@opengeni/sdk";
+import type {
+  OpenGeniClient,
+  SessionListPageOptions,
+  WorkspaceLiveStreamOptions,
+  WorkspaceSessionListEvent,
+} from "@opengeni/sdk";
 import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
-import type { AppContextValue } from "../src/context";
-import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
-import type { Session } from "../src/types";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
+import type { Session } from "@opengeni/react/app/types";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const subjectId = "sidebar-preview";
@@ -141,6 +146,127 @@ if (previewParameters.get("scenario") === "keyboard-focus") {
   );
 }
 
+if (previewParameters.get("scenario") === "hover") {
+  // Sample data for the sidebar hover preview. Every fact below is a field the
+  // real compact list row carries; the values are illustrative.
+  const activeControl = {
+    state: "active",
+    controlVersion: 1,
+    controlEtag: "preview",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const stats = (overrides: Record<string, number | boolean> = {}) => ({
+    directChildren: 0,
+    totalDescendants: 0,
+    runningDescendants: 0,
+    queuedDescendants: 0,
+    waitingDescendants: 0,
+    attentionDescendants: 0,
+    pausedDescendants: 0,
+    failedDescendants: 0,
+    unreadDescendants: 0,
+    unreadFailedDescendants: 0,
+    truncated: false,
+    ...overrides,
+  });
+  const hoverRow = (
+    number: number,
+    title: string,
+    age: number,
+    overrides: Partial<Session> & Record<string, unknown>,
+    createdBy: Session["createdBy"] = alex,
+  ): Session =>
+    ({
+      ...session(number, title, null, age, createdBy),
+      effectiveControl: activeControl,
+      treeStats: stats(),
+      ...overrides,
+    }) as Session;
+  const working = hoverRow(3001, "Astra strategy takeover - preserve and improve Grocery Bot", 2, {
+    status: "running",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "max",
+    backgroundCommandActivity: { state: "running", count: 2 },
+    treeStats: stats({
+      directChildren: 5,
+      totalDescendants: 5,
+      runningDescendants: 2,
+      attentionDescendants: 1,
+      pausedDescendants: 1,
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+    }),
+  });
+  const needsYou = hoverRow(3002, "Approve the staging database migration", 6, {
+    status: "requires_action",
+    requiresActionSince: timeBefore(24),
+    model: "organization-claude-subscription/claude-opus-5-5",
+    reasoningEffort: "high",
+  });
+  const waiting = hoverRow(3003, "Watch the nightly import and verify row counts", 9, {
+    status: "idle",
+    inputWait: {
+      deadlineAt: new Date(now + 35 * 60_000).toISOString(),
+      reason: "Waiting for the nightly import to finish before checking the row counts.",
+    },
+    model: "codex/gpt-6.1-sol",
+    reasoningEffort: "xhigh",
+  });
+  const parent = hoverRow(3004, "Grocery Bot setup", 14, {
+    status: "idle",
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "paused",
+      primaryBlocker: {
+        kind: "session",
+        sessionId: "00000000-0000-4000-9000-000000003004",
+        displayName: "Grocery Bot setup",
+        actor: "Alex Morgan",
+        reason: "Holding until the store API key is rotated.",
+        changedAt: timeBefore(12),
+        revision: 1,
+      },
+    },
+    treeStats: stats({ directChildren: 1, totalDescendants: 1, pausedDescendants: 1 }),
+  });
+  const pausedChild = hoverRow(3005, "Compare grocery prices across three stores", 13, {
+    status: "idle",
+    parentSessionId: parent.id,
+    rootSessionId: parent.id,
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "medium",
+    effectiveControl: {
+      ...activeControl,
+      state: "paused",
+      directState: "active",
+      primaryBlocker: parent.effectiveControl.primaryBlocker,
+    },
+  });
+  const finished = hoverRow(
+    3006,
+    "Quarterly cloud cost report",
+    48,
+    {
+      status: "idle",
+      unread: true,
+      hasSchedules: true,
+      model: "codex/gpt-6-astra",
+      reasoningEffort: "medium",
+    },
+    jamie,
+  );
+  rows.splice(0, rows.length, working, needsYou, waiting, parent, pausedChild, finished);
+}
+
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
 export type SessionSidebarEvidence = {
   listCalls: {
@@ -162,8 +288,12 @@ export type SessionSidebarEvidence = {
   failCursor: string | null;
   failTodayCursor: string | null;
   holdTodayCursor: string | null;
+  holdChannelId: string | null;
+  holdChannelCursor: string | null;
   heldPageStarted: boolean;
   releaseHeldPage: () => void;
+  /** `?hints=1` only: another device archives a row and the server sends its commit hint. */
+  archiveRemotely: (sessionId: string) => void;
   snapshot: () => Session[];
 };
 
@@ -174,8 +304,19 @@ export const evidence: SessionSidebarEvidence = {
   failCursor: null,
   failTodayCursor: null,
   holdTodayCursor: null,
+  holdChannelId: null,
+  holdChannelCursor: null,
   heldPageStarted: false,
   releaseHeldPage: () => {},
+  archiveRemotely: (sessionId) => {
+    const row = rows.find((candidate) => candidate.id === sessionId);
+    if (!row) throw new Error("Preview session not found");
+    row.archived = true;
+    row.archivedAt = new Date().toISOString();
+    row.archiveVersion = (row.archiveVersion ?? 0) + 1;
+    row.updatedAt = row.archivedAt;
+    publishHint([sessionId]);
+  },
   snapshot: () => structuredClone(rows),
 };
 
@@ -244,8 +385,16 @@ export const client = {
     };
     evidence.listCalls.push(call);
     const todayPage = options.updatedFrom !== undefined && options.updatedBefore === undefined;
-    if (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor) {
+    const heldChannelPage =
+      evidence.holdChannelId !== null &&
+      options.channelId === evidence.holdChannelId &&
+      (options.cursor ?? null) === evidence.holdChannelCursor;
+    if (
+      heldChannelPage ||
+      (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor)
+    ) {
       evidence.holdTodayCursor = null;
+      evidence.holdChannelId = null;
       evidence.heldPageStarted = true;
       await new Promise<void>((resolve) => {
         evidence.releaseHeldPage = resolve;
@@ -309,12 +458,56 @@ client.listSessionSummaryPage = async (workspace, options) => {
   };
 };
 
+// `?hints=1` serves the workspace live stream, so the sidebar runs in commit
+// hint mode: no list polling, and only a published hint invalidates rows.
+const pendingHints: WorkspaceSessionListEvent[] = [];
+let wakeHintStream = () => {};
+function publishHint(sessionIds: string[] | null) {
+  pendingHints.push({
+    type: "workspace.sessions.changed",
+    workspaceId,
+    available: true,
+    sessionIds,
+  });
+  wakeHintStream();
+}
+if (previewParameters.has("hints")) {
+  Object.assign(client, {
+    getClientConfig: async () => ({}),
+    getWorkspace: async (id: string) => ({ id, inferenceControl: { revision: 0 } }),
+    streamWorkspaceLiveEvents: async function* (
+      workspace: string,
+      options: WorkspaceLiveStreamOptions = {},
+    ) {
+      options.onStateChange?.("live");
+      yield {
+        type: "workspace.sessions.changed",
+        workspaceId: workspace,
+        available: true,
+        sessionIds: null,
+      } satisfies WorkspaceSessionListEvent;
+      while (!options.signal?.aborted) {
+        const hint = pendingHints.shift();
+        if (hint) {
+          yield hint;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wakeHintStream = resolve;
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+    },
+  });
+}
+
 const invocation = { workspaceId };
 const context = {
   client,
   session: null,
   accessContext: { subjectId },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
+  clientConfig: {},
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},

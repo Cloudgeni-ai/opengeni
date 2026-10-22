@@ -17,6 +17,7 @@ import {
   useEmbeddedComputerInteraction,
 } from "../session-context";
 import { usePageLiveActivity } from "./internal";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 // Keep caller promises intact while fencing their later viewer side effects.
 // These local fences never become part of an operation receipt on the wire.
@@ -24,8 +25,10 @@ const actionResultFences = new WeakMap<object, () => boolean>();
 export function isStaleComputerActionResult(value: unknown): boolean {
   return typeof value === "object" && value !== null && actionResultFences.get(value)?.() === false;
 }
-export function computerActionReceiptError(receipt: ComputerActionReceipt): Error {
-  const error = new Error(receipt.error?.message ?? "Desktop input did not complete.");
+export function computerActionReceiptError(t: OpenGeniText, receipt: ComputerActionReceipt): Error {
+  const error = new Error(
+    receipt.error?.message ?? t("hooks.useComputerSession.desktopInputDidNotComplete"),
+  );
   const fence = actionResultFences.get(receipt);
   if (fence) actionResultFences.set(error, fence);
   return error;
@@ -64,6 +67,7 @@ export type UseComputerSessionResult = {
 /** Selected ComputerSession state. Semantic and pixel input share the same
  * generation-fenced controller operation stream used by agents. */
 export function useComputerSession(options: UseComputerSessionOptions): UseComputerSessionResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedComputerInteraction(options);
   const computerSessionId = options.computerSessionId;
   const enabled = (options.enabled ?? true) && computerSessionId !== null;
@@ -161,6 +165,9 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       if (!isCurrentSource() || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
       const selected = chooseTarget(targets, selectedTargetIdRef.current);
+      // A closed window must not silently redirect viewing or input to another
+      // application. Retain the choice until the person selects a new target.
+      const selectedId = selected?.id ?? selectedTargetIdRef.current;
       // Discovery is useful independently of semantic observation. Publish it
       // now so a slow/unresponsive application cannot block the frame stream
       // or prevent the person from choosing a different window or screen.
@@ -173,7 +180,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         previous.target.targetGeneration === selected.targetGeneration
           ? previous
           : null;
-      selectedTargetIdRef.current = selected?.id ?? null;
+      selectedTargetIdRef.current = selectedId;
       targetsRef.current = { source, computerSessionId, targets };
       observationRef.current = { source, computerSessionId, observation: retainedObservation };
       setState((current) =>
@@ -184,7 +191,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
               ...current,
               session,
               targets,
-              selectedTargetId: selected?.id ?? null,
+              selectedTargetId: selectedId,
               observation: retainedObservation,
               loading: false,
               error: null,
@@ -198,7 +205,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
           })
         : null;
       if (!isCurrentSource() || requestRef.current.id !== id) return;
-      selectedTargetIdRef.current = selected?.id ?? null;
+      selectedTargetIdRef.current = selectedId;
       targetsRef.current = { source, computerSessionId, targets };
       observationRef.current = { source, computerSessionId, observation };
       setState((current) =>
@@ -209,7 +216,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
               ...current,
               session,
               targets,
-              selectedTargetId: selected?.id ?? null,
+              selectedTargetId: selectedId,
               observation,
               loading: false,
               error: null,
@@ -288,7 +295,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
 
   const runMutation = useCallback(
     async <T>(scopeComputerSessionId: string, operation: () => Promise<T>): Promise<T> => {
-      if (!isCurrentSource()) throw new Error("The desktop source is no longer selected.");
+      if (!isCurrentSource()) throw new Error(t("hooks.useComputerSession.theDesktopSourceIsNo"));
       invalidateRefresh();
       if (
         mutationRef.current.computerSessionId !== scopeComputerSessionId ||
@@ -327,18 +334,18 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         }
       }
     },
-    [invalidateRefresh, isCurrentSource, source],
+    [invalidateRefresh, isCurrentSource, source, t],
   );
 
   const selectTarget = useCallback(
     async (targetId: string): Promise<ComputerTarget> => {
-      if (!computerSessionId) throw new Error("No desktop is selected.");
-      if (!isCurrentSource()) throw new Error("The desktop source is no longer selected.");
+      if (!computerSessionId) throw new Error(t("hooks.useComputerSession.noDesktopIsSelected"));
+      if (!isCurrentSource()) throw new Error(t("hooks.useComputerSession.theDesktopSourceIsNo"));
       const target =
         targetsRef.current.source === source
           ? targetsRef.current.targets.find((candidate) => candidate.id === targetId)
           : null;
-      if (!target) throw new Error("The selected desktop target is no longer available.");
+      if (!target) throw new Error(t("hooks.useComputerSession.theSelectedDesktopTargetIs"));
       invalidateRefresh();
       const readRequestId = requestRef.current.id;
       const selectionRevision = ++selectionRevisionRef.current;
@@ -401,7 +408,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         throw error;
       }
     },
-    [client, computerSessionId, invalidateRefresh, isCurrentSource, source, workspaceId],
+    [client, computerSessionId, invalidateRefresh, isCurrentSource, source, workspaceId, t],
   );
 
   const dispatchAction = useCallback(
@@ -410,8 +417,8 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       operationId: string,
       frame: ComputerFrame | null,
     ): Promise<ComputerActionReceipt> => {
-      if (!computerSessionId) throw new Error("No desktop is selected.");
-      if (!isCurrentSource()) throw new Error("The desktop source is no longer selected.");
+      if (!computerSessionId) throw new Error(t("hooks.useComputerSession.noDesktopIsSelected"));
+      if (!isCurrentSource()) throw new Error(t("hooks.useComputerSession.theDesktopSourceIsNo"));
       if (frame && frame.computerSessionId !== computerSessionId) {
         throw new Error("The displayed desktop frame belongs to another desktop session.");
       }
@@ -444,7 +451,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         frameTarget ?? focusTarget ?? currentObservation?.target ?? inputTarget ?? null;
       if (!target) throw new Error("The desktop target is not ready for input.");
       if (frame && frame.targetId !== selectedTargetIdRef.current) {
-        throw new Error("The displayed desktop frame is no longer selected.");
+        throw new Error(t("hooks.useComputerSession.theDisplayedDesktopFrameIs"));
       }
       if (
         frame &&
@@ -597,6 +604,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       runMutation,
       source,
       workspaceId,
+      t,
     ],
   );
 
@@ -618,7 +626,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
   );
 
   const readClipboard = useCallback(async (): Promise<ComputerClipboard> => {
-    if (!computerSessionId) throw new Error("No desktop is selected.");
+    if (!computerSessionId) throw new Error(t("hooks.useComputerSession.noDesktopIsSelected"));
     const selectionRevision = selectionRevisionRef.current;
     const settledOrder = actionResultOrderRef.current.settled;
     const selectedTargetId = selectedTargetIdRef.current;
@@ -661,7 +669,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       );
       throw error;
     }
-  }, [client, computerSessionId, isCurrentSource, source, workspaceId]);
+  }, [client, computerSessionId, isCurrentSource, source, workspaceId, t]);
 
   return {
     session: visible.session,
@@ -723,8 +731,7 @@ function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
 ): ComputerTarget | null {
-  const preferred = targets.find((target) => target.id === preferredId);
-  if (preferred) return preferred;
+  if (preferredId !== null) return targets.find((target) => target.id === preferredId) ?? null;
   return (
     targets.find((target) => target.focused && target.kind === "screen") ??
     targets.find((target) => target.kind === "screen") ??

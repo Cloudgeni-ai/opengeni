@@ -6,6 +6,7 @@
 // time — one cached client, correct per-workspace token, no cross-tenant leak.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { CodexRequestTransport } from "./responses-websocket";
 
 export type CodexTokenSnapshot = {
   accessToken: string;
@@ -54,6 +55,8 @@ export type CodexModelRequestEvent = {
   phase: "started" | "headers" | "first_byte" | "completed" | "failed" | "timed_out";
   model?: string;
   durationMs: number;
+  /** Request audit start to actual transport dispatch, excluding provider time. */
+  dispatchDelayMs?: number;
   responseObserved: boolean;
   timeoutPolicy: CodexResponseTimeoutPolicy;
   timeoutClass?: CodexResponseTimeoutClass;
@@ -62,6 +65,8 @@ export type CodexModelRequestEvent = {
   willRetry?: boolean;
   /** Only true for a successful response with substantive assistant/tool output. */
   meaningfulOutput?: boolean;
+  /** How the request was carried; reported once its response headers arrive. */
+  transport?: CodexRequestTransport;
 };
 
 export type CodexRequestOpaqueArtifacts = {
@@ -74,7 +79,18 @@ export type CodexRequestOpaqueArtifacts = {
  * dispatched. Errors are intentionally not classified here: the owning worker
  * must receive typed lease-loss failures unchanged.
  */
-export type CodexBeforeProviderDispatch = () => Promise<void> | void;
+export type CodexProviderRequestIdentity = { requestId: string; transportAttempt: number };
+
+export type CodexProviderRequestSettlement = CodexProviderRequestIdentity & {
+  /** Transport evidence only; response_received is NOT a durable history checkpoint. */
+  outcome: "response_received" | "refused" | "unknown";
+};
+
+// The optional argument preserves credit-admission consumers (notably images)
+// which do not dispatch through the Responses transport and own their own fence.
+export type CodexBeforeProviderDispatch = (
+  request?: CodexProviderRequestIdentity,
+) => Promise<void> | void;
 
 export type CodexRequestPreparationPhase =
   | "transport_entry"
@@ -83,19 +99,16 @@ export type CodexRequestPreparationPhase =
 
 export type CodexRequestContext = {
   clientVersion: string;
-  /**
-   * Stable per-session affinity id, sent as the `session_id` header on every
-   * request. This is the backend's STICKY CACHE-ROUTING key — measured
-   * 2026-07-12 with byte-identical ~99k-token gpt-5.6-sol requests on one idle
-   * account: without the header, repeat requests hit the prompt cache ~50% of
-   * the time (a per-request routing lottery across cache shards; matches the
-   * prod fleet's 48.6%); with a stable session_id, 10/10 requests hit at the
-   * 99.0% ceiling — Codex CLI parity (the CLI always sends it; its own last-3d
-   * token-weighted rate here is 94%). `prompt_cache_key` in the body only
-   * influences routing and does NOT pin it. Use the SAME value as
-   * prompt_cache_key (the OpenGeni sessionId) so routing and cache key agree.
-   */
+  /** Actual session identity; also the legacy affinity fallback. */
   sessionId?: string;
+  /**
+   * Stable cache-sharing cohort, sent as the Codex Responses `session_id`
+   * header, including WebSocket warm-up. Independent of session identity,
+   * body prompt_cache_key and conversation-scoped socket/continuation state.
+   * A familiar prefix can then be reused by a new session in the same cohort.
+   * This is an affinity hint, not a guarantee against eviction or overflow.
+   */
+  cacheAffinityKey?: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */
   getToken: () => Promise<CodexTokenSnapshot>;
   /** Forced refresh used for the 401 retry. */
@@ -109,6 +122,8 @@ export type CodexRequestContext = {
    * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
    */
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
+  /** Awaited best-effort sink for every actual reading, independently of latest-only caches. */
+  persistUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => Promise<void>;
   /** Optional per-run override, primarily for deterministic transport tests. */
   responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
   /**
@@ -128,6 +143,8 @@ export type CodexRequestContext = {
    * immediately before each actual provider dispatch, including auth retries.
    */
   beforeProviderDispatch?: CodexBeforeProviderDispatch;
+  /** Independent of audit delivery. Unknown never proves physical quiescence. */
+  onProviderRequestSettled?: (request: CodexProviderRequestSettlement) => Promise<void> | void;
   /** Stable request identity supplied by the owning durable execution. */
   nextRequestId?: () => string;
   /**

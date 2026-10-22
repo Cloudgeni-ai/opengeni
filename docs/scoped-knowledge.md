@@ -229,7 +229,7 @@ account. Opaque cursors are bound to the account, evidence kind, and run where
 applicable. The database uses a target-schema-local exact-token capability with
 SELECT-only policies, so a read cannot reuse the destructive migration
 capability, cannot write an evidence table, and cannot collide with another
-OpenGeni schema in the same database. Expected scope, cursor, limit, and missing
+Opengeni schema in the same database. Expected scope, cursor, limit, and missing
 run failures are mapped to typed HTTP errors.
 
 One run writes a receipt for **every** workspace in the account, so those

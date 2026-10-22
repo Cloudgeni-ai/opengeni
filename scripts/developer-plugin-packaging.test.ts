@@ -74,7 +74,7 @@ function isOrganizationMcpUrl(value: unknown): value is string {
   }
 }
 
-describe("shared OpenGeni package", () => {
+describe("shared Opengeni package", () => {
   test("one identity uses default contained skills and compatible manifests", () => {
     const claude = json("plugins/opengeni/.claude-plugin/plugin.json");
     const portable = json("plugins/opengeni/plugin.json");

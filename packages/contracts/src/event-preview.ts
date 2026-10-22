@@ -15,6 +15,18 @@ import {
 
 export const SESSION_EVENT_PAYLOAD_MAX_BYTES = 64 * 1024;
 
+/**
+ * Durable ceiling for one `agent.toolCall.output` event. The event is the
+ * human/audit record of a tool result; model history keeps its own truncated
+ * copy separately. A tool can return far more than anyone ever sees (a shell
+ * command printing a 45 MB line, for example), and storing that inline made
+ * every later history read load it whole. The budget comfortably exceeds the
+ * model-facing tool-output truncation, so the timeline never shows less than
+ * the model saw.
+ */
+export const TOOL_CALL_OUTPUT_EVENT_MAX_BYTES = 256 * 1024;
+const TOOL_CALL_OUTPUT_EVENT_STRING_BYTES = 64 * 1024;
+
 const TARGET_PAYLOAD_BYTES = 60 * 1024;
 const DEFAULT_STRING_BYTES = 8 * 1024;
 const RETRY_STRING_BYTES = 1024;
@@ -90,6 +102,11 @@ export type SessionEventPayloadTruncation = {
 export type BoundSessionEventPayloadOptions = {
   surface?: SessionEventBoundarySurface;
   maxBytes?: number;
+  /**
+   * Per-string head+tail budget once the payload must be bounded. Defaults to
+   * the compact preview budget; larger budgets keep the byte target at maxBytes.
+   */
+  stringBytes?: number;
   /**
    * Separately trusted durable receipt. Producer payload fields never populate
    * this slot; invalid values fail closed to not_retained.
@@ -195,12 +212,23 @@ export function boundSessionEventPayload<T>(
 ): T {
   const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? SESSION_EVENT_PAYLOAD_MAX_BYTES));
   const surface = options.surface ?? "durable_audit";
+  const customStringBytes =
+    options.stringBytes === undefined
+      ? null
+      : Math.max(RETRY_STRING_BYTES, Math.floor(options.stringBytes));
+  const stringBytes = customStringBytes ?? DEFAULT_STRING_BYTES;
+  const retryStringBytes =
+    customStringBytes === null
+      ? RETRY_STRING_BYTES
+      : Math.max(RETRY_STRING_BYTES, Math.floor(customStringBytes / 8));
+  const targetBytes =
+    customStringBytes === null ? Math.min(maxBytes, TARGET_PAYLOAD_BYTES) : maxBytes;
   const fullEvidence =
     validateRetainedOutputEvidence(options.fullEvidence) ?? retainedOutputUnavailable();
   const originalMeasurement = measureJsonBytes(payload);
   const originalBytes = originalMeasurement.bytes;
 
-  let state = previewState(DEFAULT_STRING_BYTES, DEFAULT_ARRAY_ENTRIES, DEFAULT_OBJECT_FIELDS);
+  let state = previewState(stringBytes, DEFAULT_ARRAY_ENTRIES, DEFAULT_OBJECT_FIELDS);
   let preview = previewValue(payload, state, "$", 0);
   if (!state.changed && originalBytes !== null && originalBytes <= maxBytes) {
     return payload;
@@ -212,8 +240,8 @@ export function boundSessionEventPayload<T>(
     boundaryMetadata(surface, reason, originalBytes, state, fullEvidence),
   );
 
-  if (sessionEventJsonBytes(bounded) > Math.min(maxBytes, TARGET_PAYLOAD_BYTES)) {
-    state = previewState(RETRY_STRING_BYTES, RETRY_ARRAY_ENTRIES, RETRY_OBJECT_FIELDS);
+  if (sessionEventJsonBytes(bounded) > targetBytes) {
+    state = previewState(retryStringBytes, RETRY_ARRAY_ENTRIES, RETRY_OBJECT_FIELDS);
     preview = previewValue(payload, state, "$", 0);
     reason = payloadTruncationReason(originalMeasurement, state);
     bounded = attachTruncation(
@@ -241,6 +269,28 @@ export function boundSessionEventPayload<T>(
 
   settleDeliveredSizes(bounded, maxBytes);
   return bounded as T;
+}
+
+/**
+ * Write-time bound for durable session events. Only tool-call output has an
+ * unbounded producer; it is kept intact up to TOOL_CALL_OUTPUT_EVENT_MAX_BYTES
+ * and otherwise stored as an explicit head+tail preview whose `truncation`
+ * records the original size. Every other event type is returned unchanged.
+ */
+export function boundSessionEventPayloadForWrite<T>(type: string, payload: T): T {
+  if (type !== "agent.toolCall.output") return payload;
+  let bytes: number | null;
+  try {
+    bytes = sessionEventJsonBytes(payload);
+  } catch {
+    bytes = null;
+  }
+  if (bytes !== null && bytes <= TOOL_CALL_OUTPUT_EVENT_MAX_BYTES) return payload;
+  return boundSessionEventPayload(payload, {
+    surface: "durable_audit",
+    maxBytes: TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
+    stringBytes: TOOL_CALL_OUTPUT_EVENT_STRING_BYTES,
+  });
 }
 
 function previewState(

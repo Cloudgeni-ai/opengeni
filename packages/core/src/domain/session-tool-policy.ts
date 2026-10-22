@@ -1,5 +1,5 @@
 import {
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
@@ -10,9 +10,10 @@ import {
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   bundledSkillSelectionForAgentConfig,
+  CUA_DESKTOP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
-  type FirstPartyMcpToolName,
+  FirstPartyMcpToolName,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
@@ -21,6 +22,7 @@ import {
   resolveAgentMediaToolSurface,
   resolveWorkspaceAgentHumanInputEnabled,
   resolveWorkspaceSessionToolDefaults,
+  workspaceSettingsAllowCreditModels,
   type AgentFunctionToolName,
   type AgentToolEnvironment,
   type AgentMediaAttachment,
@@ -35,7 +37,7 @@ import {
   getSandbox,
   listSkillDescriptors,
   requireWorkspace,
-  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
@@ -206,6 +208,15 @@ export function scheduledTurnMcpServerIds(turn: Pick<SessionTurn, "metadata">): 
     : null;
 }
 
+/** The accepted scheduled built-in selection, including an explicit empty list. */
+export function scheduledTurnFirstPartyMcpTools(
+  turn: Pick<SessionTurn, "metadata">,
+): FirstPartyMcpToolName[] | null {
+  const value = turn.metadata?.scheduledFirstPartyMcpTools;
+  if (value === undefined) return null; // Older accepted snapshots use the stored list.
+  return FirstPartyMcpToolName.array().parse(value);
+}
+
 /**
  * Execution's canonical turn selection. Ordinary turns use the durable session
  * policy, not the queue's omitted-tools `[]`. Scheduled turns instead retain
@@ -317,6 +328,8 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /** Resolved once per distinct model in this response page, using its catalog settings. */
+  modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
 
 /**
@@ -368,19 +381,11 @@ export async function workspaceSessionEffectiveToolsContext(
           ),
         )
       : Promise.resolve([]),
-    Promise.all(
-      [...new Map(configured.map((session) => [session.id, session])).values()].map(
-        async (session) =>
-          [
-            session.id,
-            await sessionHasToolRouterHistory(deps.db, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: session.id,
-            }),
-          ] as const,
-      ),
-    ),
+    sessionsWithToolRouterHistory(deps.db, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      sessionIds: [...new Set(configured.map((session) => session.id))],
+    }),
   ]);
   return {
     ...baseline,
@@ -393,8 +398,12 @@ export async function workspaceSessionEffectiveToolsContext(
         sandbox?.kind === "selfhosted" ? [[id, "selfhosted" as const]] : [],
       ),
     ),
-    routerHistorySessionIds: new Set(
-      routerHistory.filter(([, present]) => present).map(([id]) => id),
+    routerHistorySessionIds: routerHistory,
+    modelProviders: new Map(
+      [...new Set(configured.map((session) => session.model))].map((modelId) => [
+        modelId,
+        resolveModelProviderForTurn(catalog.settings, modelId),
+      ]),
     ),
   };
 }
@@ -410,25 +419,20 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
   if (bundledSkillIds === undefined) return true;
   const tools = new Set(
     resolveAgentToolFamilies(session.agent).firstPartyTools(
-      allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
+      resolveSessionFirstPartyMcpTools(context.settings, session, context.workspaceSettings),
     ),
   );
   return bundledSkillIds.some((id) => {
-    if (
-      [
-        "builtin:opengeni-documents",
-        "builtin:opengeni-spreadsheets",
-        "builtin:opengeni-presentations",
-      ].includes(id)
-    ) {
+    if (["builtin:documents", "builtin:spreadsheets", "builtin:presentations"].includes(id)) {
       return tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
     }
-    if (id === "builtin:opengeni-sites") {
+    if (id === "builtin:sites") {
       return tools.has("artifacts_create") && tools.has("artifacts_publish");
     }
-    if (id === "builtin:opengeni-video-generation") {
+    if (id === "builtin:video-generation") {
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
+    if (id === "builtin:secrets") return tools.has("secret_search");
     return true;
   });
 }
@@ -439,7 +443,11 @@ export function sessionEffectiveToolProjectionInput(
   toolRefs: readonly ToolRef[],
   context?: SessionEffectiveToolsContext,
 ) {
-  const model = context ? resolveModelProviderForTurn(context.settings, session.model) : undefined;
+  const model = context?.modelProviders?.has(session.model)
+    ? context.modelProviders.get(session.model)
+    : context
+      ? resolveModelProviderForTurn(context.settings, session.model)
+      : undefined;
   const sandboxBackend =
     (session.activeSandboxId
       ? context?.activeSandboxBackends?.get(session.activeSandboxId)
@@ -454,6 +462,7 @@ export function sessionEffectiveToolProjectionInput(
     ? webSearchToolPlan(context.settings, {
         hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
         transportHostedSearch: model?.provider.kind === "xai-subscription",
+        creditsDisabled: !workspaceSettingsAllowCreditModels(context.workspaceSettings),
       })
     : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
@@ -498,12 +507,13 @@ export function sessionEffectiveToolProjectionInput(
   const needsTitle =
     session.titleSource !== "user" &&
     (!session.title?.trim() || session.title.trim() === AUTOMATIC_SESSION_TITLE_FALLBACK);
+  const selectedFirstPartyMcpTools = context
+    ? resolveSessionFirstPartyMcpTools(context.settings, session, context.workspaceSettings)
+    : [];
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
       ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
-          .firstPartyTools(
-            allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
-          )
+          .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
       : [];
   const interactionNames = new Set<string>(FIRST_PARTY_IN_PROCESS_TOOL_NAMES);
@@ -528,7 +538,8 @@ export function sessionEffectiveToolProjectionInput(
       ].includes(name);
       if (
         permissionAllowed(readOnly ? "sessions:read" : "sessions:control") &&
-        (name !== "browser_download_save" || permissionAllowed("files:upload"))
+        ((name !== "browser_download_save" && name !== "browser_record") ||
+          permissionAllowed("files:upload"))
       ) {
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
@@ -536,7 +547,7 @@ export function sessionEffectiveToolProjectionInput(
           resolveAgentToolFamilies(session.agent, {
             sandboxAttached: sandboxAvailable,
           }).allowsFirstPartyTool(name) &&
-          session.firstPartyMcpTools.includes(name)
+          selectedFirstPartyMcpTools.includes(name)
         )
           firstPartyMcpTools.push(name);
       }
@@ -549,6 +560,16 @@ export function sessionEffectiveToolProjectionInput(
       firstPartyMcpTools.splice(index, 1);
   }
   const codex = model?.provider.kind === "codex-subscription";
+  const nativeComputerTools = Boolean(
+    context &&
+    resolveFirstPartyDelegationSecret(context.settings) &&
+    permissionAllowed("sessions:control") &&
+    ["computer_open", "computer_act"].every((name) =>
+      resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
+        .firstPartyTools(selectedFirstPartyMcpTools)
+        .includes(name as FirstPartyMcpToolName),
+    ),
+  );
   const retainedRouter =
     context?.routerInHistory === true || context?.routerHistorySessionIds?.has(session.id) === true;
   const progressiveDisclosure =
@@ -565,11 +586,17 @@ export function sessionEffectiveToolProjectionInput(
     "request_human_input",
     "list_models",
     ...webSearchPlan.providerTools,
+    // Interaction entry tools stay visible even with progressive disclosure;
+    // the remaining authorized family tools are disclosed after opening.
+    ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
       : []),
     ...(!progressiveDisclosure ? runtimeToolNames : []),
+    ...(nativeComputerTools && !progressiveDisclosure
+      ? CUA_DESKTOP_TOOLS.map((tool) => `interaction__cua_${tool.name}`)
+      : []),
   ]);
   const environment: AgentToolEnvironment = {
     productServerIds: new Set([
@@ -589,6 +616,7 @@ export function sessionEffectiveToolProjectionInput(
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
   environment.hasDeferredTools =
+    (nativeComputerTools && progressiveDisclosure) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
     ) ||
@@ -613,6 +641,7 @@ export function sessionEffectiveToolProjectionInput(
     config: session.agent,
     firstPartyMcpTools,
     firstPartyModelNames,
+    nativeComputerTools,
     mcpServerIds: toolRefs.map((ref) => ref.id),
     productServerIds: environment.productServerIds ?? new Set<string>(),
     environment,

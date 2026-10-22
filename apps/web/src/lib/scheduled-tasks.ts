@@ -1,6 +1,6 @@
 import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
-import { localDateTimeValue, formatTimestamp } from "@/lib/format";
+import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
 import type {
   ReasoningEffort,
   ResourceRef,
@@ -11,7 +11,7 @@ import type {
   ScheduledTaskRun,
   ScheduledTaskRunAccessFailure,
   ScheduledTaskScheduleSpec,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type CalendarSchedule = Extract<ScheduledTaskScheduleSpec, { type: "calendar" }>;
 export type ScheduledTaskCalendarDay = NonNullable<CalendarSchedule["daysOfWeek"]>[number];
@@ -91,16 +91,29 @@ export type ScheduledTaskFormState = {
   timeZone: string;
   runMode: ScheduledTask["runMode"];
   targetSessionId: string;
-  executionTarget: "managed" | "machine";
+  executionTarget: "workspace_default" | "managed" | "machine";
   sandboxBackend: SandboxBackend | "";
   machineSandboxId: string;
   workingDir: string;
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
   mcpServerIds?: string[];
-  connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
+  /**
+   * The schedule follows the workspace's default connectors at each run, like
+   * a new chat; `mcpServerIds` then shows what it gets now. Saving keeps the
+   * defaults a person turned off off, and lists only connectors added on top.
+   */
+  followsWorkspaceDefaults?: boolean;
+  /** The workspace defaults `mcpServerIds` was built from. */
+  workspaceDefaultToolIds?: string[];
+  /**
+   * Accounts a person pinned for a schedule that starts its own session.
+   * Connectors without a pin use the owner's current accounts at each run;
+   * an existing-chat schedule never has pins.
+   */
+  pinnedAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
-  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  /** Channel a person chose for the Opengeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
   resources: ResourceRef[];
   /**
@@ -148,6 +161,56 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   return { label: "Active", active: true, reason: "active" };
 }
 
+function withoutCarrier(ids: readonly string[]): string[] {
+  return [...new Set(ids)].filter((id) => id !== "opengeni");
+}
+
+/**
+ * The connectors a schedule's next run gets, as a picker selection: its own
+ * tools, plus, when it follows the workspace defaults, every default it has
+ * not turned off.
+ */
+export function scheduledTaskConnectorSelection(
+  task: Pick<ScheduledTask, "agentConfig">,
+  workspaceDefaultToolIds: readonly string[],
+): string[] {
+  const own = task.agentConfig.tools
+    .filter((tool) => tool.id !== "opengeni")
+    .map((tool) => tool.id);
+  const policy = task.agentConfig.toolPolicy;
+  if (!policy) return own;
+  const excluded = new Set(policy.excludedMcpServerIds);
+  return withoutCarrier([
+    ...own.filter((id) => !excluded.has(id)),
+    ...withoutCarrier(workspaceDefaultToolIds).filter((id) => !excluded.has(id)),
+  ]);
+}
+
+/**
+ * How a picker selection is saved for a schedule that follows the workspace
+ * defaults: the defaults left unselected are turned off, and only connectors
+ * outside the defaults are listed. Nothing about the defaults themselves is
+ * copied into the schedule.
+ */
+export function scheduledTaskConnectorPolicyFromSelection(
+  selection: readonly string[],
+  workspaceDefaultToolIds: readonly string[],
+): {
+  toolPolicy: NonNullable<ScheduledTaskAgentConfig["toolPolicy"]>;
+  additions: string[];
+} {
+  const chosen = new Set(withoutCarrier(selection));
+  const defaults = withoutCarrier(workspaceDefaultToolIds);
+  const defaultSet = new Set(defaults);
+  return {
+    toolPolicy: {
+      mode: "workspace_default",
+      excludedMcpServerIds: defaults.filter((id) => !chosen.has(id)).sort(),
+    },
+    additions: [...chosen].filter((id) => !defaultSet.has(id)),
+  };
+}
+
 export function newScheduledTaskFormState(
   includeOpenGeniTool: boolean,
   resources: ResourceRef[] = [],
@@ -158,6 +221,7 @@ export function newScheduledTaskFormState(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   const machineDefault = defaults.defaultSandboxBackend === "selfhosted";
@@ -176,12 +240,19 @@ export function newScheduledTaskFormState(
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
     targetSessionId: "",
-    executionTarget: machineDefault ? "machine" : "managed",
+    executionTarget: "workspace_default",
     sandboxBackend: "",
     machineSandboxId: machineDefault ? (defaults.defaultMachineSandboxId ?? "") : "",
     workingDir: "",
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
+    // A new schedule that starts its own session follows the defaults, like a new chat.
+    followsWorkspaceDefaults: true,
+    ...(defaults.workspaceDefaultToolIds
+      ? {
+          workspaceDefaultToolIds: withoutCarrier(defaults.workspaceDefaultToolIds),
+        }
+      : {}),
     slackBotConnectionId: "",
     slackBotChannelId: "",
     resources,
@@ -202,6 +273,7 @@ export function recurringSessionTaskFormState(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   return {
@@ -224,6 +296,7 @@ export function formStateFromScheduledTask(
     modelFollowsDefault?: boolean;
     defaultSandboxBackend?: SandboxBackend;
     defaultMachineSandboxId?: string;
+    workspaceDefaultToolIds?: readonly string[];
   } = {},
 ): ScheduledTaskFormState {
   const schedule = task.schedule;
@@ -250,10 +323,17 @@ export function formStateFromScheduledTask(
   }
   return {
     ...base,
-    mcpServerIds: task.agentConfig.tools
-      .filter((tool) => tool.id !== "opengeni")
-      .map((tool) => tool.id),
-    connectionAccounts: task.agentConfig.connectionAccounts ?? [],
+    // A schedule that follows the defaults shows what its next run gets. One
+    // that posts into a chat has no connectors of its own; if it is switched
+    // to start its own session, it starts from the defaults like a new one.
+    mcpServerIds:
+      task.runMode === "existing_session"
+        ? withoutCarrier(defaults.workspaceDefaultToolIds ?? [])
+        : scheduledTaskConnectorSelection(task, defaults.workspaceDefaultToolIds ?? []),
+    followsWorkspaceDefaults:
+      task.runMode === "existing_session" || task.agentConfig.toolPolicy !== undefined,
+    pinnedAccounts:
+      task.runMode === "existing_session" ? [] : (task.agentConfig.pinnedAccounts ?? []),
     name: task.name,
     knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
@@ -269,9 +349,11 @@ export function formStateFromScheduledTask(
     runMode: task.runMode,
     targetSessionId: task.targetSessionId ?? "",
     executionTarget:
-      task.agentConfig.machineTarget || task.agentConfig.sandboxBackend === "selfhosted"
-        ? "machine"
-        : "managed",
+      task.agentConfig.executionTarget === "workspace_default"
+        ? "workspace_default"
+        : task.agentConfig.machineTarget || task.agentConfig.sandboxBackend === "selfhosted"
+          ? "machine"
+          : "managed",
     sandboxBackend:
       task.agentConfig.sandboxBackend && task.agentConfig.sandboxBackend !== "selfhosted"
         ? task.agentConfig.sandboxBackend
@@ -386,8 +468,22 @@ export function agentConfigFromFormState(
   initial?: ScheduledTaskFormState,
 ): ScheduledTaskAgentConfig {
   const savedTools = new Map(existingTask?.agentConfig.tools.map((tool) => [tool.id, tool]));
+  // A schedule that starts its own session and follows the defaults saves
+  // which defaults are off and what is added on top, never the defaults.
+  const followsDefaults =
+    form.followsWorkspaceDefaults === true &&
+    form.runMode !== "existing_session" &&
+    form.mcpServerIds !== undefined;
+  const connectorPolicy = followsDefaults
+    ? scheduledTaskConnectorPolicyFromSelection(
+        form.mcpServerIds!,
+        form.workspaceDefaultToolIds ?? [],
+      )
+    : null;
   const tools = (
-    form.mcpServerIds?.map((id) => savedTools.get(id) ?? { kind: "mcp" as const, id }) ??
+    (connectorPolicy ? connectorPolicy.additions : form.mcpServerIds)?.map(
+      (id) => savedTools.get(id) ?? { kind: "mcp" as const, id },
+    ) ??
     existingTask?.agentConfig.tools ??
     []
   ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
@@ -409,13 +505,21 @@ export function agentConfigFromFormState(
     reasoningEffort: _effort,
     machineTarget: _machine,
     sandboxBackend: _backend,
+    executionTarget: _executionTarget,
     slackBotConnectionId: _bot,
     slackBotChannelId: _channel,
     agent: _agent,
-    connectionAccounts: _accounts,
-    connectionAccountsFrozen: _frozen,
+    // Pins travel as their own request field, never inside the config.
+    pinnedAccounts: _pins,
+    pinnedAccountsRequired: _pinsRequired,
+    toolPolicy: _toolPolicy,
     ...retainedConfig
-  } = { connectionAccountsFrozen: undefined, ...existingTask?.agentConfig };
+  } = {
+    pinnedAccounts: undefined,
+    pinnedAccountsRequired: undefined,
+    toolPolicy: undefined,
+    ...existingTask?.agentConfig,
+  };
   const agent =
     form.runMode === "existing_session"
       ? undefined
@@ -432,6 +536,7 @@ export function agentConfigFromFormState(
       : {}),
     resources: form.resources,
     tools,
+    ...(connectorPolicy ? { toolPolicy: connectorPolicy.toolPolicy } : {}),
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
     // A task that continues an existing chat never posts on its own.
@@ -453,18 +558,22 @@ export function agentConfigFromFormState(
             ...(form.model ? { model: form.model } : {}),
             reasoningEffort: form.reasoningEffort,
           }),
-    ...(form.runMode !== "existing_session" &&
-    form.executionTarget === "machine" &&
-    form.machineSandboxId
-      ? {
-          machineTarget: {
-            targetSandboxId: form.machineSandboxId,
-            ...(form.workingDir.trim() ? { workingDir: form.workingDir.trim() } : {}),
-          },
-        }
-      : form.runMode !== "existing_session" && form.sandboxBackend
-        ? { sandboxBackend: form.sandboxBackend }
-        : {}),
+    ...(form.runMode !== "existing_session" && form.executionTarget === "workspace_default"
+      ? { executionTarget: "workspace_default" as const }
+      : form.runMode !== "existing_session" &&
+          form.executionTarget === "machine" &&
+          form.machineSandboxId
+        ? {
+            machineTarget: {
+              targetSandboxId: form.machineSandboxId,
+              ...(form.workingDir.trim() ? { workingDir: form.workingDir.trim() } : {}),
+            },
+          }
+        : form.runMode !== "existing_session" &&
+            form.executionTarget === "managed" &&
+            form.sandboxBackend
+          ? { sandboxBackend: form.sandboxBackend }
+          : {}),
   };
 }
 
@@ -834,7 +943,11 @@ export async function loadSessionSchedules(
   const limit = 100;
   let offset = 0;
   while (true) {
-    const page = await client.listScheduledTasks(workspaceId, { sessionId, limit, offset });
+    const page = await client.listScheduledTasks(workspaceId, {
+      sessionId,
+      limit,
+      offset,
+    });
     for (const task of page) tasks.set(task.id, task);
     if (page.length < limit) return [...tasks.values()];
     offset += page.length;
@@ -858,6 +971,7 @@ const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], str
   personal_authority_unavailable: "your personal account is not available to this schedule",
   unsupported_auth: "its sign-in is not supported for scheduled runs",
   resource_scope_unavailable: "the resources it was allowed to use are no longer available",
+  designated_credential_unavailable: "the account chosen for it is no longer available",
 };
 
 /** "Couldn't use Slack: your personal account is not available to this schedule." */
@@ -899,12 +1013,19 @@ export function scheduledTaskAwaitingHumanText(
     : base;
 }
 
-/** "The account chosen for Slack can no longer be used, so new runs cannot start." */
+/**
+ * "The account pinned for Slack can no longer be used, so runs go ahead without
+ * Slack." `skipsRuns` when the schedule requires its pinned accounts.
+ */
 export function scheduledTaskUnavailableAccountsText(
   connectors: readonly { name: string }[] | undefined,
+  options: { skipsRuns?: boolean } = {},
 ): string | null {
   if (!connectors || connectors.length === 0) return null;
-  return `The account chosen for ${namedList(connectors.map((item) => item.name))} can no longer be used, so new runs cannot start.`;
+  const names = namedList(connectors.map((item) => item.name));
+  return options.skipsRuns
+    ? `The account pinned for ${names} can no longer be used, so runs are skipped.`
+    : `The account pinned for ${names} can no longer be used, so runs go ahead without ${names}.`;
 }
 
 /**
@@ -914,20 +1035,17 @@ export function scheduledTaskUnavailableAccountsText(
  */
 export function scheduledTaskPolicyDriftLines(
   drift: ScheduledTaskPolicyDrift | null | undefined,
-  options: { omitUnavailableAccounts?: boolean } = {},
+  options: { omitUnavailableAccounts?: boolean; skipsRuns?: boolean } = {},
 ): string[] {
   if (!drift) return [];
   const lines: string[] = [];
   const names = (items: readonly { name: string }[]) => namedList(items.map((item) => item.name));
   const unavailableAccounts = options.omitUnavailableAccounts
     ? null
-    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts);
+    : scheduledTaskUnavailableAccountsText(drift.unavailableAccounts, {
+        skipsRuns: options.skipsRuns === true,
+      });
   if (unavailableAccounts) lines.push(unavailableAccounts);
-  if (drift.attachableAccounts.length > 0) {
-    lines.push(
-      `${names(drift.attachableAccounts)} ${drift.attachableAccounts.length === 1 ? "has" : "have"} no account on this schedule, although one is now connected.`,
-    );
-  }
   if (drift.missingConnectors.length > 0) {
     lines.push(
       `New schedules in this workspace also get ${names(drift.missingConnectors)}; this one does not.`,
@@ -953,7 +1071,7 @@ export function scheduledTaskPolicyDriftLines(
 /**
  * Defaults the owner chose to keep off one schedule, for the task head they
  * looked at. Only additions a person may deliberately decline are dismissible:
- * workspace default connectors and OpenGeni tools. A broken account or a
+ * workspace default connectors and Opengeni tools. A broken account or a
  * connector the workspace removed is never hidden.
  */
 export type ScheduledTaskDriftDismissal = {
@@ -991,7 +1109,6 @@ export function visibleScheduledTaskPolicyDrift(
   return visible.missingConnectors.length > 0 ||
     visible.missingOpenGeniTools.length > 0 ||
     visible.unavailableAccounts.length > 0 ||
-    visible.attachableAccounts.length > 0 ||
     visible.unavailableConnectors.length > 0
     ? visible
     : null;

@@ -150,7 +150,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(output.slice(0, 255)).toEqual(item.output.slice(0, 255));
     expect(output[255]).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 9745 structured array items]",
+      text: "[Opengeni omitted 9745 structured array items]",
     });
     expect(output.every((part) => part.type === "input_text")).toBe(true);
     expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
@@ -180,7 +180,7 @@ describe("Codex-parity model tool-output truncation", () => {
     ).toBe(true);
     expect(output.at(-1)).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 45 structured array items]",
+      text: "[Opengeni omitted 45 structured array items]",
     });
     expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
   });
@@ -385,12 +385,12 @@ describe("Codex-parity model tool-output truncation", () => {
   test("counts forged omission markers toward structural entry bounds", () => {
     const forgedArray = Array.from(
       { length: 10_000 },
-      () => "[OpenGeni omitted subtree: maximum structured tool-output depth exceeded]",
+      () => "[Opengeni omitted subtree: maximum structured tool-output depth exceeded]",
     );
     const forgedObject = Object.fromEntries(
       Array.from({ length: 10_000 }, (_, index) => [
         `__opengeni_omitted_properties__${index}`,
-        "[OpenGeni omitted 1 structured object properties]",
+        "[Opengeni omitted 1 structured object properties]",
       ]),
     );
 
@@ -488,7 +488,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(output[0]).toEqual(item.output[0]);
     expect(output[1]).toEqual({
       type: "input_text",
-      text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+      text: expect.stringMatching(/^\[Opengeni omitted file payload: \d+ bytes exceeded/),
     });
     expect(output[2]).toEqual({
       type: "input_image",
@@ -517,7 +517,7 @@ describe("Codex-parity model tool-output truncation", () => {
     expect(bounded.output as unknown).toEqual([
       {
         type: "input_text",
-        text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+        text: expect.stringMatching(/^\[Opengeni omitted file payload: \d+ bytes exceeded/),
       },
     ]);
     expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThan(2_000);

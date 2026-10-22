@@ -10,8 +10,8 @@ use register::{happens_after, CausalRegister, RegisterContribution};
 use crate::formula::{rewrite_deleted_sheet_references, rewrite_sheet_references};
 use crate::workbook::MAX_SHEET_NAME_BYTES;
 use crate::{
-    AtomicBatch, AuthoredCellContent, CellBlock, CellCoord, CellValue, Command, Sheet, StableId,
-    Workbook,
+    AtomicBatch, AuthoredCellContent, CellBlock, CellCoord, CellValue, Command, DimensionAxis,
+    Sheet, StableId, Workbook,
 };
 
 pub use snapshot::{
@@ -30,6 +30,13 @@ pub use types::{
 struct CellKey {
     sheet_id: StableId,
     coord: CellCoord,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DimensionKey {
+    sheet: SheetGeneration,
+    axis: DimensionAxis,
+    index: u32,
 }
 
 type FormulaRewritePlan = Vec<(String, Option<String>)>;
@@ -76,6 +83,7 @@ enum OperationKind {
     DeleteSheet,
     SetCells,
     ClearRange,
+    SetDimension,
     Undo { target: OperationId },
 }
 
@@ -88,6 +96,7 @@ enum OperationEffect {
         range: crate::CellRange,
     },
     Undo(OperationId),
+    Dimension(DimensionKey),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +170,7 @@ pub struct CollaborativeWorkbook {
     pending_dependency_edges: usize,
     sheets: BTreeMap<StableId, SheetHistory>,
     cells: BTreeMap<CellKey, CausalRegister<AuthoredCellContent>>,
+    dimensions: BTreeMap<DimensionKey, CausalRegister<Option<u32>>>,
     range_clears: BTreeMap<OperationId, RangeClearRecord>,
     operations: BTreeMap<OperationId, OperationRecord>,
     undone: BTreeSet<OperationId>,
@@ -194,6 +204,7 @@ impl CollaborativeWorkbook {
             pending_dependency_edges: 0,
             sheets: BTreeMap::new(),
             cells: BTreeMap::new(),
+            dimensions: BTreeMap::new(),
             range_clears: BTreeMap::new(),
             operations: BTreeMap::new(),
             undone: BTreeSet::new(),
@@ -569,6 +580,11 @@ impl CollaborativeWorkbook {
                 CollaborationCommand::DeleteSheet { .. }
                 | CollaborationCommand::ClearRange { .. }
                 | CollaborationCommand::Undo { .. } => {}
+                CollaborationCommand::SetDimension { axis, pixels, .. } => {
+                    if !axis.valid_pixels(*pixels) || *pixels == Some(axis.default_pixels()) {
+                        return Err(CollaborationError::InvalidDimension);
+                    }
+                }
             }
         }
         Ok(())
@@ -722,7 +738,8 @@ impl CollaborativeWorkbook {
                     prepared.push(PreparedOperation::Plain);
                 }
                 CollaborationCommand::RenameSheet { sheet, .. }
-                | CollaborationCommand::DeleteSheet { sheet } => {
+                | CollaborationCommand::DeleteSheet { sheet }
+                | CollaborationCommand::SetDimension { sheet, .. } => {
                     self.validate_sheet_live(
                         *sheet,
                         transaction.base(),
@@ -986,6 +1003,7 @@ impl CollaborativeWorkbook {
             .ok_or(CollaborationError::RevisionExhausted)?;
         let shared_base = Arc::new(transaction.base().clone());
         let mut affected_cells = BTreeSet::new();
+        let mut affected_dimensions = BTreeSet::new();
         let mut structural_change = false;
 
         for (operation_index, (operation, prepared)) in transaction
@@ -1167,6 +1185,31 @@ impl CollaborativeWorkbook {
                         },
                     )
                 }
+                CollaborationCommand::SetDimension {
+                    sheet,
+                    axis,
+                    index,
+                    pixels,
+                } => {
+                    let key = DimensionKey {
+                        sheet: *sheet,
+                        axis: *axis,
+                        index: *index,
+                    };
+                    self.dimensions.entry(key).or_default().insert(
+                        RegisterContribution {
+                            operation_id: operation.id(),
+                            dot: transaction.dot(),
+                            operation_index,
+                            base: Arc::clone(&shared_base),
+                            value: *pixels,
+                        },
+                        &self.undone,
+                    );
+                    journal.inserted_dimensions.push((key, operation.id()));
+                    affected_dimensions.insert(key);
+                    (OperationKind::SetDimension, OperationEffect::Dimension(key))
+                }
                 CollaborationCommand::Undo { target } => {
                     if self.undone.insert(*target) {
                         journal.inserted_undone_targets.push(*target);
@@ -1179,6 +1222,13 @@ impl CollaborativeWorkbook {
                     let target_kind = target_record.kind.clone();
                     let target_effect = target_record.effect.clone();
                     match target_effect {
+                        OperationEffect::Dimension(key) => {
+                            if let Some(register) = self.dimensions.get_mut(&key) {
+                                register.recompute_maximal(&self.undone);
+                            }
+                            journal.recompute_dimensions.insert(key);
+                            affected_dimensions.insert(key);
+                        }
                         OperationEffect::Sheet(sheet_id) => {
                             if matches!(target_kind, OperationKind::RenameSheet) {
                                 if let Some(history) = self.sheets.get_mut(&sheet_id) {
@@ -1241,6 +1291,16 @@ impl CollaborativeWorkbook {
                 self.rebuild_materialized(next_revision, prepared.next_ids.clone())?;
             } else {
                 self.refresh_materialized_cells(&affected_cells, next_revision)?;
+                for key in affected_dimensions {
+                    let pixels = self
+                        .dimensions
+                        .get(&key)
+                        .and_then(CausalRegister::visible)
+                        .and_then(|value| value.value);
+                    if let Some(sheet) = self.workbook.sheets.get_mut(&key.sheet.sheet_id()) {
+                        sheet.set_dimension(key.axis, key.index, pixels);
+                    }
+                }
                 self.workbook.ids = prepared.next_ids;
             }
         } else {
@@ -1273,6 +1333,20 @@ impl CollaborativeWorkbook {
         }
         for target in journal.inserted_undone_targets.into_iter().rev() {
             self.undone.remove(&target);
+        }
+        for (key, id) in journal.inserted_dimensions.into_iter().rev() {
+            let remove = self.dimensions.get_mut(&key).is_some_and(|register| {
+                register.remove(id, &self.undone);
+                register.is_empty()
+            });
+            if remove {
+                self.dimensions.remove(&key);
+            }
+        }
+        for key in journal.recompute_dimensions {
+            if let Some(register) = self.dimensions.get_mut(&key) {
+                register.recompute_maximal(&self.undone);
+            }
         }
         for operation_id in journal.inserted_operations.into_iter().rev() {
             self.operations.remove(&operation_id);
@@ -1406,6 +1480,15 @@ impl CollaborativeWorkbook {
                 if let Some(sheet) = sheets.get_mut(&key.sheet_id) {
                     sheet.set_cell(key.coord, content.materialize());
                 }
+            }
+        }
+        for (key, register) in &self.dimensions {
+            if let Some(sheet) = sheets.get_mut(&key.sheet.sheet_id()) {
+                sheet.set_dimension(
+                    key.axis,
+                    key.index,
+                    register.visible().and_then(|value| value.value),
+                );
             }
         }
         self.workbook =
@@ -1612,6 +1695,8 @@ struct PreparedTransaction {
 
 #[derive(Debug, Default)]
 struct AppliedTransactionJournal {
+    inserted_dimensions: Vec<(DimensionKey, OperationId)>,
+    recompute_dimensions: BTreeSet<DimensionKey>,
     created_sheets: Vec<StableId>,
     inserted_sheet_names: Vec<(StableId, OperationId)>,
     inserted_sheet_deletions: Vec<(StableId, OperationId)>,

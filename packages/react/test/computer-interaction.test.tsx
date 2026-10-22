@@ -26,7 +26,7 @@ import { useComputerSessions } from "../src/hooks/use-computer-sessions";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const COMPUTER_SESSION_ID = "44444444-4444-4444-8444-444444444444";
 const PEER_COMPUTER_SESSION_ID = "55555555-5555-4555-8555-555555555555";
@@ -414,6 +414,60 @@ describe("ComputerSession React resources", () => {
     },
   );
 
+  test("a disappeared window does not redirect observation or input to another target", async () => {
+    const chosen = target("window-1");
+    const unrelated = target("window-2");
+    let targets = [chosen, unrelated];
+    const observed: string[] = [];
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets,
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observed.push(targetId);
+        return observation(targets.find((candidate) => candidate.id === targetId)!);
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(unrelated), request.operationId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    try {
+      await flush(20);
+      expect(hook.result.current.selectedTarget?.id).toBe(chosen.id);
+      targets = [unrelated];
+      for (let i = 0; i < 2; i++) {
+        await actRun(() => hook.result.current.refresh());
+        expect(hook.result.current.selectedTarget).toBeNull();
+        expect(hook.result.current.observation).toBeNull();
+      }
+      await expect(
+        hook.result.current.act({ type: "keyboard", action: "type", value: "fixture" }),
+      ).rejects.toThrow();
+      expect(requests).toEqual([]);
+      expect(observed).toEqual([chosen.id]);
+      await actRun(() => hook.result.current.selectTarget(unrelated.id));
+      expect(hook.result.current.selectedTarget?.id).toBe(unrelated.id);
+      expect(observed).toEqual([chosen.id, unrelated.id]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("keeps target selection local and fences semantic and pixel actions exactly", async () => {
     const windowTarget = target();
     const screenTarget = target("screen-1", "screen");
@@ -584,6 +638,9 @@ describe("ComputerSession React resources", () => {
         });
         targets = [windowTarget, screenTarget];
         await actRun(() => hook.result.current.refresh());
+        expect(hook.result.current.selectedTarget).toBeNull();
+        expect(hook.result.current.observation).toBeNull();
+        await actRun(() => hook.result.current.selectTarget(screenTarget.id));
         expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
         expect(requests).toHaveLength(1);
       } finally {
@@ -2001,6 +2058,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("keeps grants out of URLs, authenticates frames, and clears on target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     const client = fakeClient({
       attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
@@ -2038,6 +2097,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("accepts restarted frame sequences after attachment renewal", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     let attaches = 0;
     const client = fakeClient({
@@ -2121,6 +2182,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("uses the distinct Computer relay stream kind", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     let socket: FakeComputerSocket | null = null;
     const client = fakeClient({
       attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
@@ -2172,6 +2235,8 @@ describe("ComputerSession frame stream", () => {
   });
 
   test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeComputerSocket[] = [];
     let release!: (value: ArrayBuffer) => void;
     const delayed = new (class extends Blob {
@@ -2555,6 +2620,8 @@ describe("ComputerViewer", () => {
   });
 
   test("switches whole screens with the display target's existing frame and coordinate fence", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const screens = [
       { ...target("screen-1", "screen"), title: "Main display", focused: true },
@@ -3045,6 +3112,8 @@ describe("ComputerViewer", () => {
 
   for (const recovery of ["Reconnect", "Refresh desktops"]) {
     test(`recovers an ended desktop producer through ${recovery} after a visible frame`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const current = computerSession();
       const currentTarget = target();
@@ -3338,6 +3407,63 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 
+  for (const scenario of [
+    "owned",
+    "other-session",
+    "physical",
+    "other-adapter",
+    "macos",
+    "no-display",
+    "no-pointer",
+    "no-keyboard",
+  ] as const) {
+    test(`isolated CUA viewer input preserves seat authority: ${scenario}`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
+      const canvasMock = mockComputerCanvas();
+      const currentSession = computerSession();
+      currentSession.adapter = "opengeni.cua.linux.v1";
+      currentSession.seatId = `linux-virtual:${currentSession.id}`;
+      currentSession.capabilities!.backgroundInput = false;
+      if (scenario === "other-session")
+        currentSession.seatId = `linux-virtual:${PEER_COMPUTER_SESSION_ID}`;
+      if (scenario === "physical") currentSession.seatId = "seat-1";
+      if (scenario === "other-adapter") currentSession.adapter = "opengeni.linux.atspi-x11.v1";
+      if (scenario === "macos") currentSession.platform = "macos";
+      if (scenario === "no-display") currentSession.displayId = "";
+      if (scenario === "no-pointer") currentSession.capabilities!.pointerInput = false;
+      if (scenario === "no-keyboard") currentSession.capabilities!.keyboardInput = false;
+      const owned = ["owned", "no-pointer", "no-keyboard"].includes(scenario);
+      const fixture = await renderComputerInputFixture(undefined, undefined, {
+        currentTarget: { ...target(), title: "Background fixture", focused: false },
+        currentSession,
+      });
+      try {
+        await fixture.frame(1);
+        await canvasMock.finishDecode(0);
+        expect(fixture.keyboard.disabled).toBe(!owned || scenario === "no-keyboard");
+        await computerGesture(fixture.canvas, [20, 20]);
+        await flush(350);
+        await actRun(() => {
+          fixture.keyboard.value = "Hello";
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true, data: "Hello" }));
+        });
+        await flush(50);
+        expect(fixture.actions.filter(({ action }) => action.type === "pointer")).toHaveLength(
+          owned && scenario !== "no-pointer" ? 1 : 0,
+        );
+        expect(fixture.actions.filter(({ action }) => action.type === "keyboard")).toHaveLength(
+          owned && scenario !== "no-keyboard" ? 1 : 0,
+        );
+        expect(currentSession.capabilities!.backgroundInput).toBe(false);
+        expect(fixture.actions.every(({ targetId }) => targetId === "window-1")).toBe(true);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    });
+  }
+
   test("keeps semantic controls live but disables raw input for an unfocused background window", async () => {
     const backgroundWindow = { ...target(), focused: false };
     const actions: unknown[] = [];
@@ -3393,6 +3519,8 @@ describe("ComputerViewer", () => {
   });
 
   test("routes advertised background window clicks and typing without focusing the desktop", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(undefined, undefined, {
       currentTarget: { ...target(), title: "Background window", focused: false },
@@ -3556,6 +3684,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["same paint", "pending decode", "new paint"] as const)(
     "dispatches an immediate first click and one continuation against each actual %s",
     async (paint) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas(true);
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -3623,6 +3753,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["drag", "key", "right click", "wheel"] as const)(
     "does not resend an immediate click before a following %s",
     async (next) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(undefined, undefined, {
         pointerClickContinuation: true,
@@ -3690,6 +3822,8 @@ describe("ComputerViewer input reliability", () => {
   ] as const)(
     "clears first-click continuation before a later gesture after %s",
     async (boundary) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -3708,6 +3842,13 @@ describe("ComputerViewer input reliability", () => {
         await computerGesture(fixture.canvas, [25, 25]);
         await flush();
         expect(fixture.actions).toHaveLength(1);
+        for (const value of ["b", "c"]) {
+          await actRun(() => {
+            fixture.keyboard.value = value;
+            fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+          });
+          await flush(25);
+        }
         if (boundary === "target switch") await fixture.switchTarget();
         await actRun(() =>
           finishFirst({
@@ -3746,6 +3887,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("sends the real second click while the first receipt waits and fences later keys behind both", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const finishes: Array<(value: ComputerActionReceipt) => void> = [];
     const fixture = await renderComputerInputFixture(
@@ -3802,6 +3945,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["transport rejection", "failed receipt", "unknown receipt"] as const)(
     "a late first %s cannot cancel a key queued after the second click completes",
     async (result) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const pending: Array<{
         resolve: (value: ComputerActionReceipt) => void;
@@ -3866,6 +4011,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("an older failure preserves the latest failed click and only notifies that latest failure", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const pending: Array<(value: ComputerActionReceipt) => void> = [];
     const fixture = await renderComputerInputFixture(
@@ -3911,6 +4058,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["prepared", "dispatched"] as const)(
     "a current %s receipt does not report completed input or advance queued keys",
     async (state) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(async (request) => ({
         ...receipt(observation(), request.operationId),
@@ -3942,6 +4091,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("starts a new click after painted dimensions change without substituting frame metadata", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(undefined, undefined, {
       pointerClickContinuation: true,
@@ -3970,6 +4121,8 @@ describe("ComputerViewer input reliability", () => {
   ])(
     "starts a new click when canvas $change maps the same client point elsewhere",
     async ({ rect, x, y }) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(undefined, undefined, {
         pointerClickContinuation: true,
@@ -4052,6 +4205,8 @@ describe("ComputerViewer input reliability", () => {
     },
   ])("honors mouse and keyboard availability independently (%p)", async (testCase) => {
     const { expectedHint, ...capabilities } = testCase;
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4110,6 +4265,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("fits captured windows to the dock while preserving pixels and input coordinates", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const resizeMock = mockComputerViewportResize();
     const fixture = await renderComputerInputFixture();
@@ -4267,6 +4424,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("dismisses the desktop menu without swallowing a canvas click or subsequent typing", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4312,6 +4471,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("uses the painted frame for pointer input and discards decoding after a target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas(true);
     const fixture = await renderComputerInputFixture();
     try {
@@ -4355,7 +4516,70 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
-  for (const boundary of ["target switch", "failed receipt"] as const) {
+  test.each([false, true])(
+    "combines only adjacent unsent text, preserving key order and size bounds (%s)",
+    async (large) => {
+      let finishFirst!: (value: ComputerActionReceipt) => void;
+      let calls = 0;
+      const fixture = await renderComputerInputFixture(async (request) => {
+        if (++calls === 1) return await new Promise((resolve) => (finishFirst = resolve));
+        return {
+          ...receipt(observation(), request.operationId),
+          observation: null,
+        };
+      });
+      const type = async (value: string) => {
+        await actRun(() => {
+          fixture.keyboard.value = value;
+          fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        });
+        await flush(25);
+      };
+      try {
+        await actRun(() => fixture.keyboard.focus());
+        await type("a");
+        const b = large ? "b".repeat(600_000) : "b";
+        const c = large ? "c".repeat(400_001) : "c";
+        await type(b);
+        await type(c);
+        await actRun(() =>
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { bubbles: true, key: "Tab" }),
+          ),
+        );
+        await type("d");
+        await type("e");
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "keyboard", action: "type", value: "a" },
+        ]);
+        await actRun(() =>
+          finishFirst({
+            ...receipt(observation(), fixture.actions[0]!.operationId),
+            observation: null,
+          }),
+        );
+        await flush();
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "keyboard", action: "type", value: "a" },
+          ...(large
+            ? ([
+                { type: "keyboard", action: "type", value: b },
+                { type: "keyboard", action: "type", value: c },
+              ] as const)
+            : ([{ type: "keyboard", action: "type", value: "bc" }] as const)),
+          { type: "keyboard", action: "press", value: "Tab" },
+          { type: "keyboard", action: "type", value: "de" },
+        ]);
+        expect(new Set(fixture.actions.map(({ operationId }) => operationId)).size).toBe(
+          large ? 5 : 4,
+        );
+      } finally {
+        await fixture.rendered.unmount();
+      }
+    },
+  );
+
+  for (const boundary of ["target switch", "failed receipt", "unknown outcome"] as const) {
     test(`discards queued keyboard input after a ${boundary}`, async () => {
       let finishFirst!: (receipt: ComputerActionReceipt) => void;
       const fixture = await renderComputerInputFixture(
@@ -4376,14 +4600,24 @@ describe("ComputerViewer input reliability", () => {
         });
         await flush();
         expect(fixture.actions).toHaveLength(1);
+        for (const value of ["b", "c"]) {
+          await actRun(() => {
+            fixture.keyboard.value = value;
+            fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+          });
+          await flush(25);
+        }
         if (boundary === "target switch") await fixture.switchTarget();
         await actRun(() =>
           finishFirst({
             ...receipt(observation(), fixture.actions[0]!.operationId),
             observation: null,
-            ...(boundary === "failed receipt"
+            ...(boundary !== "target switch"
               ? {
-                  state: "failed" as const,
+                  state:
+                    boundary === "unknown outcome"
+                      ? ("outcome_unknown" as const)
+                      : ("failed" as const),
                   error: {
                     code: "resource_unavailable",
                     message: "input failed",
@@ -4402,6 +4636,8 @@ describe("ComputerViewer input reliability", () => {
   }
 
   test("keeps control unavailable across live frames and reconnects the same desktop", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     let controlUnavailable = true;
     const fixture = await renderComputerInputFixture(
@@ -4490,6 +4726,8 @@ describe("ComputerViewer input reliability", () => {
   test.each(["discovery", "clipboard"] as const)(
     "keeps controls unavailable after a %s service failure while capture continues",
     async (source) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture(
         async (request) => receipt(observation(), request.operationId),
@@ -4532,6 +4770,8 @@ describe("ComputerViewer input reliability", () => {
   );
 
   test("keeps background semantic actions usable when app inspection fails", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const backgroundTarget = { ...target(), focused: false };
     const fixture = await renderComputerInputFixture(async (request) =>
@@ -4581,6 +4821,8 @@ describe("ComputerViewer input reliability", () => {
   test.each([500, 503])(
     "keeps live input available after a %s app inspection failure",
     async (status) => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockComputerCanvas();
       const fixture = await renderComputerInputFixture();
       fixture.client.observeComputerTarget = async () => {
@@ -4649,6 +4891,8 @@ describe("ComputerViewer input reliability", () => {
       new OpenGeniApiError(0, "Transport unavailable", { outcomeUnknown: true }),
     ],
   ] as const)("does not label a %s as a control outage or replay it", async (_name, error) => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     let fail = true;
     const fixture = await renderComputerInputFixture(async (request) => {
@@ -4688,6 +4932,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("hides a frame after the selected target generation changes", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture(async (request) =>
       receipt(observation({ ...target(), targetGeneration: "generation-2" }), request.operationId),
@@ -4748,6 +4994,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("preserves scroll deltas across frames and sends scroll before a key", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4783,6 +5031,8 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test("dispatches a continuous wheel gesture within 45 ms", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -4916,12 +5166,13 @@ async function renderComputerInputFixture(
   readComputerClipboard?: () => Promise<ComputerClipboard>,
   options: {
     currentTarget?: ComputerTarget;
+    currentSession?: ComputerSession;
     backgroundInput?: boolean;
     pointerClickContinuation?: boolean;
   } = {},
 ) {
   const currentTarget = options.currentTarget ?? target();
-  const currentSession = computerSession();
+  const currentSession = options.currentSession ?? computerSession();
   if (options.backgroundInput !== undefined) {
     currentSession.capabilities!.backgroundInput = options.backgroundInput;
   }

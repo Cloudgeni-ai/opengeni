@@ -2,14 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { CreatorMonogram } from "@/components/creator-monogram";
+import { CreatorMonogram } from "@opengeni/react/app/components/creator-monogram";
 
 import {
   RailTrailingMetadata,
-  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
-} from "./session-row-content";
+} from "@opengeni/react/app/components/rail/session-row-content";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -146,42 +145,6 @@ describe("rail creator monogram", () => {
   });
 });
 
-describe("SessionRowHoverDetails", () => {
-  test("shows the full title, creator, age, and exact sub-agent count without row status copy", () => {
-    const markup = renderToStaticMarkup(
-      <SessionRowHoverDetails
-        title="Diagnose staging availability error with the complete title"
-        createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
-        createdBy={human}
-        descendantCount={3}
-        descendantCountTruncated={false}
-      />,
-    );
-
-    expect(markup).toContain("Diagnose staging availability error with the complete title");
-    expect(markup).toContain("13h ago");
-    expect(markup).toContain("Created by Bendik Nyheim");
-    expect(markup).toContain("3 sub-agents");
-    expect(markup).not.toContain("Idle");
-    expect(markup).not.toContain("Read");
-  });
-
-  test("preserves lower-bound counts and names service-created sessions", () => {
-    const markup = renderToStaticMarkup(
-      <SessionRowHoverDetails
-        title="Nightly sweep"
-        createdAt={new Date(Date.now() - 60_000).toISOString()}
-        createdBy={service}
-        descendantCount={1000}
-        descendantCountTruncated
-      />,
-    );
-
-    expect(markup).toContain("Created by Scheduled task");
-    expect(markup).toContain("1,000+ sub-agents");
-  });
-});
-
 describe("sessionRowAccessibleName", () => {
   // `aria-label` replaces name-from-content, so this string - not the chip and
   // not the sr-only span - is what a screen reader actually announces.
@@ -229,6 +192,41 @@ describe("SessionRowContent", () => {
   function srOnly(markup: string): string {
     return parse(markup).querySelector(".sr-only")?.textContent ?? "";
   }
+
+  test.each([false, true])("clips the full title without ellipsis (mobile=%s)", (mobile) => {
+    const title = "Cloudflare Storage for Per-Site Databases and Asset Sharing";
+    const host = parse(
+      renderToStaticMarkup(
+        <SessionRowContent
+          title={title}
+          stateLabel="Running"
+          mobile={mobile}
+          summary={active}
+          creator={human}
+          relativeTime="now"
+        />,
+      ),
+    );
+    const text = host.querySelector("[data-session-row-title]")!;
+    expect(text.textContent).toBe(title);
+    expect(text.className).toContain("overflow-hidden whitespace-nowrap");
+    expect(text.className).not.toContain("truncate");
+    expect(text.parentElement?.nextElementSibling?.hasAttribute("data-session-row-metadata")).toBe(
+      true,
+    );
+    if (mobile)
+      expect(host.querySelector("[data-session-row-state]")?.className).toContain("truncate");
+  });
+
+  test("keeps the title fade inside its column without extending into metadata", async () => {
+    const styles = await Bun.file(
+      new URL("../../../../../packages/react/styles/app.css", import.meta.url),
+    ).text();
+    expect(styles).toContain(
+      "mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent)",
+    );
+    expect(styles).not.toContain("[data-session-row-text]");
+  });
 
   test.each([
     ["a root row", human],

@@ -3,7 +3,7 @@
 // This is the heart of Channel B's data plane. exposeStreamPort resolves the
 // provider's scoped tunnel for the ONE exposed stream port (6080), assembles the
 // direct-to-provider WS URL (client → provider-tunnel direct; the pixel socket
-// never traverses OpenGeni), and mints the scoped OpenGeni stream token. It is a
+// never traverses Opengeni), and mints the scoped Opengeni stream token. It is a
 // plain function over a live, externally-owned `{session}` handle — NO Temporal,
 // NO worker RPC, NO actor. The API-direct handshake handler (apps/api) calls it
 // in-process on a freshly-resumed-by-id box and returns the result as the HTTP
@@ -13,7 +13,7 @@
 //
 // THE TOKEN IS NOT A URL QUERY PARAM. The provider's own scoped tunnel URL
 // (Modal raw-TLS host:port, Daytona signed preview, Blaxel preview-token query)
-// carries the reach-the-port boundary; the OpenGeni stream token is RECORDED
+// carries the reach-the-port boundary; the Opengeni stream token is RECORDED
 // against the viewer holder and is the in-box websockify edge boundary (P3/P5).
 // Per the sandbox contract ruling, exposeStreamPort returns the token alongside the
 // URL so the caller records it; it does NOT append it to `url`.
@@ -82,9 +82,9 @@ export type ExposeStreamPortInput = {
 
 export type ExposeStreamPortResult = {
   /** The direct-to-provider WS URL the viewer connects to (provider-scoped; the
-   *  OpenGeni token is NOT appended). */
+   *  Opengeni token is NOT appended). */
   url: string;
-  /** The scoped OpenGeni stream token — recorded against the holder, NEVER a URL
+  /** The scoped Opengeni stream token — recorded against the holder, NEVER a URL
    *  query param. */
   token: string;
   /** ISO absolute expiry of the token (the rotation hot-swap window backstop). */
@@ -106,7 +106,7 @@ const DEFAULT_RESOLUTION: [number, number] = [1280, 800];
  * the leaf stays agent-loop-free (the helper lives behind the bare
  * `@openai/agents-core` root, which the import-discipline test forbids). The
  * provider's own `endpoint.query` (Blaxel `bl_preview_token`, Daytona signed
- * token) is preserved; the OpenGeni token is NOT appended (it is recorded against
+ * token) is preserved; the Opengeni token is NOT appended (it is recorded against
  * the holder + validated at the in-box websockify edge).
  */
 export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
@@ -272,7 +272,7 @@ export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {
 
 /**
  * Resolve the provider's scoped tunnel for the stream port and mint the scoped
- * OpenGeni stream token. Returns a coherent `{url, token, expiresAt, transport,
+ * Opengeni stream token. Returns a coherent `{url, token, expiresAt, transport,
  * client, resolution}` cell the caller records on the lease (data_plane_url) and
  * returns in the DesktopStream handshake.
  *

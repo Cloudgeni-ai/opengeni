@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { computeWorkspaceCaptureGcPlan, type Database } from "@opengeni/db";
 import {
   WorkspaceCaptureManifest,
@@ -344,7 +344,7 @@ describe("workspace-capture — durable change fingerprint", () => {
     try {
       git("init", "-q");
       git("config", "user.email", "test@opengeni.dev");
-      git("config", "user.name", "OpenGeni Test");
+      git("config", "user.name", "Opengeni Test");
       git("config", "commit.gpgsign", "false");
       writeFileSync(join(root, "same.txt"), "same tree\n");
       git("add", "same.txt");

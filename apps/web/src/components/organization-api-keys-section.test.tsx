@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
 import { presetPermissions } from "@/lib/organization-access";
-import type { ApiKey } from "@/types";
+import type { ApiKey } from "@opengeni/react/app/types";
 
 const toastSuccess = mock((_message: string) => undefined);
 const toastError = mock((_message: string) => undefined);
@@ -21,7 +21,7 @@ mock.module("sonner", () => ({
   ),
 }));
 
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     title,

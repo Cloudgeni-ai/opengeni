@@ -5,7 +5,7 @@ import type { GitHubSignedStatePayload } from "@opengeni/github";
 
 /**
  * Bounded configured-token browser handoff. These signed claims preserve only
- * the exact OpenGeni github:manage grant across GitHub redirects; the callback
+ * the exact Opengeni github:manage grant across GitHub redirects; the callback
  * independently proves current GitHub personal/organization ownership. This
  * state must never be interpreted as GitHub installation authority.
  */

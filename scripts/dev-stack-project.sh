@@ -1,4 +1,4 @@
-# Shared Compose-project identity for one OpenGeni checkout / git worktree.
+# Shared Compose-project identity for one Opengeni checkout / git worktree.
 # Sourced by scripts/dev-stack.sh (start) and scripts/dev-stack-down.sh (stop /
 # clean) so both always name the exact same Docker Compose project, network,
 # volumes, and sandbox image tags. Callers must already be in the repository

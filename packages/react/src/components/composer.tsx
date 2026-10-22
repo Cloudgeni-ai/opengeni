@@ -1,5 +1,6 @@
 import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
+  AppWindowIcon,
   ArrowUpIcon,
   ChevronDownIcon,
   FileIcon,
@@ -52,13 +53,16 @@ import {
   ComposerResponsiveContext,
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
-import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
+import { composerSubmissionErrorMessage } from "../lib/format";
+import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
+import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
 import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
+import { useOpenGeniText } from "../messages/runtime";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
@@ -79,6 +83,11 @@ export type ComposerDelivery = Pick<
   | "value"
   | "setValue"
   | "send"
+  | "sendToQueue"
+  | "busySend"
+  | "singleSend"
+  | "alternateSend"
+  | "sendAlternate"
   | "steer"
   | "sending"
   | "canSend"
@@ -107,149 +116,8 @@ export type ComposerControlLinks = {
   sessionHref?: ((sessionId: string) => string) | undefined;
 };
 
-export type ChatComposerMessages = {
-  messagePlaceholder: string;
-  pausedPlaceholder: string;
-  inputLabel: string;
-  keyboardHint: string;
-  slashCommandBlocked: string;
-  controlChangedError: string;
-  sendFailedError: string;
-  dropFiles: string;
-  attachFiles: string;
-  pauseAriaLabel: string;
-  pauseTitle: string;
-  /** Stop control shown while a response runs (`runControl="stop"`). */
-  stopAriaLabel?: string | undefined;
-  stopTitle?: string | undefined;
-  sendMessageAriaLabel: string;
-  sendAndResumeAriaLabel: string;
-  sendTitle: string;
-  sendAndResumeTitle: string;
-  annotationNotesRequired: string;
-  workspacePaused: string;
-  pausedHere: string;
-  parentBlocker: string;
-  narrowerPause: string;
-  pausedBy: (displayName: string) => string;
-  queuedAhead: (count: number) => string;
-  resumingAndSending: string;
-  nextMessageResumes: string;
-  resumeThisWorkstream: string;
-  resumeShort: string;
-  hidePauseDetails: string;
-  showPauseDetails: string;
-  pauseReasonsLabel: string;
-  pausedByLabel: string;
-  alsoPausedByLabel: string;
-  resumeWorkspace: string;
-  resumeFromSession: string;
-  sessionCanRun: string;
-  stillPausedBy: (displayName: string) => string;
-  restoredResourcesLabel: string;
-  restoredFile: (fileId: string) => string;
-  removeRestoredResource: (index: number) => string;
-  uploading: string;
-  uploadFailed: string;
-  previewAttachment: (name: string) => string;
-  previewUnavailable?: string | undefined;
-  attachmentPreviewLabel: string;
-  downloadAttachment: (name: string) => string;
-  closeAttachmentPreview: string;
-  retryAttachment: (name: string) => string;
-  retryUpload: string;
-  removeAttachment: (name: string) => string;
-  confirmCommand: (name: string) => string;
-  confirmDescription: (command: SlashCommand) => string;
-  cancel: string;
-  runCommand: (name: string) => string;
-  commands: string;
-  slashCommandsLabel: string;
-  modelLabel: string;
-  close: string;
-  danger: string;
-  draftConflict: string;
-  useOtherDraft: string;
-  keepMine: string;
-  savingDraft: string;
-  formatBytes: (bytes: number) => string;
-  formatRelativeTime: (changedAt: string) => string;
-};
-
-export const defaultChatComposerMessages: ChatComposerMessages = {
-  messagePlaceholder: "Message the agent…",
-  pausedPlaceholder: "Message the agent — it will wait in the queue…",
-  inputLabel: "Message the agent",
-  // Shortcuts live in the send button's title; the footer stays quiet unless
-  // the host supplies its own hint.
-  keyboardHint: "",
-  slashCommandBlocked:
-    "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
-  controlChangedError:
-    "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
-  sendFailedError: "Sending failed — your draft is still here. Try again.",
-  dropFiles: "Drop files to attach",
-  attachFiles: "Attach files",
-  pauseAriaLabel: "Pause this workstream",
-  pauseTitle: "Pause this workstream; queued prompts and approvals are preserved",
-  stopAriaLabel: "Stop",
-  stopTitle: "Stop the response",
-  sendMessageAriaLabel: "Send message",
-  sendAndResumeAriaLabel: "Add message to queue",
-  sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",
-  sendAndResumeTitle: "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
-  annotationNotesRequired: "Add a note to each quote before sending.",
-  workspacePaused: "Workspace paused",
-  pausedHere: "Paused here",
-  parentBlocker: "parent",
-  narrowerPause: "a narrower pause",
-  pausedBy: (displayName) => `Paused by ${displayName}`,
-  queuedAhead: (count) =>
-    `${count} waiting prompt${count === 1 ? "" : "s"}; your message joins the queue.`,
-  resumingAndSending: "Sending…",
-  nextMessageResumes: "Messages wait in the queue until you resume.",
-  resumeThisWorkstream: "Resume this workstream",
-  resumeShort: "Resume",
-  hidePauseDetails: "Hide pause details",
-  showPauseDetails: "Show pause details",
-  pauseReasonsLabel: "Reasons this workstream is paused",
-  pausedByLabel: "Paused by ",
-  alsoPausedByLabel: "Also paused by ",
-  resumeWorkspace: "Resume workspace",
-  resumeFromSession: "Resume from this session",
-  sessionCanRun: "This session will be able to run",
-  stillPausedBy: (displayName) => `Still paused by ${displayName}`,
-  restoredResourcesLabel: "Restored prompt resources",
-  restoredFile: (fileId) => `File ${fileId.slice(0, 8)}`,
-  removeRestoredResource: (index) => `Remove restored resource ${index + 1}`,
-  uploading: "Uploading",
-  uploadFailed: "Upload failed",
-  previewAttachment: (name) => `Preview ${name}`,
-  previewUnavailable: "Preview unavailable",
-  attachmentPreviewLabel: "Attachment preview",
-  downloadAttachment: (name) => `Download ${name}`,
-  closeAttachmentPreview: "Close",
-  retryAttachment: (name) => `Retry ${name}`,
-  retryUpload: "Retry upload",
-  removeAttachment: (name) => `Remove ${name}`,
-  confirmCommand: (name) => `Confirm /${name}`,
-  confirmDescription: (command) => `Run /${command.name}? ${command.description}`,
-  cancel: "Cancel",
-  runCommand: (name) => `Run /${name}`,
-  commands: "Commands",
-  slashCommandsLabel: "Slash commands",
-  modelLabel: "Model",
-  close: "Close",
-  danger: "danger",
-  draftConflict: "This draft changed in another tab. Your local draft is still here.",
-  useOtherDraft: "Use other draft",
-  keepMine: "Keep mine",
-  // Kept for embedder message overrides / back-compat. Routine autosave is
-  // silent — only draft conflicts surface under the composer.
-  savingDraft: "Saving draft…",
-  formatBytes,
-  formatRelativeTime,
-};
+export { defaultChatComposerMessages } from "../composer-messages";
+export type { ChatComposerMessages } from "../composer-messages";
 
 export type ComposerSubmitMode = "queue" | "steer";
 export type ComposerSubmitBlocker =
@@ -264,7 +132,7 @@ export type ComposerSubmitBlocker =
 /**
  * How the composer offers run control.
  * - `pause`: the workstream Pause control and paused-state strip (default; the
- *   OpenGeni console).
+ *   Opengeni console).
  * - `stop`: a Stop control only while a response runs. Stopping pauses this
  *   conversation; the next message continues it, so people never see a paused
  *   state they have to resume. Pauses applied elsewhere still show.
@@ -392,7 +260,7 @@ export function useChatComposerController({
   controlLinks,
   disabled = false,
   attachments,
-  commands = defaultCommands,
+  commands: commandsProp,
   commandContext,
   onClearView,
   onPaste,
@@ -400,10 +268,16 @@ export function useChatComposerController({
   runControl = "pause",
   running = false,
 }: UseChatComposerControllerOptions) {
+  const t = useOpenGeniText();
+  const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
   const formatError = useErrorMessage();
+  const singleSend = delivery.singleSend === true;
   const messages = useMemo(
-    () => ({ ...defaultChatComposerMessages, ...messageOverrides }),
-    [messageOverrides],
+    () => ({
+      ...defaultChatComposerMessages(singleSend ? singleSendText(t) : t),
+      ...messageOverrides,
+    }),
+    [messageOverrides, singleSend, t],
   );
   const id = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -432,6 +306,8 @@ export function useChatComposerController({
   const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
   const [paletteMounted, setPaletteMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Which control's submission is in flight, so only that control shows it.
+  const [submittingMode, setSubmittingMode] = useState<ComposerSubmitMode | null>(null);
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
   const deliveryValue = delivery.value;
@@ -644,11 +520,20 @@ export function useChatComposerController({
       if (!delivery.canSend) return false;
       submittingRef.current = true;
       setSubmitting(true);
+      setSubmittingMode(mode);
       try {
-        return mode === "steer" || resumesOnSend ? await delivery.steer() : await delivery.send();
+        if (resumesOnSend) return await delivery.steer();
+        // With one Send, Cmd/Ctrl+Enter is just Send.
+        if (mode !== "steer" || singleSend) return await delivery.send();
+        // Cmd/Ctrl+Enter and the button beside Send send the other way:
+        // Steer when Send queues, queue when Send steers.
+        return delivery.sendAlternate ? await delivery.sendAlternate() : await delivery.steer();
       } finally {
         submittingRef.current = false;
-        if (mountedRef.current) setSubmitting(false);
+        if (mountedRef.current) {
+          setSubmitting(false);
+          setSubmittingMode(null);
+        }
       }
     },
     [
@@ -660,6 +545,7 @@ export function useChatComposerController({
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
       resumesOnSend,
+      singleSend,
     ],
   );
 
@@ -710,7 +596,7 @@ export function useChatComposerController({
             ? messages.controlChangedError
             : formatError(
                 delivery.error,
-                composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
               ),
         }
       : null);
@@ -821,6 +707,10 @@ export function useChatComposerController({
     canSubmit,
     submitBlocker,
     submit,
+    busySend: delivery.busySend ?? "queue",
+    singleSend,
+    alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
+    submittingMode,
     handleKeyDown,
     handlePaste,
     handleFileChange,
@@ -1078,7 +968,12 @@ function focusBelongsElsewhere(textarea: HTMLTextAreaElement): boolean {
   if (!active || active === textarea) return false;
   if (active.closest(EDITING_FOCUS_SELECTOR)) return true;
   const popup = active.closest(POPUP_FOCUS_SELECTOR);
-  return popup !== null && !popup.contains(textarea);
+  if (popup) return !popup.contains(textarea);
+  // A dismissed popup can restore a button or link while draft hydration is
+  // still pending. Its focus remains intentional after the popup disappears.
+  return (
+    active !== textarea.ownerDocument.body && active !== textarea.ownerDocument.documentElement
+  );
 }
 
 export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(function ComposerInput(
@@ -1105,6 +1000,29 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
     });
     return () => window.cancelAnimationFrame(frame);
   }, [autoFocus, controller.disabled, controller.textareaRef]);
+
+  // Text rewraps when the box gets narrower or wider (panel resize, viewport
+  // change), so refit the height on width changes, not only on edits.
+  useEffect(() => {
+    const textarea = controller.textareaRef.current;
+    if (!textarea || typeof ResizeObserver === "undefined") return;
+    let width = textarea.clientWidth;
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === width) return;
+      width = textarea.clientWidth;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        applyComposerTextareaHeight(textarea, 220);
+      });
+    });
+    observer.observe(textarea);
+    return () => {
+      observer.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [controller.textareaRef]);
 
   return (
     <textarea
@@ -1185,7 +1103,9 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
         ref={ref}
         className={cn(
           "og-composer-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
-          "max-sm:flex-nowrap max-sm:gap-1",
+          // Phone: 44px touch targets already space themselves; tight gaps leave
+          // the model pill room for its name.
+          "max-sm:flex-nowrap max-sm:gap-0.5",
           className,
         )}
       />
@@ -1226,7 +1146,7 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
       ref={ref}
       className={cn(
         "og-composer-actions ml-auto flex shrink-0 items-center gap-1.5",
-        "max-sm:flex-nowrap max-sm:gap-1",
+        "max-sm:flex-nowrap max-sm:gap-0.5",
         className,
       )}
     />
@@ -1340,6 +1260,10 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
       return null;
     const busy = controller.pausing || controller.resuming;
     const tip = title ?? controller.messages.pauseTitle;
+    // On a narrow composer, Send and its Queue/Steer choice need the room
+    // while there is a draft, so Pause steps aside until it is sent or
+    // cleared, as the phone app's single trailing control does.
+    const yieldsToDraft = controller.submitBlocker !== "empty";
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1355,6 +1279,7 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
+            yieldsToDraft && "og-composer-pause-yields max-sm:hidden",
             className,
           )}
         >
@@ -1385,6 +1310,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     { className, "aria-label": ariaLabel, title, children, ...props },
     ref,
   ) {
+    const t = useOpenGeniText();
     const controller = useComposerController();
     if (
       controller.runControl !== "stop" ||
@@ -1394,7 +1320,7 @@ export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>
     )
       return null;
     const busy = controller.pausing;
-    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? "Stop";
+    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? t("composer.stop");
     const tip = title ?? controller.messages.stopTitle ?? label;
     return (
       <ComposerTip tip={tip}>
@@ -1431,6 +1357,85 @@ export type ComposerSendButtonProps = Omit<
   OwnedButtonProps
 >;
 
+export type ComposerAlternateSendButtonProps = ComposerSendButtonProps;
+
+/**
+ * The other way to send while the agent works, beside Send: Steer when Send
+ * queues, Queue when Send steers. It appears once there is something to send,
+ * so touch users (who have no Cmd/Ctrl+Enter) always have both choices.
+ * It is shown exactly when Send takes its busy path (`alternateSend`), and
+ * keeps its word on every width; on narrow composers Pause steps aside while
+ * there is a draft to make room, as on phones.
+ */
+export const AlternateSendButton = forwardRef<HTMLButtonElement, ComposerAlternateSendButtonProps>(
+  function ComposerAlternateSendButton(
+    { className, "aria-label": ariaLabel, title, children, ...props },
+    ref,
+  ) {
+    const t = useOpenGeniText();
+    const controller = useComposerController();
+    if (
+      controller.alternateSend === null ||
+      controller.paused ||
+      controller.submitBlocker === "empty" ||
+      controller.submitBlocker === "disabled"
+    )
+      return null;
+    const queues = controller.alternateSend === "queue";
+    const label = queues
+      ? (controller.messages.queueLabel ?? t("composerMessages.queue"))
+      : (controller.messages.steerLabel ?? t("composerMessages.steer"));
+    const tip =
+      title ??
+      (controller.submitBlocker === "annotations"
+        ? controller.messages.annotationNotesRequired
+        : queues
+          ? (controller.messages.queueTitle ?? t("composerMessages.queueRunsAfterCurrentWork"))
+          : (controller.messages.steerTitle ?? t("composerMessages.steerReadsItSoon")));
+    const inFlight = controller.sending && controller.submittingMode === "steer";
+    return (
+      <ComposerTip tip={tip}>
+        <button
+          data-analytics-action={queues ? "queue" : "steer"}
+          data-og-composer-alternate-send=""
+          {...props}
+          ref={ref}
+          type="button"
+          onClick={(event) => {
+            // This button goes away once the draft is sent. Return keyboard
+            // and screen-reader focus to the message box instead of the page.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("steer").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
+          disabled={!controller.canSubmit}
+          aria-label={ariaLabel ?? label}
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+          className={cn(
+            "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2.5 pointer-coarse:h-11 pointer-coarse:px-3.5",
+            "border border-og-border bg-og-surface-1 text-og-control font-medium text-og-fg",
+            "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+            "hover:bg-og-surface-2 active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+            className,
+          )}
+        >
+          {children ??
+            (inFlight ? (
+              <>
+                <LoaderCircleIcon aria-hidden="true" className="size-3.5 animate-og-spin" />
+                <span>{label}</span>
+              </>
+            ) : (
+              label
+            ))}
+        </button>
+      </ComposerTip>
+    );
+  },
+);
+
 export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>(
   function ComposerSendButton(
     { className, "aria-label": ariaLabel, title, children, ...props },
@@ -1443,7 +1448,9 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
         ? controller.messages.annotationNotesRequired
         : controller.paused
           ? controller.messages.sendAndResumeTitle
-          : controller.messages.sendTitle);
+          : controller.busySend === "steer"
+            ? (controller.messages.steerSendTitle ?? controller.messages.sendTitle)
+            : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button
@@ -1451,7 +1458,14 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           {...props}
           ref={ref}
           type="button"
-          onClick={() => void controller.submit("queue")}
+          onClick={(event) => {
+            // Send is disabled once the draft is sent; keep keyboard and
+            // screen-reader focus in the message box.
+            const hadFocus = event.currentTarget === document.activeElement;
+            void controller.submit("queue").then((sent) => {
+              if (sent && hadFocus) controller.focusInput();
+            });
+          }}
           disabled={!controller.canSubmit}
           data-og-tip={tip}
           aria-label={
@@ -1470,7 +1484,7 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           )}
         >
           {children ??
-            (controller.sending ? (
+            (controller.sending && controller.submittingMode !== "steer" ? (
               <LoaderCircleIcon className="size-4 animate-og-spin" />
             ) : (
               <ArrowUpIcon className="size-4" />
@@ -1836,10 +1850,54 @@ function AttachmentChips({
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
   onLoadPreview: UseFileAttachmentsResult["loadPreview"];
 }) {
+  const t = useOpenGeniText();
   const lightbox = useLightboxOptional();
   const previewRequest = useRef<AbortController | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
+  // Thumbnails always show: an uploaded image without a live local preview (a
+  // restored draft, a revoked or broken object URL) loads its stored copy.
+  const [storedThumbs, setStoredThumbs] = useState<Record<string, string>>({});
+  const [brokenLocal, setBrokenLocal] = useState<ReadonlySet<string>>(() => new Set());
+  const thumbRequests = useRef<Map<string, AbortController>>(new Map());
+  const localPreview = (attachment: UseFileAttachmentsResult["attachments"][number]) =>
+    attachment.previewUrl && !brokenLocal.has(attachment.id) ? attachment.previewUrl : undefined;
+
+  useEffect(() => {
+    if (!onLoadPreview) return;
+    for (const attachment of attachments) {
+      const id = attachment.id;
+      if (
+        attachment.status !== "ready" ||
+        !attachment.file ||
+        !attachment.contentType.startsWith("image/") ||
+        (attachment.previewUrl && !brokenLocal.has(id)) ||
+        storedThumbs[id] ||
+        thumbRequests.current.has(id)
+      ) {
+        continue;
+      }
+      const controller = new AbortController();
+      thumbRequests.current.set(id, controller);
+      void onLoadPreview(id, controller.signal)
+        .then((url) => {
+          if (url && !controller.signal.aborted) {
+            setStoredThumbs((current) => ({ ...current, [id]: url }));
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (thumbRequests.current.get(id) === controller) thumbRequests.current.delete(id);
+        });
+    }
+  }, [attachments, brokenLocal, onLoadPreview, storedThumbs]);
+  useEffect(() => {
+    const requests = thumbRequests.current;
+    return () => {
+      for (const controller of requests.values()) controller.abort();
+      requests.clear();
+    };
+  }, []);
 
   useEffect(() => () => previewRequest.current?.abort(), [onLoadPreview]);
 
@@ -1850,9 +1908,12 @@ function AttachmentChips({
   ) {
     previewRequest.current?.abort();
     const attachmentId = attachment.id;
-    const releaseSource = onRetainPreview(attachmentId);
-    let src = attachment.previewUrl;
-    if (!releaseSource && canLoadPreview) {
+    const local = localPreview(attachment);
+    const releaseSource = local ? onRetainPreview(attachmentId) : undefined;
+    let src = local ?? storedThumbs[attachmentId];
+    // An unretained local URL may already be revoked: prefer the stored copy.
+    if (!releaseSource && canLoadPreview) src = storedThumbs[attachmentId];
+    if (!src && canLoadPreview) {
       const controller = new AbortController();
       previewRequest.current = controller;
       setPreviewLoadingId(attachmentId);
@@ -1894,6 +1955,15 @@ function AttachmentChips({
         const secureContextRequired = attachment.errorCode === "secure_context_required";
         const previewFailed = previewErrorId === attachment.id;
         const previewLoading = previewLoadingId === attachment.id;
+        const local = localPreview(attachment);
+        const thumb = local ?? storedThumbs[attachment.id];
+        // A local object URL that fails (revoked, unreadable) falls back to the stored copy.
+        const onThumbError = local
+          ? () =>
+              setBrokenLocal((current) =>
+                current.has(attachment.id) ? current : new Set(current).add(attachment.id),
+              )
+          : undefined;
         const canLoadPreview = Boolean(
           lightbox &&
           onLoadPreview &&
@@ -1901,47 +1971,68 @@ function AttachmentChips({
           attachment.file &&
           attachment.contentType.startsWith("image/"),
         );
+        const appShot = attachment.appShot;
         const statusText = previewFailed
-          ? (messages.previewUnavailable ?? "Preview unavailable")
+          ? (messages.previewUnavailable ?? t("composer.previewUnavailable"))
           : attachment.status === "uploading"
             ? messages.uploading
             : failed
               ? attachment.error || messages.uploadFailed
-              : messages.formatBytes(attachment.sizeBytes);
+              : appShot
+                ? t("composer.appShotSummary", { app: appShot.app })
+                : messages.formatBytes(attachment.sizeBytes);
+        // An app-shot reads as the window it shows: its title first, then the
+        // app, with a wider thumbnail so the window is recognizable.
+        const displayName = appShot ? appShot.title.trim() || appShot.app : attachment.name;
+        const thumbSize = appShot ? "h-10 w-16" : "size-8";
         return (
           <div
             key={attachment.id}
+            data-app-shot={appShot ? "" : undefined}
             className={cn(
               "flex min-w-0 items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              // A captured window arrives from outside the page: let it settle in.
+              appShot && "animate-og-enter",
               failed
                 ? cn(
                     "border-og-status-failed/40 bg-og-status-failed/10",
                     secureContextRequired
                       ? "max-w-full items-start sm:max-w-[32rem]"
-                      : "max-w-[240px]",
+                      : appShot
+                        ? "max-w-[320px]"
+                        : "max-w-[240px]",
                   )
-                : "max-w-[240px] border-og-border bg-og-surface-2",
+                : cn(
+                    "border-og-border bg-og-surface-2",
+                    appShot ? "max-w-[320px]" : "max-w-[240px]",
+                  ),
             )}
           >
-            {lightbox && (attachment.previewUrl || canLoadPreview) ? (
+            {lightbox && (thumb || canLoadPreview) ? (
               <button
                 type="button"
                 className={cn(
-                  "size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
-                  !attachment.previewUrl && "flex items-center justify-center disabled:cursor-wait",
+                  thumbSize,
+                  "shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  appShot && "border border-og-border bg-og-surface-1",
+                  !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
-                aria-label={messages.previewAttachment(attachment.name)}
+                aria-label={messages.previewAttachment(displayName)}
                 aria-busy={previewLoading || undefined}
                 disabled={previewLoading}
                 onClick={(event) =>
                   void openPreview(attachment, event.currentTarget, canLoadPreview)
                 }
               >
-                {attachment.previewUrl ? (
+                {thumb ? (
                   <img
-                    src={attachment.previewUrl}
+                    src={thumb}
                     alt=""
-                    className="h-full w-full object-cover transition-opacity hover:opacity-80"
+                    onError={onThumbError}
+                    className={cn(
+                      "h-full w-full object-cover transition-opacity hover:opacity-80",
+                      appShot && "object-top",
+                    )}
                   />
                 ) : previewLoading ? (
                   <LoaderCircleIcon className="size-4 animate-og-spin text-og-fg-muted" />
@@ -1949,11 +2040,12 @@ function AttachmentChips({
                   <ImageIcon className="size-4 text-og-fg-muted" />
                 )}
               </button>
-            ) : attachment.previewUrl ? (
+            ) : thumb ? (
               <img
-                src={attachment.previewUrl}
+                src={thumb}
                 alt=""
-                className="size-8 shrink-0 rounded object-cover"
+                onError={onThumbError}
+                className={cn(thumbSize, "shrink-0 rounded object-cover", appShot && "object-top")}
               />
             ) : attachment.contentType.startsWith("image/") ? (
               <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
@@ -1961,8 +2053,21 @@ function AttachmentChips({
               <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-og-fg">{attachment.name}</div>
-              {secureContextRequired ? (
+              <div className="truncate font-medium text-og-fg">{displayName}</div>
+              {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
+                <ComposerTip
+                  tip={
+                    appShot.text?.trim()
+                      ? t("composer.appShotTextIncluded")
+                      : t("composer.appShotNoText")
+                  }
+                >
+                  <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
+                    <AppWindowIcon aria-hidden className="size-3 shrink-0" />
+                    <span className="truncate">{statusText}</span>
+                  </div>
+                </ComposerTip>
+              ) : secureContextRequired ? (
                 <div className="break-words text-og-xs leading-4 text-og-status-failed">
                   {statusText}
                 </div>
@@ -1984,7 +2089,7 @@ function AttachmentChips({
                   onClick={() => onRetry(attachment.id)}
                   disabled={disabled}
                   className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
-                  aria-label={messages.retryAttachment(attachment.name)}
+                  aria-label={messages.retryAttachment(displayName)}
                 >
                   <RotateCwIcon className="size-3.5" />
                 </button>
@@ -1995,7 +2100,7 @@ function AttachmentChips({
               onClick={() => onRemove(attachment.id)}
               disabled={disabled}
               className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
-              aria-label={messages.removeAttachment(attachment.name)}
+              aria-label={messages.removeAttachment(displayName)}
             >
               <XIcon className="size-3.5" />
             </button>

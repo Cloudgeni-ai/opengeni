@@ -10,6 +10,7 @@ import * as z from "zod/v4";
 export function contractToolInput<T extends z.ZodObject>(
   projection: T,
   validation: z.ZodType = projection,
+  options: { jsonObjectFields?: readonly string[] } = {},
 ): z.ZodType<z.input<T>, z.input<T>> {
   const inputProjection = projection.strict();
   const jsonSchema = z.toJSONSchema(inputProjection, {
@@ -17,10 +18,33 @@ export function contractToolInput<T extends z.ZodObject>(
     target: "draft-7",
   });
   assertDescribedToolInput(jsonSchema);
+  for (const field of options.jsonObjectFields ?? []) {
+    const property = (jsonSchema.properties as Record<string, { type?: string }>)[field];
+    if (property?.type !== "object") {
+      throw new Error(`JSON string normalization requires an object-only input: ${field}`);
+    }
+  }
+  const normalizeObject = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // The normal value-free contract error reports the expected object.
+    }
+    return value;
+  };
   // MCP's SDK only publishes recognized object schemas. A passthrough object
   // keeps the call intact, while metadata supplies the projected JSON Schema.
   return z
-    .object({})
+    .object(
+      Object.fromEntries(
+        (options.jsonObjectFields ?? []).map((field) => [
+          field,
+          z.preprocess(normalizeObject, z.unknown()).optional(),
+        ]),
+      ),
+    )
     .catchall(z.unknown())
     .superRefine((args, context) => {
       const projected = inputProjection.safeParse(args);

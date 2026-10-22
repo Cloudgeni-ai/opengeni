@@ -2261,7 +2261,13 @@ function approvalEnv(overrides: Record<string, string> = {}) {
 
 function approvalFixture(
   options: {
-    mergeMethod?: "merge" | "squash" | "rebase" | "single" | "moving-main-squash";
+    mergeMethod?:
+      | "merge"
+      | "squash"
+      | "rebase"
+      | "single"
+      | "moving-main-squash"
+      | "moving-main-merge";
     associatedPullCount?: number;
     authorId?: number;
     pullState?: string;
@@ -2321,9 +2327,11 @@ function approvalFixture(
       ? [{ sha: baseSha }, { sha: pullHeadSha }]
       : mergeMethod === "rebase"
         ? [{ sha: rebasedFirstSha }]
-        : mergeMethod === "moving-main-squash"
-          ? [{ sha: movingMainParentSha }]
-          : [{ sha: baseSha }];
+        : mergeMethod === "moving-main-merge"
+          ? [{ sha: movingMainParentSha }, { sha: pullHeadSha }]
+          : mergeMethod === "moving-main-squash"
+            ? [{ sha: movingMainParentSha }]
+            : [{ sha: baseSha }];
   const author =
     options.author ??
     (options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
@@ -2408,7 +2416,7 @@ function approvalFixture(
         tree: {
           sha:
             options.sourceTreeSha ??
-            (mergeMethod === "moving-main-squash" ? movingMainSourceTreeSha : headTreeSha),
+            (mergeMethod.startsWith("moving-main-") ? movingMainSourceTreeSha : headTreeSha),
         },
         parents: sourceParents,
       });
@@ -2967,45 +2975,48 @@ describe("release approval provenance", () => {
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
   });
 
-  test("accepts the exact reviewed tree delta squashed onto disjoint moving main", async () => {
-    const retainedControllerSha = "89".repeat(20);
-    const initialMainSha = "ab".repeat(20);
-    const terminalMainSha = "cd".repeat(20);
-    const fixture = approvalFixture({
-      mergeMethod: "moving-main-squash",
-      controllerSha: retainedControllerSha,
-      controllerTreeSha: "ef".repeat(20),
-      initialMainSha,
-      terminalMainSha,
-      sourceAncestorMainShas: [retainedControllerSha, initialMainSha, terminalMainSha],
-      controllerAncestorMainShas: [initialMainSha, terminalMainSha],
-    });
+  test.each(["moving-main-squash", "moving-main-merge"] as const)(
+    "accepts the exact reviewed tree delta via %s onto disjoint moving main",
+    async (mergeMethod) => {
+      const retainedControllerSha = "89".repeat(20);
+      const initialMainSha = "ab".repeat(20);
+      const terminalMainSha = "cd".repeat(20);
+      const fixture = approvalFixture({
+        mergeMethod,
+        controllerSha: retainedControllerSha,
+        controllerTreeSha: "ef".repeat(20),
+        initialMainSha,
+        terminalMainSha,
+        sourceAncestorMainShas: [retainedControllerSha, initialMainSha, terminalMainSha],
+        controllerAncestorMainShas: [initialMainSha, terminalMainSha],
+      });
 
-    const result = await verifyApprovedMerge({
-      env: approvalEnv({
-        GITHUB_REF:
-          `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
-        GITHUB_SHA: retainedControllerSha,
-        GITHUB_WORKFLOW_SHA: retainedControllerSha,
-        RELEASE_CONTROLLER_SHA: retainedControllerSha,
-      }),
-      fetchImpl: fixture.fetchImpl,
-      logger: { log() {} },
-    });
+      const result = await verifyApprovedMerge({
+        env: approvalEnv({
+          GITHUB_REF:
+            `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+          GITHUB_SHA: retainedControllerSha,
+          GITHUB_WORKFLOW_SHA: retainedControllerSha,
+          RELEASE_CONTROLLER_SHA: retainedControllerSha,
+        }),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      });
 
-    expect(result).toMatchObject({
-      sourceSha: mergeSha,
-      sourceTreeSha: movingMainSourceTreeSha,
-      mergeMethod: "provider-verified-moving-main-squash",
-      sourceComposition: {
-        type: "exact-reviewed-delta-on-moving-main",
-        integrationBaseSha: movingMainParentSha,
-        integrationBaseTreeSha: movingMainParentTreeSha,
-        manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-        pathCount: 1,
-      },
-    });
-  });
+      expect(result).toMatchObject({
+        sourceSha: mergeSha,
+        sourceTreeSha: movingMainSourceTreeSha,
+        mergeMethod: `provider-verified-${mergeMethod}`,
+        sourceComposition: {
+          type: "exact-reviewed-delta-on-moving-main",
+          integrationBaseSha: movingMainParentSha,
+          integrationBaseTreeSha: movingMainParentTreeSha,
+          manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+          pathCount: 1,
+        },
+      });
+    },
+  );
 
   test.each([
     ["overlapping integration change", { movingMainOverlap: true }],
@@ -3021,6 +3032,21 @@ describe("release approval provenance", () => {
         logger: { log() {} },
       }),
     ).rejects.toThrow("differs from the exact reviewed moving-main composition");
+  });
+
+  test.each([
+    { movingMainOverlap: true },
+    { movingMainSourceExtra: true },
+    { movingMainParentRetainsBase: false },
+    { movingMainTreeTruncated: "source" as const },
+  ])("rejects altered queue merge composition %#", async (options) => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeMethod: "moving-main-merge", ...options }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow();
   });
 
   test("rejects a moving-main source whose integration parent does not retain the reviewed base", async () => {
@@ -3698,7 +3724,11 @@ describe("workflow contracts", () => {
       "artifact-runtime": { result: "success" },
     };
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
-      if (reports.has(name) || name === "automation-admission") continue;
+      if (
+        reports.has(name) ||
+        ["automation-admission", "merge-content", "full-green"].includes(name)
+      )
+        continue;
       // Execute the checked-in boolean predicate with GitHub's documented
       // status-function values, including an unrelated skipped dependency.
       const expression = job.if
@@ -3759,9 +3789,11 @@ describe("workflow contracts", () => {
     expect(
       ci.jobs.test.steps.find((step: any) => step.name === "Require every split CI lane").run,
     ).toContain("scripts/ci/required-results.jq");
-    expect(ci.jobs["automation-report"].steps.at(-1).env.AUTOMATION_CHECK_CONCLUSION).toContain(
-      "&& 'success' || 'failure'",
-    );
+    expect(
+      ci.jobs["automation-report"].steps.find(
+        (step: any) => step.name === "Complete exact-head automation CI check",
+      ).env.AUTOMATION_CHECK_CONCLUSION,
+    ).toContain("&& 'success' || 'failure'");
     expect(
       ci.jobs["browser-acceptance"].steps.filter((step: any) => step.if?.includes("always()"))
         .length,
@@ -3943,7 +3975,7 @@ describe("workflow contracts", () => {
     expect(plan.name).toBe("Explain change impact");
     expect(plan.needs).toBe("automation-admission");
     expect(plan.if).toBe(
-      "${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(plan.outputs).toEqual(
       expect.objectContaining({
@@ -3964,7 +3996,7 @@ describe("workflow contracts", () => {
     expect(planScript).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(planScript).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
     expect(planScript).toContain(
-      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 6)",
+      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 12)",
     );
 
     const source = ci.jobs["source-contracts"];
@@ -3977,8 +4009,12 @@ describe("workflow contracts", () => {
       "bun install --frozen-lockfile --ignore-scripts",
       "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
     ]);
-    expect(source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run)).toEqual([]);
-    expect(source.steps.filter((step: any) => step.run)[0]?.name).toBe("Install dependencies");
+    const beforeInstall = source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run);
+    expect(beforeInstall.map((step: any) => step.name)).toEqual([
+      "Restore complete checkout history without listing refs",
+    ]);
+    expect(beforeInstall[0]?.run).toContain("git fetch --quiet");
+    expect(beforeInstall[0]?.run).toContain(">/dev/null 2>&1");
     for (const stepName of [
       "Validate changeset release plan",
       "Profile impacted TypeScript 7 projects",
@@ -4400,7 +4436,9 @@ describe("workflow contracts", () => {
       "artifact-runtime",
       "images",
     ]);
-    expect(aggregate.if).toBe("${{ always() }}");
+    expect(aggregate.if).toBe(
+      "${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}",
+    );
     expect(aggregate.permissions ?? ci.permissions).toEqual({
       contents: "read",
     });

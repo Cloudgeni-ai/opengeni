@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import { AuthApiError } from "@/api";
-import {
-  ManagedAuthSessionUnavailableError,
-  managedAuthFailure,
-  validateManagedAuthInput,
-} from "./managed-auth-form";
+import { ManagedAuthSessionUnavailableError } from "@opengeni/react/app/lib/managed-auth-transition";
+import { managedAuthFailure, validateManagedAuthInput } from "./managed-auth-form";
 import {
   clearVerificationLinkErrorFromLocation,
   managedAuthModeFromSearch,

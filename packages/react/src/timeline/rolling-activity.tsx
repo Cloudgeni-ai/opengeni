@@ -6,7 +6,10 @@ import { CompactActivityContext } from "./shared";
 import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
 import { toolDisplayName } from "./tool-display-name";
+import { toolStepPhase } from "./tool-steps";
 import type { ActivityItem } from "./types";
+import { rollingActivityItem } from "./work-presentation";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** One stable viewport; updates replace its content without moving the conversation. */
 export function RollingActivity({
@@ -22,43 +25,33 @@ export function RollingActivity({
   /** Show "+N earlier"; off when an enclosing status line already counts steps. */
   showCount?: boolean;
 }) {
+  const t = useOpenGeniText();
   const reduced = useReducedMotion();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  // Progress notes have their own line in the status row; the reel shows steps.
-  const work = items.filter(
-    (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
-  );
-  const active = work.filter((item) =>
-    item.kind === "reasoning" ? item.streaming : "status" in item && item.status === "running",
-  );
-  // Advance with the event order; finishing a parallel tool must not replay an older one.
-  const item =
-    !mounted && previousItem && previousItem.kind !== "agent-message" ? previousItem : work.at(-1);
-  if (!item) return null;
-  const earlierCount = Math.max(
-    0,
-    work.findIndex((entry) => entry.id === item.id),
-  );
+  // Progress notes have their own line in the status row; the reel shows steps, advancing
+  // with the event order so finishing a parallel tool never replays an older one.
+  const selected = rollingActivityItem(items, previousItem, mounted);
+  if (!selected) return null;
+  const { item, earlierCount } = selected;
   const fallback = (
     <span className="og-rolling-label">
       <WrenchIcon className="size-3.5" />
       <span>
-        {item.kind === "tool-call" ? toolDisplayName(item.name, item.display) : "Working"}
+        {item.kind === "tool-call"
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
+          : t("timeline.rollingActivity.working")}
       </span>
     </span>
   );
   return (
-    <span
-      className="og-rolling-status"
-      data-running={active.some((entry) => entry.id === item.id) ? "true" : undefined}
-    >
+    <span className="og-rolling-status" data-running={selected.running ? "true" : undefined}>
       <span className="sr-only">
         {item.kind === "tool-call"
-          ? toolDisplayName(item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display, toolStepPhase(item.status))
           : item.kind === "reasoning"
-            ? "Thinking"
-            : "Working"}
+            ? t("timeline.rollingActivity.thinking")
+            : t("timeline.rollingActivity.working")}
       </span>
       <span className="og-rolling-window" aria-hidden="true">
         <AnimatePresence initial={false} mode="sync">
@@ -78,7 +71,7 @@ export function RollingActivity({
           >
             <CompactActivityContext.Provider value={true}>
               <Suspense fallback={fallback}>
-                {renderActivity(item, toolRegistry, undefined, undefined, undefined, undefined)}
+                {renderActivity(t, item, toolRegistry, undefined, undefined, undefined, undefined)}
               </Suspense>
             </CompactActivityContext.Provider>
           </motion.span>

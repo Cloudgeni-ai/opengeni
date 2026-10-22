@@ -23,7 +23,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
         </div>
         <div class="shadow-lg" id="shadow"></div>
         <div class="ring-2 ring-og-accent" id="ring"></div>
-        <div class="blur" id="blur"></div>
+        <div class="backdrop-blur" id="blur"></div>
         <div class="border border-og-border" id="border"></div>
         <div class="bg-og-bg text-og-menu" id="defaults"></div>
       </div>
@@ -83,7 +83,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
           <button class="og-realtime-model-trigger" id="wide-realtime-trigger"></button>
         </div>
       </div>
-      <div class="border blur shadow-lg" id="outside"></div>
+      <div class="border backdrop-blur shadow-lg" id="outside"></div>
     `);
   });
 
@@ -99,7 +99,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
         childTranslateVariable: computed("transform-child").getPropertyValue("--tw-translate-x"),
         shadow: computed("shadow").boxShadow,
         ring: computed("ring").boxShadow,
-        blur: computed("blur").filter,
+        blur: computed("blur").backdropFilter,
         borderStyle: computed("border").borderTopStyle,
         borderWidth: computed("border").borderTopWidth,
       };
@@ -138,7 +138,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
           .backgroundColor,
         rootDensity: getComputedStyle(document.getElementById("root-density-override")!).fontSize,
         outsideBorder: outside.borderTopWidth,
-        outsideFilter: outside.filter,
+        outsideFilter: outside.backdropFilter,
         outsideShadow: outside.boxShadow,
       };
     });

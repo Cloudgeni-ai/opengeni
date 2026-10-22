@@ -3,6 +3,7 @@ import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   boundSessionEventPayload,
   renderMessageSentAtForModel,
   sessionEventJsonBytes,
@@ -86,13 +87,15 @@ import {
   updateSessionTitle,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
+  steerQueuedTurnInTransaction,
+  resolveWaitingSteer,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import postgres from "postgres";
 
@@ -148,7 +151,7 @@ async function readSessionActivityRevision(
   sessionId: string,
 ): Promise<string> {
   const [row] = await shared.admin<Array<{ revision: string }>>`
-    select activity_revision::text as revision
+    select activity_xid::text as revision
     from sessions
     where workspace_id = ${workspaceId} and id = ${sessionId}`;
   if (!row) throw new Error(`Session activity revision missing: ${sessionId}`);
@@ -159,9 +162,13 @@ async function send(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   text: string,
-  delivery: "send" | "steer" = "send",
+  requested: "send" | "steer" | "steer_now" = "send",
   model?: string,
 ) {
+  // "steer_now" is the explicit "Send now": queue the prompt, then Steer its
+  // row with `interrupt` so the live attempt is interrupted immediately
+  // instead of at its next model step.
+  const delivery = requested === "steer_now" ? "send" : requested;
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
     grant.workspaceId,
@@ -184,6 +191,24 @@ async function send(
         }),
       ),
   );
+  if (requested === "steer_now") {
+    const queued = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
+    if (!queued) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId: queued.id,
+          expectedTurnVersion: queued.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `steer-now-${text}-${crypto.randomUUID()}`,
+          interrupt: true,
+        }),
+      ),
+    );
+  }
   const turn = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
   if (!turn) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
   return { ...accepted, turn };
@@ -260,6 +285,76 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("history and event appends survive transient connection acquisition failures", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "persist despite connection pressure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const position = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    for (const [offset, code] of ["53300", "57P03", "ECONNREFUSED", "ECONNRESET"].entries()) {
+      let admissions = 0;
+      const interrupted = new Proxy(client.db, {
+        get(target, property, receiver) {
+          if (property !== "transaction") return Reflect.get(target, property, receiver);
+          return (...args: Parameters<typeof target.transaction>) => {
+            admissions += 1;
+            if (admissions === 1)
+              return Promise.reject(
+                Object.assign(new Error("injected connection failure"), { code }),
+              );
+            return target.transaction(...args);
+          };
+        },
+      });
+      expect(
+        await appendSessionHistoryItems(interrupted, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          expectedExecutionGeneration: turn!.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [
+            {
+              position: position + offset,
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: `saved-${code}` }],
+              },
+            },
+          ],
+        }),
+      ).toBe(true);
+      expect(admissions).toBe(2);
+      admissions = 0;
+      const result = await appendSessionEventsForTurnAttempt(
+        interrupted,
+        grant.workspaceId!,
+        session.id,
+        turn!.id,
+        turn!.executionGeneration,
+        attemptId,
+        [{ type: "agent.reasoning.delta", payload: { delta: `saved-${code}` } }],
+      );
+      expect(result.accepted).toBe(true);
+      expect(admissions).toBe(2);
+    }
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(history.filter((row) => row.position >= position)).toHaveLength(4);
+    const events =
+      await shared.admin`select id from session_events where session_id = ${session.id} and type = 'agent.reasoning.delta'`;
+    expect(events).toHaveLength(4);
+  });
+
   describe("exact-attempt connector policy replay", () => {
     async function policyAttempt() {
       const { grant, session } = await fixture();
@@ -1141,7 +1236,7 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "use this direction", "steer");
+    const replacement = await send(grant, session.id, "use this direction", "steer_now");
 
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -1761,7 +1856,8 @@ describe("clean session control plane", () => {
       }
       changedCursor = page.nextCursor ?? undefined;
     } while (changedCursor);
-    expect(changedIds).toEqual([newcomer.id, movedId]);
+    expect(changedIds).toContain(newcomer.id);
+    expect(changedIds).toContain(movedId);
     expect(new Set([...oldTraversalIds, ...changedIds])).toEqual(
       new Set([...expectedEqualOrder, newcomer.id]),
     );
@@ -1901,8 +1997,8 @@ describe("clean session control plane", () => {
     expect(new Set(allSeen)).toEqual(
       new Set([newest.id, second.id, third.id, moved.id, inserted.id]),
     );
-    expect(allSeen).toHaveLength(new Set(allSeen).size);
-    expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
+    // xmin polling is at least once; earlier visible sessions may replay.
+    for (const id of [third.id, moved.id, inserted.id]) expect(changedIds).toContain(id);
   });
 
   test("the first-page revision fence is a nonblocking MVCC snapshot", async () => {
@@ -1912,9 +2008,7 @@ describe("clean session control plane", () => {
     await reader.unsafe("begin");
     try {
       const [fence] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
       expect(fence).toBeDefined();
 
       // Keeping the reader transaction open must not delay either raw progress
@@ -1927,10 +2021,8 @@ describe("clean session control plane", () => {
       ]);
 
       const [advanced] = await reader<Array<{ revision: string }>>`
-        select revision::text as revision
-        from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}`;
-      expect(BigInt(advanced!.revision)).toBeGreaterThan(BigInt(fence!.revision));
+        select pg_snapshot_xmin(pg_current_snapshot())::text as revision`;
+      expect(BigInt(advanced!.revision)).toBeGreaterThanOrEqual(BigInt(fence!.revision));
 
       await reader.unsafe("commit");
       readerTransactionOpen = false;
@@ -1984,7 +2076,7 @@ describe("clean session control plane", () => {
       Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
     >`
       select id, created_at as "createdAt", updated_at as "updatedAt",
-        activity_revision::text as "activityRevision"
+        activity_xid::text as "activityRevision"
       from sessions where workspace_id = ${grant.workspaceId!}
       order by created_at desc, id desc offset 2500 limit 1`;
     expect(cursor).toBeDefined();
@@ -2005,24 +2097,25 @@ describe("clean session control plane", () => {
         explain (format json, costs off)
         select id from sessions
         where workspace_id = ${grant.workspaceId!}
-          and activity_revision > 0
-          and activity_revision <= 1000000
+          and activity_xid > '0'::xid8
           and (
-            activity_revision < ${cursor!.activityRevision}::text::bigint
+            activity_xid < ${cursor!.activityRevision}::text::xid8
             or (
-              activity_revision = ${cursor!.activityRevision}::text::bigint
+              activity_xid = ${cursor!.activityRevision}::text::xid8
               and (
                 updated_at < ${cursor!.updatedAt}
                 or (updated_at = ${cursor!.updatedAt} and id < ${cursor!.id})
               )
             )
           )
-        order by activity_revision desc, updated_at desc, id desc limit 20`;
+        order by activity_xid desc, updated_at desc, id desc limit 20`;
       return { created, updated };
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
-    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
-  });
+    expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_xid_idx");
+    // Seeding and analyzing the planner fixture takes about 25s on a 4-core CI
+    // runner, so the 30s default leaves no headroom.
+  }, 90_000);
 
   test("raw delta writers advance sequence without advancing monitoring activity", async () => {
     const baseline = "2020-01-02T03:04:05.123000Z";
@@ -2047,7 +2140,7 @@ describe("clean session control plane", () => {
       >`
         select last_sequence as "lastSequence",
           to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt",
-          activity_revision::text as "activityRevision"
+          activity_xid::text as "activityRevision"
         from sessions where workspace_id = ${workspaceId} and id = ${sessionId}`;
       return row!;
     };
@@ -2482,7 +2575,7 @@ describe("clean session control plane", () => {
     ).toBe(true);
     expect(canonicalMixedOutput.at(-1)).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 105 structured array items]",
+      text: "[Opengeni omitted 105 structured array items]",
     });
     expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
       JSON.stringify(canonicalMixed),
@@ -2701,9 +2794,18 @@ describe("clean session control plane", () => {
         event.type === "agent.toolCall.output" &&
         (event.payload as { id?: unknown }).id === "pending-call",
     )?.payload as { output: { text: string }; truncation: unknown };
-    expect(recoveryOutput.output.text).toBe(huge);
+    // The recovery audit event is bounded at write; model history and the
+    // pending receipt above keep their own exact representations.
+    expect(recoveryOutput.output.text).toContain("bytes omitted");
     expect(sessionEventJsonBytes(recoveryOutput)).toBeGreaterThan(SESSION_EVENT_PAYLOAD_MAX_BYTES);
-    expect(sessionEventPayloadTruncation(recoveryOutput)).toBeNull();
+    expect(sessionEventJsonBytes(recoveryOutput)).toBeLessThanOrEqual(
+      TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
+    );
+    expect(sessionEventPayloadTruncation(recoveryOutput)).toMatchObject({
+      truncated: true,
+      surface: "durable_audit",
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
     const recoveryPreview = boundSessionEventPayload(recoveryOutput, {
       surface: "durable_audit",
     });
@@ -3232,6 +3334,70 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
+  test.each([0, 3])(
+    "internal MCP waits preserve the provider budget and clear on model progress (%s)",
+    async (count) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "survive the internal API outage");
+      const firstAttemptId = crypto.randomUUID();
+      const first = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: firstAttemptId },
+      );
+      if (!first) throw new Error("turn was not claimed");
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        await db.execute(
+          sql`update session_turns set metadata = metadata || ${JSON.stringify({
+            providerRecoveryCount: count,
+            ...(count > 0
+              ? {
+                  providerRecoveryReason: "provider_overloaded",
+                  providerRecoveryStartedAt: new Date(Date.now() - 60_000).toISOString(),
+                }
+              : {}),
+          })}::jsonb where id = ${first.id}::uuid`,
+        );
+      });
+      const recovered = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "first_party_mcp_setup_unavailable",
+      });
+      expect(recovered.action).toBe("recovering");
+      const waiting = await getSessionTurn(client.db, grant.workspaceId!, first.id);
+      expect(waiting?.metadata.providerRecoveryCount).toBe(count);
+      expect(typeof waiting?.metadata.internalMcpSetupWaitStartedAt).toBe("string");
+      const nextAttemptId = crypto.randomUUID();
+      const next = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: nextAttemptId },
+      );
+      if (!next) throw new Error("turn was not reclaimed");
+      expect(next.id).toBe(first.id);
+      const completed = await appendSessionEventsForTurnAttempt(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        next.id,
+        next.executionGeneration,
+        nextAttemptId,
+        [{ type: "agent.model.request", payload: { phase: "completed" } }],
+      );
+      expect(completed.accepted).toBe(true);
+      const metadata = (await getSessionTurn(client.db, grant.workspaceId!, first.id))?.metadata;
+      expect(metadata).not.toHaveProperty("providerRecoveryCount");
+      expect(metadata).not.toHaveProperty("internalMcpSetupWaitStartedAt");
+    },
+  );
+
   test("a completed current model request resets only the consecutive provider recovery budget", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "continue through intermittent provider overloads");
@@ -3537,6 +3703,93 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
       ),
     ).toEqual([{ callId: "old-unresolved" }]);
+  });
+
+  test("clearing proves call/result pairs across many history pages and ignores out-of-order results", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run many tools");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const callItem = (callId: string) => ({
+      type: "function_call",
+      name: "exec_command",
+      callId,
+      arguments: "{}",
+    });
+    const resultItem = (callId: string) => ({
+      type: "function_call_result",
+      callId,
+      output: { type: "text", text: `done ${callId}` },
+    });
+    const calls = ["early", "late", "unanswered", "reversed"];
+    for (const callId of calls) {
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callId,
+        callType: "function_call",
+        callItem: callItem(callId),
+      });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          ...identity,
+          callId,
+          resultItem: resultItem(callId),
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+    }
+    const filler = Array.from({ length: 90 }, (_, index) => [
+      { position: 102 + index * 2, item: callItem(`filler-${index}`) },
+      { position: 103 + index * 2, item: resultItem(`filler-${index}`) },
+    ]).flat();
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: 100, item: callItem("early") },
+          { position: 101, item: resultItem("early") },
+          ...filler,
+          { position: 400, item: callItem("unanswered") },
+          { position: 401, item: resultItem("reversed") },
+          { position: 402, item: callItem("reversed") },
+          { position: 403, item: callItem("late") },
+          { position: 404, item: resultItem("late") },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await clearDurablePendingSessionToolCalls(client.db, { ...identity, callIds: calls }),
+    ).toEqual({ accepted: true, cleared: 2 });
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ callId: schema.sessionPendingToolCalls.callId })
+            .from(schema.sessionPendingToolCalls)
+            .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+        )
+      )
+        .map(({ callId }) => callId)
+        .sort(),
+    ).toEqual(["reversed", "unanswered"]);
   });
 
   test("recovery consumes compacted completed pairs without reactivating or re-emitting them", async () => {
@@ -4114,6 +4367,104 @@ describe("clean session control plane", () => {
       callId: "pause-approval-call",
     });
     expect(steeredResult).not.toHaveProperty("status");
+  });
+
+  test("a Steer waiting for the next model step replaces an approval wait that came first", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "ask before running");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    // Accepted while the step still runs: it waits for the next model step.
+    const steered = await send(grant, session.id, "do this instead", "steer");
+    expect(steered.turn.metadata).toMatchObject({ deferredUntilModelStep: true });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "running",
+    });
+    // The step ends in an approval instead of another model request.
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "waiting-steer-approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "approval_tool",
+        callId: "waiting-steer-approval-call",
+        arguments: "{}",
+      },
+    });
+    await attachOpenSuffixToPendingToolCalls(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      members: [
+        { callId: "waiting-steer-approval-call", interruptionKind: "approval", reasoningItems: [] },
+      ],
+    });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn!.id,
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "waiting-steer-approval-call" },
+        },
+      ],
+    });
+
+    const resolved = await resolveWaitingSteer(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+    });
+    expect(resolved).not.toBeNull();
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "superseded",
+      cancelReason: "steer",
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).slice(-1)[0]
+        ?.item,
+    ).toMatchObject({ type: "function_call_result", callId: "waiting-steer-approval-call" });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.some(
+        (item) => item.metadata.delivery === "steer",
+      ),
+    ).toBe(false);
+    expect(
+      await resolveWaitingSteer(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+      }),
+    ).toBeNull();
+    const next = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(next?.id).toBe(steered.turn.id);
   });
 
   test("accepted Send and Steer stay out of the waiting queue", async () => {
@@ -4786,7 +5137,7 @@ describe("clean session control plane", () => {
     ).toEqual([second.update.id]);
   });
 
-  test("a compaction failure holds ordinary internal updates without blocking explicit Compact", async () => {
+  test("a compaction failure holds machine input already pending at the failure without blocking explicit Compact", async () => {
     const { grant, session } = await fixture();
     const first = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
@@ -4812,22 +5163,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: failedAttemptId },
     );
-    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      turnId: failedTurn!.id,
-      triggerEventId: failedTurn!.triggerEventId,
-      attemptId: failedAttemptId,
-      turnStatus: "failed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        {
-          type: "turn.failed",
-          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
-        },
-      ],
-    });
-
+    // This result arrives while the failing attempt runs, so it is pending at
+    // the failure: it saw no newer history and must not retry on its own.
     const held = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -4844,6 +5181,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+
     expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
       kind: "idle",
     });
@@ -4881,6 +5234,94 @@ describe("clean session control plane", () => {
         (update) => update.id,
       ),
     ).toContain(held.update.id);
+  });
+
+  test("machine input committed after a compaction failure is newer truth and starts one attempt", async () => {
+    const { grant, session } = await fixture();
+    const childResult = (summary: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result" as const,
+      classification: "success" as const,
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary,
+      payload: {
+        type: "child_terminal_result" as const,
+        childSessionId: crypto.randomUUID(),
+        status: "idle" as const,
+      },
+    });
+    const first = await addSessionSystemUpdate(client.db, childResult("First child result"));
+    if (!first.added) throw new Error("first system update was not inserted");
+    const failedAttemptId = crypto.randomUUID();
+    const failedTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: failedAttemptId },
+    );
+    const held = await addSessionSystemUpdate(client.db, childResult("Held child result"));
+    if (!held.added) throw new Error("held system update was not inserted");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: failedTurn!.id,
+      triggerEventId: failedTurn!.triggerEventId,
+      attemptId: failedAttemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: { error: "checkpoint failed", code: "context_compaction_failed" },
+        },
+      ],
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+
+    const newer = await addSessionSystemUpdate(client.db, childResult("Newer child result"));
+    if (!newer.added) throw new Error("newer system update was not inserted");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+    const retryAttemptId = crypto.randomUUID();
+    const retryTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: retryAttemptId },
+    );
+    expect(retryTurn).toMatchObject({ source: "system", status: "running" });
+    // Child results from different children claim in separate batches; the
+    // held backlog leads in canonical order and the newer result follows.
+    const delivered = async (turnId: string) =>
+      (
+        await listSessionSystemUpdatesForTurn(client.db, grant.workspaceId!, session.id, turnId)
+      ).map((entry) => entry.id);
+    expect(await delivered(retryTurn!.id)).toEqual([held.update.id]);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: retryTurn!.id,
+      triggerEventId: retryTurn!.triggerEventId,
+      attemptId: retryAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: {} }],
+    });
+    const nextTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(await delivered(nextTurn!.id)).toEqual([newer.update.id]);
   });
 
   test("a model-visible goal-continuation notice remains delivered after turn failure", async () => {
@@ -5375,7 +5816,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace it", "steer");
+    const steered = await send(grant, session.id, "replace it", "steer_now");
 
     await expect(
       markSessionAttemptQuiesced(client.db, {
@@ -5449,7 +5890,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace the vanished worker", "steer");
+    const steered = await send(grant, session.id, "replace the vanished worker", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     expect(
       await markSessionWorkflowWakeDelivered(client.db, {
@@ -5866,7 +6307,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "replace it", "steer");
+    const replacement = await send(grant, session.id, "replace it", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     // Temporarily open admission without manufacturing the receipt event that
     // the historical race never wrote. This lets a newer attempt exist before
@@ -6115,9 +6556,11 @@ describe("clean session control plane", () => {
 
   test("Pause and Resume preserve lifecycle while Cancel is terminal", async () => {
     const { grant, session } = await fixture();
+    const before = (await getSession(client.db, grant.workspaceId!, session.id))?.status;
     const paused = await controlSession(grant, session.id, "pause");
     expect(paused.control.state).toBe("paused");
-    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("queued");
+    // Pause is control state only: the lifecycle status (an idle shell since #4330) is unchanged.
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe(before!);
     const resumed = await controlSession(grant, session.id, "resume");
     expect(resumed.control.state).toBe("active");
   });
@@ -6226,7 +6669,7 @@ describe("clean session control plane", () => {
   });
 
   describe("pending machine input at the final idle settlement fence", () => {
-    async function idleChild(compactionFailed = false) {
+    async function idleChild(compactionFailed = false, heldDirection = false) {
       const { grant, session: parent } = await fixture();
       const child = await createSession(client.db, {
         accountId: grant.accountId,
@@ -6250,6 +6693,22 @@ describe("clean session control plane", () => {
         { attemptId },
       );
       if (!turn) throw new Error("child turn was not claimed");
+      // Input accepted while the failing attempt runs is pending at the
+      // failure, so it saw no newer history and stays held.
+      const held = heldDirection
+        ? await addSessionSystemUpdate(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: child.id,
+            classification: "info",
+            sourceId: crypto.randomUUID(),
+            dedupeKey: `idle-fence-held-${crypto.randomUUID()}`,
+            summary: "direction pending at the compaction failure",
+            kind: "agent_message",
+            payload: { type: "agent_message", text: "continue", operationId: crypto.randomUUID() },
+          })
+        : null;
+      if (held && !held.added) throw new Error("held machine input was not inserted");
       expect(
         await applySessionTurnSettlement(client.db, grant.workspaceId!, {
           sessionId: child.id,
@@ -6282,8 +6741,28 @@ describe("clean session control plane", () => {
               ),
             ),
         );
-      return { grant, child, idleNotices };
+      return { grant, child, idleNotices, heldUpdateId: held?.update.id ?? null };
     }
+
+    test("input already pending at a compaction failure does not hold idle settlement", async () => {
+      const { grant, child, idleNotices, heldUpdateId } = await idleChild(true, true);
+      // Ordinary input held behind compaction failure is not an autonomous
+      // retry; idle settlement must not acquire a new hold for it.
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, child.id, `session-${child.id}`, {
+          attemptId: crypto.randomUUID(),
+        }),
+      ).toBeNull();
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+      ).toMatchObject({ action: "settled", notifyParent: true });
+      expect(await idleNotices()).toHaveLength(1);
+      expect(
+        (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)).map(
+          (update) => update.id,
+        ),
+      ).toContain(heldUpdateId!);
+    });
 
     for (const kind of ["agent_message", "agent_steer_instruction"] as const) {
       for (const compactionFailed of [false, true]) {
@@ -6308,22 +6787,8 @@ describe("clean session control plane", () => {
               attemptId,
             });
 
-          if (compactionFailed && kind === "agent_message") {
-            // Ordinary input held behind compaction failure is not an
-            // autonomous retry; idle settlement must not acquire a new hold.
-            expect(await claim()).toBeNull();
-            expect(
-              await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
-            ).toMatchObject({ action: "settled", notifyParent: true });
-            expect(await idleNotices()).toHaveLength(1);
-            expect(
-              (
-                await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)
-              ).map((update) => update.id),
-            ).toContain(added.update.id);
-            return;
-          }
-
+          // Input committed after the final peek is newer than any compaction
+          // failure, so it reopens the episode exactly like without one.
           expect(
             await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
           ).toEqual({ action: "stale", episodeKey: null, events: [] });
@@ -7385,6 +7850,21 @@ describe("clean session control plane", () => {
         },
       ],
     });
+
+    // The idempotency key is a trigger-filled plain column, so the lookup is
+    // index-served under row-level security instead of reading the whole turn.
+    const keyed = await shared.admin<Array<{ id: string; usageSourceKey: string | null }>>`
+      select id, usage_source_key as "usageSourceKey" from session_events
+      where workspace_id = ${grant.workspaceId!} and turn_id = ${turn.id}
+        and type = 'agent.model.usage'
+      order by sequence`;
+    expect(keyed.map((row) => row.usageSourceKey)).toEqual([sourceKey, sourceKey, sourceKey]);
+    const [unrelated] = await shared.admin<Array<{ keyed: number; total: number }>>`
+      select count(usage_source_key)::int as keyed, count(*)::int as total from session_events
+      where workspace_id = ${grant.workspaceId!} and session_id = ${session.id}
+        and type <> 'agent.model.usage'`;
+    expect(unrelated!.total).toBeGreaterThan(0);
+    expect(unrelated!.keyed).toBe(0);
   });
 
   test("a completed model call keeps usage truth when its attempt is replaced before signals", async () => {

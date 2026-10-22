@@ -1,10 +1,7 @@
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   completeTranscriptionRecordingSegment,
@@ -116,7 +113,7 @@ test("signup trial credits pay for dictation like general credits; chat-scoped c
   // Zero credits: the honest out-of-credits path.
   await expect(billing.admit({ accountId, workspaceId, attribution })).rejects.toMatchObject({
     code: "insufficient_credits",
-    message: "Voice input needs Opengeni credits. Add credits to continue.",
+    message: "Voice input needs credits. Add credits to continue.",
   });
   // A chat-model-scoped coupon does not pay for voice.
   await applyCreditLedgerEntry(client!.db, {

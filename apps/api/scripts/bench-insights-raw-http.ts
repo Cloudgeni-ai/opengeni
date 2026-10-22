@@ -21,7 +21,8 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "../../../packages/db/src/provision-roles";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../../../packages/db/src/lossless-json";
-import { acquireOwnerMigratedTestDatabase, testSettings } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";

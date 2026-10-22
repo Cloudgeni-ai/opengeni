@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/contracts",
-  "version": "1.4.4",
-  "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
+  "version": "4.3.1",
+  "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./prepared-mcp-setup": {
+      "types": "./src/prepared-mcp-setup.ts",
+      "default": "./src/prepared-mcp-setup.ts"
+    },
     "./connection-account-label": {
       "types": "./src/connection-account-label.ts",
       "default": "./src/connection-account-label.ts"
@@ -30,9 +34,21 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
+    },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
+    "./session-usage-limit-refusal": {
+      "types": "./src/session-usage-limit-refusal.ts",
+      "default": "./src/session-usage-limit-refusal.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -150,6 +166,10 @@
       "types": "./src/session-final-reply.ts",
       "default": "./src/session-final-reply.ts"
     },
+    "./session-history": {
+      "types": "./src/session-history.ts",
+      "default": "./src/session-history.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -166,6 +186,10 @@
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
     },
+    "./subscription-personal-authority-v2": {
+      "types": "./src/subscription-personal-authority-v2.ts",
+      "default": "./src/subscription-personal-authority-v2.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
@@ -181,6 +205,10 @@
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"
+    },
+    "./vault-provider-wire": {
+      "types": "./src/vault-provider-wire.ts",
+      "default": "./src/vault-provider-wire.ts"
     },
     "./code-search": {
       "types": "./src/code-search.ts",
@@ -241,6 +269,10 @@
     "./session-list-entries": {
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
+    },
+    "./workspace-control-event": {
+      "types": "./src/workspace-control-event.ts",
+      "default": "./src/workspace-control-event.ts"
     }
   },
   "publishConfig": {
@@ -248,7 +280,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

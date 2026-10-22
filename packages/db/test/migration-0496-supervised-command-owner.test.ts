@@ -1,6 +1,6 @@
 // Regression companion for 0496_supervised_command_settlement.sql.
 import { expect, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb } from "../src";
 import { migrate } from "../src/migrate";
 import { supervisedCommandProtocolReady } from "../src/retained-provider-commands";

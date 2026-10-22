@@ -15,11 +15,11 @@ const declaration = parsed.program.body
 if (declaration?.type !== "FunctionDeclaration") throw new Error("Missing production loader");
 
 const dependencies = [
+  "loadCoreRoutedClaudeCatalogReadiness",
   "connectionRestrictionsAndXaiReadiness",
   "loadWorkspaceClaudeSubscriptionReadiness",
   "getWorkspaceModelPolicy",
-  "workspaceCodexSubscriptionActive",
-  "loadWorkspaceCodexModelAvailability",
+  "loadWorkspaceCodexCatalogReadiness",
   "listConnectionsMetadata",
   "listWorkspaceProviderCustomModelsByKind",
   "getOrganizationModelProviderCatalogForWorkspace",
@@ -68,11 +68,13 @@ function fixture(
     claudeAuthoritySnapshot: { frozen: "claude" },
   };
   const values: Record<string, unknown> = {
+    // Claude's provider route, read once for both Claude readers (null: legacy).
+    "claude-core": null,
     restrictions: { restrictions: { "supergrok/": ["allowed"] }, xaiSubscriptionActive: true },
     claude: { workspace: true, organization: false },
     policy: { allowedProviders: ["anthropic"], allowedModels: null },
-    codex: true,
-    observations: { marker: "availability" },
+    // Codex readiness and live availability come from one cutover-aware read.
+    codex: { active: true, observations: {} },
     // Workspace API-key readiness is derived from one metadata read; the
     // fixture keys it by provider so the derivation port stays trivial.
     connections: {
@@ -102,11 +104,11 @@ function fixture(
   };
   const ports = {
     CLAUDE_CONNECTION_KINDS,
+    loadCoreRoutedClaudeCatalogReadiness: (...args: unknown[]) => read("claude-core", args),
     connectionRestrictionsAndXaiReadiness: (...args: unknown[]) => read("restrictions", args),
     loadWorkspaceClaudeSubscriptionReadiness: (...args: unknown[]) => read("claude", args),
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
-    workspaceCodexSubscriptionActive: (...args: unknown[]) => read("codex", args),
-    loadWorkspaceCodexModelAvailability: (...args: unknown[]) => read("observations", args),
+    loadWorkspaceCodexCatalogReadiness: (...args: unknown[]) => read("codex", args),
     listConnectionsMetadata: (...args: unknown[]) => read("connections", args),
     listWorkspaceProviderCustomModelsByKind: (...args: unknown[]) => read("workspace-models", args),
     getOrganizationModelProviderCatalogForWorkspace: (...args: unknown[]) =>
@@ -196,6 +198,14 @@ for (const first of ["inputs", "catalog"] as const) {
         organizationOpenRouterConnectionActive: false,
         organizationGatewayCustomModels: ["org-gateway"],
         organizationOpenRouterCustomModels: ["org-openrouter"],
+        workspaceOpperConnectionActive: false,
+        workspaceOpperCustomModels: [],
+        organizationOpperConnectionActive: false,
+        organizationOpperCustomModels: [],
+        organizationDirect: {
+          openai: { active: false, models: [] },
+          azure_openai: { active: false, endpoint: null, models: [] },
+        },
         claudeConnections: {
           anthropic: { active: true, models: ["org-anthropic"] },
           claude_subscription: { active: false, models: ["org-subscription"] },
@@ -219,7 +229,10 @@ test("subscription activation waits for the same exact fresh/frozen-subject read
     await flush();
     expect(f.settled()).toBe(false);
     const read = f.calls.filter((call) => call.name === "claude");
-    expect(read).toEqual([{ name: "claude", args: [f.db, f.settings, f.context] }]);
+    expect(read).toEqual([{ name: "claude", args: [f.db, f.settings, f.context, null] }]);
+    expect(f.calls.filter((call) => call.name === "claude-core")).toEqual([
+      { name: "claude-core", args: [f.db, f.settings, f.context] },
+    ]);
     f.holds.claude!.resolve({ workspace: false, organization: true });
     const result = await f.running;
     expect(result.claudeConnections.claude_subscription.active).toBe(true);
@@ -237,6 +250,7 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
       const providerKinds = [
         "vercel_gateway",
         "openrouter",
+        "opper",
         "anthropic",
         ...(subscription ? ["claude_subscription"] : []),
       ];
@@ -247,14 +261,25 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
           expect(args[1]).toEqual({
             accountId: f.context.accountId,
             workspaceId: f.context.workspaceId,
-            providerKinds,
+            // Organization Azure OpenAI has no workspace custom-model rail.
+            providerKinds:
+              name === "org-catalog" ? [...providerKinds, "openai", "azure_openai"] : providerKinds,
           });
         else if (name === "connections")
           expect(args.slice(1)).toEqual([f.context.workspaceId, null]);
         else if (name === "restrictions" || name === "claude")
-          expect(args.slice(1)).toEqual([f.settings, f.context]);
+          expect(args.slice(1)).toEqual([f.settings, f.context, null]);
+        else if (name === "claude-core") expect(args.slice(1)).toEqual([f.settings, f.context]);
         else if (name === "codex")
-          expect(args.slice(1)).toEqual([f.settings, f.context.workspaceId]);
+          expect(args.slice(1)).toEqual([
+            f.settings,
+            {
+              accountId: f.context.accountId,
+              workspaceId: f.context.workspaceId,
+              subjectId: f.context.subjectId,
+            },
+            { observeAvailability: false },
+          ]);
         else expect(args.slice(1)).toEqual([f.context.workspaceId]);
       }
       f.release(Object.keys(f.values));
@@ -271,15 +296,29 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
   }
 });
 
-test("opt-in live availability is still invoked exactly once, never added to stable create admission", async () => {
+test("opt-in live availability is still requested exactly once, never for stable create admission", async () => {
   const f = fixture({ observe: true });
   try {
     await flush();
-    expect(f.calls.filter((call) => call.name === "observations")).toEqual([
-      { name: "observations", args: [f.db, f.settings, f.context.workspaceId] },
+    expect(f.calls.filter((call) => call.name === "codex")).toEqual([
+      {
+        name: "codex",
+        args: [
+          f.db,
+          f.settings,
+          {
+            accountId: f.context.accountId,
+            workspaceId: f.context.workspaceId,
+            subjectId: f.context.subjectId,
+          },
+          { observeAvailability: true },
+        ],
+      },
     ]);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }
@@ -289,9 +328,13 @@ test("the loader's existing omitted-options default still observes live availabi
   const f = fixture({ observe: "default" });
   try {
     await flush();
-    expect(f.names().filter((name) => name === "observations")).toHaveLength(1);
-    f.release(Object.keys(f.values));
-    expect((await f.running).observations).toBe(f.values.observations);
+    const codexCalls = f.calls.filter((call) => call.name === "codex");
+    expect(codexCalls).toHaveLength(1);
+    expect(codexCalls[0]!.args[3]).toEqual({ observeAvailability: true });
+    const observations = { marker: "availability" };
+    f.holds.codex!.resolve({ active: true, observations });
+    f.release(Object.keys(f.values).filter((name) => name !== "codex"));
+    expect((await f.running).observations).toBe(observations);
   } finally {
     await f.cleanup();
   }

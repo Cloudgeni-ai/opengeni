@@ -85,7 +85,7 @@ export class OpenGeni {
       // An empty value (a blank `OPENGENI_API_BASE_URL=` in .env) means the default.
       baseUrl: options.baseUrl?.trim() || DEFAULT_OPENGENI_BASE_URL,
       // A missing key fails each request, not construction: a module-scope
-      // `new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! })` must not
+      // `new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! })` must not
       // break `next build` (or any import) where the secret only exists at
       // runtime.
       ...(options.apiKey
@@ -115,7 +115,7 @@ export class OpenGeni {
         const credential = access.credential;
         if (credential && credential.kind !== "organization_api_key") {
           throw new TypeError(
-            "OpenGeni needs an organization API key to create workspaces; this is a workspace key.",
+            "Opengeni needs an organization API key to create workspaces; this is a workspace key.",
           );
         }
         const organizationId = credential?.accountId ?? access.defaultAccountId;
@@ -732,3 +732,6 @@ function abortError(): Error {
   error.name = "AbortError";
   return error;
 }
+
+/** Current brand spelling; the established SDK export remains compatible. */
+export { OpenGeni as Opengeni };

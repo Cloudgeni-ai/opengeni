@@ -109,6 +109,17 @@ function assemble(error: SelfhostedControlError, f: FaultFields): string {
 export function renderSelfhostedFault(error: SelfhostedControlError): string {
   const detail = error.detail;
 
+  if (error.code === ErrorCode.ERROR_CODE_PROTOCOL && detail.outcome_unknown === "true") {
+    return assemble(error, {
+      headline: "the machine could not recover this delivery's outcome",
+      happened: error.message,
+      layer: "the machine link's control delivery journal — not the command itself",
+      preserved: "unknown — an earlier delivery may have executed or may still be running.",
+      tryNext:
+        "inspect the command or its effects before retrying; do not repeat a state-changing operation blindly.",
+    });
+  }
+
   if (error.payloadTooLarge || error.code === ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE) {
     if (detail.direction === "request") {
       return assemble(error, {

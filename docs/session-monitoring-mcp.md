@@ -1,5 +1,25 @@
 # Compact session monitoring over MCP
 
+## Selected conversation targets and message receipts
+
+`session_target_get/set` retains optional conversational context in the calling
+session's versioned `conversationTargetV1` metadata. Set/clear uses an exact live
+attempt, optimistic version and operation ID; stale retries cannot restore a
+cleared selection. Target access is checked at selection and every read. The
+metadata grants no authority, never changes voice ownership, and is not an
+implicit dispatch destination. No session is automatically deleted.
+
+`session_message_status(sessionId, updateId)` follows an existing Send/Steer
+receipt belonging to this caller. Pending, cancelled and superseded input stays
+distinct from delivery. Delivered input names its exact consuming turn; only an
+outcome for that turn's current execution generation yields an exact bounded
+`session_events` result read. Read that result before relaying it; a status alone
+is not the answer. The tools do not resend, resume, wait, or consume results.
+Use ordinary `session_wait`/history and an explicitly timed `wait_for_input` when
+waiting on unrelated sessions (unlike children, they do not automatically send
+terminal results to the caller). A paused target requires authorized Resume or
+an explicitly requested change of direction through Steer.
+
 ## Child unread and consumption
 
 Unread is based on completed assistant messages, substantive final answers,
@@ -110,10 +130,25 @@ repeatedly requesting the whole tail.
 The explicit `results` view selects final answers and actionable outcomes without
 duplicating an answer from both message and turn-completion records. `tools`
 provides compact tool receipts, with arguments/output requested explicitly and
-call-ID drill-down for detail. `debug` exposes explicitly requested audit and
+call-ID drill-down for detail; `toolName` with `includeOutput: true` returns up
+to three named calls with their results in one page (default one, the newest).
+Arguments or a result too large for one page continue losslessly through
+`nextCursor`, which returns to the named calls once that value is complete; a
+call whose result could not be included names the exact read in `readOutput`,
+and `outputUnavailable` says why a result cannot be matched to its call.
+`debug` exposes explicitly requested audit and
 diagnostic records, including retained deltas. The underlying audit records remain
 append-only; these views are read projections, not model-history reconstruction.
 Unclaimed queued prompts must not appear as conversation the agent has processed.
+
+Avoidable mistakes get refusals that name the corrected call. A cursor that was
+not issued unchanged is refused, never repaired; when its readable part still
+names a position, the refusal gives the equivalent cursor-free call
+(`before`/`after` plus the same selectors), which every page also exposes as
+`nextBefore`/`nextAfter`. An unknown event type lists the closest registered
+types and its dotted family. `callId` or `toolName` sent with a non-tools view
+reads `view: "tools"` and says so in `notice`; other mismatched selectors are
+refused with both plausible corrected calls.
 
 Use `session_get`/`session_wait` for status and joining workers, and
 `command_read`/`command_wait` for command-specific output. `session_events` does

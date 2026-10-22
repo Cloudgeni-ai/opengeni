@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OpenGeniClient,
@@ -84,6 +84,10 @@ function upstreamServer() {
       body: multipart ? await request.formData() : text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path.endsWith("/goal") && request.method === "GET" && url.searchParams.has("absent")) {
+      // A goal-less session read through the `absent=null` opt-in.
+      return Response.json(null);
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`) {
       return Response.json({ models: [VOICE_MODEL] });
     }
@@ -127,6 +131,7 @@ function upstreamServer() {
         headers: {
           "X-OpenGeni-Has-More": "true",
           "X-OpenGeni-Next-Before": "1",
+          "X-OpenGeni-Conversation-Filter": "2",
           // Upstream's own revision header must stay behind the proxy.
           "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
         },
@@ -343,7 +348,7 @@ describe("createSessionProxyHandler", () => {
       );
     }
   });
-  test("returns the host's 401 and never calls OpenGeni without authentication", async () => {
+  test("returns the host's 401 and never calls Opengeni without authentication", async () => {
     const { upstream, browser } = setup({
       resolve: () => new Response("Unauthorized", { status: 401 }),
     });
@@ -391,9 +396,9 @@ describe("createSessionProxyHandler", () => {
   });
 
   test("a missing API key fails requests, not module load, and names the env var in the server log", async () => {
-    // `new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! })` runs at module
+    // `new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! })` runs at module
     // scope in a Next.js route; `next build` imports it without runtime secrets.
-    const og = new OpenGeni({ apiKey: undefined as unknown as string, organizationId: "org" });
+    const og = new Opengeni({ apiKey: undefined as unknown as string, organizationId: "org" });
     const handler = createSessionProxyHandler(og, {
       resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
     });
@@ -503,6 +508,17 @@ describe("createSessionProxyHandler", () => {
     expect(guarded.upstream.requests).toHaveLength(0);
   });
 
+  test("goal read forwards the absent=null opt-in so a goal-less session is a 200 null", async () => {
+    const { upstream, browser } = setup();
+    expect(await browser.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    const [request] = upstream.requests;
+    expect(request!.method).toBe("GET");
+    expect(request!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`,
+    );
+    expect(request!.url.searchParams.get("absent")).toBe("null");
+  });
+
   test("acts as the resolved external user through asUser", async () => {
     const { upstream, browser } = setup();
     const session = await browser.getSession(WORKSPACE_ID, SESSION_ID);
@@ -555,6 +571,72 @@ describe("createSessionProxyHandler", () => {
       tools: [],
       firstPartyMcpTools: [],
     });
+  });
+
+  test("voice-first creation is explicit, preserves retry identity and never fabricates a prompt", async () => {
+    const inputs: unknown[] = [];
+    const admissions: SessionProxyMessageInput[] = [];
+    const { upstream, browser } = setup({
+      realtimeVoice: true,
+      createSession: (input) => {
+        inputs.push(input);
+        return { initialMessage: input.initialMessage, tools: [] };
+      },
+      beforeForwardMessage: (input) => {
+        admissions.push(input);
+      },
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      startMode: "realtime",
+      idempotencyKey: "voice-create",
+    });
+    expect(inputs).toEqual([
+      { initialMessage: "", startMode: "realtime", idempotencyKey: "voice-create" },
+    ]);
+    expect(admissions).toEqual([{ delivery: "create", startMode: "realtime" }]);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      startMode: "realtime",
+      idempotencyKey: "voice-create",
+    });
+    expect(upstream.requests[0]!.body).not.toHaveProperty("initialMessage");
+
+    const disabled = setup({ realtimeVoice: false, createSession: () => ({ tools: [] }) });
+    expect(
+      (await rejection(disabled.browser.createSession(WORKSPACE_ID, { startMode: "realtime" })))
+        .code,
+    ).toBe("route_not_allowed");
+    expect(disabled.upstream.requests).toEqual([]);
+    for (const fields of [
+      { initialMessage: "Do not silently send this" },
+      { resources: [{ kind: "file", fileId: "file-1" }] },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.createSession(WORKSPACE_ID, { startMode: "realtime", ...fields } as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(1);
+  });
+
+  test("a simple create hook retains the browser retry key unless the server supplies its own", async () => {
+    for (const serverKey of [undefined, "server-key"]) {
+      const { upstream, browser } = setup({
+        createSession: ({ initialMessage }) => ({
+          initialMessage,
+          ...(serverKey ? { idempotencyKey: serverKey } : {}),
+        }),
+      });
+      await browser.createSession(WORKSPACE_ID, {
+        initialMessage: "Hello",
+        idempotencyKey: "browser-key",
+      });
+      expect(upstream.requests[0]!.body).toMatchObject({
+        idempotencyKey: serverKey ?? "browser-key",
+      });
+    }
   });
 
   test("first-message files and model choices reach the hook and the created session", async () => {
@@ -723,6 +805,12 @@ describe("createSessionProxyHandler", () => {
       ],
       [
         "POST",
+        "realtime/websocket",
+        connect,
+        () => browser.negotiateRealtimeWebsocket(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
         "realtime/gateway",
         connect,
         () => browser.negotiateGatewayRealtime(WORKSPACE_ID, SESSION_ID, connect),
@@ -818,6 +906,58 @@ describe("createSessionProxyHandler", () => {
     expect((await send(open.handler, "POST", "realtime")).status).toBe(400);
     expect(denied.upstream.requests).toHaveLength(0);
     expect(open.upstream.requests).toHaveLength(0);
+  });
+
+  test("only an explicit realtimeVoice: true offers voice to stock UIs", async () => {
+    expect((await setup().browser.getClientConfig()).realtimeVoice).toBeUndefined();
+    expect((await setup({ realtimeVoice: true }).browser.getClientConfig()).realtimeVoice).toBe(
+      true,
+    );
+  });
+
+  test("anonymous visitors cannot upload unless visitorUploads is set", async () => {
+    const visitor = {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "visitor:abc", visitor: true }),
+    };
+    const upload = (handler: (request: Request) => Promise<Response>, path: string) =>
+      handler(
+        new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            scope: "session",
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+          }),
+        }),
+      );
+    const refused = setup(visitor);
+    expect((await refused.browser.getClientConfig()).fileUploads?.enabled).toBe(false);
+    expect((await upload(refused.handler, "uploads")).status).toBe(404);
+    expect((await upload(refused.handler, "uploads/up_1/complete")).status).toBe(404);
+    expect(refused.upstream.requests.some((r) => r.url.pathname.includes("/files/uploads"))).toBe(
+      false,
+    );
+    // Agent-produced files still download.
+    await refused.browser.createFileDownloadUrl(
+      WORKSPACE_ID,
+      "33333333-3333-4333-8333-333333333333",
+    );
+    expect(refused.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
+
+    const allowed = setup({ ...visitor, visitorUploads: true });
+    expect((await allowed.browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    await upload(allowed.handler, "uploads");
+    expect(allowed.upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/files/uploads`,
+    );
+
+    // Signed-in users follow `files`; `files: false` now also reports uploads off.
+    expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    expect((await setup({ files: false }).browser.getClientConfig()).fileUploads?.enabled).toBe(
+      false,
+    );
   });
 
   test("realtimeVoice: false reports voice off and refuses every voice route", async () => {
@@ -1115,6 +1255,8 @@ describe("createSessionProxyHandler", () => {
     expect(page.events.map((event) => event.sequence)).toEqual([1]);
     expect(page.hasMore).toBe(true);
     expect(page.nextBefore).toBe(1);
+    // The conversation-filter announcement reaches the browser.
+    expect(page.conversationFilter).toBe(2);
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");
@@ -1575,6 +1717,40 @@ describe("createSessionProxyHandler", () => {
     expect((await off.browser.getClientConfig()).archive).toBe(false);
   });
 
+  test("an open conversation can mark itself read, and nothing else about attention", async () => {
+    const { upstream, browser } = setup();
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, {
+      unread: false,
+      acknowledgedThroughSequence: 42,
+    });
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, { unread: false });
+    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+    ]);
+    expect(upstream.requests.map((request) => request.body)).toEqual([
+      { unread: false, acknowledgedThroughSequence: 42 },
+      { unread: false },
+    ]);
+    for (const request of [
+      { unread: true },
+      { activelyWorking: true },
+      { unread: false, activelyWorking: false },
+      { unread: false, expectedVersion: 3 },
+      { unread: false, acknowledgedThroughSequence: -1 },
+      { unread: false, acknowledgedThroughSequence: 1.5 },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, request as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(2);
+  });
+
   test("retained media a session produced is served under files, scoped and association-checked", async () => {
     const RETAINED = "44444444-4444-4444-8444-444444444444";
     const OTHER_SESSION = "55555555-5555-4555-8555-555555555555";
@@ -1795,6 +1971,74 @@ describe("createSessionProxyHandler", () => {
     expect(defaults.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
   });
 
+  test("workspace Sites are opt-in, read-only and need no session", async () => {
+    const site = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`;
+    const list = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts`;
+    // Off by default: the session-scoped artifact path still requires a session.
+    expect((await setup({ artifacts: true }).handler(new Request(site))).status).toBe(400);
+    expect((await setup().handler(new Request(site))).status).toBe(404);
+
+    const on = setup({ sites: true });
+    const forwarded = async (url: string) => {
+      const response = await on.handler(new Request(url));
+      expect(response.status).toBe(200);
+      return on.upstream.requests.at(-1)!.url;
+    };
+    expect((await forwarded(site)).pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}`,
+    );
+    const content = await forwarded(`${site}/content?versionId=v1&smuggled=1`);
+    expect(content.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/content`,
+    );
+    expect(Object.fromEntries(content.searchParams)).toEqual({ versionId: "v1" });
+    const listed = await forwarded(`${list}?limit=5&sourceSessionId=x`);
+    expect(Object.fromEntries(listed.searchParams)).toEqual({ limit: "5" });
+    const html = await on.handler(new Request(`${site}/html?versionId=v1`));
+    expect(await html.text()).toBe("<h1>Dashboard</h1>");
+    expect((await on.handler(new Request(`${site}/html`))).status).toBe(400);
+
+    // Writes stay closed without a session, and so do editable artifacts.
+    for (const [url, method] of [
+      [`${site}/rollback`, "POST"],
+      [`${site}/status`, "PUT"],
+    ] as const) {
+      const response = await on.handler(
+        new Request(url, { method, headers: { "Content-Type": "application/json" }, body: "{}" }),
+      );
+      expect(response.status).toBe(404);
+    }
+    const editable = site.replace("published-artifacts", "editable-artifacts");
+    expect((await on.handler(new Request(editable))).status).toBe(404);
+  });
+
+  test("Excel workbook routes are opt-in and act as the resolved user", async () => {
+    const off = setup();
+    await expect(off.browser.createOfficeWorkbookTicket(WORKSPACE_ID)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(off.upstream.requests.some((r) => r.url.pathname.includes("/office/"))).toBe(false);
+
+    const on = setup({ office: true });
+    await on.browser.createOfficeWorkbookTicket(WORKSPACE_ID);
+    const minted = on.upstream.requests.at(-1)!;
+    expect(minted.method).toBe("POST");
+    expect(minted.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbook-tickets`);
+    expect(minted.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    await on.browser.listOfficeWorkbooks(WORKSPACE_ID).catch(() => undefined);
+    const listed = on.upstream.requests.at(-1)!;
+    expect(listed.method).toBe("GET");
+    expect(listed.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbooks`);
+    // Another workspace and other office paths stay closed.
+    await expect(on.browser.createOfficeWorkbookTicket(OTHER_WORKSPACE_ID)).rejects.toMatchObject({
+      status: 403,
+    });
+    const other = await on.handler(
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/office/anything`),
+    );
+    expect(other.status).toBe(404);
+  });
+
   test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
     const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
     const scoped = { "x-opengeni-session-id": SESSION_ID };
@@ -1854,7 +2098,7 @@ describe("createSessionProxyHandler", () => {
       sourceSessionId: SESSION_ID,
     });
 
-    // An artifact OpenGeni does not list for this session is not served.
+    // An artifact Opengeni does not list for this session is not served.
     const other = await on.handler(
       new Request(item.replace(EDITABLE_ID, "fedcba9876543210fedcba9876543210"), {
         headers: scoped,

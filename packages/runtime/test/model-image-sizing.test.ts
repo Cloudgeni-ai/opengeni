@@ -2,6 +2,10 @@ import { expect, test } from "bun:test";
 import sharp from "sharp";
 import { createModelImageSizer } from "../src/model-image-sizing";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
+import {
+  ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
+  AnthropicRequestSizeError,
+} from "../src/anthropic-request-size";
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 
@@ -71,12 +75,23 @@ test("high-entropy JPEG projections never grow individual or multi-image payload
     .toBuffer();
   const encoded = bytes.toString("base64");
   expect(encoded.length).toBeLessThan(10 * 1024 * 1024);
-  const sized = await createModelImageSizer(2000)(encoded, "image/jpeg");
+  // RED witness for the prior dimension-only policy: individually admissible
+  // images can collectively exceed the provider's entire HTTP request limit.
+  const prior = await createModelImageSizer(2000)(encoded, "image/jpeg");
+  expect(prior.data.length * 55).toBeGreaterThan(32_000_000);
+  const sized = await createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES)(
+    encoded,
+    "image/jpeg",
+  );
   expect(sized.mediaType).toBe("image/webp");
-  expect(sized.data.length).toBeLessThanOrEqual(10 * 1024 * 1024);
+  expect(sized.data.length).toBeLessThanOrEqual(ANTHROPIC_IMAGE_MAX_ENCODED_BYTES);
   expect(sized.data.length).toBeLessThanOrEqual(encoded.length);
-  expect(await createModelImageSizer(2000)(encoded, "image/jpeg")).toEqual(sized);
+  expect(
+    await createModelImageSizer(2000, ANTHROPIC_IMAGE_MAX_ENCODED_BYTES)(encoded, "image/jpeg"),
+  ).toEqual(sized);
+  let calls = 0;
   const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    calls++;
     expect(String(init?.body).length).toBeLessThan(32_000_000);
     const sent = JSON.parse(String(init?.body));
     const images = sent.messages[0].content.filter((block: any) => block.type === "image");
@@ -95,7 +110,23 @@ test("high-entropy JPEG projections never grow individual or multi-image payload
       },
     ]),
   );
-}, 30_000);
+  const failure = await model
+    .getResponse(
+      request([
+        {
+          role: "user",
+          content: Array.from({ length: 100 }, () => ({
+            type: "input_image",
+            image: `data:image/jpeg;base64,${encoded}`,
+          })),
+        },
+      ]),
+    )
+    .catch((caught: unknown) => caught);
+  expect(failure).toBeInstanceOf(AnthropicRequestSizeError);
+  expect((failure as AnthropicRequestSizeError).requestSize.imageCount).toBe(100);
+  expect(calls).toBe(1);
+}, 60_000);
 
 test("invalid and active formats fail before entering other image decoders", async () => {
   const size = createModelImageSizer(2000);

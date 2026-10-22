@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/sdk",
-  "version": "1.4.4",
-  "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
+  "version": "4.3.1",
+  "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,6 +26,26 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
+    "./app-links": {
+      "types": "./src/app-links.ts",
+      "default": "./src/app-links.ts"
+    },
+    "./this-computer": {
+      "types": "./src/this-computer.ts",
+      "default": "./src/this-computer.ts"
+    },
+    "./desktop-bridge": {
+      "types": "./src/desktop-bridge.ts",
+      "default": "./src/desktop-bridge.ts"
+    },
+    "./office": {
+      "types": "./src/office/index.ts",
+      "default": "./src/office/index.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -46,6 +66,10 @@
       "types": "./src/site.ts",
       "default": "./src/site.ts"
     },
+    "./site-bridge-host": {
+      "types": "./src/site-bridge-host.ts",
+      "default": "./src/site-bridge-host.ts"
+    },
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"
@@ -58,6 +82,10 @@
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
     },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
     "./insights-usage": {
       "types": "./src/insights-usage.ts",
       "default": "./src/insights-usage.ts"
@@ -65,6 +93,10 @@
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
+    },
+    "./external-vault-receiver": {
+      "types": "./src/external-vault-receiver.ts",
+      "default": "./src/external-vault-receiver.ts"
     },
     "./session-history-import": {
       "types": "./src/session-history-import.ts",
@@ -130,6 +162,10 @@
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
     },
+    "./realtime-websocket-transport": {
+      "types": "./src/realtime-websocket-transport.ts",
+      "default": "./src/realtime-websocket-transport.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
@@ -177,7 +213,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/generate-site-browser-runtime.ts && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

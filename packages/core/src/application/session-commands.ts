@@ -18,6 +18,7 @@ import type {
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 import { HTTPException } from "hono/http-exception";
 import {
   checkWorkspaceAllowance,
@@ -59,7 +60,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import { initiatingHumanForAllowance } from "../domain/sessions";
-import { modelFundingForAdmission } from "../billing/limits";
+import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "../billing/limits";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
 import {
   requireSessionAuthorization,
@@ -163,7 +164,7 @@ function agentActor(context: AgentSessionCommandContext) {
  */
 async function assertFreshAgentCommandAllowance(
   tx: SessionActivityDatabase,
-  deps: { settings?: Settings },
+  deps: { settings?: Settings; catalogSourceSettings?: Settings },
   context: AgentSessionCommandContext,
   targetSessionId: string,
 ): Promise<void> {
@@ -171,8 +172,15 @@ async function assertFreshAgentCommandAllowance(
   if (!target || target.accountId !== context.accountId) {
     throw new HTTPException(404, { message: "Target session not found" });
   }
-  if (deps.settings) {
-    const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
+  let fundedWithoutCredits = false;
+  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
+  // Request adapters may hand over settings already resolved for the caller's
+  // workspace, with synthetic workspace providers overlaid. Resolve the
+  // target's catalog from the unoverlaid source; feeding the overlay back
+  // through deployment validation rejects its reserved provider kinds.
+  const catalogSource = deps.catalogSourceSettings ?? deps.settings;
+  if (catalogSource) {
+    const { settings } = await resolveWorkspaceCatalogSettings(tx, catalogSource, {
       accountId: target.accountId,
       workspaceId: context.workspaceId,
       retainedProductModelId: target.model,
@@ -182,16 +190,26 @@ async function assertFreshAgentCommandAllowance(
       settings,
       workspaceId: context.workspaceId,
       model: target.model,
+      accountId: target.accountId,
+      subjectId: initiatingHumanForAllowance(frozen),
     });
-    if (modelFundingForAdmission(settings, target.model, codexBilled).fundedWithoutCredits) {
-      return;
-    }
+    fundedWithoutCredits = modelFundingForAdmission(
+      settings,
+      target.model,
+      codexBilled,
+      await coreRoutedSubscriptionFunding(tx, settings, {
+        accountId: target.accountId,
+        workspaceId: context.workspaceId,
+        model: target.model,
+        subjectId: initiatingHumanForAllowance(frozen),
+      }),
+    ).fundedWithoutCredits;
   }
-  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
   const refusal = await checkWorkspaceAllowance(tx, {
     accountId: target.accountId,
     workspaceId: context.workspaceId,
     subjectId: initiatingHumanForAllowance(frozen),
+    ...(fundedWithoutCredits ? { fundedWithoutCredits: true } : {}),
   });
   if (refusal) {
     throw new HTTPException(402, {
@@ -329,7 +347,8 @@ async function wakeSessionCommand(
 /**
  * Nudge the one bounded dispatcher after a set-based control transaction. The
  * API never materializes descendant session ids; Postgres remains the complete
- * wake ledger and the 10-second Schedule repairs a lost immediate trigger.
+ * wake ledger and the control worker's 10-second repair cadence recovers a
+ * lost immediate trigger.
  */
 async function requestControlWakeDispatch(
   deps: {
@@ -388,6 +407,7 @@ export async function sendAgentSessionMessage(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -457,6 +477,7 @@ export async function steerAgentSession(
   deps: {
     db: Database;
     settings?: Settings;
+    catalogSourceSettings?: Settings;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
@@ -844,6 +865,7 @@ export async function steerHumanQueuePrompt(
           turnId,
           expectedTurnVersion: input.expectedTurnVersion,
           controlEtag: input.controlEtag ?? null,
+          ...(input.interrupt === true ? { interrupt: true } : {}),
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
@@ -1096,7 +1118,7 @@ export async function getHumanComposerDraft(
 }
 
 export async function saveHumanComposerDraft(
-  deps: SessionAuthorizationCommandDeps,
+  deps: SessionAuthorizationCommandDeps & { settings?: Settings },
   context: HumanSessionCommandContext,
   input: SaveComposerDraftRequest,
 ): Promise<ComposerDraft> {
@@ -1123,7 +1145,9 @@ export async function saveHumanComposerDraft(
         }),
       ),
   );
-  return composerDraft(row)!;
+  const saved = composerDraft(row)!;
+  if (deps.settings) prepareDraftModel({ db: deps.db, settings: deps.settings }, context, saved);
+  return saved;
 }
 
 export async function controlHumanWorkspaceTimer(

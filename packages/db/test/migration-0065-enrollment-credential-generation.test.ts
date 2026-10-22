@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");

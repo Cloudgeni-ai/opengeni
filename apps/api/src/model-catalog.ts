@@ -1,6 +1,8 @@
 import {
   OPENROUTER_PROVIDER_ID,
+  OPPER_PROVIDER_ID,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
   type ConfiguredModel,
 } from "@opengeni/config";
 import {
@@ -40,7 +42,9 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     model.providerId === "workspace-claude-subscription" ||
     model.providerId === "organization-claude-subscription" ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
-    model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+    model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID ||
+    model.providerId === OPPER_PROVIDER_ID ||
+    model.providerId === WORKSPACE_OPPER_PROVIDER_ID
       ? undefined
       : model.credentialSource.kind === "connected_subscription"
         ? model.credentialSource.provider === "xai"
@@ -63,13 +67,17 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
         ? { provider: "openrouter", providerLabel: "OpenRouter" }
         : model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
           ? { provider: "workspace-openrouter", providerLabel: "Your OpenRouter" }
-          : source === "codex"
-            ? { provider: "codex", providerLabel: "Codex" }
-            : source === "supergrok"
-              ? { provider: "supergrok", providerLabel: "SuperGrok" }
-              : source === "workspace_gateway"
-                ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-                : { provider: "opengeni", providerLabel: "Opengeni" };
+          : model.providerId === OPPER_PROVIDER_ID
+            ? { provider: "opper", providerLabel: "Opper" }
+            : model.providerId === WORKSPACE_OPPER_PROVIDER_ID
+              ? { provider: "workspace-opper", providerLabel: "Your Opper" }
+              : source === "codex"
+                ? { provider: "codex", providerLabel: "Codex" }
+                : source === "supergrok"
+                  ? { provider: "supergrok", providerLabel: "SuperGrok" }
+                  : source === "workspace_gateway"
+                    ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+                    : { provider: "opengeni", providerLabel: "Opengeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
@@ -113,12 +121,27 @@ export type WorkspaceModelCatalogDefaults = {
   creditsSelection: DefaultModelSelection | null;
 };
 
+/** The picker offers only speeds some account serving the workspace offers. */
+function withoutUnavailableLatencyModes(selection: WorkspaceModelSelection): ConfiguredModel {
+  const unavailable = selection.unavailableLatencyModes;
+  if (!unavailable?.length) return selection.model;
+  return {
+    ...selection.model,
+    capabilities: {
+      ...selection.model.capabilities,
+      latencyModes: selection.model.capabilities.latencyModes.map((mode) =>
+        unavailable.includes(mode.id) ? { ...mode, runnable: false } : mode,
+      ),
+    },
+  };
+}
+
 export function projectWorkspaceModelCatalog(
   selections: readonly WorkspaceModelSelection[],
   defaults?: WorkspaceModelCatalogDefaults,
 ): WorkspaceModelCatalogResponseType {
   const models = selections.map((selection) => ({
-    ...projectClientModel(selection.model),
+    ...projectClientModel(withoutUnavailableLatencyModes(selection)),
     credentialReadiness: selection.credentialReadiness,
     policyAllowed: selection.policyAllowed,
     availability: selection.availability,

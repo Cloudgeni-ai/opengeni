@@ -1,4 +1,4 @@
-//! Native accessibility and capture adapter for OpenGeni ComputerSessions.
+//! Native accessibility and capture adapter for Opengeni ComputerSessions.
 //!
 //! The placement-local Bun controller owns public session authority, durable
 //! operation receipts, and media grants. This crate owns only the genuinely
@@ -16,11 +16,14 @@ mod linux_pointer;
 mod model;
 mod rpc;
 mod tree;
+mod window_command;
 #[cfg(any(target_os = "linux", test))]
 mod window_input_fences;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_gnome;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -30,6 +33,9 @@ pub use adapter::{
 pub use model::*;
 pub use rpc::{run_native_rpc, NativeRpcServerError, NATIVE_RPC_PROTOCOL_VERSION};
 pub use tree::{RawSemanticNode, SemanticSnapshotIndex};
+pub use window_command::{
+    answer_window_command, run_window_command, WindowBounds, WindowPresence, WindowQuery,
+};
 
 /// Opens the native adapter for the current desktop seat.
 ///

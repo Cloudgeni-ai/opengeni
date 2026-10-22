@@ -2,14 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configuredModels } from "@opengeni/config";
 import type { AccessGrant, LatencyMode } from "@opengeni/contracts";
 import { bootstrapWorkspace, claimSessionWorkForAttempt, createDb, getSession } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "../src";
-import { acceptSessionUserMessage, createSessionForRequest } from "../src/domain/sessions";
+import {
+  acceptSessionUserMessage,
+  createSessionForRequest,
+  updateSessionToolPolicy,
+} from "../src/domain/sessions";
 import { sendAgentSessionMessage } from "../src/application/session-commands";
 
 let shared: SharedTestDatabase;
@@ -131,6 +132,47 @@ async function turns(sessionId: string) {
   >`select model, reasoning_effort as "reasoningEffort", latency_mode as "latencyMode", metadata
     from session_turns where session_id=${sessionId} order by position`;
 }
+
+describe("built-in selection intent at creation", () => {
+  test("omission follows defaults independently of connectors; explicit lists and pinned parents stay exact", async () => {
+    const { parent, create, deps, grant, caller } = await fixture("standard");
+    expect(parent.toolPolicy.firstPartyMode).toBe("workspace_default");
+    deps.settings.defaultFirstPartyMcpTools = ["session_get", "custom_mcp_setup_request"];
+    const child = await create();
+    expect(child.firstPartyMcpTools).toEqual(["session_get", "custom_mcp_setup_request"]);
+    expect(child.toolPolicy.firstPartyMode).toBe("workspace_default");
+    const pinnedChild = await create({ firstPartyMcpTools: [] });
+    expect(pinnedChild.firstPartyMcpTools).toEqual([]);
+    expect(pinnedChild.toolPolicy.firstPartyMode).toBeUndefined();
+
+    await updateSessionToolPolicy(deps, grant, parent.id, {
+      mode: "explicit",
+      tools: parent.tools,
+      firstPartyMcpTools: ["session_get"],
+      expectedVersion: 1,
+    });
+    const inheritedPin = await create();
+    expect(inheritedPin.firstPartyMcpTools).toEqual(["session_get"]);
+    expect(inheritedPin.toolPolicy.firstPartyMode).toBeUndefined();
+    // Equal values today are not authority to opt an agent into future grants.
+    deps.settings.defaultFirstPartyMcpTools = ["session_get"];
+    await expect(
+      updateSessionToolPolicy(deps, caller, parent.id, {
+        mode: "workspace_default",
+        expectedVersion: 2,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    const pinnedTopLevel = await createSessionForRequest(deps, grant, grant.workspaceId, {
+      initialMessage: "Synthetic explicit selection; never execute a model",
+      sandboxBackend: "none",
+      firstPartyMcpTools: [],
+    });
+    expect(pinnedTopLevel.toolPolicy.mode).toBe("workspace_default");
+    expect(pinnedTopLevel.toolPolicy.firstPartyMode).toBeUndefined();
+    expect(pinnedTopLevel.firstPartyMcpTools).toEqual([]);
+  }, 30_000);
+});
 
 describe("new session latency defaults", () => {
   for (const parentLatency of ["fast", "priority"] as const) {

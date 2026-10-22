@@ -14,7 +14,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   registerApiKeyRoutes,
   organizationApiKeyPermissionsForAccess,
@@ -118,6 +118,9 @@ function fixture(initial?: OrganizationAccessPolicy) {
       if (!found) throw new Error("missing");
       return found;
     }),
+  );
+  track(
+    spyOn(db, "getWorkspace").mockImplementation(async (_db, id) => workspaces.get(id) ?? null),
   );
   track(
     spyOn(db, "listSharedWorkspacesForAccount").mockImplementation(async () =>

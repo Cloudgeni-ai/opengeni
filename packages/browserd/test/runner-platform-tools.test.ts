@@ -47,32 +47,31 @@ mock.module("node:fs/promises", () => ({
     return original.access(path, ...args);
   },
 }));
-const { AgentBrowserJsonRunner } = await import(process.argv[1]);
+const { ManagedBrowserRunner } = await import(process.argv[1]);
 const browserPath = join(root, "chrome");
-const binaryPath = join(root, "agent-browser");
-await original.writeFile(browserPath, '#!/bin/sh\\nprintf "stderr drained\\\\n" >&2\\nprintf "chrome launched\\\\n"\\n', { mode: 0o700 });
-await original.writeFile(binaryPath, "#!" + process.execPath + "\\nconsole.log(JSON.stringify({ success: true, data: process.env.AGENT_BROWSER_EXECUTABLE_PATH, error: null }));\\n", { mode: 0o700 });
+const browserScript = [
+  "#!/bin/sh",
+  'for a; do case "$a" in --user-data-dir=*) p=\${a#--user-data-dir=};; esac; done',
+  'printf "stderr drained\\\\n" >&2',
+  'echo $$ > "$p/../fixture.pid"',
+  "printf '45678\\\\n/devtools/browser/11111111-1111-4111-8111-111111111111\\\\n' > \\"$p/DevToolsActivePort\\"",
+  "exec sleep 30",
+  "",
+].join("\\n");
+await original.writeFile(browserPath, browserScript, { mode: 0o700 });
 let runner;
+let browserPid = 0;
 try {
-  runner = await AgentBrowserJsonRunner.create({
-    namespace: "og", sessionName: "platform-tools",
-    socketDirectory: join(root, "socket"), profileDirectory: join(root, "profile"),
-    downloadDirectory: join(root, "downloads"), screenshotDirectory: join(root, "screenshots"),
-    headed: true, browserExecutablePath: browserPath,
-    binary: { path: binaryPath, name: "agent-browser-linux-x64", version: "0.33.2", sha256: "fixture" },
+  runner = await ManagedBrowserRunner.create({ profileDirectory: join(root, "profile"),
+    headed: true, browserExecutablePath: browserPath, systemdScope: false, networkIsolation: false,
   });
-  const wrapper = await runner.run(["get", "cdp-url"]);
-  assert.ok((await original.readFile(wrapper, "utf8")).includes(join(bin, "tail")));
-  const browser = Bun.spawn([wrapper], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => browser.kill("SIGKILL"), 3_000);
-  try {
-    assert.equal(await browser.exited, 0);
-    assert.equal(await new Response(browser.stdout).text(), "chrome launched\\n");
-  } finally {
-    clearTimeout(timer);
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await browser.exited;
-  }
+  const launch = join(root, "chrome-launch");
+  const wrapper = (await original.readdir(launch)).find((name) => name.endsWith(".sh"));
+  assert.ok((await original.readFile(join(launch, wrapper), "utf8")).includes(join(bin, "tail")));
+  await runner.run(["get", "cdp-url"], { timeoutMs: 3_000 });
+  browserPid = Number((await original.readFile(join(root, "fixture.pid"), "utf8")).trim());
+  // The reader keeps the browser's last stderr bytes once it closes stderr.
+  process.kill(browserPid, "SIGKILL");
   const log = join(root, "chrome-launch", "chrome-stderr.log");
   let content = "";
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -83,6 +82,7 @@ try {
   assert.equal(content, "stderr drained\\n");
   console.log("PATH utilities launched Chrome and drained stderr");
 } finally {
+  if (browserPid) try { process.kill(browserPid, "SIGKILL"); } catch {}
   if (runner) await runner.terminate();
   await original.rm(root, { recursive: true, force: true });
 }

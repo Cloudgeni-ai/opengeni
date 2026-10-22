@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
@@ -20,47 +21,53 @@ import {
 import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-policies";
 import { WorkspaceLearningPolicyEffectiveMode } from "./workspace-learning-policy";
 
-const boundedReason = z.string().trim().min(1).max(4_096);
-const operationId = z.string().uuid();
+const boundedReason = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(4_096));
+const operationId = /* @__PURE__ */ defineSchema(() => z.string().uuid());
 const exactEvidence = {
   claimId: z.string().uuid(),
   evidenceId: z.string().uuid(),
 };
 
 /** Exact accepted-attempt authority. It is validated again inside the write transaction. */
-export const CompanyBrainGovernedWriteAttempt = z
-  .object({
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    turnId: z.string().uuid(),
-    attemptId: z.string().uuid(),
-    executionGeneration: z.number().int().positive(),
-  })
-  .strict();
+export const CompanyBrainGovernedWriteAttempt = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      attemptId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
+    })
+    .strict(),
+);
 export type CompanyBrainGovernedWriteAttempt = z.infer<typeof CompanyBrainGovernedWriteAttempt>;
 
-export const ProposeWorkspaceKnowledgeClaimRequest = z
-  .object({
-    kind: z.literal("propose_knowledge"),
-    operationId,
-    ...exactEvidence,
-    reason: boundedReason,
-  })
-  .strict();
+export const ProposeWorkspaceKnowledgeClaimRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("propose_knowledge"),
+      operationId,
+      ...exactEvidence,
+      reason: boundedReason,
+    })
+    .strict(),
+);
 export type ProposeWorkspaceKnowledgeClaimRequest = z.infer<
   typeof ProposeWorkspaceKnowledgeClaimRequest
 >;
 
-export const CorrectWorkspaceKnowledgeClaimRequest = z
-  .object({
-    kind: z.literal("correct_knowledge"),
-    operationId,
-    ...exactEvidence,
-    replacesClaimId: z.string().uuid(),
-    reason: boundedReason,
-  })
-  .strict();
+export const CorrectWorkspaceKnowledgeClaimRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("correct_knowledge"),
+      operationId,
+      ...exactEvidence,
+      replacesClaimId: z.string().uuid(),
+      reason: boundedReason,
+    })
+    .strict(),
+);
 export type CorrectWorkspaceKnowledgeClaimRequest = z.infer<
   typeof CorrectWorkspaceKnowledgeClaimRequest
 >;
@@ -71,30 +78,32 @@ export type CorrectWorkspaceKnowledgeClaimRequest = z.infer<
  * evidence; callers may describe the subject and predicate but cannot widen
  * authority or supply replacement source bytes.
  */
-export const PromoteTaskNoteKnowledgeRequest = z
-  .object({
-    kind: z.literal("promote_task_note_knowledge"),
-    operationId,
-    noteId: z.string().uuid(),
-    expectedNoteVersion: z.literal(1),
-    entityType: z
-      .string()
-      .trim()
-      .min(1)
-      .max(96)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-    normalizedKey: z.string().trim().min(1).max(512),
-    displayName: z.string().trim().min(1).max(512),
-    predicateKey: z
-      .string()
-      .trim()
-      .min(1)
-      .max(128)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-    confidenceBps: z.number().int().min(0).max(10_000),
-    reason: boundedReason,
-  })
-  .strict();
+export const PromoteTaskNoteKnowledgeRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("promote_task_note_knowledge"),
+      operationId,
+      noteId: z.string().uuid(),
+      expectedNoteVersion: z.literal(1),
+      entityType: z
+        .string()
+        .trim()
+        .min(1)
+        .max(96)
+        .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+      normalizedKey: z.string().trim().min(1).max(512),
+      displayName: z.string().trim().min(1).max(512),
+      predicateKey: z
+        .string()
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+      confidenceBps: z.number().int().min(0).max(10_000),
+      reason: boundedReason,
+    })
+    .strict(),
+);
 export type PromoteTaskNoteKnowledgeRequest = z.infer<typeof PromoteTaskNoteKnowledgeRequest>;
 
 /**
@@ -102,40 +111,42 @@ export type PromoteTaskNoteKnowledgeRequest = z.infer<typeof PromoteTaskNoteKnow
  * draft. The caller selects only the governed target and active-head baseline;
  * it cannot replace the source content or activate the draft.
  */
-export const PromoteTaskNoteInstructionPolicyRequest = z
-  .strictObject({
-    kind: z.literal("promote_task_note_instruction_policy"),
-    operationId,
-    noteId: z.string().uuid(),
-    expectedNoteVersion: z.literal(1),
-    entityType: z
-      .string()
-      .trim()
-      .min(1)
-      .max(96)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-    normalizedKey: z.string().trim().min(1).max(512),
-    displayName: z.string().trim().min(1).max(512),
-    predicateKey: z
-      .string()
-      .trim()
-      .min(1)
-      .max(128)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-    confidenceBps: z.number().int().min(0).max(10_000),
-    target: WorkspaceInstructionPolicyTarget,
-    expectedCurrentRevisionId: z.string().uuid().nullable(),
-    expectedActivationVersion: z.number().int().nonnegative(),
-    reason: boundedReason,
-  })
-  .superRefine((value, context) => {
-    const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
-    if (!target.success) {
-      for (const issue of target.error.issues) {
-        context.addIssue({ ...issue, path: ["target", ...issue.path] });
+export const PromoteTaskNoteInstructionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .strictObject({
+      kind: z.literal("promote_task_note_instruction_policy"),
+      operationId,
+      noteId: z.string().uuid(),
+      expectedNoteVersion: z.literal(1),
+      entityType: z
+        .string()
+        .trim()
+        .min(1)
+        .max(96)
+        .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+      normalizedKey: z.string().trim().min(1).max(512),
+      displayName: z.string().trim().min(1).max(512),
+      predicateKey: z
+        .string()
+        .trim()
+        .min(1)
+        .max(128)
+        .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+      confidenceBps: z.number().int().min(0).max(10_000),
+      target: WorkspaceInstructionPolicyTarget,
+      expectedCurrentRevisionId: z.string().uuid().nullable(),
+      expectedActivationVersion: z.number().int().nonnegative(),
+      reason: boundedReason,
+    })
+    .superRefine((value, context) => {
+      const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
+      if (!target.success) {
+        for (const issue of target.error.issues) {
+          context.addIssue({ ...issue, path: ["target", ...issue.path] });
+        }
       }
-    }
-  });
+    }),
+);
 export type PromoteTaskNoteInstructionPolicyRequest = z.infer<
   typeof PromoteTaskNoteInstructionPolicyRequest
 >;
@@ -145,146 +156,154 @@ export type PromoteTaskNoteInstructionPolicyRequest = z.infer<
  * preference proposal. Descriptor metadata is caller-supplied and bounded,
  * while the full proposal content always comes from the admitted note.
  */
-export const PromoteTaskNotePreferenceRequest = z.strictObject({
-  kind: z.literal("promote_task_note_preference"),
-  operationId,
-  noteId: z.string().uuid(),
-  expectedNoteVersion: z.literal(1),
-  entityType: z
-    .string()
-    .trim()
-    .min(1)
-    .max(96)
-    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-  normalizedKey: z.string().trim().min(1).max(512),
-  displayName: z.string().trim().min(1).max(512),
-  predicateKey: z
-    .string()
-    .trim()
-    .min(1)
-    .max(128)
-    .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-  confidenceBps: z.number().int().min(0).max(10_000),
-  stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
-  title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-  description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
-  precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
-  conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
-  conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
-  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
-  reason: boundedReason,
-});
+export const PromoteTaskNotePreferenceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    kind: z.literal("promote_task_note_preference"),
+    operationId,
+    noteId: z.string().uuid(),
+    expectedNoteVersion: z.literal(1),
+    entityType: z
+      .string()
+      .trim()
+      .min(1)
+      .max(96)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    normalizedKey: z.string().trim().min(1).max(512),
+    displayName: z.string().trim().min(1).max(512),
+    predicateKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    confidenceBps: z.number().int().min(0).max(10_000),
+    stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
+    title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+    precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
+    conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
+    conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
+    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+    reason: boundedReason,
+  }),
+);
 export type PromoteTaskNotePreferenceRequest = z.infer<typeof PromoteTaskNotePreferenceRequest>;
 
-export const ProposeWorkspaceInstructionPolicyRequest = z
-  .strictObject({
-    kind: z.literal("propose_instruction_policy"),
-    operationId,
-    ...exactEvidence,
-    target: WorkspaceInstructionPolicyTarget,
-    // Instruction drafts use the same storage bound as the human editor.
-    // Prompt composition retains its separate byte limit after activation.
-    content: z
-      .string()
-      .min(1)
-      .max(
-        AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
-        AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
-      )
-      .refine((value) => value.trim().length > 0, "instruction proposal must not be blank"),
-    expectedCurrentRevisionId: z.string().uuid().nullable(),
-    expectedActivationVersion: z.number().int().nonnegative(),
-    reason: boundedReason,
-  })
-  .superRefine((value, context) => {
-    const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
-    if (!target.success) {
-      for (const issue of target.error.issues) {
-        context.addIssue({ ...issue, path: ["target", ...issue.path] });
+export const ProposeWorkspaceInstructionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .strictObject({
+      kind: z.literal("propose_instruction_policy"),
+      operationId,
+      ...exactEvidence,
+      target: WorkspaceInstructionPolicyTarget,
+      // Instruction drafts use the same storage bound as the human editor.
+      // Prompt composition retains its separate byte limit after activation.
+      content: z
+        .string()
+        .min(1)
+        .max(
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+        )
+        .refine((value) => value.trim().length > 0, "instruction proposal must not be blank"),
+      expectedCurrentRevisionId: z.string().uuid().nullable(),
+      expectedActivationVersion: z.number().int().nonnegative(),
+      reason: boundedReason,
+    })
+    .superRefine((value, context) => {
+      const target = WorkspaceInstructionPolicyTarget.safeParse(value.target);
+      if (!target.success) {
+        for (const issue of target.error.issues) {
+          context.addIssue({ ...issue, path: ["target", ...issue.path] });
+        }
       }
-    }
-  });
+    }),
+);
 export type ProposeWorkspaceInstructionPolicyRequest = z.infer<
   typeof ProposeWorkspaceInstructionPolicyRequest
 >;
 
-export const ProposeWorkspacePreferenceRequest = z.strictObject({
-  kind: z.literal("propose_preference"),
-  operationId,
-  ...exactEvidence,
-  stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
-  title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-  description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
-  // Agent-authored: the descriptor pair is prompt-composed in every session and
-  // the content is retrieved on demand, so it stays short.
-  content: z
-    .string()
-    .min(1)
-    .max(
-      AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
-      AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
-    )
-    .refine((value) => value.trim().length > 0, "preference proposal must not be blank"),
-  precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
-  conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
-  conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
-  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
-  reason: boundedReason,
-});
+export const ProposeWorkspacePreferenceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    kind: z.literal("propose_preference"),
+    operationId,
+    ...exactEvidence,
+    stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
+    title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+    // Agent-authored: the descriptor pair is prompt-composed in every session and
+    // the content is retrieved on demand, so it stays short.
+    content: z
+      .string()
+      .min(1)
+      .max(
+        AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+        AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+      )
+      .refine((value) => value.trim().length > 0, "preference proposal must not be blank"),
+    precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
+    conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
+    conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
+    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+    reason: boundedReason,
+  }),
+);
 export type ProposeWorkspacePreferenceRequest = z.infer<typeof ProposeWorkspacePreferenceRequest>;
 
 /**
  * Destination selection is explicit and structured. There is deliberately no
  * generic "remember" operation, classifier, personal scope, or active authority.
  */
-export const CompanyBrainGovernedWriteRequest = z.discriminatedUnion("kind", [
-  ProposeWorkspaceKnowledgeClaimRequest,
-  CorrectWorkspaceKnowledgeClaimRequest,
-  PromoteTaskNoteKnowledgeRequest,
-  PromoteTaskNoteInstructionPolicyRequest,
-  PromoteTaskNotePreferenceRequest,
-  ProposeWorkspaceInstructionPolicyRequest,
-  ProposeWorkspacePreferenceRequest,
-]);
+export const CompanyBrainGovernedWriteRequest = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    ProposeWorkspaceKnowledgeClaimRequest,
+    CorrectWorkspaceKnowledgeClaimRequest,
+    PromoteTaskNoteKnowledgeRequest,
+    PromoteTaskNoteInstructionPolicyRequest,
+    PromoteTaskNotePreferenceRequest,
+    ProposeWorkspaceInstructionPolicyRequest,
+    ProposeWorkspacePreferenceRequest,
+  ]),
+);
 export type CompanyBrainGovernedWriteRequest = z.infer<typeof CompanyBrainGovernedWriteRequest>;
 
-export const CompanyBrainGovernedWriteDestination = z.enum([
-  "knowledge",
-  "instruction_policy",
-  "preference",
-]);
+export const CompanyBrainGovernedWriteDestination = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["knowledge", "instruction_policy", "preference"]),
+);
 export type CompanyBrainGovernedWriteDestination = z.infer<
   typeof CompanyBrainGovernedWriteDestination
 >;
 
-export const CompanyBrainGovernedWriteReceipt = z.object({
-  operationId,
-  inputHash: z.string().regex(/^[0-9a-f]{64}$/),
-  workspaceId: z.string().uuid(),
-  destination: CompanyBrainGovernedWriteDestination,
-  outcome: z.literal("proposed"),
-  claimId: z.string().uuid(),
-  evidenceId: z.string().uuid(),
-  relationId: z.string().uuid().nullable(),
-  reviewId: z.string().uuid().nullable(),
-  knowledgeChangeProposalId: z.string().uuid().nullable(),
-  destinationProposalId: z.string().uuid().nullable(),
-  destinationRevisionId: z.string().uuid().nullable(),
-  taskNoteSource: z
-    .object({
-      noteId: z.string().uuid(),
-      rootSessionId: z.string().uuid(),
-      noteVersion: z.literal(1),
-      textHash: z.string().regex(/^[0-9a-f]{64}$/),
-    })
-    .nullable()
-    .optional(),
-  effectiveBoundary: z.literal("human_review_required"),
-  rollback: z.object({
-    supported: z.literal(false),
-    mechanism: z.literal("not_applicable_proposal_only"),
+export const CompanyBrainGovernedWriteReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId,
+    inputHash: z.string().regex(/^[0-9a-f]{64}$/),
+    workspaceId: z.string().uuid(),
+    destination: CompanyBrainGovernedWriteDestination,
+    outcome: z.literal("proposed"),
+    claimId: z.string().uuid(),
+    evidenceId: z.string().uuid(),
+    relationId: z.string().uuid().nullable(),
+    reviewId: z.string().uuid().nullable(),
+    knowledgeChangeProposalId: z.string().uuid().nullable(),
+    destinationProposalId: z.string().uuid().nullable(),
+    destinationRevisionId: z.string().uuid().nullable(),
+    taskNoteSource: z
+      .object({
+        noteId: z.string().uuid(),
+        rootSessionId: z.string().uuid(),
+        noteVersion: z.literal(1),
+        textHash: z.string().regex(/^[0-9a-f]{64}$/),
+      })
+      .nullable()
+      .optional(),
+    effectiveBoundary: z.literal("human_review_required"),
+    rollback: z.object({
+      supported: z.literal(false),
+      mechanism: z.literal("not_applicable_proposal_only"),
+    }),
   }),
-});
+);
 export type CompanyBrainGovernedWriteReceipt = z.infer<typeof CompanyBrainGovernedWriteReceipt>;
 
 /**
@@ -292,12 +311,9 @@ export type CompanyBrainGovernedWriteReceipt = z.infer<typeof CompanyBrainGovern
  * immutable accepted-attempt snapshot decides whether derived evidence may
  * create a proposal; the destination still owns activation and rollback.
  */
-export const CompanyBrainLearningPolicyDecision = z.enum([
-  "blocked",
-  "proposal_created",
-  "activation_requested",
-  "activated",
-]);
+export const CompanyBrainLearningPolicyDecision = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["blocked", "proposal_created", "activation_requested", "activated"]),
+);
 export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLearningPolicyDecision>;
 
 /**
@@ -306,12 +322,14 @@ export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLear
  * destinations create no `knowledge_change_proposals` row and are therefore
  * never evaluated; they report `null`.
  */
-export const CompanyBrainLearningDecisionSummary = z.object({
-  receiptId: z.string().uuid(),
-  outcome: GovernedLearningDecisionOutcome,
-  automaticEligible: z.boolean(),
-  reasons: z.array(GovernedLearningDecisionReason).max(16),
-});
+export const CompanyBrainLearningDecisionSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receiptId: z.string().uuid(),
+    outcome: GovernedLearningDecisionOutcome,
+    automaticEligible: z.boolean(),
+    reasons: z.array(GovernedLearningDecisionReason).max(16),
+  }),
+);
 export type CompanyBrainLearningDecisionSummary = z.infer<
   typeof CompanyBrainLearningDecisionSummary
 >;
@@ -320,37 +338,41 @@ export type CompanyBrainLearningDecisionSummary = z.infer<
  * Bounded, content-free reason why evaluation or activation did not complete.
  * The proposal write itself remains durable regardless.
  */
-export const CompanyBrainLearningStepFailure = z.object({
-  stage: z.enum(["evaluation", "activation"]),
-  code: z.enum(["authority", "conflict", "invalid_operation", "unavailable"]),
-});
+export const CompanyBrainLearningStepFailure = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    stage: z.enum(["evaluation", "activation"]),
+    code: z.enum(["authority", "conflict", "invalid_operation", "unavailable"]),
+  }),
+);
 export type CompanyBrainLearningStepFailure = z.infer<typeof CompanyBrainLearningStepFailure>;
 
-export const CompanyBrainLearningPolicyRouteReceipt = z.object({
-  operationId,
-  workspaceId: z.string().uuid(),
-  effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
-  decision: CompanyBrainLearningPolicyDecision,
-  write: CompanyBrainGovernedWriteReceipt.nullable(),
-  learning: CompanyBrainLearningDecisionSummary.nullable().default(null),
-  learningFailure: CompanyBrainLearningStepFailure.nullable().default(null),
-  activation: z.object({
-    requested: z.boolean(),
-    activated: z.boolean(),
-    boundary: z.enum([
-      "policy_off",
-      "human_review",
-      "destination_authority",
-      "not_eligible",
-      "human_activation_required",
-      "activated",
-    ]),
-    receiptId: z.string().uuid().nullable().default(null),
-    destination: GovernedLearningActivationDestination.nullable().default(null),
-    destinationRevisionId: z.string().uuid().nullable().default(null),
-    effectiveAt: z.string().datetime().nullable().default(null),
+export const CompanyBrainLearningPolicyRouteReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId,
+    workspaceId: z.string().uuid(),
+    effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
+    decision: CompanyBrainLearningPolicyDecision,
+    write: CompanyBrainGovernedWriteReceipt.nullable(),
+    learning: CompanyBrainLearningDecisionSummary.nullable().default(null),
+    learningFailure: CompanyBrainLearningStepFailure.nullable().default(null),
+    activation: z.object({
+      requested: z.boolean(),
+      activated: z.boolean(),
+      boundary: z.enum([
+        "policy_off",
+        "human_review",
+        "destination_authority",
+        "not_eligible",
+        "human_activation_required",
+        "activated",
+      ]),
+      receiptId: z.string().uuid().nullable().default(null),
+      destination: GovernedLearningActivationDestination.nullable().default(null),
+      destinationRevisionId: z.string().uuid().nullable().default(null),
+      effectiveAt: z.string().datetime().nullable().default(null),
+    }),
   }),
-});
+);
 export type CompanyBrainLearningPolicyRouteReceipt = z.infer<
   typeof CompanyBrainLearningPolicyRouteReceipt
 >;

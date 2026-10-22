@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   clearSignInChangeFeedback,
   isStaleSignInRequestCallbackError,

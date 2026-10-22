@@ -6,8 +6,10 @@ import {
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
 import {
+  accessContextHasInbox,
   verifyDelegatedAccessToken,
   DEVELOPER_SETUP_API_KEY_PRESET,
+  normalizePermission,
   organizationAccessPresetPermissions,
   type AccountGrant,
   type AccessContext,
@@ -35,7 +37,9 @@ import {
   listWorkspacesForSubject,
   findActiveApiKeyByHash,
   getWorkspaceGrant,
+  subjectHasLiveWorkspaceAuthorityInScope,
   requireWorkspace,
+  getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
 } from "@opengeni/db";
@@ -43,7 +47,11 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ManagedAuth } from "../managed-auth-type";
-import { getManagedSession } from "../managed-session";
+import {
+  getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
+} from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
@@ -210,6 +218,7 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
+const verifiedSiteViewerProofs = new WeakSet<DelegatedHumanAuthorization>();
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -275,6 +284,91 @@ export function stampDelegatedHumanAuthorization(
   };
   Object.freeze(proof.permissions);
   delegatedHumanRequests.set(request, Object.freeze(proof));
+}
+
+/**
+ * Verified published-Site dispatch only: the caller has verified the signed
+ * gateway, served host and opaque viewer cookie. This is exact-workspace
+ * ownership for session routes, not a console login or a generic Site bearer.
+ * Native people use the existing delegated-human resolver; external owning
+ * users reload their existing membership without provisioning a new identity.
+ */
+export function stampSiteViewerSessionAuthorization(
+  request: Request,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    permissions: Permission[];
+  },
+): void {
+  if (input.subjectId.startsWith("user:")) {
+    stampDelegatedHumanAuthorization(request, {
+      ...input,
+      workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+    });
+    return;
+  }
+  if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request))
+    throw new HTTPException(403, { message: "request access authorization already resolved" });
+  const parsed = delegatedHumanAuthorizationSchema
+    .extend({
+      subjectId: z
+        .string()
+        .max(1024)
+        .regex(/^external_user:[^\s\u0000-\u001f\u007f]+$/),
+    })
+    .parse({ ...input, workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] } });
+  if (parsed.workspaceScope.kind !== "selected") throw new Error("Site workspace scope required");
+  Object.freeze(parsed.permissions);
+  Object.freeze(parsed.workspaceScope.workspaceIds);
+  Object.freeze(parsed.workspaceScope);
+  const proof = Object.freeze(parsed);
+  verifiedSiteViewerProofs.add(proof);
+  delegatedHumanRequests.set(request, proof);
+}
+
+/** Token prefix of personal API keys, which act as the person who made them. */
+export const PERSONAL_API_KEY_TOKEN_PREFIX = "ogp_";
+
+/**
+ * A personal API key acts as its owner. Call once per incoming request, after
+ * any middleware that may rebuild the Request and before access resolution:
+ * an active personal key stamps this exact raw Request with its owner and
+ * access setting, so the request resolves through the same live-access path as
+ * a person's signed-in agent (their current membership, role and workspaces,
+ * capped by the key) and routes treat it as that person. Anything else is left
+ * to the ordinary resolver, which refuses an unknown or revoked key.
+ */
+export async function stampPersonalApiKeyRequest(
+  request: Request,
+  deps: Pick<AccessDeps, "db">,
+): Promise<boolean> {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith(`${bearerPrefix}${PERSONAL_API_KEY_TOKEN_PREFIX}`)) return false;
+  if (
+    request.headers.has("x-opengeni-external-actor") ||
+    serviceInitiatorFromHeaders(request.headers)
+  ) {
+    throw new HTTPException(403, {
+      message: "A personal API key acts only as the person who created it.",
+    });
+  }
+  const apiKey = await findActiveApiKeyByHash(
+    deps.db,
+    await sha256Hex(authorization.slice(bearerPrefix.length)),
+  );
+  if (!apiKey || apiKey.credentialKind !== "personal" || !apiKey.ownerSubjectId) return false;
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: apiKey.accountId,
+    subjectId: apiKey.ownerSubjectId,
+    permissions: (apiKey.ownerPermissions ?? []).flatMap((permission) => {
+      const parsed = Permission.safeParse(permission);
+      return parsed.success ? [parsed.data] : [];
+    }),
+    workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
+  });
+  return true;
 }
 
 /** Immutable verified dispatch bounds for this exact raw Request, not a grant. */
@@ -891,6 +985,55 @@ export async function requireWorkspaceSettingsGrant(
 }
 
 /**
+ * Authority for a shared workspace's own Members surface (list, candidates,
+ * add, change, remove). A holder of the requested workspace permission keeps
+ * the ordinary grant. Otherwise an active organization owner or administrator,
+ * authenticated by the canonical managed cookie, manages any shared workspace
+ * in their organization exactly as through the organization control plane,
+ * with or without an operational membership row there. Every other principal
+ * (API keys, delegated bearers, agents, services, local/configured access)
+ * and every Personal workspace keeps the original refusal. The database
+ * functions re-derive the organization role under the organization fence.
+ */
+export async function requireWorkspaceMemberManagementAuthority(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission: "members:manage" | "workspace:read",
+): Promise<{ grant: AccessGrant; organizationAdministrator: boolean }> {
+  try {
+    return {
+      grant: await requireAccessGrant(c, deps, workspaceId, permission),
+      organizationAdministrator: false,
+    };
+  } catch (error) {
+    if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    const context = await requireAccessContext(c, deps);
+    if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
+      throw error;
+    }
+    const workspace = await getWorkspace(deps.db, workspaceId);
+    if (!workspace || workspace.kind !== "shared") throw error;
+    const organizationRole = context.accountGrants.find(
+      (candidate) =>
+        candidate.accountId === workspace.accountId && candidate.subjectId === context.subjectId,
+    )?.role;
+    if (organizationRole !== "owner" && organizationRole !== "admin") throw error;
+    return {
+      grant: {
+        workspaceId,
+        accountId: workspace.accountId,
+        subjectId: context.subjectId,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        principalKind: "human_session",
+        permissions: ["workspace:read", "members:manage"],
+      },
+      organizationAdministrator: true,
+    };
+  }
+}
+
+/**
  * Automatic membership for an organization key acting as an external user
  * (`asUser`): the first request to a shared workspace in the key's own
  * organization creates the user's missing membership with
@@ -926,7 +1069,7 @@ async function provisionExternalMemberOnFirstUse(
     )
   )
     return false;
-  const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+  const workspace = await getWorkspace(deps.db, workspaceId);
   if (
     !workspace ||
     workspace.kind !== "shared" ||
@@ -1043,7 +1186,7 @@ async function accessGrantAuthorization(
   }
   const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
   if (organizationKey) {
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) throw new HTTPException(404, { message: "workspace not found" });
     if (
       workspace.accountId !== organizationKey.accountId ||
@@ -1097,7 +1240,7 @@ async function accessGrantAuthorization(
     };
   }
   if (!grant) {
-    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
@@ -1163,6 +1306,30 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
     grant.subjectId === context.subjectId &&
     grant.subjectId.startsWith("user:")
   );
+}
+
+/**
+ * The subject whose inbox this request may read, or null when it has none.
+ * A signed-in person (`user:`, no key) requires verified managed-human
+ * provenance, including approved native app credentials. The local
+ * install's human qualifies only when the in-process local bootstrap produced
+ * this context (so a delegated bearer naming `dev` cannot borrow it), with the
+ * human-session, non-delegated, non-service, keyless shape of
+ * {@link accessContextHasInbox}. An agent acting as a person (verified
+ * in-process dispatch) reads that person's inbox within its organization and
+ * workspaces: the inbox routes check each item's workspace on this context.
+ */
+export function inboxSubjectForContext(context: AccessContext): string | null {
+  if (!accessContextHasInbox(context)) return null;
+  if (context.subjectId.startsWith("user:")) {
+    return canonicalManagedCookieContexts.has(context) || delegatedHumanContexts.has(context)
+      ? context.subjectId
+      : null;
+  }
+  return canonicalLocalHumanContexts.has(context) &&
+    context.workspaceGrants.every((grant) => isCanonicalLocalHumanSession(context, grant))
+    ? context.subjectId
+    : null;
 }
 
 function isCanonicalLocalHumanSession(context: AccessContext, grant: AccessGrant): boolean {
@@ -1238,15 +1405,28 @@ export function hasPermission(
   permissionMode?: AccessGrant["permissionMode"],
 ): boolean {
   if (!Array.isArray(permissions)) return false;
-  if (permissionMode === "explicit" || explicitPermissionSets.has(permissions))
-    return permissions.includes(permission);
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
+  const granted = permissions.includes(permission) || grantsSecretAlias(permissions, permission);
+  if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return granted;
   // Variable-set metadata, plaintext read, write/rotation, attachment, and
   // runtime use are independent capabilities. Deprecated broad permissions
   // remain parseable but do not imply any of the exact permissions.
-  return permissions.includes(permission) || permissions.includes("workspace:admin");
+  return granted || permissions.includes("workspace:admin");
+}
+
+/**
+ * Stored roles and API keys keep their legacy variable-set names (Q-16): a
+ * canonical `secrets:*` requirement is met by any granted name that aliases to
+ * it. Legacy requirements (the variable-set routes, until they are removed)
+ * keep their exact meaning. `secrets:read` is never aliased.
+ */
+function grantsSecretAlias(permissions: readonly Permission[], permission: Permission): boolean {
+  if (normalizePermission(permission) !== permission) return false;
+  return permissions.some(
+    (granted) => granted !== permission && normalizePermission(granted) === permission,
+  );
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
@@ -1321,6 +1501,24 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
 
   const bearer = bearerToken(c);
   if (bearer) {
+    if (bearer.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) {
+      // A native app account: the person approved this device from a signed-in
+      // browser, so it carries the same human authority as that browser.
+      if (!deps.managedAuth) return null;
+      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db);
+      if (!session?.user) return null;
+      const context = await ensureManagedAccessForUser(deps.db, {
+        userId: session.user.id,
+        email: session.user.email,
+        name: session.user.name,
+        emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
+      });
+      canonicalManagedCookieContexts.add(context);
+      recordUserPresence(c, deps, context.subjectId);
+      return context;
+    }
     const delegated = await delegatedAccessContext(c, deps, "managed", bearer);
     if (delegated) {
       return delegated;
@@ -1367,6 +1565,62 @@ async function resolveDelegatedHumanAccessContext(
     throw new HTTPException(403, {
       message: "delegated humans require native organization access",
     });
+  }
+  if (verifiedSiteViewerProofs.has(proof)) {
+    const workspaceId =
+      proof.workspaceScope.kind === "selected" && proof.workspaceScope.workspaceIds.length === 1
+        ? proof.workspaceScope.workspaceIds[0]
+        : null;
+    if (!workspaceId)
+      throw new HTTPException(403, { message: "Site viewer workspace unavailable" });
+    const grant = await withWorkspaceSubjectRls(
+      deps.db,
+      workspaceId,
+      proof.subjectId,
+      async (tx) => {
+        if (
+          !(await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+            accountId: proof.organizationId,
+            workspaceId,
+            subjectId: proof.subjectId,
+          }))
+        )
+          return null;
+        return getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
+          principalKind: "human_session",
+        });
+      },
+    );
+    if (!grant || grant.accountId !== proof.organizationId)
+      throw new HTTPException(403, { message: "Site viewer membership unavailable" });
+    const bounded = Object.freeze({
+      ...grant,
+      permissionMode: "explicit" as const,
+      permissions: Object.freeze(
+        explicitPermissions(
+          Permission.options.filter(
+            (permission) =>
+              hasPermission(grant.permissions, permission) &&
+              hasPermission(proof.permissions, permission, "explicit"),
+          ),
+        ),
+      ) as Permission[],
+    });
+    const accountGrant = Object.freeze({
+      accountId: proof.organizationId,
+      subjectId: proof.subjectId,
+      permissions: Object.freeze([] as Permission[]) as Permission[],
+    });
+    const context: AccessContext = Object.freeze({
+      mode: "managed",
+      subjectId: proof.subjectId,
+      accountGrants: Object.freeze([accountGrant]) as AccountGrant[],
+      workspaceGrants: Object.freeze([bounded]) as AccessGrant[],
+      defaultAccountId: proof.organizationId,
+      defaultWorkspaceId: workspaceId,
+    });
+    delegatedHumanContexts.set(context, proof);
+    return context;
   }
   const userId = proof.subjectId.slice("user:".length);
   const profiles = await getManagedUserProfilesByIds(deps.db, [userId]);
@@ -1489,6 +1743,12 @@ async function apiKeyAccessContext(
   const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
   if (!apiKey) {
     return null;
+  }
+  // Verified at request entry (stampPersonalApiKeyRequest) and resolved as
+  // its owner; reaching here means that step did not run. Never fall back to
+  // a key-shaped principal.
+  if (apiKey.credentialKind === "personal") {
+    throw new HTTPException(401, { message: "personal API key could not be verified" });
   }
   const externalHeader = c.req.header("x-opengeni-external-actor");
   const service = serviceInitiatorFromHeaders(c.req.raw.headers);

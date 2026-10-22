@@ -2,6 +2,7 @@ import type {
   StreamConnectionState,
   WorkspaceControlEvent,
   WorkspaceInteractionRevisionEvent,
+  WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { createContext, useContext } from "react";
 import type {
@@ -27,12 +28,23 @@ export type OpenGeniContextValue = {
   workspaceControlConnectionState: StreamConnectionState | "idle" | "error";
   workspaceInteractionEvent: WorkspaceInteractionRevisionEvent | null;
   workspaceInteractionConnectionState: StreamConnectionState | "idle" | "error";
+  /** Absent on older/custom hosts: retain the existing polling fallback. */
+  workspaceSessionListEvent?: WorkspaceSessionListEvent | null;
   registerSessionReconciler: (
     sessionId: string,
     key: string,
     reconcile: () => Promise<void>,
   ) => () => void;
-  reconcileSession: (sessionId: string) => Promise<void>;
+  /**
+   * Repair every registered projection of a session when its live stream
+   * (re)opens. `initialOpen` marks the first open after a fresh tail load, when
+   * each projection was just read alongside that tail: only the API-contract
+   * check runs then.
+   */
+  reconcileSession: (
+    sessionId: string,
+    options?: { initialOpen?: boolean | undefined },
+  ) => Promise<void>;
 };
 
 export const OpenGeniContext = createContext<OpenGeniContextValue | null>(null);
@@ -145,6 +157,7 @@ function useEmbeddedClientRefinement<TClient extends object>(
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
     workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceSessionListEvent: context?.workspaceSessionListEvent ?? null,
     workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
@@ -173,6 +186,7 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
     workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceSessionListEvent: context?.workspaceSessionListEvent ?? null,
     workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
@@ -193,7 +207,6 @@ const BROWSER_INTERACTION_METHODS = [
   "getAuthRun",
   "startBrowserAuthRun",
   "reportBrowserAuthRun",
-  "protectedBrowserAuthFill",
   "verifyBrowserAuthRun",
   "listInteractionInterventions",
   "getInteractionIntervention",

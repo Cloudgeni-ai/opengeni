@@ -49,7 +49,7 @@ export function sanitizedTestEnvironment(
   // CI sets this parent flag for the full unit shard because package-local
   // PostgreSQL/FORCE-RLS tests use the unit filename convention. Preserve only
   // the exact fail-closed boolean and its explicitly selected native PostgreSQL
-  // fixture; all other ambient OpenGeni state stays scrubbed. Local focused
+  // fixture; all other ambient Opengeni state stays scrubbed. Local focused
   // checks remain infrastructure-free unless their caller deliberately requires
   // the real database boundary.
   if (requireRealDatabase) {
@@ -68,8 +68,12 @@ export function sourceUsesExplicitTestConcurrency(source: string): boolean {
 
 export function sourceUsesWallClockPerformanceAssertion(source: string): boolean {
   return (
-    /\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
-    /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source)
+    // Timing that the source pattern below cannot see, such as a sampling
+    // profiler whose sampler thread starves when other test processes share
+    // the CPUs, declares itself explicitly.
+    /opengeni:test-wall-clock-sensitive/u.test(source) ||
+    (/\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
+      /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source))
   );
 }
 
@@ -96,6 +100,9 @@ function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
 export function sourceMutatesSharedPostgresRole(source: string): boolean {
   return (
     /\b(?:create|alter|drop)\s+role\b/i.test(source) ||
+    // This fixture creates a cluster-wide owner role and drops it on release.
+    // A concurrent migration can still hold the role in a catalog snapshot.
+    /\bacquireOwnerMigratedTestDatabase\s*\(/.test(source) ||
     (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source)) ||
     sourceProvisionsRolesOnSharedDatabase(source)
   );

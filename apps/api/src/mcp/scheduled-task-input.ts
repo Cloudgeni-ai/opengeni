@@ -28,33 +28,46 @@ export function resolveScheduledTaskCreateInput(
 }
 
 export function scheduledTaskCreateToolInput() {
-  return z
-    .object({
-      ...CreateScheduledTaskRequest.options[1].out.shape,
-      runMode: ScheduledTaskRunMode.optional().describe(
-        "Omit to schedule a message in this chat. Choose reusable_session or new_session_per_run only when the user requests a separate agent.",
-      ),
-      targetSessionId: z
-        .string()
-        .uuid()
-        .optional()
-        .describe("Destination chat. Omitted existing-session destinations use the calling chat."),
-      prompt: ScheduledTaskAgentConfigInput.shape.prompt
-        .optional()
-        .describe(
-          "Message to send to an existing chat at each occurrence. The chat supplies its model, tools and machine.",
+  return (
+    z
+      .object({
+        ...CreateScheduledTaskRequest.options[1].out.shape,
+        runMode: ScheduledTaskRunMode.optional().describe(
+          "Omit to schedule a message in this chat. Choose reusable_session or new_session_per_run only when the user requests a separate agent.",
         ),
-      agentConfig: z
-        .object(ScheduledTaskAgentConfigInput.shape)
-        .omit({ slackBotChannelId: true })
-        .strict()
-        .optional()
-        .describe(
-          "Creation settings for a separate scheduled agent. For an existing chat, supply prompt instead.",
-        ),
-    })
-    .omit({ agentLearning: true, connectionAuthorities: true })
-    .strict();
+        targetSessionId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            "Destination chat. Omitted existing-session destinations use the calling chat.",
+          ),
+        prompt: ScheduledTaskAgentConfigInput.shape.prompt
+          .optional()
+          .describe(
+            "Message to send to an existing chat at each occurrence. The chat supplies its model, tools and machine.",
+          ),
+        agentConfig: z
+          .object(ScheduledTaskAgentConfigInput.shape)
+          .omit({ slackBotChannelId: true, toolPolicy: true })
+          .strict()
+          .optional()
+          .describe(
+            "Creation settings for a separate scheduled agent. For an existing chat, supply prompt instead.",
+          ),
+      })
+      // Only a person pins connector accounts; agents never do.
+      // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.
+      .omit({
+        agentLearning: true,
+        connectionAuthorities: true,
+        pinnedAccounts: true,
+        pinnedAccountsRequired: true,
+        variableSetId: true,
+        environmentId: true,
+      })
+      .strict()
+  );
 }
 
 // Validate the original call, before projection defaults can add fields from

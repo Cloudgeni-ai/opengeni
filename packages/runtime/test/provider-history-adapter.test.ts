@@ -1,10 +1,163 @@
 import { describe, expect, test } from "bun:test";
+import type { ModelRequest } from "@openai/agents";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
+import { anthropicMessages } from "../src/anthropic-messages";
 import {
+  chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
+  responsesRouteDeclaresAdditionalTools,
+  toolDisclosureItem,
 } from "../src/provider-history-adapter";
 
+type Item = Record<string, unknown>;
+const C = (id: string): Item => ({
+  type: "function_call",
+  callId: id,
+  name: "run",
+  arguments: "{}",
+});
+const R = (id: string): Item => ({ type: "function_call_result", callId: id, output: id });
+const OBSERVE = {
+  type: "function",
+  name: "interaction__browser_observe",
+  description: "Observe a tab.",
+  parameters: { type: "object", properties: { targetId: { type: "string" } } },
+  strict: false,
+};
+
+describe("tool disclosure projection", () => {
+  const disclosure = toolDisclosureItem([OBSERVE], { viaToolInvoke: true });
+  const history = [
+    { type: "message", role: "user", content: "open the page" },
+    C("a"),
+    C("b"),
+    R("a"),
+    R("b"),
+    disclosure,
+  ];
+
+  test("Responses declares the tools with one additional_tools item where the route accepts it", () => {
+    const projected = projectHistoryForProvider(history, "responses", {
+      declaresAdditionalTools: true,
+    });
+    expect(projected.slice(0, 5)).toEqual(history.slice(0, 5));
+    expect(projected[5]).toEqual({
+      type: "unknown",
+      providerData: { type: "additional_tools", role: "developer", tools: [OBSERVE] },
+    });
+  });
+
+  test("other Responses routes get a developer message with the definitions as text", () => {
+    const projected = projectHistoryForProvider(history, "responses");
+    expect(projected.slice(0, 5)).toEqual(history.slice(0, 5));
+    // Only the wire message: the disclosure marker never reaches the provider.
+    expect(projected[5]).toEqual({
+      type: "unknown",
+      providerData: { type: "message", role: "developer", content: disclosure.content },
+    });
+    expect(projectHistoryForProvider(history, "responses")).toEqual(projected);
+  });
+
+  test("only verified Responses routes receive additional_tools", () => {
+    expect(responsesRouteDeclaresAdditionalTools("codex-subscription")).toBe(true);
+    for (const kind of [
+      "openai",
+      "azure-openai",
+      "azure-mai",
+      "direct-openai-workspace",
+      "direct-azure-workspace",
+      "xai-subscription",
+      "supergrok-subscription",
+      "api-key",
+      "vercel-gateway-managed",
+      "openrouter-workspace",
+    ]) {
+      expect(responsesRouteDeclaresAdditionalTools(kind)).toBe(false);
+    }
+  });
+
+  test("with tool_invoke the text carries the definitions; otherwise it asks for a tool_search load", () => {
+    expect(String(disclosure.content)).toStartWith(
+      "These tools are now available. Call one by its name, or through tool_invoke with its name and a nested arguments object. Definitions:\n",
+    );
+    const native = toolDisclosureItem([OBSERVE], { viaToolInvoke: false });
+    expect(String(native.content)).toBe(
+      'These tools are now available: interaction__browser_observe. Load them with tool_search using names ["interaction__browser_observe"], then call them by name.',
+    );
+    // The definitions still ride along for routes that declare them natively.
+    expect(
+      projectHistoryForProvider([native], "responses", { declaresAdditionalTools: true })[0],
+    ).toEqual({
+      type: "unknown",
+      providerData: { type: "additional_tools", role: "developer", tools: [OBSERVE] },
+    });
+  });
+
+  test("Claude gets a system message with the definitions after the step's results", () => {
+    const projected = projectHistoryForProvider(history, "anthropic-messages");
+    expect(projected[5]).toEqual({
+      type: "message",
+      role: "system",
+      content: disclosure.content,
+    });
+    const messages = anthropicMessages(projected as ModelRequest["input"]);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+    ]);
+    const system = JSON.stringify(messages.at(-1)!.content);
+    expect(system).toContain("tool_invoke");
+    expect(system).toContain("interaction__browser_observe");
+  });
+
+  test("Chat gets a system message, or a machine-origin user message where systems are hoisted", () => {
+    const chat = projectHistoryForProvider(history, "chat");
+    expect(chat[5]).toEqual({ type: "message", role: "system", content: disclosure.content });
+    const gemini = projectHistoryForProvider(history, "chat", { hoistsSystemMessages: true });
+    expect(gemini[5]!.role).toBe("user");
+    expect(String(gemini[5]!.content)).toStartWith(
+      "Opengeni tool update (machine-origin input; no new human message).\n",
+    );
+    expect(String(gemini[5]!.content)).toEndWith(String(disclosure.content));
+    // The item depends only on itself, so replays reproduce the same prefix.
+    expect(projectHistoryForProvider(history, "chat")).toEqual(chat);
+  });
+
+  test("the definitions are the frozen JSON, and only Gemini routes count as hoisting", () => {
+    const content = String(disclosure.content);
+    expect(JSON.parse(content.slice(content.indexOf("\n") + 1))).toEqual({ tools: [OBSERVE] });
+    for (const model of ["google/gemini-2.5-flash-lite", "gemini-3-pro", "vertex/gemini-2.5"]) {
+      expect(chatRouteHoistsSystemMessages(model)).toBe(true);
+    }
+    for (const model of ["openai/gpt-4.1-nano", "anthropic/claude-haiku-4.5", "fixture"]) {
+      expect(chatRouteHoistsSystemMessages(model)).toBe(false);
+    }
+  });
+});
+
 describe("projectHistoryForProvider", () => {
+  test("included search evidence stays inert and in order on every provider API", () => {
+    const items = [
+      { type: "message", role: "user", content: "Find docs" },
+      hostedSearchFixture(),
+      { type: "function_call", callId: "checkpoint", name: "checkpoint", arguments: "{}" },
+      { type: "function_call_result", callId: "checkpoint", output: "ACK" },
+    ];
+    const before = structuredClone(items);
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(items, api);
+      expect(projected).toHaveLength(items.length);
+      expect(projected[1]).toMatchObject({ type: "message", role: "assistant" });
+      expect(JSON.stringify(projected[1]!.content)).toContain("exactly seven colors");
+      expect(projected[2]).toBe(items[2]);
+      expect(projected[3]).toBe(items[3]);
+      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      expect(items).toEqual(before);
+    }
+  });
   test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
     const text = "Synthetic reasoning. ".repeat(2000);
     const items = [

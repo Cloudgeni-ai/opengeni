@@ -4,12 +4,24 @@ import type { MCPServer } from "@openai/agents";
 import type { AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
   KnowledgeEntryListResponse,
+  KnowledgeEntryListRequest,
+  KnowledgeSearchToolRequest,
   KnowledgeSavePreparationResponse,
   type AttemptToolIdentity,
   type AttemptToolResult,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
-import { PrefixedMcpServer, prefixedMcpToolName, prepareAgentTools } from "../src";
+import { testSettings } from "@opengeni/testing/settings";
+import {
+  PrefixedMcpServer,
+  prefixedMcpToolName,
+  prepareAgentTools,
+  buildOpenGeniAgent,
+  runAgentStream,
+} from "../src";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { lazyToolRuntimeForAgent } from "../src/lazy-tool-transport";
+import { z } from "zod";
+import { estimateTextTokens } from "../src/context-compaction";
 import { projectKnowledgeToolResultForModel } from "../src/knowledge-model-projection";
 import { unwrapSdkMcpResultProjection } from "../src/mcp-result-custom-data";
 import {
@@ -393,30 +405,46 @@ function expectEntryLossless(original: Json, compact: Json): void {
 // ---- tests -----------------------------------------------------------------
 
 describe("Knowledge discovery model projection", () => {
-  test("search keeps every actionable field and all shown text", () => {
+  test("search provides discovery cards without rewriting the canonical result", () => {
     const original = searchFixture();
+    const stored = JSON.stringify(original);
     const compact = compactOf(SEARCH, original);
     expect(compact.nextCursor).toBe(original.nextCursor);
     expect(compact.searchMode).toBe("hybrid");
     expect(compact.entries).toHaveLength(original.entries.length);
-    original.entries.forEach((entry: Json, index: number) =>
-      expectEntryLossless(entry, compact.entries[index]),
-    );
+    expect(compact.readWith).toBe("knowledge_get");
+    original.entries.forEach((entry: Json, index: number) => {
+      const card = compact.entries[index];
+      expect(card).toMatchObject({
+        id: entry.id,
+        title: entry.revision.title,
+        kind: entry.revision.kind,
+        scope: entry.scope,
+        outcome: entry.revision.outcome,
+      });
+      expect(Array.from(card.snippet ?? "").length).toBeLessThanOrEqual(200);
+      expect(card).not.toHaveProperty("revision");
+      expect(card).not.toHaveProperty("version");
+      expect(card).not.toHaveProperty("excerpts");
+    });
+    expect(JSON.stringify(original)).toBe(stored);
   });
 
-  test("preview is dropped only when an excerpt repeats it verbatim", () => {
+  test("the best matching excerpt supplies the snippet, including later chunks", () => {
     const original = searchFixture();
     const compact = compactOf(SEARCH, original);
-    const source = compact.entries.find((entry: Json) => entry.revision.kind === "source");
+    const source = compact.entries.find((entry: Json) => entry.kind === "source");
     const sourceOriginal = original.entries.find((entry: Json) => entry.id === source.id);
     // Best chunk 2 starts at 2,080: the first 512 characters are unique text.
-    expect(source.excerpts[0].start).toBe(2_080);
-    expect(source.revision.preview).toBe(sourceOriginal.revision.preview);
-    expect(source.revision.sourceKind).toBe("file");
-    for (const entry of compact.entries.filter((candidate: Json) => candidate !== source)) {
-      expect(entry.revision).not.toHaveProperty("preview");
-      expect(entry.excerpts).toHaveLength(1);
-    }
+    expect(sourceOriginal.excerpts.find((excerpt: Json) => excerpt.field === "content").start).toBe(
+      2_080,
+    );
+    expect(source.snippet).toBe(
+      sourceOriginal.excerpts
+        .find((excerpt: Json) => excerpt.field === "content")
+        .text.slice(0, 200)
+        .trimEnd(),
+    );
   });
 
   test("an entry without an excerpt keeps its preview", () => {
@@ -436,11 +464,14 @@ describe("Knowledge discovery model projection", () => {
     };
     const compact = compactOf(SEARCH, original);
     expect(compact.fallbackReason).toBe("provider_unavailable");
-    expect(compact.entries[0].excerpts).toEqual([]);
-    expect(compact.entries[0].revision.preview).toBe(original.entries[0]!.revision.preview);
+    expect(compact.entries[0]).not.toHaveProperty("excerpts");
+    expect(compact).not.toHaveProperty("nextCursor");
+    expect(compact.entries[0].snippet).toBe(
+      original.entries[0]!.revision.preview.slice(0, 200).trimEnd(),
+    );
   });
 
-  test("title excerpts are kept, and only an empty preview is dropped without a content excerpt", () => {
+  test("a title-only match needs no duplicate excerpt or empty snippet", () => {
     const entry = entrySummary({
       label: "empty-group",
       title: "Acme collection",
@@ -451,9 +482,9 @@ describe("Knowledge discovery model projection", () => {
     });
     entry.excerpts = [{ field: "title", start: 0, end: 15, text: "Acme collection" }];
     const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
-    expect(compact.entries[0].excerpts).toEqual(entry.excerpts);
-    expect(compact.entries[0].revision).not.toHaveProperty("preview");
-    expect(compact.entries[0].revision.title).toBe("Acme collection");
+    expect(compact.entries[0]).not.toHaveProperty("excerpts");
+    expect(compact.entries[0]).not.toHaveProperty("snippet");
+    expect(compact.entries[0].title).toBe("Acme collection");
   });
 
   test("a short content that the title contains keeps its preview", () => {
@@ -469,10 +500,10 @@ describe("Knowledge discovery model projection", () => {
     });
     entry.revision.preview = "MySQL";
     const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
-    expect(compact.entries[0].revision.preview).toBe("MySQL");
+    expect(compact.entries[0].snippet).toBe("MySQL");
   });
 
-  test("a content excerpt that does not start the content never replaces the preview", () => {
+  test("a later matching passage is a snippet, not a claim to show the full entry", () => {
     const entry = entrySummary({
       label: "later-chunk",
       title: "Later chunk note",
@@ -481,21 +512,20 @@ describe("Knowledge discovery model projection", () => {
       chunk: 1,
     });
     const compact = compactOf(SEARCH, { entries: [entry], nextCursor: null });
-    expect(compact.entries[0].excerpts[0].start).toBe(1_040);
-    expect(compact.entries[0].revision.preview).toBe(entry.revision.preview);
+    const passage = entry.excerpts.find((excerpt: Json) => excerpt.field === "content");
+    expect(passage.start).toBe(1_040);
+    expect(compact.entries[0].snippet).toBe(passage.text.slice(0, 200).trimEnd());
+    expect(compact.readWith).toBe("knowledge_get");
   });
 
   test("state that differs from the defaults is kept", () => {
     const original = searchFixture();
     const compact = compactOf(SEARCH, original);
-    const withPending = compact.entries.find((entry: Json) => entry.latestRevisionId);
-    expect(withPending.latestRevisionId).not.toBe(withPending.revision.id);
-    expect(withPending).not.toHaveProperty("publishedRevisionId");
-    for (const entry of compact.entries.filter((candidate: Json) => candidate !== withPending)) {
+    for (const entry of compact.entries) {
       expect(entry).not.toHaveProperty("publishedRevisionId");
       expect(entry).not.toHaveProperty("latestRevisionId");
       expect(entry).not.toHaveProperty("archived");
-      expect(entry.revision).not.toHaveProperty("change");
+      expect(entry).not.toHaveProperty("change");
     }
 
     const unusual = entrySummary({
@@ -510,8 +540,8 @@ describe("Knowledge discovery model projection", () => {
     unusual.revision.entryId = uuid("some other entry");
     const [kept] = compactOf(SEARCH, { entries: [unusual], nextCursor: null }).entries;
     expect(kept.archived).toBe(true);
-    expect(kept.revision.change).toBe("archive");
-    expect(kept.revision.entryId).toBe(unusual.revision.entryId);
+    expect(kept.change).toBe("archive");
+    expect(kept.id).toBe(unusual.id);
   });
 
   test("pending matches keep their published pointer, including null", () => {
@@ -603,6 +633,81 @@ describe("Knowledge discovery model projection", () => {
 });
 
 describe("caller seam", () => {
+  for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+    test(`saved Knowledge eager selection is stable, and old selections stay deferred (${transport})`, async () => {
+      const settings = testSettings({
+        sandboxBackend: "none",
+        webSearchEnabled: false,
+        lazyToolSearchEnabled: true,
+        codexToolSearchEnabled: true,
+        mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+      });
+      for (const eager of [undefined, ["knowledge_search"]]) {
+        const server: MCPServer = {
+          name: "knowledge",
+          cacheToolsList: false,
+          async connect() {},
+          async close() {},
+          async invalidateToolsCache() {},
+          async listTools() {
+            return ["knowledge_get", "knowledge_search", "knowledge_save"].map((name) => ({
+              name,
+              description: name,
+              inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+            }));
+          },
+          async callTool() {
+            return [];
+          },
+        };
+        const prepared = await prepareAgentTools(
+          settings,
+          [{ kind: "mcp", id: "opengeni", ...(eager ? { eager } : {}) }],
+          {
+            accountId: uuid("account"),
+            workspaceId: uuid("workspace"),
+            sessionId: uuid("session"),
+            turnId: uuid("turn"),
+            attemptId: uuid("attempt"),
+            executionGeneration: 1,
+            localMcpServers: [{ id: "opengeni", server }],
+          },
+        );
+        try {
+          const model = new ScriptedModel("ok");
+          const agent = buildOpenGeniAgent(settings, [], {
+            model,
+            lazyToolTransport: transport,
+            mcpServers: prepared.mcpServers,
+          });
+          const run = async () => {
+            const stream = await runAgentStream(agent, "hello", settings);
+            for await (const _event of stream) {
+              /* drain */
+            }
+            await stream.completed;
+          };
+          await run();
+          const saved = JSON.stringify(model.requests[0]!.tools);
+          const names = model.requests[0]!.tools.flatMap((tool) =>
+            tool.type === "function" ? [tool.name] : [],
+          );
+          expect(names.includes(prefixedMcpToolName("opengeni", "knowledge_search"))).toBe(
+            Boolean(eager),
+          );
+          expect(names).not.toContain(prefixedMcpToolName("opengeni", "knowledge_get"));
+          expect(names).not.toContain(prefixedMcpToolName("opengeni", "knowledge_save"));
+          await lazyToolRuntimeForAgent(agent)!.ensurePrepared();
+          await run();
+          expect(JSON.stringify(model.requests[1]!.tools)).toBe(saved);
+          expect(JSON.stringify(model.requests[0]!.tools)).toBe(saved);
+        } finally {
+          await prepared.close();
+        }
+      }
+    });
+  }
+
   test("Codemode receives the exact result; the model receives the projection", async () => {
     const result = textResult(searchFixture());
     const exact = textOf(result);
@@ -681,7 +786,7 @@ describe("caller seam", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: "https://mcp.example.test/og",
             cacheToolsList: false,
           },
@@ -759,7 +864,7 @@ describe("caller seam", () => {
   });
 
   test("a result still too large after compaction spills the exact bytes", async () => {
-    const entries = Array.from({ length: 600 }, (_, index) =>
+    const entries = Array.from({ length: 4000 }, (_, index) =>
       entrySummary({
         label: `large-${index}`,
         title: `Large note ${index}`,
@@ -791,7 +896,101 @@ describe("caller seam", () => {
 describe("measured reduction", () => {
   const utf8 = (value: string): number => Buffer.byteLength(value, "utf8");
 
-  test("realistic fixtures shrink without losing content", () => {
+  test.skipIf(!process.env.OPENGENI_BENCH_KNOWLEDGE_TOOLS)(
+    "report schema and model-result budgets against an explicit base",
+    async () => {
+      const base = process.env.OPENGENI_BENCH_BASE_REF;
+      if (!base) throw new Error("OPENGENI_BENCH_BASE_REF is required");
+      const read = Bun.spawnSync([
+        "git",
+        "show",
+        `${base}:packages/runtime/src/knowledge-model-projection.ts`,
+      ]);
+      if (read.exitCode !== 0) throw new Error(read.stderr.toString());
+      const source = read.stdout
+        .toString()
+        .replace(
+          '"@opengeni/contracts"',
+          JSON.stringify(import.meta.resolve("@opengeni/contracts")),
+        );
+      const js = new Bun.Transpiler({ loader: "ts" }).transformSync(source);
+      const previous = (
+        await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`)
+      ).projectKnowledgeToolResultForModel;
+      const measure = (value: unknown) => {
+        const json = JSON.stringify(value);
+        return { bytes: utf8(json), estimatedTokens: estimateTextTokens(json) };
+      };
+      const oldSchema = KnowledgeEntryListRequest.omit({
+        view: true,
+        sessionId: true,
+        reviewBatchId: true,
+        rootOnly: true,
+      }).extend({ view: z.enum(["published", "needs_review"]).default("published") });
+      const schemas = {
+        before: measure(z.toJSONSchema(oldSchema)),
+        after: measure(z.toJSONSchema(KnowledgeSearchToolRequest.omit({ rootOnly: true }))),
+      };
+      const results = [];
+      for (const count of [5, 20]) {
+        const input = textResult({
+          entries: Array.from({ length: count }, (_, i) =>
+            entrySummary({
+              label: `keyword-${i}`,
+              title: `Deployment decision ${i}`,
+              contentLength: 900,
+              view: "published",
+              chunk: null,
+            }),
+          ),
+          nextCursor: "c".repeat(250),
+          searchMode: "keyword",
+          fallbackReason: "provider_unavailable",
+        });
+        const before = previous(SEARCH, input);
+        const after = projectKnowledgeToolResultForModel(SEARCH, input);
+        for (let i = 0; i < 100; i++) {
+          previous(SEARCH, input);
+          projectKnowledgeToolResultForModel(SEARCH, input);
+        }
+        const rounds = [];
+        for (let round = 0; round < 7; round++) {
+          const run = (project: typeof previous) => {
+            const start = performance.now();
+            for (let i = 0; i < 1000; i++) project(SEARCH, input);
+            return (performance.now() - start) / 1000;
+          };
+          if (round % 2 === 0)
+            rounds.push({ before: run(previous), after: run(projectKnowledgeToolResultForModel) });
+          else {
+            const afterMs = run(projectKnowledgeToolResultForModel);
+            rounds.push({ before: run(previous), after: afterMs });
+          }
+        }
+        const median = (key: "before" | "after") =>
+          rounds
+            .slice(2)
+            .map((r) => r[key])
+            .sort((a, b) => a - b)[2];
+        results.push({
+          count,
+          before: measure(before),
+          after: measure(after),
+          projectionMs: { before: median("before"), after: median("after") },
+        });
+      }
+      console.log(
+        JSON.stringify({
+          base,
+          tokenMethod: "runtime conservative estimate; not provider tokenization",
+          schemas,
+          results,
+        }),
+      );
+    },
+  );
+
+  test("realistic discovery cards shrink; save preparation remains lossless", () => {
     const rows = (
       [
         ["knowledge_search", SEARCH, searchFixture()],

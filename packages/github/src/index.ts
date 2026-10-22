@@ -391,7 +391,7 @@ export function buildGitHubAppManifest(input: {
     callback_urls: [`${base}/v1/github/oauth/callback`],
     public: input.public,
     // A setup URL and OAuth-on-install are mutually exclusive in GitHub's App
-    // contract. OpenGeni needs the setup callback to receive the installation
+    // contract. Opengeni needs the setup callback to receive the installation
     // id, then starts its own exact user-authorization flow.
     request_oauth_on_install: !input.setupUrl,
     default_permissions: permissions,

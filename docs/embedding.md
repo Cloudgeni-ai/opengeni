@@ -1,14 +1,14 @@
 # Advanced In-Process Embedding
 
-> Most customer products do **not** need this integration shape. When OpenGeni
-> remains a standalone service and the product presents an OpenGeni-backed agent
+> Most customer products do **not** need this integration shape. When Opengeni
+> remains a standalone service and the product presents an Opengeni-backed agent
 > in its own UI, mount `OpenGeniChat` or `SessionConversation` from
 > `@opengeni/react` behind the packaged `createSessionProxyHandler` from
 > `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
 > [product integration](product-integration.md) and the `opengeni-client` skill. This guide is for the rarer case where the
-> host mounts OpenGeni's router or calls its core domain packages in-process.
+> host mounts Opengeni's router or calls its core domain packages in-process.
 
-This guide is for a host application that embeds OpenGeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same OpenGeni domain/runtime code the standalone stack uses.
+This guide is for a host application that embeds Opengeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same Opengeni domain/runtime code the standalone stack uses.
 
 The contract is simple: **all ports unset means standalone**. The defaults in `apps/api/src/index.ts`, `apps/worker/src/activities.ts`, and `packages/db/src/index.ts` preserve the normal local/self-hosted deployment behavior. An embedded host opts in by binding only the seams it owns.
 
@@ -65,7 +65,7 @@ behavior is not appropriate. The proxy does not need billing, sandbox environmen
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+**Opengeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
@@ -74,21 +74,177 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
+`NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
+For a persistent shell, `useNewConversation`/`NewConversationView` and
+`useSessionConversation`/`SessionConversationView` separate ownership from
+layout without introducing another send implementation. A host creation
+adapter returns the session ID; stock keeps the immutable retry request,
+preserves newer unsent content, and supplies an `initialDraft` handoff for the
+native composer. Voice-first creation uses `startMode: "realtime"` with no
+synthetic prompt. See the [conversation UI guide](../docs-site/integrate/conversation-ui.mdx)
+for optional hooks and their scope/lifetime boundaries. Simple embeds still
+use one `OpenGeniChat` component.
+
+**The full session app.** A page that already holds the person's own
+credential (a delegated token, a native-app token, an API key) can render the
+Opengeni web app's session UI itself: the chat list with search, projects,
+pins and archive, the session page with its header, timeline, approvals,
+questions and dock, the new-chat page, and the composer with its pickers.
+`SessionApp` from `@opengeni/react/session-app` is that UI, the same
+components the web app renders, backed by the same app state, with in-memory
+navigation. Pages it does not show (settings, billing, schedules) open the web
+app (`consoleUrl`) through `openUrl`.
+
+```tsx
+import { SessionApp } from "@opengeni/react/session-app";
+import "@opengeni/react/compiled.css";
+
+<SessionApp
+  apiBaseUrl="https://api.example.com"
+  headers={() => ({ Authorization: `Bearer ${token}` })}
+  consoleUrl="https://app.example.com"
+  workspaceId={workspaceId}
+  features={{ dock: true }}
+  messageContext={[
+    { id: "page", text: "The person is on the billing page of Acme." },
+    { id: "invoice", label: "Invoice #1042", text: "They have invoice #1042 open: …" },
+  ]}
+  onUnauthorized={() => refreshToken()}
+/>;
+```
+
+`consoleUrl` is the Opengeni web app's origin, which the embed links to for
+pages it does not show. `sessionId` and `onSessionChange` let the page own
+which chat is open; `onSessionChange` runs only when the person opens another
+chat. `openUrl` receives everything that leaves the embed (app pages, provider
+sign-in, checkout, files opened in full); a host that cannot open browser tabs,
+such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
+from the client or a raw app request. `compiled.css` is the only stylesheet
+the embed needs; it uses the Inter font when the page loads it. Server rendering
+produces only its loading state; the app starts in the browser.
+
+A preset decides which features show and single keys switch them:
+
+| Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
+| --- | --- | --- | --- |
+| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
+| `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
+| `adminAccess`: workspace-admin access indicator and grant | on | off | off |
+| `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
+| `brand`: the Opengeni row at the top of the chat list | on | on | off |
+
+Everything else (model and effort, capabilities, repositories, runs on,
+secrets, usage limit, approvals and questions, goals, attachments, voice, find
+in chat, message actions) is always on and follows the server's client
+configuration and the person's permissions, as in the web app. A switch only
+hides; it never grants. `slots` adds host sections to the shell (a workspace
+picker or account row under the chat list, banners above the canvas),
+`theme` follows the host application (the embed sets its own `data-og-theme`
+and never touches the host page's `<html>`), and `messageContext` adds
+per-message model context (never instructions) to every new chat and message:
+text, one item or a list of items. An item with a `label` shows as a pill above
+the composer (its `detail` in the tooltip), and the person can leave it out of
+their messages; a new label brings it back. Pass a new value whenever the
+context changes (the Excel add-in passes the current selection). A function is
+also accepted; it is read when each message is sent and shows no pill.
+With the dock off, entries that only open a dock panel hide with it.
+
+The dock's heavier pieces are opt-in so a page that does not show them never
+downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
+(ideally from a lazily loaded module) to turn on highlighted diffs, the
+terminal, the desktop viewer and the code editor. `surfaces` supplies the PDF
+preview and the editable document, spreadsheet and presentation editor; without
+an editor, those artifacts show a link that opens them in the web app.
+
+Everything stays inside the embed: menus, popovers, dialogs and tooltips
+render in its own root with its theme, its toasts stay out of the page's own
+toaster (two embeds on one page share one stack), ⌘/Ctrl+F is only caught
+while focus is inside it, and it never changes the page title or navigates the
+page. The exceptions are deliberate: Reload, offered when part of the app fails
+to download, reloads the page, as the embed's code is the page's; connecting a
+GitHub account opens GitHub's sign-in popup; creating a GitHub App posts its
+manifest to GitHub in a new tab; and links in a sandbox terminal open in a new
+tab. Two
+`SessionApp`s on one page keep separate state, navigation and events.
+The Excel add-in (`apps/web/office`) is the reference `companion` host.
+
+`SessionApp` calls the Opengeni API directly, so it needs a credential with the
+person's own workspace permissions. `OpenGeniChat` and the session proxy
+(`createSessionProxyHandler`) stay the path for products that must not hand the
+browser a credential; the proxy serves only the conversation routes, so it
+renders the conversation components above.
+
+Embedded defaults keep Opengeni's own product choices out of the host's
+product. The Opengeni web app renders its session UI from the same
+`@opengeni/react` components as `SessionApp`. Existing explicit settings keep
+working.
+
+### Computer connection offers
+
+The agent offers `api:connected-machine` without deciding whether the person is
+in a desktop app or browser. `SessionConversation` recognizes that offer and
+renders `ThisComputerCard` with the host's `computerConnection` props. Supply the
+same props through `OpenGeniChat.conversationProps` or `SessionConversationView`.
+The existing `timelineProps.renderAuthNeeded` override still takes precedence.
+
+```tsx
+import "@opengeni/react/this-computer.css";
+
+<SessionConversation
+  sessionId={sessionId}
+  computerConnection={{
+    productName: "Acme",
+    // Inside your desktop app: useThisComputer(yourHost, workspaceId).
+    computer: desktopComputer,
+    // Only needed for outstanding operating-system permissions.
+    onSetup: () => setPermissionGuideOpen(true),
+    // Outside it: your OS-appropriate installer and account/workspace handoff.
+    downloads: [{ label: "Download Acme for Mac", url: yourMacDownloadUrl }],
+    openAppUrl: yourConnectUrl,
+  }}
+/>
+```
+
+For a product using the desktop kit, build `yourConnectUrl` with
+`computerConnectUrl({ scheme: "acme", webUrl, subjectId })` from
+`@opengeni/sdk/app-links`; `webUrl` is the product deployment's native workspace
+or chat destination. Other desktop architectures can supply `onConnect` to open
+their own connection flow instead. A callback finishing does not claim that a
+computer is online: provide the actual `computer` status or personal `machines`
+inventory for that. Keep these props bound to the current signed-in person and
+workspace; callbacks and links come from the host, never the model's event.
+
+Inside the desktop app one click invokes the host connection; on the web, the
+person installs the product's app and returns to **Open app and connect**. System
+permissions and sign-in/consent are not bypassed. Without host configuration the
+default offer explains that computer setup is unavailable. It never substitutes
+an Opengeni download, setup token, shell command, or model-supplied setup URL.
+
+### Embedded defaults
+
+| Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
+| --- | --- |
+| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`), or `createSessionProxyHandler({ realtimeVoice: true })`, which reports `realtimeVoice: true` in the client config. Proxy `realtimeVoice: false` still refuses voice. |
+| The working indicator says "Thinking…" with a "Show details" action, not the console's playful copy. | `genieLoading` (`phrases`, `messages`, `orb`, or `render`); omitted fields keep the neutral defaults. `MessageTimeline` keeps the console copy. |
+| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow `files` (and `files: false` now also reports uploads off). Agent-produced media still loads for visitors. |
+
 Live voice is the same realtime protocol the console uses, not a second
 transport. The proxy forwards the workspace realtime model catalog and the
 session `realtime` routes (begin, provider connect, heartbeat, connection
 activate, ledger sync, end) as the resolved user, after `authorizeSession`;
 `realtimeVoice: false` refuses them and reports `realtimeVoice: false` in the
-client config. Owner/connection/epoch proof, Steer-based delegation, transcript
+client config, while explicit `realtimeVoice: true` reports `true`, which also
+shows the stock voice button. Owner/connection/epoch proof, Steer-based delegation, transcript
 truth, credit admission, and per-minute metering stay in the API exactly as for
 the console. `beforeForwardMessage` receives `delivery: "realtime"` once when a
 call starts (refusal, MCP credential rotation through the standalone rotate
 route, including the `toolServer` token) and before each sync that carries
 delegation or finalized transcript entries (refusal, `modelContext` placed
 before the browser's on those entries; it must be stable across a retry,
-because ledger replay requires an identical entry). `SessionConversation`
-fetches the catalog and mounts the lazily loaded voice button only when a model
-is available; `realtimeVoice={false}` turns it off.
+because ledger replay requires an identical entry). When voice is opted in
+(see the defaults table above), `SessionConversation` fetches the catalog and
+mounts the lazily loaded voice button only when a model is available;
+`realtimeVoice={false}` turns it off even when the proxy offers it.
 
 The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
@@ -96,7 +252,7 @@ children. The SDK scrolls the timeline internally and keeps the composer at
 the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
 
 Agent replies link files, sandbox paths, editable artifacts, and Sites with
-`artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
+`artifact:`, `sandbox:`, and Opengeni console paths that do not exist on the
 host origin. `SessionConversation` downloads retained files by default and
 displays generated images and video, published files, and screenshots through
 the same session scope (`createWorkspaceRetainedArtifactLoader`,
@@ -107,9 +263,12 @@ session association the API proves for every workspace-level artifact read.
 Sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
 session working directory without following symlinks.
 The session goal shows in the conversation chrome with Pause, Resume, and
-Clear; the proxy forwards only the goal read, `{ status: "paused" | "active" }`
-updates, and the clear, its only `DELETE`. Sub-agent cards and child updates
-call `onOpenSession`; `OpenGeniChat` opens the child chat in place.
+Clear; the proxy forwards only the goal read (with its `?absent=null` opt-in, so
+a goal-less chat reads a 200 `null` instead of logging a failed 404),
+`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Rows for spawning,
+messaging, and hearing from another agent call `onOpenSession`; `OpenGeniChat` opens the child
+chat in place. Those rows name the agent with the title it was spawned with; pass
+`resolveSessionTitle` to show current titles (the web app reads them from session lineage).
 The proxy's client config reports `sessionCreation`, `archive`, and
 `artifacts` (`false` when off), so the stock chat hides actions the proxy
 cannot serve; the composer microphone follows `voiceInput.available`
@@ -132,7 +291,8 @@ approval, and answer; the endpoint checks it with `verifyToolRequest` from
 ([your own tools](product-integration.md#your-own-tools-as-the-signed-in-user-node)).
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
-`@opengeni/sdk` outside React. See
+`@opengeni/sdk` outside React. Your product's own links (its scheme, in-app
+paths) are drawn with `renderLink` on `Markdown` or `OpenGeniLinkProvider`. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
 
 A host that mounts the styled React surfaces
@@ -198,7 +358,7 @@ but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
 ### Host prepare → native accept → host project
 
-An embedding host may need its own business record before OpenGeni accepts
+An embedding host may need its own business record before Opengeni accepts
 work. Keep that integration as three explicit phases rather than rebuilding the
 composer protocol:
 
@@ -208,15 +368,15 @@ composer protocol:
 2. **Native accept:** call `submitComposerDraftForRequest` once with the same
    `clientEventId` and return its exact response. Do not PUT a trusted draft,
    guess revisions, construct raw event JSON, or encode a host record id into
-   the OpenGeni operation key.
+   the Opengeni operation key.
 3. **Project:** correlate the accepted event/turn/receipt back to the prepared
    host record. A projection failure after native commit must not mark native
    work failed; reconcile it from the idempotent receipt/export stream.
 
-Host preparation and OpenGeni acceptance are not a distributed transaction.
+Host preparation and Opengeni acceptance are not a distributed transaction.
 A definite pre-acceptance failure may fail the host record. An ambiguous
 network/process outcome must remain retryable and use the same request bytes and
-`clientEventId`; OpenGeni then returns the committed replay or a hard
+`clientEventId`; Opengeni then returns the committed replay or a hard
 idempotency conflict.
 
 For a host-rendered React session, construct the narrow client once instead of
@@ -242,10 +402,10 @@ fabricated success value.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime
-schemas. An embedding host does not need to adopt OpenGeni's Zod major and must
+schemas. An embedding host does not need to adopt Opengeni's Zod major and must
 not patch or symlink the Agents dependency tree. The published type declarations
 still reference the public Agents types, so the Agents packages remain declared
-dependencies, but OpenGeni's executable `dist` contains no external Agents or
+dependencies, but Opengeni's executable `dist` contains no external Agents or
 Zod import. The publish-closure guard enforces that boundary.
 
 ### Agent configuration
@@ -254,7 +414,7 @@ Sessions with an agent configuration (`CreateSessionRequest.agent`, the
 workspace's `settings.sessionAgentDefaults`, a scheduled task's
 `agentConfig.agent`, or a parent's configuration) freeze one resolved
 `sessions.agent_config`: `capabilities` (`"all"`, `"none"`, or a starting point
-plus toggles over thirteen capabilities), `identity`, `renderer`, and the
+plus toggles over fourteen capabilities, including `secrets`), `identity`, `renderer`, and the
 instructions alias. Workers gate every tool family and compose a modular prompt
 (identity, base behavior, runtime mechanics, then only the modules of enabled
 capabilities and attached resources) from it; `session.agent` and
@@ -267,30 +427,38 @@ byte. Agent configuration is always on; a new top-level session that omits
 [Product integration](product-integration.md#configure-the-agent); the design
 and enforcement details are in [Agent configuration](design/agent-configuration.md).
 
+The Skills a session carries itself (`skills` on create) can be replaced later
+with `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` (SDK
+`updateSessionSkills`): send the complete list and the session's
+`toolPolicyVersion` as `expectedVersion`. The change applies from the next turn
+and is recorded as a `session.skills.updated` event with the Skill names. An
+agent can only remove Skills this way. A session Skill shadows a workspace
+Skill with the same name.
+
 ### Agent instructions and per-message application context
 
 For sessions without an agent configuration, a host has two system-level instruction scopes, composed as **deployment default
 template → workspace persona → per-session instructions**, with the
-non-bypassable CORE (goal-loop ownership + variable set block) always
+non-bypassable CORE (goal-loop ownership) always
 substituted in. Exact-message application context does not enter this prefix.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, carries system-level authority, and is capped at 65536 characters.
 - **Per-message `modelContext`** (`CreateSessionRequest.modelContext`,
   `SendMessageInput.modelContext`, and supported realtime inbound entries) —
-  optional application context for one exact accepted message. OpenGeni stores
+  optional application context for one exact accepted message. Opengeni stores
   it with the accepted turn/realtime entry, includes it as a separate
   `input_text` part in that same canonical user-role history item, and preserves
   it through queueing, steering, retry, approval resume, worker recovery, and
   realtime handoff. Standard timeline rendering displays only the visible
   message text; full event/audit reads retain `modelContext`. It is **not**
   secret, private, privileged, or system-level authority. For realtime voice,
-  SDK/React hosts may provide `getModelContext`; OpenGeni captures its current
+  SDK/React hosts may provide `getModelContext`; Opengeni captures its current
   bounded value once when each durable delegation or finalized transcript entry
   is created, without restarting the controller when the callback changes. A
   failing or oversized callback omits only that entry's context and does not
   discard or block the provider message.
-- **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
+- **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling Opengeni. Opengeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Use workspace `agentInstructions` for stable tenant-wide behavior and session
 `instructions` for a durable session persona. Use `modelContext` for concise
@@ -302,7 +470,7 @@ tenant-scoped tool over a large context snapshot.
 
 Because `modelContext` is appended in the newest user history item rather than
 composed into `Agent.instructions`, changing it does not rewrite the persistent
-provider prefix or invalidate otherwise reusable prompt-cache bytes. OpenGeni
+provider prefix or invalidate otherwise reusable prompt-cache bytes. Opengeni
 adds the message's acceptance time (minute-precision UTC with the weekday) to
 that same history item as its own part, so hosts do not need to put the current
 date or time in `modelContext`. Initial
@@ -339,7 +507,7 @@ original turn authority. Recovery, approval, and retry update the existing turn
 and cannot replace it.
 
 `TurnInitiator.kind` is `subject | service`; `subjectId` remains opaque to
-OpenGeni. Hosts must not encode or infer the kind from a subject-id prefix,
+Opengeni. Hosts must not encode or infer the kind from a subject-id prefix,
 because the host owns that namespace. Agent-created work inherits the caller's
 frozen principal only through the HMAC-signed session/turn/attempt claims minted
 by the worker, and records a bounded `via` provenance chain. Scheduled,
@@ -353,7 +521,7 @@ resolver must deny that sentinel rather than substitute the session creator,
 API-key owner, sandbox token, or current worker.
 
 A trusted V1 embedding host may also sign `serviceInitiator` plus optional
-`serviceInitiatorContext` into a domain-bound `ogd2_` delegated bearer. OpenGeni continues to
+`serviceInitiatorContext` into a domain-bound `ogd2_` delegated bearer. Opengeni continues to
 authorize the request with the bearer's ordinary `subjectId` and permissions,
 but freezes the separately asserted service principal as causal provenance for
 the new session/turn. The claim accepts only `kind: "service"`, cannot coexist
@@ -361,7 +529,7 @@ with exact agent turn/attempt claims, and is consumed only by commands that
 create work; it cannot impersonate a human or change access. V2 core callers
 can provide the same typed fields on their trusted `AccessGrant`. The optional
 display label belongs on `serviceInitiator`, not in its context. Identity fields
-and context are bounded; OpenGeni-owned lineage/backfill keys and the
+and context are bounded; Opengeni-owned lineage/backfill keys and the
 `unattributed-legacy` migration sentinel are reserved.
 
 Ordinary delegated and first-party/Codemode credentials remain `ogd_`. The
@@ -451,6 +619,37 @@ approval authority. Normal resource authorization and command receipts apply.
 See `examples/site-session-embed` for a standard React provider, timeline and
 durable composer using this transport without knowing its execution location.
 
+### Site Data inside a Site
+
+`site.data` and `site.files` ([Site Data](site-data.md)) use the same HTTP
+transport with `published-artifacts/current/...` paths. A host opts in by
+building its bridge with `createSiteToolBridge({ artifactId, siteVersionId,
+requestedTools, fetchResponse, ... })`: the bridge rewrites `current` to the
+pinned Site, adds `x-opengeni-site-frame`, `x-opengeni-site-id` and
+`x-opengeni-site-version`, and the frame advertises `siteData: 1`. The API
+gives every framed request viewer reach, whoever is viewing. Hosts without
+`fetchResponse` or a pinned Site (inline HTML, tools-only hosts, local
+previews) do not advertise it, and Site code gets `site_data_unsupported`
+without a request being sent; their bridges also refuse `current` Site Data
+paths. No host forwards an explicit `published-artifacts/<id>/data|files`
+path from a Site. `site.sql.run` (Site SQL) travels the same way on
+`published-artifacts/current/sql/queries/<name>` and gets
+`site_sql_unsupported` where Site Data is unsupported. `createOpenGeniSessionProxy`
+does not forward Site Data or Site SQL routes yet.
+
+### Viewers and published Sites
+
+Hosts can answer `site.viewer` and `site.auth.signIn()` by passing `viewer`
+(a `SiteViewer`) and optionally `onSignIn` to `PublishedHtmlArtifactFrame`
+or `ArtifactSandbox`; the frame then advertises `viewer: 1`. The console
+passes the signed-in member (`kind: "member"`, `id: "user:<subject>"`) and
+resolves sign-in at once. Without `viewer`, Site code gets `null`. Sites
+published to their own hostname run in the Sites gateway's shell, which
+answers the same methods for members, invited people and guests and sends
+sign-in through the app's `/site-auth/authorize` page. Products manage
+publications with the `OpenGeniClient` methods in
+[Published Sites](published-sites.md); they never need to proxy Site hosts.
+
 ### Session Authorization
 
 Canonical sources: `SessionAuthorizationPort` in
@@ -464,6 +663,7 @@ revocation by binding `AppDependencies.sessionAuthorization`:
 
 ```ts
 type SessionAuthorizationPort = {
+  capabilities?: { modelAccountOperation?: boolean };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   resolveListScope(
     input: ResolveSessionAuthorizationListScopeInput,
@@ -482,6 +682,21 @@ and `user_private` owner checks also run before the host; the host may narrow
 further and cannot grant those sessions. Cross-session agent access keeps
 exact-target projection even when the host returns `relatedSessionAccess: "root"`.
 
+Choosing a session's model account (any provider) is
+`session.model_account.write` internally. By default the host receives its older
+name, `session.codex_account.write`, on both the neutral PUT `/model-account`
+and legacy POST `/codex-account` routes, preserving existing allow/deny policies.
+After migrating policy keys to `session.model_account.write`, a host sets
+`capabilities: { modelAccountOperation: true }` to receive the neutral name on
+both routes. Omitted or false keeps legacy delivery. There is exactly one host
+decision: a denial is never retried under another alias or combined with an
+alternate allow. Standalone authorization without a host port is unchanged.
+
+Both names remain valid `SessionAuthorizationOperation` values.
+`canonicalSessionAuthorizationOperation` from `@opengeni/contracts` helps resolve
+old names, but normalizing incoming operations alone is insufficient: comparisons
+and policy keys must also migrate to the canonical name before opting in.
+
 An allowed decision may set `relatedSessionAccess: "root"` when the principal
 may see the target's full tree. The fail-closed default is `"target"`: detail,
 lineage, control, parent, and tree-stat projections remove information derived
@@ -490,13 +705,13 @@ second session; that target always receives its own authorization decision.
 
 `resolveListScope` returns either `all` or a bounded database-applicable scope:
 `rootSessionIds` include their descendants while `sessionIds` authorize exact
-rows only. OpenGeni applies the scope inside search, pin, ordering, totals,
+rows only. Opengeni applies the scope inside search, pin, ordering, totals,
 snapshot continuation, and MCP discovery queries. It does not hydrate a broad
 page and filter afterward. Revocation between cursor pages skips newly hidden
 rows and continues scanning to fill the next authorized page.
 
 The same rule is load-bearing for advisory related-work discovery. The host
-scope, OpenGeni private-session checks, and exact live caller authority are
+scope, Opengeni private-session checks, and exact live caller authority are
 materialized before title/active-goal/typed-claim matching, rank, counts,
 relevance cursors, or ancestor expansion. A host must not filter a completed
 discovery page in its adapter, because hidden rows would already have affected
@@ -512,9 +727,9 @@ Denied targets are externally indistinguishable from missing sessions; invalid
 responses or an unavailable host return a retryable unavailable failure. All
 ports unset preserves standalone behavior without the added lookups.
 
-This port authorizes OpenGeni sessions; it does not replace OpenGeni's internal
+This port authorizes Opengeni sessions; it does not replace Opengeni's internal
 delegated/MCP/stream credentials. The host still mints its ordinary user-facing
-delegated token, while OpenGeni continues minting technical first-party tokens
+delegated token, while Opengeni continues minting technical first-party tokens
 and then consults this port with their durable caller authority.
 
 #### Delegated tokens carry no personal-connection authority
@@ -531,12 +746,12 @@ pick up personal connections in shared workspaces, because a real
 `subjectId` and `workspaceId` are signed token fields with no database row
 behind them (`delegatedAccessContext` builds the grant inline), so treating that
 subject as authority to borrow someone's private provider credentials is not a
-boundary OpenGeni is willing to hold. Denying it everywhere is the honest
+boundary Opengeni is willing to hold. Denying it everywhere is the honest
 version of the rule; scoping the denial to personal workspaces would have left
 the same defect one room over.
 
 Hosts that need agent runs to act on a user's personal provider account should
-have that user connect it from a canonical signed-in OpenGeni session, which
+have that user connect it from a canonical signed-in Opengeni session, which
 freezes an ordinary personal-connection delegation onto the causal turn. See
 `docs/organization-tenancy.md` for the authority model.
 
@@ -565,7 +780,7 @@ type EntitlementsPort = {
 };
 ```
 
-When bound on the worker through `ActivityDependencies.entitlements`, `admitRun` replaces local credit-balance admission for managed/Stripe-funded non-Codex turns. When unset, OpenGeni uses its local ledger/static limits exactly as standalone. The port is admission-only; metering remains the idempotency-keyed usage writer. In this branch the core API admission path still calls `requireLimit`; do not document an API-side entitlements binding until source wires one.
+When bound on the worker through `ActivityDependencies.entitlements`, `admitRun` replaces local credit-balance admission for managed/Stripe-funded non-Codex turns. When unset, Opengeni uses its local ledger/static limits exactly as standalone. The port is admission-only; metering remains the idempotency-keyed usage writer. In this branch the core API admission path still calls `requireLimit`; do not document an API-side entitlements binding until source wires one.
 
 ### Connection Credentials
 
@@ -579,13 +794,14 @@ The port can bind any combination of its four legs:
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
-  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   runCredentials?(
     input: RunCredentialsRequest,
   ): Promise<RunCredentialsResolution>;
   mcpCredentials?(
     input: McpCredentialsRequest,
   ): Promise<McpCredentialResolution>;
+  // Added by `VaultConnectionCredentialsPort` in `@opengeni/vaults`.
+  vaultProvider?: VaultProvider | null;
 };
 ```
 
@@ -599,7 +815,7 @@ Azure DevOps, including more than one account/installation for the same
 provider. A host must not use `provider` alone as credential identity.
 
 Repository mounts are resource identity, not host-to-runtime mapping. An embedding
-host may omit `mountPath`; OpenGeni then normalizes and persists
+host may omit `mountPath`; Opengeni then normalizes and persists
 `repos/<encoded-host>/<owner>/<repo>`, including a non-default Git HTTPS port in
 the encoded host segment. That keeps equal owner/repository names on GitHub,
 GitLab, Azure DevOps, and custom hosts distinct. Explicit paths remain supported,
@@ -608,7 +824,7 @@ case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
 Repository URI normalization preserves the provider-defined HTTPS clone path;
-OpenGeni never manufactures or removes a trailing `.git` suffix. Credential
+Opengeni never manufactures or removes a trailing `.git` suffix. Credential
 routing and resource identity use an exhaustive provider capability policy:
 GitHub and GitLab explicitly declare `.git` and suffix-free paths equivalent,
 while Azure DevOps and provider-neutral remotes use exact paths. Adding a Git
@@ -621,7 +837,7 @@ best effort: when its clone fails (for example the repository is empty, the
 ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
 mount path in `skippedOptionalRepositories` on the `repository-clone`
 `sandbox.operation.completed` event, and the session continues without it.
-Without the flag a failed clone fails sandbox setup, as before. OpenGeni sets
+Without the flag a failed clone fails sandbox setup, as before. Opengeni sets
 it only on repositories it attaches on a person's behalf (a Slack task's
 recently used repositories); it grants no access and changes no credential
 routing. An optional clone is bounded to 60 seconds (90 seconds for all
@@ -629,7 +845,7 @@ optional clones of one setup command) when the sandbox has a `timeout` binary,
 so a hung fetch is skipped the same way. Before each turn's strict GitHub App
 allowlist recheck and installation-token mint, the worker also drops, for that
 turn only, an optional GitHub App repository that the workspace allowlist no
-longer admits or, when OpenGeni's own App mints the token (no host
+longer admits or, when Opengeni's own App mints the token (no host
 `gitCredentials` port), that the installation can no longer reach; it reports
 them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
 named `optional-repository-access`. This only removes repositories from the
@@ -649,7 +865,7 @@ Every request carries the current `sessionId`, root-session lineage,
 turn/attempt/execution generation, frozen initiator, and immutable initiator
 provenance. A host must authorize that authority against its own session binding
 and selected repositories immediately before minting either a token or stable
-Git identity. OpenGeni reuses the same frozen authority for initial provisioning,
+Git identity. Opengeni reuses the same frozen authority for initial provisioning,
 deferred identity resolution, lazy provisioning, and proactive renewal; it fails
 closed before calling a bound host broker when the authority is unavailable.
 
@@ -659,18 +875,18 @@ with omitted `provider`; non-GitHub requests receive `provider` plus
 `repositoryRefs`. An explicit binding, or multiple bindings for one provider,
 adds `credentialBindingId`, `provider`, and (for a single canonical host)
 `providerHost`. The host must echo those fields exactly in `GitCredentials`.
-OpenGeni validates those echoes together with `workspaceId` before accepting a
+Opengeni validates those echoes together with `workspaceId` before accepting a
 token. Provider-neutral repository refs carry the same binding/access fields
 plus `provider`, `repositoryId`, `installationId`, `projectId`, and
 `connectionId`; GitHub aliases remain accepted. `expiresAt` is per binding;
-without it OpenGeni uses a conservative bounded refresh cadence.
+without it Opengeni uses a conservative bounded refresh cadence.
 
 When the provider cannot mint a token whose authority is contained to those
 selected repositories, the host may return `transport: { kind: "http_broker",
 repositories }`. Every route must echo exactly one requested `repositoryUri`
 and provide a unique, credential-free, canonical HTTPS `brokerUri`; the route
 set must cover the binding exactly. `token` is then a short-lived bearer for the
-host's smart-Git endpoint rather than a provider token. OpenGeni keeps the
+host's smart-Git endpoint rather than a provider token. Opengeni keeps the
 persisted remote canonical and installs selected-remote Git `insteadOf` rewrites in a
 replaceable include file. The path-aware helper supplies the bearer only to the
 returned broker URI. It rejects missing, extra, duplicate, non-HTTPS,
@@ -705,26 +921,37 @@ or replace a healthy sibling token. Renewal may rotate a broker bearer but may
 not change its exact routes during the admitted attempt; any route change fails
 closed and waits for a newer turn. Renewal requires no model/MCP call and never
 mutates the manifest.
-`sandboxSecrets` receives the account/workspace/resource ids plus the exact
-session/turn/attempt/execution generation, frozen turn initiator, and nullable
-causal-human subject. Organization/workspace Variable Sets may be resolved for
-a pure service initiator; user-scoped sets must reject a null causal human and
-revalidate the exact admitted personal-resource grant. The provider returns
-plaintext values plus exact scope/resource/attempt echoes, which the worker
-checks before applying any value.
+The former `sandboxSecrets` leg is removed. A host that owns its own secret
+store passes `vaultProvider` (a `VaultProvider` from `@opengeni/vaults`) on
+`connectionCredentials`; Opengeni links it as a `source: "host"` vault and
+resolves values from it live when a `{{secret:…}}` reference runs, so the host
+never returns secret plaintext through the credential port. See
+[`secrets.md`](secrets.md#providers).
+
+For a product whose secret store lives behind another service, use a remote
+`external` vault connection instead. One connection can expose multiple vaults;
+separate user-owned connections keep user-specific inventories isolated. The
+host verifies the signed request, maps the native account/workspace/subject to
+its own tenant/user, and authorizes each metadata, read or supported write
+operation. The same references work in tools, shells, browsers and Sites.
+See [external-vaults.md](external-vaults.md) for setup, pending verification,
+capabilities and freshness. Native secret ask cards remain hosted-only.
+
+This is not a replacement for the renewable run-credential callback: that port
+still owns short-lived per-attempt credentials, Git/MCP bindings, renewal and
+cleanup. A vault read does not establish those lifecycle guarantees.
 
 A standalone product can supply the same material without embedding: a
 workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
-is a signed HTTP endpoint that OpenGeni uses as that workspace's `runCredentials`
+is a signed HTTP endpoint that Opengeni uses as that workspace's `runCredentials`
 resolver, in place of the injected port.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
-or equivalent host-owned material. It is independent of `variableSetId`; the
-request includes a variable-set id/name only as informational context. An
-embedding host should resolve the OpenGeni session through its own durable
-session binding instead of creating a marker variable set or copying host
-connection rows into OpenGeni.
+or equivalent host-owned material. It is independent of vaults. An embedding
+host should resolve the Opengeni session through its own durable session
+binding instead of creating a marker vault item or copying host connection
+rows into Opengeni.
 
 Every request carries account/workspace/session, parent and root session,
 the shared `sandboxGroupId`,
@@ -734,10 +961,10 @@ The host decides which of its connections apply—including whether to deliver
 anything to a connected machine—and returns provider-neutral environment
 values, relative credential files, and environment names that point at those
 files. One response may contain credentials for multiple providers and multiple
-accounts; OpenGeni does not infer or constrain provider combinations.
+accounts; Opengeni does not infer or constrain provider combinations.
 `not_applicable` is the explicit per-attempt opt-out for a target OS/backend or
 host policy; it carries no material and must remain stable for the frozen
-attempt. On a compatible command surface OpenGeni still removes any prior
+attempt. On a compatible command surface Opengeni still removes any prior
 session credential root before agent or Channel-A commands run, so a worker
 crash cannot leave an old pointer readable merely because the next attempt opts
 out.
@@ -759,7 +986,7 @@ their own provider refresh if they outlive rotating credentials.
 
 Credential selection and renewal are pinned to the effective sandbox backend
 and unproxied session established at turn start. If a user swaps the active route
-mid-turn, OpenGeni does not copy that turn's host material onto the new target;
+mid-turn, Opengeni does not copy that turn's host material onto the new target;
 the next admitted turn resolves and seeds credentials for that target. This is a
 deliberate authority boundary, especially when the new target is a connected
 machine. A chat-only lazy turn still resolves the host port so reconnect state
@@ -771,10 +998,10 @@ share an OS user and filesystem; separate session directory names prevent
 accidental activation collisions but are not an isolation boundary. A host must
 therefore select credentials that are valid for the whole shared-box trust
 domain (commonly the intersection or root-session policy), decline delivery, or
-place differently trusted sessions in separate sandbox groups. OpenGeni never
+place differently trusted sessions in separate sandbox groups. Opengeni never
 claims that `/tmp` path separation protects one same-user process from another.
 
-OpenGeni does not register environment or credential-file values for output
+Opengeni does not register environment or credential-file values for output
 rewriting. Accepted model, tool, event, history, failure, and diagnostic content
 remains exact even when it contains configured-secret-shaped text. Hosts should
 return only the materialization and renewal facts required by the run;
@@ -807,7 +1034,7 @@ references. See [MCP connection cutover](remote-mcp-credentials.md) for account
 selection, refresh, and migration behavior.
 
 `runCredentials` has no standalone fallback because ordinary standalone sandbox
-credentials continue to come from variable sets and existing lifecycle hooks. This port does
+credentials come from `{{secret:…}}` references and existing lifecycle hooks. This port does
 **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in
 `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with
 `signDelegatedAccessToken(settings.delegationSecret, ...)`.
@@ -823,8 +1050,11 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. With an agent configuration it only
-refines inside the enabled capabilities (a name owned by a capability that is
-off is a 422 `agent_config_conflict`); prefer `agent.capabilities`. It accepts only names from
+refines inside the enabled capabilities: a name owned by a capability that is
+off is left out, so a client built against an older capability map keeps
+creating sessions when a tool moves under a capability it turns off (an agent's
+own `session_create` list is still a 422 `agent_config_conflict`); prefer
+`agent.capabilities`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
 connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent
@@ -864,7 +1094,7 @@ MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
 resources, skills, and MCP servers remain empty, while omitted tools continue to receive
-workspace-default capability MCP refs. Variable sets, sandbox environments, model selection,
+workspace-default capability MCP refs. Vault policy, sandbox environments, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.
 
@@ -910,14 +1140,22 @@ Standalone uses `createDb(settings.databaseUrl)` and no search-path override. Em
 - `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup, max })` for postgres-js handles.
 - `registerDbBinding(db, { rlsStrategy, userLookup })` for an externally constructed Drizzle handle.
 
+`createDb` and the exported `Database` port use explicit-table builders, not
+Drizzle's relational `db.query.<table>` API. Use, for example,
+`db.select().from(schema.sessions).where(eq(schema.sessions.id, id))`, importing
+tables from `@opengeni/db/schema`. This avoids constructing unused relational
+builders for every transaction. An injected schema-configured Drizzle handle
+remains compatible; a host can still use relational queries through its original
+handle. Transactions, savepoints, prepared statements, and RLS scopes are unchanged.
+
 For `rlsStrategy: "force"`, role provisioning rejects every privilege-bearing
 role relationship. PostgreSQL 16+ managed services may retain the automatic
 ADMIN-only reverse grant from `opengeni_app` to the non-superuser `CREATEROLE`
-principal that created it; OpenGeni accepts only the exact non-inheritable,
+principal that created it; Opengeni accepts only the exact non-inheritable,
 non-settable, superuser-granted management edge. PostgreSQL 15 and every
 uncertain or privilege-bearing edge remain fail-closed.
 
-Dedicated-schema deployments use a search path shaped like `<schema>,opengeni_private,public`; `public` stays last so pgcrypto/pgvector symbols resolve. `rlsStrategy: "force"` is the standalone posture: OpenGeni connects as a non-owner role and FORCE RLS applies. `rlsStrategy: "scoped"` is the embedded owner-role posture: the host owns the isolation boundary, but OpenGeni still emits the `opengeni.account_id` / `opengeni.workspace_id` GUCs on scoped queries.
+Dedicated-schema deployments use a search path shaped like `<schema>,opengeni_private,public`; `public` stays last so pgcrypto/pgvector symbols resolve. `rlsStrategy: "force"` is the standalone posture: Opengeni connects as a non-owner role and FORCE RLS applies. `rlsStrategy: "scoped"` is the embedded owner-role posture: the host owns the isolation boundary, but Opengeni still emits the `opengeni.account_id` / `opengeni.workspace_id` GUCs on scoped queries.
 
 ### Worker
 
@@ -941,14 +1179,23 @@ await runOpenGeniWorker({
 ```
 
 `runOpenGeniWorker` installs `SIGTERM`/`SIGINT` drain handlers, exposes `/healthz`,
-`/readyz`, and `/metrics`, registers engine-internal maintenance schedules on the
-control role, and closes only the Temporal clients/listener it creates. It never
+`/readyz`, and `/metrics`, runs engine-internal maintenance on the control role,
+and closes only the Temporal clients/listener it creates. The workflow-wake
+dispatcher, Knowledge indexing, site-auth maintenance, the sandbox lease reaper
+and its maintenance pass, and the idle and browser checkpoint sweeps run as
+work-checked cadences: each tick is one read-only check, and a workflow starts
+only when the job's claim could find work, so an idle deployment writes no
+Temporal history for them (`opengeni_maintenance_cadence_ticks_total{job,outcome}`
+counts idle and started ticks). An idle reaper tick still refreshes the reaper's
+read-only gauges in the control worker, and with Modal configured it lists the
+provider app first, so a box running without a lease is still swept. It never
 closes the injected database or EventBus; the host closes those after the worker
 has drained. Pass `shutdownSignals: false` when a host process manager owns
 signals, and use `createOpenGeniWorkerService` for explicit `run`, `drain`,
 `state`, and `close` control. Set `internalSchedules: "none"` only when another
-control worker in the same deployment owns the OpenGeni reaper, expired-upload,
-and workflow-wake schedules. These are engine maintenance cadences; the
+control worker in the same deployment owns the Opengeni reaper, expired-upload,
+workflow-wake, Knowledge indexing and site-auth maintenance cadences. These are
+engine maintenance cadences; the
 embedding host may continue to own all product-level scheduled-agent behavior.
 
 The published package contains `dist/workflow-bundle.js`, generated by Temporal
@@ -1018,7 +1265,7 @@ fields next to `origin`, each from a fixed list defined in
 entry surface, see [`run-lifecycle.md`](run-lifecycle.md)), `modelProvider` (the
 provider family from the turn's accepted execution policy; operator-configured
 registry providers export as `registry`), and, on `agent.toolCall.created` only,
-`toolFamily` (an OpenGeni first-party tool name, `integration:<reviewed domain>`,
+`toolFamily` (an Opengeni first-party tool name, `integration:<reviewed domain>`,
 or `custom`, so a tenant's own MCP host never leaves the database). The worker
 stamps `toolFamily` on the event payload and the export trigger checks the wire
 format again, exporting NULL for anything malformed. Usage facts carry `surface`
@@ -1030,7 +1277,7 @@ sinks receive them on each `HostEventExport` / `HostUsageExport`. The fields are
 optional on the wire; rows enqueued before the migration export them as null.
 
 
-An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
+An embedded host can project Opengeni's bounded durable session events and exact usage facts into
 its own business store without polling tenant routes or treating NATS as a durable log. This surface
 is optional. With no registered consumer, both export gates default to false and source transactions
 write zero outbox rows, preserving standalone behavior. First-consumer registration and deferred
@@ -1042,7 +1289,7 @@ normal `opengeni_app` role: an exporter reads a cross-workspace stream, while th
 tenant-scoped. Provisioning grants the current API and registers same-owner default privileges;
 shipped migrations also preserve existing exporter ACLs when adding an export function, so the
 standard migration-only upgrade job does not strand a live exporter. Re-run provisioning if a
-different database principal owns later custom functions. One OpenGeni installation per database
+different database principal owns later custom functions. One Opengeni installation per database
 is supported: dedicated data schemas do not make the shared private/export function schemas
 multi-installation-safe.
 
@@ -1075,7 +1322,7 @@ The exporter role receives `USAGE` and function `EXECUTE` on the isolated
 rewind, prune, or inspect a host consumer. Each sink has a named checkpoint and one renewable batch
 lease. Cursors are decimal strings so they remain exact past JavaScript's safe-integer range.
 
-Delivery is **at least once**. If a process dies after the sink commits but before OpenGeni advances
+Delivery is **at least once**. If a process dies after the sink commits but before Opengeni advances
 the checkpoint, the identical idempotency keys are delivered again. A sink must transactionally
 deduplicate those keys. Session ordering is authoritative by `event.sequence`; cursor order is
 stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
@@ -1151,7 +1398,7 @@ until the first lifecycle consumer registers.
 | `connection.revoked` | provider class, the same list as `connection.created` | a connection becomes `revoked`, or a live connection is deleted |
 | `scheduled_task.created` | none | a scheduled task is created |
 | `skill.installed` | none | a catalog Skill is installed into a workspace |
-| `slack.user_linked` | none | a Slack user is linked to an OpenGeni user |
+| `slack.user_linked` | none | a Slack user is linked to an Opengeni user |
 | `machine.enrolled` | none | a new Connected Machine is enrolled |
 | `member.joined` | none | a person becomes an active member of an organization that already had one |
 | `user.active` | none | a managed person is active in an authenticated browser session on a new UTC day (at most one per person per day; no organization) |
@@ -1247,10 +1494,10 @@ For embedded UIs that page historical timelines, prefer `GET .../events?compact=
 
 ## Host-owned product UI
 
-Embedding does not require the host to copy its product model into OpenGeni.
+Embedding does not require the host to copy its product model into Opengeni.
 The host may keep its own session header, repository/integration picker,
 sharing controls, linked entities, billing presentation, and domain-specific
-tabs while composing OpenGeni's session hooks and workbench surfaces below
+tabs while composing Opengeni's session hooks and workbench surfaces below
 them.
 
 `@opengeni/react/session` is the headless composition boundary. Its baseline
@@ -1285,14 +1532,14 @@ providers, repositories, and credential bindings in one session. The stock web
 picker is currently GitHub-oriented, but that is a stock-client limitation—not
 an engine, API, or embedding restriction. Embedded hosts can retain their own
 provider catalog and picker and submit the canonical resources once at launch.
-OpenGeni then owns their runtime materialization and credential routing; the host
+Opengeni then owns their runtime materialization and credential routing; the host
 does not maintain a synchronized repository model.
 
 The styled workbench is independently filterable. Hosts can mount Changes,
 Files, and Terminal while omitting Desktop, or render a completely custom
 timeline/composer from the session-only hooks and pure projection. Product
 metadata should remain in host slots/components rather than being added to
-OpenGeni contracts solely for one embedding.
+Opengeni contracts solely for one embedding.
 
 `FileBrowser.isNodeVisible`, `SandboxFiles.isNodeVisible`, and
 `SandboxWorkspace.isFileNodeVisible` provide a presentation-only file filter.
@@ -1317,10 +1564,10 @@ pointless coupling (host ownership of engine internals), so it is a contract:
 **The host owns the perimeter and external identity.**
 
 - Every request reaching the mounted api-router has already passed the HOST's
-  authentication. OpenGeni's own checks (delegated tokens, API keys) are the
+  authentication. Opengeni's own checks (delegated tokens, API keys) are the
   second gate, not the first — an embedded deployment must never be reachable
   except through the host's front door.
-- The host decides which of its principals maps to which OpenGeni
+- The host decides which of its principals maps to which Opengeni
   account/workspace, and mints `ogd_` delegated tokens (with the deployment's
   delegation secret) to act as them. Admission policy that depends on the
   host's business state (plans, quotas, feature gates) enters through the

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 describe("Google Drive sync dashboard", () => {
-  test("scopes every OpenGeni panel to one exact namespace, environment, and release", async () => {
+  test("scopes every Opengeni panel to one exact namespace, environment, and release", async () => {
     const dashboard = await loadDashboard();
     const expressions = collectExpressions(dashboard).filter((expression) =>
       expression.includes("opengeni_"),

@@ -3,8 +3,11 @@ import type {
   ArtifactCatalogListOptions,
   RetainedArtifactReference,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
-import { filterArtifactCatalog, defaultArtifactFilters } from "../src/lib/artifact-catalog";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import {
+  filterArtifactCatalog,
+  defaultArtifactFilters,
+} from "@opengeni/react/app/lib/artifact-catalog";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const sessionId = "33333333-3333-4333-8333-333333333333";
@@ -83,8 +86,27 @@ const siteVersion = {
   revision: 3,
   requestedTools: [],
 };
-const client = {
+export const client = {
   tools: { forWorkspace: () => ({}) },
+  // New artifact puts its prompt in the new-chat composer draft; the fixture
+  // records the drafted text.
+  async getNewSessionDraft(_workspaceId: string) {
+    return {
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: null,
+      reasoningEffort: null,
+      latencyMode: null,
+      options: {},
+      revision: fixtureActivity.prompts.length,
+    };
+  },
+  async saveNewSessionDraft(_workspaceId: string, draft: { text: string }) {
+    fixtureActivity.prompts.push(draft.text);
+    return { ...draft, revision: fixtureActivity.prompts.length };
+  },
   async updateArtifactPin(
     _workspaceId: string,
     kind: ArtifactCatalogItem["kind"],
@@ -135,20 +157,23 @@ const client = {
     if (state === "loading") return new Promise<never>(() => {});
     if (state === "error")
       throw Object.assign(new Error("Unable to reach the artifact catalog."), { status: 503 });
+    const filtered =
+      state === "empty"
+        ? []
+        : filterArtifactCatalog(
+            new URLSearchParams(location.search).has("many") ? gallery : items,
+            {
+              ...defaultArtifactFilters,
+              ...options,
+              q: options.q ?? "",
+              kind: options.kind ?? "all",
+            },
+          );
+    const paginated = new URLSearchParams(location.search).has("pages");
+    const offset = Number(options.cursor ?? 0);
     return {
-      items:
-        state === "empty"
-          ? []
-          : filterArtifactCatalog(
-              new URLSearchParams(location.search).has("many") ? gallery : items,
-              {
-                ...defaultArtifactFilters,
-                ...options,
-                q: options.q ?? "",
-                kind: options.kind ?? "all",
-              },
-            ),
-      nextCursor: null,
+      items: paginated ? filtered.slice(offset, offset + 20) : filtered,
+      nextCursor: paginated && offset + 20 < filtered.length ? String(offset + 20) : null,
     };
   },
   async getRetainedArtifact(_workspaceId: string, id: string) {

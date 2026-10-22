@@ -41,6 +41,7 @@ import {
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
+import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
 import {
   rawRows,
   setSubjectRlsContext,
@@ -66,8 +67,8 @@ export async function createManagedOrganization(
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     // This legacy first-organization route delegates to the same self-service
-    // receipt writer. Do not let it consume the one-shot receipt while the
-    // trial is enabled without issuing its transaction-atomic grant.
+    // receipt writer. The trigger now records zero-value Free eligibility;
+    // keep the old GUC only for compatibility with pre-0845 schemas.
     await rawRows(
       tx,
       sql`select pg_catalog.set_config(
@@ -1089,7 +1090,16 @@ export async function updateOrganizationMember(
         );
         await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
       }
-      return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      const member = OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      // A person who leaves loses every key that acts as them here, so
+      // rejoining later never revives one. Suspension keeps keys: they stop
+      // working while suspended because each request rechecks membership.
+      if (transition.kind === "offboard" && member.status === "revoked")
+        await revokePersonalApiKeysForOwner(tx as unknown as Database, {
+          accountId: member.organizationId,
+          ownerSubjectId: member.subjectId,
+        });
+      return member;
     }),
   );
 }

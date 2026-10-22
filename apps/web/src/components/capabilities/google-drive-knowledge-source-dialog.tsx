@@ -2,9 +2,9 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -12,9 +12,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectorDocumentDestinationAuthority,
@@ -24,7 +24,7 @@ import type {
   GoogleDriveSyncCadence,
   IntegrationFacetBindingSummary,
   IntegrationFacetDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FolderCrumb = { id: string; name: string };
 
@@ -280,7 +280,7 @@ export function GoogleDriveKnowledgeSourceDialog({
 
   return (
     <Dialog open={entry !== null} onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+      <DialogContent className="max-h-[90vh] grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Google Drive locations · {instance.displayName}</DialogTitle>
           <DialogDescription>

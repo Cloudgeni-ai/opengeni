@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, getConnectionMetadata } from "../src/index";
 import { migrate } from "../src/migrate";

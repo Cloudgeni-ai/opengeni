@@ -1,7 +1,11 @@
 import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useOpenGeniText } from "../messages/runtime";
+
+const DialogContainedPortal = containedPortal(Dialog.Portal);
 
 export type SessionCapabilityFrameProps = {
   name: string;
@@ -13,7 +17,7 @@ export type SessionCapabilityFrameProps = {
   expanded: boolean;
   complete: boolean;
   /** Completion copy must reflect the provider's actual scope of access. */
-  completeLabel?: string;
+  completeLabel?: string | undefined;
   actionLabel: string;
   /** Direct navigation actions should not announce a dialog on the card. */
   opensDialog?: boolean;
@@ -33,6 +37,8 @@ export type SessionCapabilityFrameProps = {
   actionUnavailable?: ReactNode;
   /** Host-owned content inside the card, under its status or actions. */
   details?: ReactNode;
+  /** Protected setup can stay in the conversation instead of opening a dialog. */
+  inlineSetup?: ReactNode;
 };
 
 function Mark({ src, name }: { src: string | null; name: string }) {
@@ -72,7 +78,9 @@ export function SessionCapabilityFrame({
   dialogOnly = false,
   actionUnavailable,
   details,
+  inlineSetup,
 }: SessionCapabilityFrameProps) {
+  const t = useOpenGeniText();
   const localOpener = useRef<HTMLButtonElement>(null);
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
@@ -95,7 +103,7 @@ export function SessionCapabilityFrame({
         style={dialogOnly ? { display: "none" } : undefined}
         ref={sectionRef}
         tabIndex={-1}
-        aria-label={`${name} setup`}
+        aria-label={t("sessionCapabilityFrame.nameSetup", { name })}
         data-state={complete ? "complete" : expanded ? "setup" : "suggested"}
         className="og-session-capability-shell"
       >
@@ -106,12 +114,16 @@ export function SessionCapabilityFrame({
         {complete ? (
           <p role="status" className="og-session-capability-copy">
             {completeLabel ??
-              (skill ? "Installed · Workspace" : "Connected · Available in this conversation")}
+              (skill
+                ? t("sessionCapabilityFrame.installedWorkspace")
+                : t("sessionCapabilityFrame.connectedAvailableInThisConversation"))}
           </p>
         ) : (
           <>
             <p className="og-session-capability-copy">{description}</p>
-            {actionUnavailable ? (
+            {inlineSetup ? (
+              <div className="og-session-capability-setup">{inlineSetup}</div>
+            ) : actionUnavailable ? (
               <div className="og-session-capability-actions" data-unavailable="">
                 <span role="note">
                   <InfoIcon size={13} aria-hidden />
@@ -122,7 +134,9 @@ export function SessionCapabilityFrame({
               <div className="og-session-capability-actions">
                 <span>
                   <ShieldCheckIcon size={13} aria-hidden />
-                  {skill ? "Guidance only · no account access" : "You choose what to authorize"}
+                  {skill
+                    ? t("sessionCapabilityFrame.guidanceOnlyNoAccountAccess")
+                    : t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
                 </span>
                 <button
                   ref={buttonRef}
@@ -149,7 +163,7 @@ export function SessionCapabilityFrame({
           if (!open && !busy) onClose();
         }}
       >
-        <Dialog.Portal>
+        <DialogContainedPortal>
           <Dialog.Overlay className="og-root og-session-capability-overlay" style={portalStyle} />
           <Dialog.Content
             className="og-root og-session-capability-dialog"
@@ -178,14 +192,14 @@ export function SessionCapabilityFrame({
                 </Dialog.Description>
               </div>
               {!busy ? (
-                <Dialog.Close aria-label="Close connection setup">
+                <Dialog.Close aria-label={t("sessionCapabilityFrame.closeConnectionSetup")}>
                   <XIcon size={18} />
                 </Dialog.Close>
               ) : null}
             </div>
             <div className="og-session-capability-dialog-body">{children}</div>
           </Dialog.Content>
-        </Dialog.Portal>
+        </DialogContainedPortal>
       </Dialog.Root>
     </div>
   );

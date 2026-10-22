@@ -10,10 +10,13 @@ import {
   Link,
 } from "@tanstack/react-router";
 import { WorkspaceDock } from "@opengeni/react";
-import { MarkdownText } from "../src/components/markdown";
-import { ArtifactLinkBoundary } from "../src/components/session/artifact-link-boundary";
-import { ArtifactSessionPage } from "../src/components/session/artifact-session-page";
-import { artifactReturnSearch } from "../src/lib/routes";
+import { MarkdownText } from "@opengeni/react/app/components/markdown";
+import { ArtifactLinkBoundary } from "@opengeni/react/app/components/session/artifact-link-boundary";
+import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
+// The web app backs the shared session UI's links with its router; this
+// fixture renders those components under its own TanStack router the same way.
+import "../src/navigation-host";
 import "../src/styles.css";
 
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";

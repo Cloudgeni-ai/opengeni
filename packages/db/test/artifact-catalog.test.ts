@@ -43,6 +43,7 @@ test("catalog query adapts only existing output domains and parameterizes litera
     await listArtifactCatalogCandidates(db, scope, {
       query,
       kinds: ["site", "document", "image", "file"],
+      siteViewer: { subjectId: null },
       snapshotAt,
       limit: 101,
     }),
@@ -84,6 +85,7 @@ test("catalog keysets retain microseconds and stable domain/native-ID ties for e
     await listArtifactCatalogCandidates(db, scope, {
       query: ArtifactCatalogListQuery.parse({ sort }),
       kinds: ["site"],
+      siteViewer: { subjectId: null },
       snapshotAt,
       after,
       limit: 100,
@@ -109,6 +111,7 @@ test("pins use a scoped capability and both candidate limits carry the pin front
   await listArtifactCatalogCandidates(db, scope, {
     query: ArtifactCatalogListQuery.parse({ sort: "title" }),
     kinds: ["file", "image", "site"],
+    siteViewer: { subjectId: null },
     snapshotAt,
     after,
     limit: 100,
@@ -131,6 +134,7 @@ test("Images filter includes explicit sandbox publications with origin independe
   await listArtifactCatalogCandidates(db, scope, {
     query: ArtifactCatalogListQuery.parse({ kind: "image" }),
     kinds: ["image"],
+    siteViewer: { subjectId: null },
     snapshotAt,
     limit: 100,
   });
@@ -151,6 +155,7 @@ test("empty authority does not query and publication records only via the scoped
     await listArtifactCatalogCandidates(db, scope, {
       query: ArtifactCatalogListQuery.parse({}),
       kinds: [],
+      siteViewer: { subjectId: null },
       snapshotAt,
       limit: 1,
     }),

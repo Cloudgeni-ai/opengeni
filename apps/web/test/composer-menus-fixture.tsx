@@ -1,23 +1,57 @@
 import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
-} from "../src/components/repository-picker";
-import { FollowUpRepositoryMenuBody } from "../src/components/follow-up-repository-menu-body";
-import { TooltipProvider } from "../src/components/ui/tooltip";
-import { NewSessionVariableSetPicker } from "../src/components/session/new-session-variable-set-picker";
-import type { GitHubRepository } from "../src/types";
-import type { SessionToolSelection } from "../src/components/pickers";
-import type { AgentLearningOverrides } from "@opengeni/sdk";
+} from "@opengeni/react/app/components/repository-picker";
+import { FollowUpRepositoryMenuBody } from "@opengeni/react/app/components/follow-up-repository-menu-body";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import {
+  SessionSecretsMenuBody,
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "@opengeni/react/app/components/secrets/session-secrets-panel";
+import type { GitHubRepository } from "@opengeni/react/app/types";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
+import type { AgentLearningOverrides, VaultPolicy, VaultSummary } from "@opengeni/sdk";
 import "../src/styles.css";
 
 const AgentLearningSettingsEditor = lazy(() =>
-  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
   })),
 );
+
+// The real settings editor reads and saves through the app's client. This
+// in-memory client keeps one chat's overrides over fixed workspace defaults.
+let chatSettings: AgentLearningOverrides = {};
+const fixtureAppContext = {
+  accessContext: { subjectId: "fixture-user" },
+  client: {
+    getAgentLearningSettings: async (_workspaceId: string, _scope: string, source?: unknown) => ({
+      version: 1,
+      settings: source
+        ? chatSettings
+        : { knowledge: "automatic", instructions: "review_first", skills: "off" },
+    }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      const next: Record<string, string> = { ...chatSettings };
+      for (const [key, value] of Object.entries(input.settings)) {
+        if (value === "inherit") delete next[key];
+        else next[key] = value;
+      }
+      chatSettings = next as AgentLearningOverrides;
+      return { version: 2, settings: chatSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -43,6 +77,32 @@ const servers = [
     }),
   ),
 ];
+const fixtureVaults: VaultSummary[] = Array.from({ length: 20 }, (_, index) => ({
+  id: `vault-${index + 1}`,
+  workspaceId: "fixture",
+  ownerKind: "workspace",
+  ownerLabel: "This workspace",
+  rootSessionId: null,
+  name: `Vault ${index + 1}`,
+  description: null,
+  source: "opengeni",
+  mode: "read_write",
+  syncStatus: "ok",
+  syncErrorCode: null,
+  syncErrorMessage: null,
+  lastSyncedAt: null,
+  rateLimitedUntil: null,
+  providerConnectionId: null,
+  availability: null,
+  isDefault: index === 0,
+  itemCount: index,
+  canWrite: true,
+  canManage: true,
+  generation: 1,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+}));
+
 function Fixture() {
   const isNew = new URLSearchParams(location.search).has("new");
   const [selection, setSelection] = useState<SessionToolSelection>({
@@ -59,7 +119,8 @@ function Fixture() {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualAdded, setManualAdded] = useState(false);
   const [fileCount, setFileCount] = useState(0);
-  const [runtimeIds, setRuntimeIds] = useState(["set-2", "set-1"]);
+  const [vaultPolicy, setVaultPolicy] = useState<VaultPolicy>({ mode: "all" });
+  const vaultRows = draftSecretsRows(fixtureVaults, vaultPolicy);
   const props: RepositoryContextPickerProps = {
     configured: true,
     status: "bound",
@@ -128,20 +189,15 @@ function Fixture() {
           onToolSelectionChange={setSelection}
           menuSide="bottom"
           repositories={{ selectedCount: selected.size, panel: <RepositoryBody {...props} /> }}
-          variableSets={{
-            selectedCount: runtimeIds.length,
+          secrets={{
+            summary: sessionSecretsSummary(vaultPolicy, vaultRows),
             panel: (
-              <NewSessionVariableSetPicker
-                workspaceId="fixture"
-                canAttach
-                canUse
-                runtimeIds={runtimeIds}
-                variableSets={Array.from({ length: 20 }, (_, index) => ({
-                  id: `set-${index + 1}`,
-                  name: `Environment ${index + 1}`,
-                }))}
-                disabled={false}
-                onChange={setRuntimeIds}
+              <SessionSecretsMenuBody
+                vaults={vaultRows}
+                policy={vaultPolicy}
+                narrowedByParent={false}
+                canEdit
+                onPolicyChange={setVaultPolicy}
               />
             ),
           }}
@@ -189,11 +245,15 @@ function Fixture() {
             manualAdded,
             fileCount,
             settings,
-            runtimeIds,
+            vaultPolicy,
           })}
         </div>
       </main>
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureAppContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

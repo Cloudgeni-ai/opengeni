@@ -1,12 +1,14 @@
 // Shared tool classification and bounded search ranking for lazy-tool-transport.ts.
 import { type Tool } from "@openai/agents";
+import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { ToolSearchIndex } from "./tool-discovery-ranking";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
-/** The prefix OpenGeni's PrefixedMcpServer stamps on codex_apps connector tools. */
+/** The prefix Opengeni's PrefixedMcpServer stamps on codex_apps connector tools. */
 export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;
@@ -61,128 +63,154 @@ export function isSearchableMcpFunctionTool(
   return serverId !== null;
 }
 
-// Minimal English stopword set: query phrasings like "send an email to someone"
-// should match on capability words, not drown in glue words (parity with
-// codex-rs, whose search normalizes tokens server-side).
-const STOPWORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "of",
-  "to",
-  "in",
-  "on",
-  "for",
-  "with",
-  "by",
-  "at",
-  "is",
-  "are",
-  "be",
-  "do",
-  "does",
-  "my",
-  "me",
-  "your",
-  "you",
-  "it",
-  "its",
-  "this",
-  "that",
-  "from",
-  "as",
-  "up",
-  "out",
-  "all",
-  "some",
-  "any",
-  "can",
-  "will",
-  "would",
-  "should",
-  "want",
-  "need",
-  "please",
-  "user",
-  "users",
-]);
+/** The first-party server that hosts the harness control tools. */
+export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
 
-/** Light suffix stemmer so "emails"/"email", "creating"/"create" co-match (min-stem guards, no over-stripping). */
-function stem(token: string): string {
-  if (token.length > 5 && token.endsWith("ing")) return token.slice(0, -3);
-  if (token.length > 4 && token.endsWith("ed")) return token.slice(0, -2);
-  if (token.length > 4 && token.endsWith("es")) return token.slice(0, -2);
-  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
-  return token;
-}
+/**
+ * First-party tools the harness itself relies on: goal lifecycle, background
+ * command polling, and the session-level wait, plus excel_run, the only way to
+ * reach a workbook the person has open in Excel. Hiding any of them behind
+ * search spends a model round trip to rediscover the same schema (for Excel,
+ * one of every four requests in a typical add-in chat). This is an exact
+ * per-tool exception, never the whole `opengeni` catalog, and it never widens
+ * authority: only a tool the attempt's prepared server actually listed
+ * (selection and permissions already applied) can be visible.
+ */
+export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
+  "goal_set",
+  "goal_update",
+  "goal_complete",
+  "goal_pause",
+  "goal_resume",
+  "command_read",
+  "command_wait",
+  "wait_for_input",
+  "excel_run",
+] as const satisfies readonly FirstPartyMcpToolName[];
 
-/** Split snake_case/camelCase/dotted text into stemmed lowercase word tokens (len ≥ 2, stopwords removed). */
-function tokenize(text: string): string[] {
-  return text
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 1 && !STOPWORDS.has(t))
-    .map(stem);
-}
+const HARNESS_CONTROL_MODEL_TOOL_NAMES: ReadonlySet<string> = new Set(
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS.map(
+    (name) => `${HARNESS_CONTROL_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${name}`,
+  ),
+);
 
-/** The searchable text of a connector tool: name (weighted ×2) + description + param names. */
-function toolSearchText(tool: Tool): string {
-  const raw = (tool as { name?: string }).name ?? "";
-  const name = raw.startsWith(CODEX_APPS_TOOL_PREFIX)
-    ? raw.slice(CODEX_APPS_TOOL_PREFIX.length)
-    : raw;
-  const description =
-    typeof (tool as { description?: unknown }).description === "string"
-      ? (tool as { description: string }).description
-      : "";
-  const params = (tool as { parameters?: { properties?: Record<string, unknown> } }).parameters
-    ?.properties;
-  const paramNames = params && typeof params === "object" ? Object.keys(params).join(" ") : "";
-  return `${name} ${name} ${description} ${paramNames}`;
+/** True for an exact harness control tool name on the first-party server. */
+export function isHarnessControlMcpToolName(registryId: string, modelName: string): boolean {
+  return (
+    registryId === HARNESS_CONTROL_MCP_SERVER_ID && HARNESS_CONTROL_MODEL_TOOL_NAMES.has(modelName)
+  );
 }
 
 /**
- * Rank connector tools against a plain-language query with BM25 (Okapi, k1=1.5,
- * b=0.75) over tokenized name+description+params. Returns the top `limit` tools
- * with a positive score, most-relevant first. An empty or no-match query returns
- * [] — matching codex-rs, whose search returns empty rather than arbitrary tools;
- * disclosing unrelated (and thereby CALLABLE) tools on a miss feeds the model
- * noise. The SDK normalizes an empty executor result into an empty
- * tool_search_output, which the model reads as "nothing matched — rephrase".
+ * First-party interaction tools that are only useful together. Disclosing one
+ * member through search discloses the whole working set, so an agent that asks
+ * for "a browser" gets open, observe, act, screenshot and tab control in one
+ * search instead of rediscovering each schema in its own model round trip.
+ * Members are matched by their name after the server separator and only ever
+ * drawn from the already-authorized searchable pool.
  */
+const INTERACTION_MCP_SERVER_ID = "interaction";
+const INTERACTION_TOOL_FAMILIES: readonly (readonly string[])[] = [
+  ["browser_open", "browser_observe", "browser_act", "browser_screenshot", "browser_tabs"],
+  ["computer_open", "computer_observe", "computer_act"],
+];
+
+/** The interaction tool's name after its server prefix, or null for any other tool. */
+function interactionToolName(name: string): string | null {
+  const prefix = `${INTERACTION_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}`;
+  return name.startsWith(prefix) ? name.slice(prefix.length) : null;
+}
+
+/** The other members of every family a disclosed tool belongs to, in family order. */
+function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
+  const disclosedShort = new Set(
+    disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
+  );
+  const wanted = INTERACTION_TOOL_FAMILIES.filter((family) =>
+    family.some((member) => disclosedShort.has(member)),
+  ).flat();
+  const companions: T[] = [];
+  for (const member of wanted) {
+    if (disclosedShort.has(member)) continue;
+    const tool = pool.find((candidate) => interactionToolName(candidate.name) === member);
+    if (tool && !companions.includes(tool)) companions.push(tool);
+  }
+  return companions;
+}
+
+/**
+ * The tool that starts each interaction family. It stays in the first request,
+ * so a browser or computer task begins with its first real call instead of a
+ * search round trip, and opening discloses the rest of the family right after
+ * the open result (see the lazy-tool transport). Only a tool the attempt
+ * actually prepared can be visible: a first-party interaction tool, or one the
+ * `interaction` server listed, never a same-named tool from another server.
+ */
+const INTERACTION_ENTRY_TOOLS: ReadonlySet<string> = new Set(["browser_open", "computer_open"]);
+
+/** True when a prepared function tool is an interaction family's entry tool. */
+export function isInteractionEntryFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
+): boolean {
+  if (!tool || typeof tool !== "object" || (tool as { type?: unknown }).type !== "function") {
+    return false;
+  }
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string" || !isInteractionEntryToolName(name)) return false;
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
+  return serverId === null || serverId === INTERACTION_MCP_SERVER_ID;
+}
+
+/** True when a model tool name is an interaction family's entry tool. */
+export function isInteractionEntryToolName(name: string): boolean {
+  const short = interactionToolName(name);
+  return short !== null && INTERACTION_ENTRY_TOOLS.has(short);
+}
+
+/**
+ * The companions an entry tool discloses once it is called: the rest of its
+ * family that is still searchable, within the same byte budgets as a search.
+ */
+export function interactionEntryCompanions(entryName: string, searchable: Tool[]): Tool[] {
+  if (!isInteractionEntryToolName(entryName)) return [];
+  const pool = searchable.filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
+  const disclosed: Tool[] = [];
+  let disclosedBytes = 0;
+  for (const tool of familyCompanions([{ name: entryName } as Tool & { name: string }], pool)) {
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) continue;
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+    disclosedBytes += toolBytes;
+    disclosed.push(tool);
+  }
+  return disclosed;
+}
+
+/**
+ * True when a prepared MCP function tool is one of the harness control tools
+ * served by the authorized first-party `opengeni` server. These stay in the
+ * first request on every transport even though the server's other schemas
+ * are deferred.
+ */
+export function isHarnessControlMcpFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
+): boolean {
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
+  return (
+    serverId !== null && isHarnessControlMcpToolName(serverId, (tool as { name: string }).name)
+  );
+}
+
+/** Field-aware lexical ranking; an empty or unmatched query returns no tools. */
 export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool[] {
-  const qTokens = Array.from(new Set(tokenize(query)));
-  if (tools.length === 0 || qTokens.length === 0) return [];
-
-  const docs = tools.map((tool) => {
-    const tokens = tokenize(toolSearchText(tool));
-    const tf = new Map<string, number>();
-    for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-    return { tool, len: tokens.length, tf };
-  });
-  const N = docs.length;
-  const avgdl = Math.max(1, docs.reduce((s, d) => s + d.len, 0) / N);
-  const df = new Map<string, number>();
-  for (const d of docs) for (const t of d.tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
-
-  const k1 = 1.5;
-  const b = 0.75;
-  const scored = docs.map((d) => {
-    let score = 0;
-    for (const qt of qTokens) {
-      const n = df.get(qt);
-      const f = d.tf.get(qt);
-      if (!n || !f) continue;
-      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
-      score += idf * ((f * (k1 + 1)) / (f + k1 * (1 - b + (b * d.len) / avgdl)));
-    }
-    return { tool: d.tool, score };
-  });
-  const hits = scored.filter((s) => s.score > 0).sort((a, b2) => b2.score - a.score);
-  return hits.slice(0, limit).map((s) => s.tool); // no hits ⇒ [] (codex-rs parity; see doc)
+  return new ToolSearchIndex(tools).rank(query, limit);
 }
 
 /**
@@ -221,7 +249,7 @@ export function toolsNamedInQuery<T extends Tool & { name: string }>(
 }
 
 /** Parse ranked or exact-name discovery arguments (string or object). */
-function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
+export function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
   let obj: Record<string, unknown> = {};
   try {
     obj =
@@ -256,7 +284,11 @@ function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: 
  * the origin-classified lazy set (deferred MCP plus every non-MCP function
  * tool outside the always-visible base names).
  */
-export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
+export function rankToolPool(
+  availableTools: Tool[],
+  rawArguments: unknown,
+  index?: ToolSearchIndex,
+): Tool[] {
   // The Agents SDK can present the same configured tool reference more than once
   // while resolving multiple client tool_search calls from one model response.
   // Collapse only referential duplicates here: distinct objects with the same
@@ -272,19 +304,48 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
   if (names) {
     // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
     // search or another executor registry. Keep the SDK's original references.
-    ranked = searchable.filter((tool) => names.includes(tool.name));
+    ranked = [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name));
+    limit = names.length;
   } else {
     // Every tool the query names comes first, even beyond the requested limit;
     // BM25 fills any remaining places.
     const named = toolsNamedInQuery(searchable, query);
     ranked = [
       ...named,
-      ...bm25RankTools(searchable, query, searchable.length).filter(
-        (tool) => !named.includes(tool as Tool & { name: string }),
-      ),
+      ...(index ?? new ToolSearchIndex(searchable))
+        .rank(query, searchable.length)
+        .filter(
+          (tool) =>
+            searchable.includes(tool as Tool & { name: string }) &&
+            !named.includes(tool as Tool & { name: string }),
+        ),
     ];
     limit = Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
   }
+  return ranked.slice(0, limit);
+}
+
+/** Full-schema disclosure is separate from compact ranking; original SDK objects only. */
+export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
+  const searchable = [...new Set(availableTools)].filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
+  const { query, names, limit: requestedLimit } = parseSearchArgs(rawArguments);
+  // Rank the entire pool before applying existing schema budgets, so an oversize
+  // definition cannot displace later candidates that fit.
+  const named = names ? [] : toolsNamedInQuery(searchable, query);
+  const ranked = names
+    ? [...new Set(names)].flatMap((name) => searchable.filter((tool) => tool.name === name))
+    : [
+        ...named,
+        ...new ToolSearchIndex(searchable)
+          .rank(query, searchable.length)
+          .filter((tool) => !named.includes(tool as Tool & { name: string })),
+      ];
+  const limit = names
+    ? names.length
+    : Math.min(MAX_SEARCH_LIMIT, Math.max(requestedLimit, named.length));
   const bounded: Tool[] = [];
   let disclosedBytes = 0;
   for (const tool of ranked) {
@@ -298,6 +359,17 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
     disclosedBytes += toolBytes;
     bounded.push(tool);
     if (bounded.length >= limit) break;
+  }
+  // Complete any interaction family a result belongs to. Companions come after
+  // the ranked results, so they never displace them, and they still respect the
+  // per-tool and total disclosure byte budgets (but not the result count limit).
+  for (const tool of familyCompanions(bounded as (Tool & { name: string })[], searchable)) {
+    if (bounded.includes(tool)) continue;
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) continue;
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+    disclosedBytes += toolBytes;
+    bounded.push(tool);
   }
   return bounded;
 }

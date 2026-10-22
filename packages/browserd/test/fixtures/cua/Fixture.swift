@@ -3,7 +3,7 @@ let root = CommandLine.arguments[1]
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let window = NSWindow(contentRect:NSRect(x:80,y:80,width:700,height:300),styleMask:[.titled,.closable],backing:.buffered,defer:false)
-window.title = "OpenGeni CUA disposable fixture"
+window.title = "Opengeni CUA disposable fixture"
 let field = NSTextField(frame:NSRect(x:24,y:150,width:420,height:30))
 field.stringValue = "first"
 field.setAccessibilityIdentifier("fixture-text")

@@ -1,6 +1,6 @@
 # Gmail
 
-OpenGeni's reviewed Gmail bridge calls the Gmail REST API through the native
+Opengeni's reviewed Gmail bridge calls the Gmail REST API through the native
 connection broker. The historical `https://gmailmcp.googleapis.com/mcp/v1`
 identity selects this bridge; Google's hosted MCP preview is not contacted.
 Connections remain personal, scoped to the accepted initiating human and selected

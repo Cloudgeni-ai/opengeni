@@ -67,10 +67,15 @@ export type ProviderWorkspaceCapturePolicy = {
    * physical instance. A replacing capture must never run behind a lease whose
    * provider identity cannot be atomically republished with it. */
   liveInstance: "preserved" | "replaced";
+  /** Which warm checkpoints run. `periodic` (the default): turn-end and
+   * interval checkpoints keep a recent recovery point. `forced_only`: the
+   * provider persists the live sandbox itself, so only a forced capture (a
+   * rotation) runs; drains still capture for rotation, archive or a move. */
+  warmCheckpoints?: "periodic" | "forced_only";
 };
 
 /**
- * How OpenGeni obtains a non-replacing attachment to the exact persisted
+ * How Opengeni obtains a non-replacing attachment to the exact persisted
  * provider instance.
  *
  * - `ordinary`: SDK `resume()` is already a pure re-address operation; the
@@ -91,6 +96,14 @@ export const REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE = Object.freeze({
   takeover: "parallel_read",
   strategy: "portable_tar",
   liveInstance: "preserved",
+} satisfies ProviderWorkspaceCapturePolicy);
+
+/** A provider that persists the live sandbox itself (Opengeni compute): a
+ * portable tar is read only to rotate, archive or move the workspace, never as
+ * a periodic warm checkpoint. */
+export const ROTATION_ONLY_PORTABLE_TAR_WORKSPACE_CAPTURE = Object.freeze({
+  ...REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
+  warmCheckpoints: "forced_only",
 } satisfies ProviderWorkspaceCapturePolicy);
 
 /** Read SDK workspace persistence without coupling callers to the three shapes
@@ -134,7 +147,7 @@ export interface ProviderRegistration {
     preserveWorkspaceForDiscard(session: unknown, sessionState: unknown): void;
   };
   /** Resolve capture semantics from either a live session, a serialized SDK
-   * session state, or OpenGeni's outer session envelope. Required for every
+   * session state, or Opengeni's outer session envelope. Required for every
    * provider so new backends cannot silently inherit unsafe teardown behavior.
    * `null` means the backend has no provider workspace to capture. */
   workspaceCapturePolicy(state: unknown): ProviderWorkspaceCapturePolicy | null;

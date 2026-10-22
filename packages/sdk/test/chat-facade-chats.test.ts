@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import { OpenGeniApiError, OpenGeniSetupError } from "../src/errors";
 import type { Chats } from "../src/chats";
 import type { ChatOptions } from "../src/chat";
@@ -11,7 +11,7 @@ describe("chat facade chats and agent", () => {
     const server = fakeServer();
     const attempts: CreateSessionRequest[] = [];
     const makeFacade = () =>
-      new OpenGeni({
+      new Opengeni({
         apiKey: "og_test",
         organizationId: ORGANIZATION_ID,
         baseUrl: "https://api.test",
@@ -203,7 +203,7 @@ describe("chat facade chats and agent", () => {
   ])("only the exact admission 422 triggers implicit fallback (%j)", async (error) => {
     const server = fakeServer();
     let creates = 0;
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       organizationId: ORGANIZATION_ID,
       baseUrl: "https://api.test",
@@ -225,7 +225,7 @@ describe("chat facade chats and agent", () => {
   test("the fallback is attempted only once when even the agent-free request is refused", async () => {
     const server = fakeServer();
     const bodies: CreateSessionRequest[] = [];
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       organizationId: ORGANIZATION_ID,
       baseUrl: "https://api.test",
@@ -334,7 +334,7 @@ describe("chat facade chats and agent", () => {
   test("isolated facade provisions the user workspace before acting as that user", async () => {
     const server = fakeServer();
     const requests: { path: string; body: Record<string, unknown> }[] = [];
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       organizationId: ORGANIZATION_ID,
       baseUrl: "https://api.test",
@@ -370,7 +370,7 @@ describe("chat facade chats and agent", () => {
 
   test("private setting failure surfaces from lazy facade create as OpenGeniSetupError", async () => {
     const server = fakeServer();
-    const og = new OpenGeni({
+    const og = new Opengeni({
       apiKey: "og_test",
       organizationId: ORGANIZATION_ID,
       baseUrl: "https://api.test",

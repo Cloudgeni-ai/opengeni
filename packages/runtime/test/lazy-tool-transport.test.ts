@@ -437,6 +437,78 @@ describe("query-independent tool discovery", () => {
     });
   }
 
+  test("search and listing name integrations whose tools could not load this turn", async () => {
+    const scripted = () =>
+      new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: "search",
+            name: "tool_search",
+            arguments: '{"query":"list my calendar events"}',
+          },
+        ],
+        [{ type: "function_call", callId: "list", name: "tool_list", arguments: "{}" }],
+        [finalMessage("done")],
+      ]);
+    const unavailable = new Map([
+      [
+        "calendar",
+        "connected but could not list its tools (HTTP 401); its connection may need to be signed in again",
+      ],
+    ]);
+    const agent = new Agent({
+      name: "degraded",
+      tools: [firstPartyTool("records__search", "Search records")],
+      model: "scripted",
+    });
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => unavailable,
+    );
+    const model = scripted();
+    await runStreamed(agent, model, runtime);
+    const expected = JSON.stringify({
+      unavailableSources: [{ server: "calendar", reason: unavailable.get("calendar") }],
+    }).slice(1, -1);
+    const searched = (model.requests[1]!.input as { type?: string; output?: unknown }[]).find(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(searched)).toContain(JSON.stringify(expected).slice(1, -1));
+    const listed = (model.requests[2]!.input as { type?: string; output?: unknown }[]).filter(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(listed.at(-1))).toContain(JSON.stringify(expected).slice(1, -1));
+
+    // Every integration loaded: the results carry no such field at all.
+    const healthy = new Agent({
+      name: "healthy",
+      tools: [firstPartyTool("records__search", "Search records")],
+      model: "scripted",
+    });
+    const healthyModel = scripted();
+    await runStreamed(
+      healthy,
+      healthyModel,
+      installLazyToolRuntime(healthy, "generic_dispatch", new Set()),
+    );
+    expect(JSON.stringify(healthyModel.requests.map((request) => request.input))).not.toContain(
+      "unavailableSources",
+    );
+  });
+
   test("listing pages are compact, lexical, scoped, and reject stale cursors", async () => {
     const catalog = ["c", "a", "b"].map((name) =>
       firstPartyTool(`records__${name}`, "文".repeat(1000)),
@@ -1031,6 +1103,125 @@ describe("generic lazy tool dispatch", () => {
     expect(result.finalOutput).toBe("done");
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
+  });
+
+  test("restores argument types on a direct call to a search-disclosed tool", async () => {
+    let releasePreparation!: () => void;
+    let preparationSettled = false;
+    const preparation = new Promise<void>((resolve) => {
+      releasePreparation = () => {
+        preparationSettled = true;
+        resolve();
+      };
+    });
+    const received: unknown[] = [];
+    const deferredTool = tool({
+      name: `${SERVER_ID}__history_page`,
+      description: "Read a page of history",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          limit: { type: "integer" },
+          includeOutput: { type: "boolean" },
+          facts: { type: "array", items: { type: "string" } },
+        },
+        required: ["sessionId"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: (input) => (received.push(input), "ok"),
+    }) as unknown as Tool;
+    const agent = agentWith(deferredTool);
+    const baseGetAllTools = agent.getAllTools.bind(agent);
+    agent.getAllTools = async (runContext) =>
+      preparationSettled ? await baseGetAllTools(runContext) : [];
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      preparation,
+      new Set([SERVER_ID]),
+    );
+    // The schema was never sent to the provider, so it decoded every value as text.
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "remembered-direct-untyped",
+          name: `${SERVER_ID}__history_page`,
+          arguments: JSON.stringify({
+            sessionId: "42",
+            limit: "3",
+            includeOutput: "true",
+            facts: '["a","b"]',
+          }),
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+    releasePreparation();
+    const result = await running;
+
+    expect(result.finalOutput).toBe("done");
+    expect(received).toEqual([
+      { sessionId: "42", limit: 3, includeOutput: true, facts: ["a", "b"] },
+    ]);
+  });
+
+  test("direct deferred restoration preserves validation inputs and leaves other boundaries alone", async () => {
+    const parameters = {
+      type: "object",
+      properties: { limit: { type: ["number", "null"] } },
+      additionalProperties: false,
+    };
+    const deferredName = `${SERVER_ID}__bounded_page`;
+    const makeTool = (name: string) =>
+      tool({
+        name,
+        description: "Synthetic bounded page",
+        parameters,
+        strict: false,
+        execute: () => {
+          throw new Error("No execution expected");
+        },
+      }) as unknown as Tool;
+    const deferred = makeTool(deferredName);
+    const eager = makeTool("exec_command");
+    const agent = agentWith(deferred);
+    agent.tools.push(eager);
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
+    await agent.getAllTools();
+    const project = (name: string, argumentsText: string) =>
+      transformGenericDispatchResponse(
+        {
+          usage: new Usage(),
+          output: [{ type: "function_call", callId: "fixture", name, arguments: argumentsText }],
+        },
+        runtime,
+      ).output[0] as { arguments: string };
+
+    const unknownKey = '{"limit":"3","__proto__":{"unused":true}}';
+    const restored = JSON.parse(project(deferredName, unknownKey).arguments);
+    expect(restored.limit).toBe(3);
+    expect(Object.keys(restored)).toEqual(["limit", "__proto__"]);
+    // additionalProperties:false still sees the unknown own key; it is not sanitized away.
+    expect(
+      Object.keys(restored).filter((key) => !Object.hasOwn(parameters.properties, key)),
+    ).toEqual(["__proto__"]);
+    for (const args of ['{"limit":"1e309"}', '{"limit":"3","unknown":[1e309]}']) {
+      expect(project(deferredName, args).arguments).toBe(args);
+    }
+    expect(project("exec_command", '{"limit":"3"}').arguments).toBe('{"limit":"3"}');
+    expect(project("not_authorized", '{"limit":"3"}').arguments).toBe('{"limit":"3"}');
+    const invoked = project(
+      "tool_invoke",
+      JSON.stringify({ name: deferredName, arguments: { limit: "3" } }),
+    );
+    expect(JSON.parse(invoked.arguments)).toEqual({ limit: "3" });
   });
 
   test("recovers a direct remembered tool call after deferred preparation", async () => {
@@ -1674,7 +1865,7 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
-  test("history restoration is pure and removes only OpenGeni's internal marker", () => {
+  test("history restoration is pure and removes only Opengeni's internal marker", () => {
     const original = JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Rome" } });
     const input = [
       {
@@ -1764,7 +1955,7 @@ describe("generic lazy tool dispatch", () => {
     expect(JSON.stringify(projected)).not.toContain("opengeni.lazy_dispatch.v1");
   });
 
-  test("preserves large generic search schemas across ordinary output truncation", async () => {
+  test("keeps candidate results compact even when every matched schema is huge", async () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
@@ -1798,14 +1989,14 @@ describe("generic lazy tool dispatch", () => {
     );
     const parsed = JSON.parse(String(output)) as { tools: unknown[] };
     expect(parsed.tools.length).toBeGreaterThan(0);
-    expect(parsed.tools.length).toBeLessThan(tools.length);
-    expect(Buffer.byteLength(String(output))).toBeGreaterThan(48_000);
+    expect(parsed.tools.length).toBe(tools.length);
+    expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
       MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
     );
 
     const item = { type: "function_call_result", callId: "search-1", output };
-    const truncated = boundModelToolOutputItem(item, 10_000) as typeof item;
+    const truncated = boundModelToolOutputItem(item, 100) as typeof item;
     expect(truncated.output).not.toBe(output);
     expect(String(truncated.output)).toContain("tokens truncated");
 
@@ -1842,6 +2033,41 @@ describe("generic lazy tool dispatch", () => {
     expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 
+  test("restores a truncated legacy full-schema receipt without consulting today's catalog", async () => {
+    const runtime = installLazyToolRuntime(
+      { getAllTools: async () => [] },
+      "openai_native",
+      new Set(),
+    );
+    const output = JSON.stringify({
+      tools: [{ name: "former__read", parameters: { type: "object" } }],
+    });
+    const marked = {
+      type: "function_call",
+      callId: "legacy",
+      name: "tool_search",
+      arguments: '{"query":"read"}',
+      providerData: { "opengeni.lazy_search.v1": { version: 1, output } },
+    };
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    await wrapped.getResponse({
+      ...baseRequest([]),
+      input: [
+        marked,
+        {
+          type: "function_call_result",
+          callId: "legacy",
+          output: "truncated",
+        },
+      ] as ModelRequest["input"],
+    });
+    const input = inner.requests[0]!.input as Array<Record<string, unknown>>;
+    expect(input[1]!.output).toBe(output);
+    expect(input).toHaveLength(2);
+    expect(input[0]!.providerData).toBeUndefined();
+  });
+
   test("reserves only the control names installed by each transport", () => {
     const invokeNamedTool = tool({
       name: "tool_invoke",
@@ -1874,7 +2100,7 @@ describe("generic lazy tool dispatch", () => {
     expect(() => generic.refresh([invokeNamedTool])).toThrow(/reserved/);
   });
 
-  test("does not install an internal hosted registration search", () => {
+  test("never advertises the execution-only historical native search", () => {
     const runtime = installLazyToolRuntime(
       {
         async getAllTools() {
@@ -1890,7 +2116,9 @@ describe("generic lazy tool dispatch", () => {
       execute: async () => [],
     }) as unknown as Tool;
 
-    expect(runtime.controlTools.every((candidate) => candidate.type !== "hosted_tool")).toBe(true);
+    const historical = runtime.controlTools.find((candidate) => candidate.type === "hosted_tool");
+    expect(historical).toBeDefined();
+    expect(runtime.shouldHideSerializedTool(serializedFunction(historical!))).toBe(true);
     expect(
       runtime.shouldHideSerializedTool({
         type: "hosted_tool",
@@ -1947,8 +2175,8 @@ describe("OpenAI/Azure native client tool search", () => {
           model: "scripted",
           instructions: formatSkillCatalog([
             {
-              id: "builtin:opengeni-skills",
-              name: "opengeni-skills",
+              id: "builtin:skill-management",
+              name: "skill-management",
               description: "Manage Skills",
             },
           ]),
@@ -1984,7 +2212,7 @@ describe("OpenAI/Azure native client tool search", () => {
         await running;
         expect(outcome).toBe("completed");
         expect(reads).toBe(1);
-        expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+        expect(JSON.stringify(model.requests[0])).toContain("builtin:skill-management");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
           "load_skill",
@@ -2048,12 +2276,12 @@ describe("OpenAI/Azure native client tool search", () => {
           return JSON.stringify({ ok: true, updated: true, title: requestedTitle });
         },
       }) as unknown as Tool;
-      const goal = firstPartyTool("opengeni__goal_set", "Set a durable session goal");
+      const child = firstPartyTool("opengeni__session_create", "Create a child agent session");
       const agent = new Agent({
         name: "title-promotion-test",
         instructions: "Title the session.",
         model: "scripted",
-        tools: [titleTool, goal],
+        tools: [titleTool, child],
       });
       const loadAllTools = agent.getAllTools.bind(agent);
       agent.getAllTools = async (runContext) =>
@@ -2098,8 +2326,10 @@ describe("OpenAI/Azure native client tool search", () => {
         runtime.search({ query: "set the session title" }).map((candidate) => candidate.name),
       ).not.toContain("opengeni__set_session_title");
       expect(
-        runtime.search({ query: "set a durable session goal" }).map((candidate) => candidate.name),
-      ).toEqual(["opengeni__goal_set"]);
+        runtime
+          .search({ query: "create a child agent session" })
+          .map((candidate) => candidate.name),
+      ).toEqual(["opengeni__session_create"]);
     }
   });
 

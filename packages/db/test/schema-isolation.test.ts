@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -104,7 +104,7 @@ describe("embedded dedicated-schema isolation", () => {
         WHERE table_schema = 'public' AND table_name <> 'schema_migrations'
         ORDER BY table_name`;
 
-      // Every OpenGeni table landed in the dedicated schema, none in public.
+      // Every Opengeni table landed in the dedicated schema, none in public.
       expect(tablesInOpengeni[0]!.count).toBeGreaterThan(30);
       expect(tablesInPublic.map((r) => r.name)).toEqual([]);
 

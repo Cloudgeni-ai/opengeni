@@ -156,7 +156,7 @@ export function providerMessageRetryHintMs(text: string): number | null {
 /**
  * Decide whether a provider refusal is an exhausted quota. Returns null for an
  * ordinary short rate limit and for anything that is not provider quota
- * evidence at all (a sandbox "disk quota exceeded", an OpenGeni credit
+ * evidence at all (a sandbox "disk quota exceeded", a platform credit
  * refusal, a 5xx), so those keep their existing classification.
  */
 export function classifyProviderQuotaExhaustion(
@@ -167,7 +167,9 @@ export function classifyProviderQuotaExhaustion(
     .filter((value): value is string => typeof value === "string" && value.length > 0)
     .map((value) => value.slice(0, MAX_FIELD_CHARS).toLowerCase());
   const text = fields.join("\n");
-  if (text.includes("opengeni credits")) return null;
+  // Platform credit refusals say "workspace credits" (older history says
+  // "opengeni credits"); they are not provider quota evidence.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
 
   const explicitStatus =
     evidence.status !== null && Number.isInteger(evidence.status) ? evidence.status : null;

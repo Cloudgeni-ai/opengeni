@@ -5,9 +5,12 @@ import {
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   SandboxChannelAService,
+  SynchronousCommandOutcomeUnknownError,
   type ActivePointer,
   type RoutableBackendSession,
 } from "../src/sandbox";
+import type { SynchronousCommandPage } from "../src/sandbox/synchronous-command";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 const csv = Buffer.from('record,total\r\n"Generated ""entry"" ø",9.75\r\n', "utf8");
 const sha256 = createHash("sha256").update(csv).digest("hex");
@@ -36,6 +39,8 @@ class StreamingBackend implements RoutableBackendSession {
   #transfers = new Map<number, string>();
   #configs = new Map<string, string>();
   #files = new Map<string, Buffer>();
+  #pages = new Map<unknown, SynchronousCommandPage>();
+  #transferOutputs = new Map<number, ReturnType<typeof synchronousNativeOutputFixture>>();
 
   constructor(
     private readonly requests: readonly WorkspaceFileImportRequest[],
@@ -45,6 +50,33 @@ class StreamingBackend implements RoutableBackendSession {
 
   content(path: string): Buffer | undefined {
     return this.#files.get(path);
+  }
+
+  getSynchronousCommandOutput(raw: unknown): SynchronousCommandPage | null {
+    return this.#pages.get(raw) ?? null;
+  }
+
+  private output<T>(
+    raw: T,
+    stdout: string,
+    exitCode: number | null,
+    providerSessionId?: number,
+  ): T {
+    const outputFixture =
+      (providerSessionId === undefined
+        ? undefined
+        : this.#transferOutputs.get(providerSessionId)) ?? synchronousNativeOutputFixture();
+    if (providerSessionId !== undefined)
+      this.#transferOutputs.set(providerSessionId, outputFixture);
+    outputFixture.record(
+      raw,
+      stdout,
+      "",
+      exitCode,
+      exitCode === null ? providerSessionId : undefined,
+    );
+    this.#pages.set(raw, outputFixture.getSynchronousCommandOutput(raw)!);
+    return raw;
   }
 
   get exec(): RoutableBackendSession["exec"] {
@@ -61,30 +93,39 @@ class StreamingBackend implements RoutableBackendSession {
       exitCode?: number;
       sessionId?: number;
     };
-    return result.sessionId === undefined
-      ? `Process exited with code ${result.exitCode}\n\nOutput:\n${result.stdout ?? ""}`
-      : `Process running with session ID ${result.sessionId}\n\nOutput:\n`;
+    const raw =
+      `Chunk ID: ${randomUUID()}\n` +
+      (result.sessionId === undefined
+        ? `Process exited with code ${result.exitCode}\n\nOutput:\n${result.stdout ?? ""}`
+        : `Process running with session ID ${result.sessionId}\n\nOutput:\n`);
+    // This alias preserves the same raw page, not a second cursor advancement.
+    this.#pages.set(raw, this.#pages.get(result)!);
+    return raw;
   }
 
   private async execute(args: unknown): Promise<unknown> {
     const input = args as { cmd: string; runAs?: string };
     this.commands.push(input);
     if (input.cmd.includes("__OPENGENI_FS_CONFINED_OK__")) {
-      return { stdout: "__OPENGENI_FS_CONFINED_OK__", exitCode: 0 };
+      return this.output(
+        { stdout: "__OPENGENI_FS_CONFINED_OK__", stderr: "", exitCode: 0 },
+        "__OPENGENI_FS_CONFINED_OK__",
+        0,
+      );
     }
     if (input.cmd.includes("__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__")) {
       const path = input.cmd.match(/> '([^']+)'/u)?.[1];
       if (!path) throw new Error("expected private transfer path");
       const sessionId = this.staged.length + 41;
       this.#transfers.set(sessionId, path);
-      return { sessionId };
+      return this.output({ sessionId }, "", null, sessionId);
     }
     if (input.cmd.startsWith("rm -f ")) {
       const path = input.cmd.match(/^rm -f '([^']+)'$/u)?.[1];
       if (!path) throw new Error("expected private cleanup path");
       // rm -f also succeeds when staging never created the file.
       if (this.#configs.delete(path)) this.cleaned.push(path);
-      return { stdout: "", exitCode: 0 };
+      return this.output({ stdout: "", stderr: "", exitCode: 0 }, "", 0);
     }
     const marker = input.cmd.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
     const source = this.requests.find((item) => input.cmd.includes(item.destinationPath));
@@ -95,7 +136,8 @@ class StreamingBackend implements RoutableBackendSession {
     expect(input.cmd).toContain(String(source.sizeBytes));
     const replayed = this.#files.has(source.destinationPath);
     if (!replayed) this.#files.set(source.destinationPath, Buffer.from(csv));
-    return { stdout: `${marker}\t${replayed ? "replayed" : "created"}`, exitCode: 0 };
+    const stdout = `${marker}\t${replayed ? "replayed" : "created"}`;
+    return this.output({ stdout, stderr: "", exitCode: 0 }, stdout, 0);
   }
 
   async writeStdin(args: unknown): Promise<string> {
@@ -106,7 +148,12 @@ class StreamingBackend implements RoutableBackendSession {
     this.#configs.set(path, content);
     this.staged.push({ path, content });
     this.onStdin();
-    return "Process exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__";
+    return this.output(
+      `Chunk ID: ${randomUUID()}\nProcess exited with code 0\n\nOutput:\n__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__`,
+      "__OPENGENI_PLACEMENT_PRIVATE_WRITE_OK__",
+      0,
+      input.sessionId,
+    );
   }
 }
 
@@ -241,3 +288,15 @@ describe.each(["exec", "execCommand"] as const)(
     });
   },
 );
+
+test("presentation-only receipts cannot authorize private staging or replay confinement", async () => {
+  const source = request("untrusted.csv");
+  const { backend, channel } = fixture([source], false, "execCommand");
+  backend.getSynchronousCommandOutput = () => null;
+  await expect(channel.importWorkspaceFile(source)).rejects.toBeInstanceOf(
+    SynchronousCommandOutcomeUnknownError,
+  );
+  expect(backend.commands).toHaveLength(1);
+  expect(backend.staged).toEqual([]);
+  expect(backend.cleaned).toEqual([]);
+});

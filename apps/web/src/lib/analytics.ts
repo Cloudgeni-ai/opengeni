@@ -1,17 +1,26 @@
-import { installAnalyticsObserver } from "./analytics-observer";
-import { clearLoginAnalytics, takeSuccessfulLogin } from "./analytics-login";
+import type {
+  AnalyticsEventName,
+  AnalyticsProperties,
+} from "@opengeni/react/app/lib/analytics-types";
+export type {
+  AnalyticsEventName,
+  AnalyticsProperties,
+  AnalyticsProperty,
+} from "@opengeni/react/app/lib/analytics-types";
+import { installAnalyticsObserver } from "@opengeni/react/app/lib/analytics-observer";
+import { clearLoginAnalytics, takeSuccessfulLogin } from "@opengeni/react/app/lib/analytics-login";
 import {
   beginIntegrationConnect,
   captureIntegrationConnectReturn,
   modelConnectionClass,
-} from "./integration-connect-analytics";
+} from "@opengeni/react/app/lib/integration-connect-analytics";
 import {
   ANALYTICS_COLLECTION_ENABLED_EVENT,
   analyticsHasProviders,
   storedAnalyticsConsent,
-} from "@/lib/analytics-consent";
-import type { AnalyticsConsent } from "@/lib/analytics-consent";
-import type { ClientConfig } from "@/types";
+} from "@opengeni/react/app/lib/analytics-consent";
+import type { AnalyticsConsent } from "@opengeni/react/app/lib/analytics-consent";
+import type { ClientConfig } from "@opengeni/react/app/types";
 import {
   journeyMilestone,
   journeyOperation,
@@ -26,49 +35,7 @@ import {
   type AuthReturnEvent,
 } from "./signup-attribution";
 
-export type AnalyticsEventName =
-  | "signup_submitted"
-  | "workspace_created"
-  | "session_started"
-  | "login_completed"
-  | "app_opened"
-  | "app_active"
-  | "navigation_clicked"
-  | "product_clicked"
-  | "credits_required_viewed"
-  | "session_start_blocked"
-  | "session_start_blocker_viewed"
-  | "session_create_attempted"
-  | "session_create_finished"
-  | "session_command_attempted"
-  | "session_command_finished"
-  | "model_connection_attempted"
-  | "model_connection_finished"
-  | "model_connection_resolved"
-  | "signup_completed"
-  | "email_verified"
-  | "organization_setup_completed"
-  | "checkout_started"
-  | "checkout_completed"
-  | "checkout_cancelled"
-  | "first_turn_completed"
-  | "integration_connect_started"
-  | "integration_connect_finished"
-  | "turn_failure_viewed"
-  | "turn_failure_action"
-  | "onboarding_step_viewed"
-  | "onboarding_step_completed"
-  | "onboarding_abandoned"
-  | "playground_step_completed"
-  | "api_key_created"
-  | "voice_call_attempted"
-  | "voice_call_finished"
-  | "dictation_attempted"
-  | "dictation_finished";
-
 type AnalyticsConfig = ClientConfig["analytics"];
-export type AnalyticsProperty = boolean | number | string;
-export type AnalyticsProperties = Record<string, AnalyticsProperty>;
 export type AnalyticsIdentity = Readonly<{
   userId: string;
   accountId: string | null;
@@ -208,7 +175,7 @@ export function captureAnalyticsEvent(
         ...facts,
         page_location: window.location.origin,
         page_referrer: "",
-        page_title: "OpenGeni",
+        page_title: "Opengeni",
       });
   };
   if (providersReady && analyticsCollectionAllowed()) {
@@ -283,7 +250,7 @@ function dispatchPageView(pathname: string): void {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
       page_referrer: "",
-      page_title: "OpenGeni",
+      page_title: "Opengeni",
       send_to: ga4MeasurementId,
     });
   }
@@ -308,7 +275,7 @@ async function initializeReo(clientId: string): Promise<void> {
   window.Reo.init({
     clientID: clientId,
     // Reo's beacon otherwise observes clipboard/code-copy and supported AI-widget
-    // interactions. OpenGeni deliberately permits page intent only.
+    // interactions. Opengeni deliberately permits page intent only.
     dnt: ["copy", "ai"],
   });
 }
@@ -517,7 +484,7 @@ function milestoneFinisher({
 
 /** Bind asynchronous provider results to the initiating identity and consent. */
 export function trackModelConnection(
-  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
+  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter" | "opper",
   workspaceId: string,
 ): (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void {
   const generation = identityGeneration;
@@ -581,7 +548,7 @@ async function initializeGa4(measurementId: string): Promise<void> {
     allow_google_signals: false,
     page_location: window.location.origin,
     page_referrer: "",
-    page_title: "OpenGeni",
+    page_title: "Opengeni",
     send_page_view: false,
   });
 

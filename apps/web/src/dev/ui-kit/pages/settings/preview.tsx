@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
 
-import type { AccessMember } from "@/components/ui/access-list";
-import { Button } from "@/components/ui/button";
+import type { AccessMember } from "@opengeni/react/ui/access-list";
+import { Button } from "@opengeni/react/ui/button";
 
 import { currentWorkspace, designPreviewAccessRequests, type WorkspaceRole } from "../../fixtures";
 import { PagePreview, KitBlock } from "../../kit";

@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import "@/navigation-host";
+import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   createMemoryHistory,
@@ -10,10 +11,24 @@ import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
 import { createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
-import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
-let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
-let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
-let siteStillDocument: typeof import("./artifact-library").siteStillDocument;
+import {
+  defaultArtifactFilters,
+  filterArtifactCatalog,
+} from "@opengeni/react/app/lib/artifact-catalog";
+
+// Rows ask the app who the viewer is, to offer a file's owner its share action.
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => ({
+    client: {},
+    accessKeyVersion: 0,
+    workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
+    managedSelfContext: null,
+    accessContext: null,
+  }),
+}));
+let ArtifactLibrary: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactLibrary;
+let ArtifactThumbnail: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactThumbnail;
+let siteStillDocument: typeof import("@opengeni/react/app/components/artifacts/artifact-library").siteStillDocument;
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -24,7 +39,8 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } = await import("./artifact-library"));
+  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } =
+    await import("@opengeni/react/app/components/artifacts/artifact-library"));
 });
 
 test("offscreen thumbnails never mount the retained loader; visible thumbnails load once", async () => {
@@ -321,21 +337,21 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
         {...props}
         loading={false}
         error={Object.assign(
-          new Error("OpenGeni API 503: upstream unavailable Reference: req_503."),
+          new Error("Opengeni API 503: upstream unavailable Reference: req_503."),
           { status: 503 },
         )}
       />
     ));
     expect(container.textContent).toContain("Couldn't load artifacts");
     expect(container.textContent).toContain("Try again in a moment.");
-    expect(container.textContent).not.toContain("OpenGeni API");
+    expect(container.textContent).not.toContain("Opengeni API");
     expect(container.textContent).not.toContain("req_503");
     await renderInRouter(root, () => (
       <ArtifactLibrary
         {...props}
         loading={false}
         error={Object.assign(
-          new Error("OpenGeni API 403: missing permission: artifacts:read Reference: req_403."),
+          new Error("Opengeni API 403: missing permission: artifacts:read Reference: req_403."),
           { status: 403 },
         )}
       />
@@ -437,6 +453,61 @@ test("hidden Sites and documents are explained instead of reported as missing", 
     expect(container.textContent).not.toContain(access);
   } finally {
     await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Only me files and images are marked in the gallery and the list; shared ones are not", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  const files: ArtifactCatalogItem[] = [
+    {
+      id: "private-file",
+      kind: "file",
+      title: "draft.pdf",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-02T00:00:00Z",
+      visibility: "private",
+      ownedByViewer: true,
+    },
+    {
+      id: "shared-file",
+      kind: "file",
+      title: "final.pdf",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-01T00:00:00Z",
+      visibility: "workspace",
+      ownedByViewer: false,
+    },
+  ];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={files}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    const entries = () => [...container.querySelectorAll("ul[aria-label=Artifacts] > li")];
+    const marked = () =>
+      entries().map((entry) => [
+        entry.textContent?.includes("draft.pdf") ? "draft" : "final",
+        entry.textContent?.includes("Only me") ?? false,
+      ]);
+    expect(Object.fromEntries(marked())).toEqual({ draft: true, final: false });
+    const list = container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]');
+    await act(async () => list!.click());
+    expect(Object.fromEntries(marked())).toEqual({ draft: true, final: false });
+  } finally {
+    await act(async () => root.unmount());
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
     container.remove();
   }
 });

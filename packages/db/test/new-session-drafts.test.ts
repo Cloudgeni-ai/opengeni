@@ -6,7 +6,7 @@ import type {
   ToolRef,
 } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { and, eq, sql } from "drizzle-orm";
 import { bigint, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import {
@@ -779,8 +779,6 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       sandboxBackend: "selfhosted",
       targetSandboxId,
       workingDir,
-      variableSetIds,
-      variableSetId: variableSetIds[1],
       rigId: expect.any(String),
       toolsProvided: true,
       selectionHistory: {
@@ -866,23 +864,73 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       const session = await createUninitializedSession(context);
       await initialize(context, session.id, 1);
       const seeded = await readDraft(workspaceId, context.subjectId);
-      return { chosen, variableSetIds, options: publicNewSessionDraftOptions(seeded!) };
+      return { chosen, options: publicNewSessionDraftOptions(seeded!) };
     };
 
-    // The choice replaced the workspace default (and the default Variable Sets
-    // it carries) for that one session. The next form starts on the default
-    // again; added Variable Sets are still remembered because they only add.
+    // The choice replaced the workspace default for that one session, so the
+    // next form starts on the default again. Stale Variable Set selections
+    // from old drafts are never carried into the seed.
     const replacedDefault = await seedWithRigChoice(true);
     expect(replacedDefault.options).not.toHaveProperty("rigId");
-    expect(replacedDefault.options).toMatchObject({
-      variableSetIds: replacedDefault.variableSetIds,
-      variableSetId: replacedDefault.variableSetIds[0],
-    });
+    expect(replacedDefault.options).not.toHaveProperty("variableSetIds");
 
     // Without a workspace default nothing was replaced, so the choice is
     // remembered like any other selection.
     const noDefault = await seedWithRigChoice(false);
     expect(noDefault.options).toMatchObject({ rigId: noDefault.chosen.id });
+  });
+
+  test("a workspace machine default supersedes only the consumed draft's next compute seed", async () => {
+    for (const defaultExecutionTarget of [
+      { kind: "managed" },
+      { kind: "machine", targetSandboxId: crypto.randomUUID() },
+      { kind: "invalid-configured-target" },
+      null,
+      undefined,
+    ]) {
+      const context = await fixture();
+      const workspaceId = context.grant.workspaceId!;
+      const channelId = crypto.randomUUID();
+      const targetSandboxId = crypto.randomUUID();
+      const workingDir = "/workspace/explicit-project";
+      const options = {
+        visibility: "private" as const,
+        sandboxBackend: "selfhosted" as const,
+        targetSandboxId,
+        workingDir,
+      };
+      await saveDraft(context, 0, {
+        text: "Still editing this exact selection",
+        selectedProjectChannelId: channelId,
+        options,
+      });
+      if (defaultExecutionTarget !== undefined) {
+        await shared.admin`update workspaces set settings = settings || ${shared.admin.json({ defaultExecutionTarget })} where id = ${workspaceId}`;
+      }
+      // Configuring the workspace must not replace an unfinished draft.
+      const editing = await readDraft(workspaceId, context.subjectId);
+      expect(editing?.text).toBe("Still editing this exact selection");
+      expect(publicNewSessionDraftOptions(editing!)).toEqual(options);
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, 1, context.subjectId, {
+        channelId,
+        targetSandboxId,
+        workingDir,
+      });
+      const seeded = await readDraft(workspaceId, context.subjectId);
+      const followsDefault = defaultExecutionTarget != null;
+      expect(publicNewSessionDraftOptions(seeded!)).toEqual(
+        followsDefault ? { visibility: "private" } : options,
+      );
+      expect(seeded?.selectedProjectComputeSnapshot).toEqual(
+        followsDefault ? {} : { sandboxBackend: "selfhosted", targetSandboxId, workingDir },
+      );
+      expect(seeded?.sessionOptions.selectionHistory).toEqual({
+        projects: [
+          { channelId, targetSandboxId, machines: [{ sandboxId: targetSandboxId, workingDir }] },
+        ],
+      });
+    }
   });
 
   test("creates a realtime-first idle shell without a user event, turn, or workflow wake", async () => {

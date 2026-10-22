@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient, type OpenGeniClientOptions } from "../src/client";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
+import type { BrowserObservation, BrowserTargetListResponse } from "../src/interaction";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -69,6 +70,71 @@ function makeClient(
   });
   return { client, requests };
 }
+
+test("metadata-only tab opening opts into inventory while default opening still returns observation", async () => {
+  const browserSessionId = "11111111-1111-4111-8111-111111111111";
+  const target: BrowserObservation["target"] = {
+    id: "synthetic-target",
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-1-generation",
+    documentGeneration: "document-1",
+    kind: "page",
+    title: "Synthetic page",
+    url: "https://new.example.test/",
+    selected: true,
+    attached: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+  const inventory: BrowserTargetListResponse = {
+    browserSessionId,
+    controllerGeneration: "controller-1",
+    targets: [target],
+  };
+  const observation: BrowserObservation = {
+    protocolVersion: 1,
+    observationId: "synthetic-observation",
+    browserSessionId,
+    target,
+    frameId: "frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const { client, requests } = makeClient((request) =>
+    jsonResponse(request.url.endsWith("/open-with-inventory") ? inventory : observation, 201),
+  );
+  expect(
+    await client.openBrowserTargetWithInventory(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(inventory);
+  expect(
+    await client.openBrowserTarget(WORKSPACE_ID, browserSessionId, {
+      url: "https://new.example.test/",
+    }),
+  ).toEqual(observation);
+  expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets/open-with-inventory`,
+    `/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${browserSessionId}/targets`,
+  ]);
+  expect(
+    requests.every(
+      (request) =>
+        request.method === "POST" &&
+        request.body === JSON.stringify({ url: "https://new.example.test/" }),
+    ),
+  ).toBe(true);
+});
 
 test("account settings opt into inactive inventory without changing the execution picker default", async () => {
   const { client, requests } = makeClient(() => jsonResponse({ connections: [] }));
@@ -618,23 +684,6 @@ describe("OpenGeniClient", () => {
       sandboxBackend: "none",
       expectedNewSessionDraftRevision: 4,
     });
-  });
-
-  test("replaces the ordered session Variable Set selection", async () => {
-    const variableSetIds = [
-      "00000000-0000-4000-8000-000000000011",
-      "00000000-0000-4000-8000-000000000012",
-    ];
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, variableSetIds }),
-    );
-    await client.updateSessionVariableSets(WORKSPACE_ID, SESSION_ID, { variableSetIds });
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({
-      method: "PUT",
-      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/variable-sets`,
-    });
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds });
   });
 
   test("gets and saves the actor-private new-session draft", async () => {
@@ -1508,6 +1557,7 @@ describe("OpenGeniClient", () => {
             "X-OpenGeni-Covered-Last": "42",
             "X-OpenGeni-Next-After": "42",
             "X-OpenGeni-Forensic-Exact": "true",
+            "X-OpenGeni-Conversation-Filter": "2",
           },
         }),
     );
@@ -1540,9 +1590,24 @@ describe("OpenGeniClient", () => {
       nextAfter: 42,
       nextBefore: null,
       forensicExact: true,
+      conversationFilter: 2,
     });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
+    );
+  });
+
+  test("listEventPage asks for tool-output previews only when requested", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      includeTypes: ["agent.toolCall.output"],
+      payloadMode: "full",
+      toolOutputs: "preview",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=full&includeTypes=agent.toolCall.output&toolOutputs=preview`,
     );
   });
 
@@ -1845,7 +1910,7 @@ describe("OpenGeniClient", () => {
       body: "",
     });
     expect((error as Error).message).toMatch(
-      /^Opengeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+      /^The request could not be confirmed — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
     );
     expect((error as Error).message).not.toContain("PRIVATE");
     expect((error as Error).message).not.toContain("bearer");
@@ -1915,8 +1980,32 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("");
     expect((error as OpenGeniApiError).code).toBeUndefined();
     expect((error as OpenGeniApiError).message).toMatch(
-      /^OpenGeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+      /^API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
     );
+  });
+
+  test("API error text an agent may relay names no platform and keeps the reference", async () => {
+    const requestId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    const { client } = makeClient(
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "The workspace could not complete the request.",
+            requestId,
+          }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as Error).message).toBe(
+      `API 500: The workspace could not complete the request. Reference: ${requestId}.`,
+    );
+    expect((error as Error).message).not.toMatch(/opengeni/i);
   });
 
   test("decodes structured API error code/message while retaining the raw body", async () => {
@@ -1939,7 +2028,7 @@ describe("OpenGeniClient", () => {
       body,
     });
     expect((error as Error).message).toMatch(
-      /^OpenGeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+      /^API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -1948,7 +2037,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "api-safe-503",
       },
@@ -1965,7 +2054,7 @@ describe("OpenGeniClient", () => {
       correlationId: "api-safe-503",
       outcomeUnknown: false,
       body,
-      message: "Opengeni is temporarily unavailable — retry. Reference: api-safe-503.",
+      message: "The workspace is temporarily unavailable — retry. Reference: api-safe-503.",
     });
   });
 
@@ -1974,7 +2063,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni could not confirm the controller mutation.",
+        message: "Opengeni could not confirm the controller mutation.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "controller-mutation-503",
@@ -2106,7 +2195,7 @@ describe("OpenGeniClient", () => {
           body: "",
         });
         expect((error as Error).message).toBe(
-          `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+          `The workspace is temporarily unavailable — retry. Reference: ${correlationId}.`,
         );
         expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
         expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
@@ -2498,6 +2587,39 @@ describe("OpenGeniClient", () => {
     ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
+  test("Site access lists fail closed on older servers and owner management uses native routes", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionPage(WORKSPACE_ID, { siteAccessId: SESSION_ID }),
+    ).rejects.toThrow("Site access-filtered");
+    const modern = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        siteAccessId: SESSION_ID,
+      }),
+    );
+    await expect(
+      modern.client.listSessionPage(WORKSPACE_ID, { siteAccessId: "current" }),
+    ).resolves.toMatchObject({ siteAccessId: SESSION_ID });
+    expect(modern.requests[0]!.url).toContain("siteAccessId=current");
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, true);
+    await modern.client.setSiteSessionAccess(WORKSPACE_ID, SESSION_ID, SESSION_ID, false);
+    await modern.client.listSiteSessionAccess(WORKSPACE_ID, SESSION_ID);
+    expect(modern.requests.slice(1).map((request) => request.method)).toEqual([
+      "PUT",
+      "DELETE",
+      "GET",
+    ]);
+    expect(modern.requests[1]!.url).toContain(
+      `/published-artifacts/${SESSION_ID}/session-access/${SESSION_ID}`,
+    );
+  });
+
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
     const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
     const unavailable = makeClient(
@@ -2640,8 +2762,8 @@ describe("OpenGeniClient", () => {
       fundingOptions: [
         {
           source: "opengeni_credits" as const,
-          label: "OpenGeni",
-          description: "Uses OpenGeni credits.",
+          label: "Opengeni",
+          description: "Uses Opengeni credits.",
           available: true,
           unavailableReason: null,
         },
@@ -2773,6 +2895,31 @@ test("Claude account disconnects send JSON for scoped browser mutation guards", 
   expect(requests).toHaveLength(2);
   for (const request of requests) {
     expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
+});
+
+test("bodiless browser-guarded mutations still send JSON", async () => {
+  const organizationId = "22222222-2222-4222-8222-222222222222";
+  const { client, requests } = makeClient((request) =>
+    request.method === "POST"
+      ? jsonResponse({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://auth.example.test/codex/device",
+          intervalSeconds: 5,
+          state: "signed",
+        })
+      : new Response(null, { status: 204 }),
+  );
+  await client.codexConnectStart(WORKSPACE_ID);
+  await client.deleteOrganizationMcpConnection(
+    organizationId,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.revokePersonalApiKey(organizationId, "33333333-3333-4333-8333-333333333333");
+  expect(requests.map((request) => request.method)).toEqual(["POST", "DELETE", "DELETE"]);
+  for (const request of requests) {
     expect(request.headers["content-type"]).toBe("application/json");
     expect(request.body).toBe("{}");
   }

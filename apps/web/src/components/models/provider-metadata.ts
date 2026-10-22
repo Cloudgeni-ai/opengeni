@@ -1,4 +1,5 @@
-import type { OrganizationModelProviderKind as ProviderKind } from "@opengeni/sdk";
+import { AzureOpenAIEndpoint } from "@opengeni/contracts";
+import type { OrganizationModelCatalogProviderKind as ProviderKind } from "@opengeni/sdk";
 import type { ProviderPresentation } from "@/components/ai-gateway-connection";
 
 // Dependency-free presentation data shared by workspace and organization connections.
@@ -90,6 +91,82 @@ export const ORGANIZATION_PROVIDER_META: Record<
     waitingModelDescription: "Waiting for an OpenRouter key",
     unavailableModelDescription: "Connection status unavailable",
     modelToastName: "OpenRouter model",
+    connectionManagerDescription: "",
+  },
+  opper: {
+    title: "Opper",
+    shortName: "Opper",
+    provider: "opper",
+    billedTo: "The organization's Opper account",
+    summary:
+      "Use models through the organization's Opper account in shared workspaces, billed to Opper.",
+    keyHelp: "Create one at platform.opper.ai under API keys.",
+    keyAriaLabel: "Organization Opper API key",
+    customModelsHeading: "Custom models",
+    customModelsDescription:
+      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-opus-5-5. Separate from deployment-provided Opper models.",
+    customModelInputAriaLabel: "Opper organization model id",
+    customModelPlaceholder: "aws/claude-opus-5-5",
+    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Opper key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Opper model",
+    connectionManagerDescription: "",
+  },
+  openai: {
+    title: "OpenAI API",
+    shortName: "OpenAI",
+    provider: "openai",
+    billedTo: "The organization's OpenAI API account",
+    summary:
+      "Use models through the organization's OpenAI API key in shared workspaces, billed to OpenAI.",
+    keyHelp: "Create one at platform.openai.com under API keys.",
+    keyAriaLabel: "Organization OpenAI API key",
+    customModelsHeading: "Models",
+    customModelsDescription:
+      "Exact OpenAI model IDs shared workspaces can pick. Each one is checked with the organization's key before it is saved.",
+    customModelsAfterConnect: "Models can be added after OpenAI is connected.",
+    customModelInputAriaLabel: "OpenAI model ID",
+    customModelPlaceholder: "gpt-6-sol",
+    emptyCustomModelsDescription: "No models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an OpenAI key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "OpenAI model",
+    connectionManagerDescription: "",
+  },
+  azure_openai: {
+    title: "Azure OpenAI",
+    shortName: "Azure OpenAI",
+    provider: "azure_openai",
+    billedTo: "The organization's Azure OpenAI account",
+    summary:
+      "Use your Azure OpenAI deployments in shared workspaces, billed to the organization's Azure account.",
+    keyHelp: "Find it in the Azure portal under your Azure OpenAI resource, Keys and Endpoint.",
+    keyAriaLabel: "Organization Azure OpenAI API key",
+    endpointField: {
+      label: "Endpoint",
+      ariaLabel: "Azure OpenAI endpoint",
+      placeholder: "https://RESOURCE.openai.azure.com",
+      hint: "The Endpoint shown next to your key, such as https://RESOURCE.openai.azure.com.",
+      validate: (value) =>
+        AzureOpenAIEndpoint.safeParse(value).success
+          ? null
+          : "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+    },
+    customModelNoun: "deployment",
+    customModelsHeading: "Deployments",
+    customModelsDescription:
+      "Exact Azure deployment names shared workspaces can pick. Each one is checked against the organization's endpoint before it is saved.",
+    customModelsAfterConnect: "Deployments can be added after Azure OpenAI is connected.",
+    customModelInputAriaLabel: "Azure OpenAI deployment name",
+    customModelPlaceholder: "gpt-6.1-sol",
+    emptyCustomModelsDescription: "No deployments yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Azure OpenAI key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Azure OpenAI deployment",
     connectionManagerDescription: "",
   },
 };

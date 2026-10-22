@@ -1,26 +1,26 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 
-import { RowButton } from "@/components/ui/page-actions";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   AGENT_LEARNING_TITLE,
   IDENTITY_POLICY_MODE,
   LEARNING_MODE_LABEL,
-} from "@/lib/agent-learning-vocabulary";
+} from "@opengeni/react/app/lib/agent-learning-vocabulary";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
-import type { CompanyProfileAgentPolicy } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Organization identity: the small identity and
@@ -84,9 +84,9 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
             value={LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]}
             onOpen={() =>
               void navigate({
-                to: "/workspaces/$workspaceId/state",
+                to: "/workspaces/$workspaceId/settings",
                 params: { workspaceId },
-                search: { page: "learning" },
+                search: { section: "learning" },
               })
             }
           />

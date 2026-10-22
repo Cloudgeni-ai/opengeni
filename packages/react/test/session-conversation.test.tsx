@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import type { SessionQueueSnapshot } from "@opengeni/sdk";
+import { expect, jest, test } from "bun:test";
+import type { SaveComposerDraftRequest, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
 import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
@@ -10,7 +10,139 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
 import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
-registerDom();
+registerDom({ clock: "virtual" });
+
+test("an embedded existing chat loads history and live events and prepares an editable revision-fenced draft without sending", async () => {
+  const base = fakeClient({});
+  const saved: SaveComposerDraftRequest[] = [];
+  let sends = 0;
+  let draftReads = 0;
+  const event = (sequence: number, text: string) => ({
+    id: crypto.randomUUID(),
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type: "user.message",
+    payload: { text },
+    occurredAt: new Date().toISOString(),
+    turnId: null,
+    clientEventId: null,
+  });
+  const effectiveControl = {
+    state: "running",
+    directState: "running",
+    override: null,
+    primaryBlocker: null,
+    settlement: null,
+  };
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [], effectiveControl }) as never,
+    listHumanInputRequests: async () => [],
+    listEvents: async () => [event(1, "Existing chat history")],
+    streamEvents: async function* (_workspace, _session, options) {
+      yield event(2, "A live update in the same chat");
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    getComposerDraft: async (...args) => {
+      draftReads++;
+      return { ...(await base.getComposerDraft(...args)), revision: 7 };
+    },
+    saveComposerDraft: async (...args) => {
+      expect(args.slice(0, 2)).toEqual([WORKSPACE_ID, SESSION_ID]);
+      saved.push(args[2]);
+      return base.saveComposerDraft(...args);
+    },
+    submitComposerDraft: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+    sendMessage: async () => {
+      sends++;
+      throw new Error("Must not send automatically");
+    },
+  });
+  const text = "Prepared by the dashboard for review, not sent";
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+      composerOptions={{ initialDraft: { text, resources: [] } }}
+    />,
+  );
+  try {
+    await waitFor(() => saved.length === 1, "Prepared draft was not saved");
+    expect(draftReads).toBeGreaterThan(0);
+    expect(saved[0]).toMatchObject({ text, expectedRevision: 7, resources: [] });
+    const input = view.container.querySelector("textarea");
+    expect(input?.value).toBe(text);
+    expect(input?.readOnly).toBe(false);
+    expect(input?.disabled).toBe(false);
+    expect(view.container.textContent).toContain("Existing chat history");
+    expect(view.container.textContent).toContain("A live update in the same chat");
+    expect(sends).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("computer offers use the embedding product's app flow", async () => {
+  const client = fakeClient({
+    listEvents: async () => [
+      {
+        id: "computer-offer",
+        sequence: 1,
+        type: "tool.auth_needed",
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        turnId: "turn",
+        clientEventId: null,
+        occurredAt: new Date(0).toISOString(),
+        payload: {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          reason: "missing_connection",
+          providerDomain: "opengeni.ai",
+          capability: {
+            id: "api:connected-machine",
+            name: "Computer",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use the files on this computer",
+            requiredVariables: [],
+          },
+        },
+      },
+    ],
+    streamEvents: async function* () {},
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      computerConnection={{
+        productName: "Acme",
+        downloads: [{ label: "Download Acme", url: "https://example.com/download" }],
+        openAppUrl: "acme://connect?destination=current",
+      }}
+    />,
+  );
+  await waitFor(
+    () => Boolean(view.container.querySelector('a[href="acme://connect?destination=current"]')),
+    "The product's computer flow did not render",
+  );
+  expect(view.container.textContent).toContain("Download Acme");
+  expect(view.container.textContent).not.toContain("curl");
+  expect(view.container.querySelector('a[href*="app.opengeni.ai"]')).toBeNull();
+  await view.unmount();
+});
 
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 3_000;
@@ -643,7 +775,10 @@ test("the complete conversation forwards only picker appearance without replacin
   }
 });
 
-test("the composer offers live voice only when an available voice model exists", async () => {
+test("live voice is opt-in and needs an available voice model", async () => {
+  // Loading the actual voice boundary settles through React's native scheduler,
+  // not the logical clock used by the conversation's polling tests.
+  jest.useRealTimers();
   const base = fakeClient({});
   const voiceModel = {
     id: "opengeni-azure/gpt-live-1",
@@ -707,17 +842,21 @@ test("the composer offers live voice only when an available voice model exists",
       "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
     );
   for (const [label, input, prop, shown, read] of [
-    ["available model", {}, undefined, true, true],
+    // Opt-in: a call spends credits and prompts for the microphone.
+    ["off by default", {}, undefined, false, false],
+    ["host prop on", {}, true, true, true],
+    ["proxy offers voice", { realtimeVoice: true }, undefined, true, true],
     ["proxy turned voice off", { realtimeVoice: false }, undefined, false, false],
-    ["host prop off", {}, false, false, false],
+    ["proxy off beats host prop", { realtimeVoice: false }, true, false, false],
+    ["host prop off beats proxy offer", { realtimeVoice: true }, false, false, false],
     [
       "only unavailable models",
       { models: [{ ...voiceModel, available: false, unavailableReason: "Add credits" }] },
-      undefined,
+      true,
       false,
       true,
     ],
-    ["client without voice", { models: null }, undefined, false, false],
+    ["client without voice", { models: null }, true, false, false],
   ] as const) {
     const { client, reads } = scenario(input as never);
     const view = await renderComponent(
@@ -731,14 +870,62 @@ test("the composer offers live voice only when an available voice model exists",
     try {
       if (shown) {
         await waitFor(() => voiceButton(view.container) !== null, `${label}: voice button`);
-        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe(
-          "Start voice with GPT Live 1",
-        );
+        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe("Start voice");
       } else {
         await flush(200);
         expect(voiceButton(view.container)).toBeNull();
       }
       expect(reads() > 0).toBe(read);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the embedded working indicator uses neutral copy unless the host overrides it", async () => {
+  const turnId = "44444444-4444-4444-8444-444444444444";
+  const startedAt = new Date().toISOString();
+  const event = (sequence: number, type: string, payload: Record<string, unknown> = {}) => ({
+    id: `55555555-5555-4555-8555-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type,
+    turnId,
+    occurredAt: startedAt,
+    payload,
+  });
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "running" }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () =>
+      [
+        event(1, "user.message", { text: "Hi" }),
+        event(2, "turn.queued", { turnId }),
+        event(3, "turn.started"),
+      ] as never,
+  });
+  const phrase = (container: HTMLElement) =>
+    container.querySelector(".og-genie-phrase")?.textContent ?? null;
+  for (const [genieLoading, expected] of [
+    [undefined, "Thinking…"],
+    [{ phrases: [] }, "Thinking…"],
+    [{ phrases: ["Un instant…"] }, "Un instant…"],
+  ] as const) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker={false}
+        {...(genieLoading ? { genieLoading } : {})}
+      />,
+    );
+    try {
+      await waitFor(() => phrase(view.container) !== null, "working indicator");
+      expect(phrase(view.container)).toBe(expected);
     } finally {
       await view.unmount();
     }

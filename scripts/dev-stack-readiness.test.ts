@@ -11,7 +11,9 @@ describe("development stack supervision", () => {
     expect(source).toContain("dev_processes_running");
     expect(source).toContain("signal_process_tree");
     expect(source).toContain("signal_process_tree KILL");
-    expect(source).toContain('if [ "$unhealthy_checks" -ge 2 ]');
+    expect(source).toContain('if [ "$unhealthy_checks" -ge 24 ]');
+    expect(source).toContain("STACK_PROBE_TIMEOUT=5 stack_http_ready");
+    expect(source).toContain('curl -fsS -m "$timeout"');
     expect(source).toContain("sleep 5");
     expect(source).toContain('bun scripts/watch-development-schema.ts "$(pwd)"');
     for (const path of [

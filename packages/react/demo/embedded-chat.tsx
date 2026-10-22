@@ -7,12 +7,21 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
-   `&hostile=1` adds global host element CSS. */
+   steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
+   one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
+   messages waiting. */
 import { createRoot } from "react-dom/client";
-import type { Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
-import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
-import { fakeClient, WORKSPACE_ID } from "../test/fake-client";
+import { useState } from "react";
+import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
+import {
+  OpenGeniChat,
+  OpenGeniProvider,
+  NewConversation,
+  SessionConversationView,
+  useSessionConversation,
+} from "@opengeni/react";
+import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -24,6 +33,7 @@ const theme = params.get("theme") === "dark" ? "dark" : "light";
 const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
+const oneSend = params.get("send") === "one";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -52,8 +62,10 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
   } as unknown as Session;
 }
 
+const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
+const steering = scenario === "steer-waiting" || scenario === "steered";
 const selectedStatus =
-  scenario === "running"
+  scenario === "running" || scenario === "waiting" || steering
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -224,6 +236,51 @@ if (scenario === "approval") {
 } else if (scenario === "running") {
   investigation();
   push("agent.message.delta", { delta: "Both payments hit the same invoice. Checking the " }, 0);
+} else if (scenario === "waiting") {
+  investigation();
+} else if (steering) {
+  // The person steers while the agent works. The Steer is only their message:
+  // it waits for the next model step, then takes over as the next turn.
+  investigation();
+  push(
+    "agent.toolCall.created",
+    {
+      id: "call-invoice",
+      name: "acme__get_invoice",
+      arguments: { invoiceId: "INV-2026-09" },
+    },
+    1,
+  );
+  push(
+    "user.message",
+    {
+      text: "Also check whether October was double charged too.",
+      delivery: "steer",
+      routing: "accepted_for_steering",
+    },
+    0.5,
+    STEER_TURN,
+  );
+  const steerEventId = `evt-${sequence}`;
+  if (scenario === "steered") {
+    push(
+      "agent.toolCall.output",
+      { id: "call-invoice", output: text({ id: "INV-2026-09", status: "paid", total: "$490.00" }) },
+      0.4,
+    );
+    push("turn.superseded", { reason: "steer", atModelStep: true }, 0.4);
+    push("turn.started", { triggerEventId: steerEventId }, 0.4, STEER_TURN);
+    push(
+      "agent.toolCall.created",
+      {
+        id: "call-october",
+        name: "acme__list_payments",
+        arguments: { customerId: "cus_9Lk2", since: "2026-10-01" },
+      },
+      0.2,
+      STEER_TURN,
+    );
+  }
 } else if (scenario === "long") {
   investigation();
   push(
@@ -246,8 +303,8 @@ if (scenario === "approval") {
 }
 
 const control: SessionQueueSnapshot["effectiveControl"] = {
-  state: "active",
-  directState: "active",
+  state: scenario === "waiting" ? "paused" : "active",
+  directState: scenario === "waiting" ? "paused" : "active",
   controlVersion: 1,
   controlEtag: "demo",
   primaryBlocker: null,
@@ -257,8 +314,28 @@ const control: SessionQueueSnapshot["effectiveControl"] = {
   override: null,
   settlement: null,
 };
+const waitingItems =
+  scenario === "waiting"
+    ? [
+        fakeTurn({
+          id: "5a1c0000-0000-4000-8000-0000000000c1",
+          sessionId: SELECTED,
+          prompt: "Also check whether October was double charged.",
+        }),
+        fakeTurn({
+          id: "5a1c0000-0000-4000-8000-0000000000c2",
+          sessionId: SELECTED,
+          position: 2,
+          prompt: "Then draft a short reply to the customer.",
+        }),
+      ]
+    : [];
 
 const base = fakeClient({});
+const controllerFixture = { streams: 0, sent: [] as SendMessageInput[] };
+if (params.get("controller") === "1") {
+  Object.assign(window, { embeddedConversationHarness: controllerFixture });
+}
 const client = fakeClient({
   getClientConfig: async () =>
     ({
@@ -281,7 +358,8 @@ const client = fakeClient({
       effectiveControl: control,
       activePersonalConnections: [],
       stoppingPreviousAttempt: false,
-      items: [],
+      // The queue snapshot never lists a prompt accepted for steering.
+      items: waitingItems,
       pendingInputs: [],
       pendingInputAttachment: null,
     }) as never,
@@ -292,11 +370,54 @@ const client = fakeClient({
     return id === SELECTED ? events : [];
   },
   pauseSession: async () => ({ effectiveControl: control }) as never,
+  sendMessage: async (_workspace, sessionId, input) => {
+    const message = typeof input === "string" ? { text: input } : input;
+    controllerFixture.sent.push(message);
+    return {
+      id: crypto.randomUUID(),
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+      sequence: ++sequence,
+      type: "user.message",
+      payload: message,
+      occurredAt: new Date().toISOString(),
+    };
+  },
   streamEvents: async function* (_workspace, _session, options) {
+    controllerFixture.streams++;
     await new Promise<void>((resolve) =>
       options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
     );
     yield* [];
+  },
+});
+
+// The demo can hold the real default new-chat flow at a response boundary.
+// Browser checks edit the next draft, retry an uncertain outcome, then settle
+// the same synthetic create without contacting a provider.
+const creationFixture = {
+  attempts: [] as Array<{ initialMessage?: string; idempotencyKey?: string }>,
+  finish: () => {},
+};
+Object.assign(window, { embeddedCreationHarness: creationFixture });
+Object.assign(client, {
+  createSession: async (
+    _workspace: string,
+    input: { initialMessage?: string; idempotencyKey?: string },
+  ) => {
+    creationFixture.attempts.push(structuredClone(input));
+    if (params.get("retry") === "1" && creationFixture.attempts.length === 1)
+      throw new TypeError("Response lost");
+    await new Promise<void>((resolve) => {
+      creationFixture.finish = resolve;
+    });
+    const created = chat(
+      "5a1c0000-0000-4000-8000-000000000099",
+      input.initialMessage ?? "New chat",
+      0,
+    );
+    sessions.unshift(created);
+    return created;
   },
 });
 
@@ -309,6 +430,59 @@ const palette =
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.body.style.background = palette.page;
 document.body.style.color = palette.ink;
+
+function PersistentConversationDemo() {
+  const [expanded, setExpanded] = useState(false);
+  const [visible, setVisible] = useState(true);
+  const conversation = useSessionConversation(SELECTED, {
+    composerOptions: { sendExtras: () => ({ modelContext: "Current record: ticket T-4821" }) },
+  });
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: 12 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, fontSize: 13 }}>
+        <button type="button" onClick={() => setExpanded((value) => !value)}>
+          Toggle panel layout
+        </button>
+        <button type="button" onClick={() => setVisible((value) => !value)}>
+          {visible ? "Hide conversation" : "Show conversation"}
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            conversation.composer.addAnnotation?.({
+              id: crypto.randomUUID(),
+              source: {
+                kind: "user_message",
+                eventId: "evt-2",
+                eventType: "user.message",
+                sequence: 2,
+                turnId: TURN,
+                startOffset: 0,
+                endOffset: 8,
+                contextBefore: "",
+                contextAfter: " on T-4821",
+              },
+              quote: "Customer",
+              note: "Check this exact source.",
+            })
+          }
+        >
+          Add example annotation
+        </button>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          width: expanded ? "100%" : "min(460px, 100%)",
+          alignSelf: "flex-end",
+        }}
+      >
+        {visible ? <SessionConversationView conversation={conversation} /> : null}
+      </div>
+    </div>
+  );
+}
 
 /** A plain host product around the stock component, as a customer would ship it. */
 function HostApp() {
@@ -376,7 +550,18 @@ function HostApp() {
         style={{ flex: 1, minHeight: 0, padding: narrow ? 0 : "16px 24px 24px" }}
       >
         <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-          <OpenGeniChat defaultSessionId={scenario === "empty" ? null : SELECTED} />
+          {params.get("new") === "standalone" ? (
+            <NewConversation />
+          ) : params.get("controller") === "1" ? (
+            <PersistentConversationDemo />
+          ) : (
+            <OpenGeniChat
+              defaultSessionId={scenario === "empty" ? null : SELECTED}
+              {...(oneSend
+                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
+                : {})}
+            />
+          )}
         </OpenGeniProvider>
       </div>
     </div>

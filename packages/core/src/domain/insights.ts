@@ -81,6 +81,12 @@ export type GetWorkspaceInsightsInput = {
   model?: string | null;
   rootSessionId?: string | null;
   sessionId?: string | null;
+  /**
+   * Resolves the reading person, only once the rollup runs. The per-schedule
+   * list leaves out other people's Only me schedules; their usage stays in the
+   * per-person private totals.
+   */
+  viewerSubjectId?: () => Promise<string | null>;
   now?: Date;
 };
 
@@ -301,7 +307,15 @@ export async function getWorkspaceInsights(
         listLiveWarmLeases(db, input.workspaceId),
       ),
       measureInsightsPhase(observePhase, "scheduled_tasks", () =>
-        listScheduledTasks(db, input.workspaceId, 100),
+        (async () =>
+          await listScheduledTasks(
+            db,
+            input.workspaceId,
+            100,
+            0,
+            undefined,
+            input.viewerSubjectId ? await input.viewerSubjectId() : null,
+          ))(),
       ),
       measureInsightsPhase(observePhase, "session_depth", () =>
         aggregateSessionDepth(db, input.workspaceId),

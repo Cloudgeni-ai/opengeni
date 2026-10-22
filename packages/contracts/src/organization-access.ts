@@ -1,29 +1,36 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
 
-export const OrganizationAccessPreset = z.enum(["read_only", "full", "custom"]);
+export const OrganizationAccessPreset = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["read_only", "full", "custom"]),
+);
 export type OrganizationAccessPreset = z.infer<typeof OrganizationAccessPreset>;
 
-export const OrganizationWorkspaceScope = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("all") }).strict(),
-  z
-    .object({
-      kind: z.literal("selected"),
-      workspaceIds: z
-        .array(
-          z
-            .string()
-            .uuid()
-            .transform((id) => id.toLowerCase()),
-        )
-        .max(500)
-        .refine((ids) => new Set(ids).size === ids.length, "Workspace IDs must be unique"),
-    })
-    .strict(),
-]);
+export const OrganizationWorkspaceScope = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("all") }).strict(),
+    z
+      .object({
+        kind: z.literal("selected"),
+        workspaceIds: z
+          .array(
+            z
+              .string()
+              .uuid()
+              .transform((id) => id.toLowerCase()),
+          )
+          .max(500)
+          .refine((ids) => new Set(ids).size === ids.length, "Workspace IDs must be unique"),
+      })
+      .strict(),
+  ]),
+);
 export type OrganizationWorkspaceScope = z.infer<typeof OrganizationWorkspaceScope>;
 
-export const OrganizationActor = z.enum(["user", "organization"]);
+export const OrganizationActor = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user", "organization"]),
+);
 export type OrganizationActor = z.infer<typeof OrganizationActor>;
 
 const aliases: Partial<Record<Permission, Permission>> = {
@@ -68,14 +75,16 @@ export function isReadOnlyPermissionSet(permissions: readonly Permission[]): boo
   );
 }
 
-const OrganizationAccessPolicyInput = z
-  .object({
-    preset: OrganizationAccessPreset,
-    // Lazy for the same module-order reason as `sets()` above.
-    permissions: z.array(z.lazy(() => Permission)),
-    workspaceScope: OrganizationWorkspaceScope,
-  })
-  .strict();
+const OrganizationAccessPolicyInput = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      preset: OrganizationAccessPreset,
+      // Lazy for the same module-order reason as `sets()` above.
+      permissions: z.array(z.lazy(() => Permission)),
+      workspaceScope: OrganizationWorkspaceScope,
+    })
+    .strict(),
+);
 
 export type OrganizationAccessPolicy = z.infer<typeof OrganizationAccessPolicyInput>;
 
@@ -102,8 +111,30 @@ export function normalizeOrganizationAccessPolicy(
   };
 }
 
-export const OrganizationAccessPolicy = OrganizationAccessPolicyInput.transform(
-  normalizeOrganizationAccessPolicy,
+export const OrganizationAccessPolicy = /* @__PURE__ */ defineSchema(() =>
+  OrganizationAccessPolicyInput.transform(normalizeOrganizationAccessPolicy),
+);
+
+/** Change what a connected agent can do. Only the person who connected it can. */
+export const UpdateOrganizationMcpConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ access: OrganizationAccessPolicy }).strict(),
+);
+
+/**
+ * The answer to a pending agent sign-in: deny it, or approve it for one
+ * organization with the access the agent gets there.
+ */
+export const McpConnectionDecision = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("decision", [
+    z.object({ decision: z.literal("deny") }).strict(),
+    z
+      .object({
+        decision: z.literal("approve"),
+        organizationId: z.string().uuid(),
+        access: OrganizationAccessPolicy,
+      })
+      .strict(),
+  ]),
 );
 
 /* ----------------------------------------------------------------------------
@@ -112,7 +143,9 @@ export const OrganizationAccessPolicy = OrganizationAccessPolicyInput.transform(
    Up to admin, never owner.
    -------------------------------------------------------------------------- */
 
-export const OrganizationServiceAccountRole = z.enum(["admin", "member"]);
+export const OrganizationServiceAccountRole = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["admin", "member"]),
+);
 export type OrganizationServiceAccountRole = z.infer<typeof OrganizationServiceAccountRole>;
 
 /** What only an organization administrator can do; a member service account's keys never hold it. */
@@ -132,45 +165,53 @@ export function serviceAccountAllowsPermission(
   return role === "admin" || !ORGANIZATION_ADMIN_ONLY_PERMISSIONS.includes(permission);
 }
 
-export const OrganizationServiceAccount = z.object({
-  id: z.string().uuid(),
-  organizationId: z.string().uuid(),
-  name: z.string().min(1).max(200),
-  description: z.string().nullable(),
-  role: OrganizationServiceAccountRole,
-  /** Keys that are not revoked, including expired ones. */
-  activeKeyCount: z.number().int().nonnegative(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const OrganizationServiceAccount = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    name: z.string().min(1).max(200),
+    description: z.string().nullable(),
+    role: OrganizationServiceAccountRole,
+    /** Keys that are not revoked, including expired ones. */
+    activeKeyCount: z.number().int().nonnegative(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type OrganizationServiceAccount = z.infer<typeof OrganizationServiceAccount>;
 
-export const ListOrganizationServiceAccountsResponse = z.object({
-  serviceAccounts: z.array(OrganizationServiceAccount),
-});
+export const ListOrganizationServiceAccountsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    serviceAccounts: z.array(OrganizationServiceAccount),
+  }),
+);
 export type ListOrganizationServiceAccountsResponse = z.infer<
   typeof ListOrganizationServiceAccountsResponse
 >;
 
-export const CreateOrganizationServiceAccountRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200),
-    description: z.string().trim().min(1).max(500).optional(),
-    role: OrganizationServiceAccountRole.default("member"),
-  })
-  .strict();
+export const CreateOrganizationServiceAccountRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(500).optional(),
+      role: OrganizationServiceAccountRole.default("member"),
+    })
+    .strict(),
+);
 export type CreateOrganizationServiceAccountRequest = z.infer<
   typeof CreateOrganizationServiceAccountRequest
 >;
 
-export const UpdateOrganizationServiceAccountRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    description: z.string().trim().min(1).max(500).nullable().optional(),
-    role: OrganizationServiceAccountRole.optional(),
-  })
-  .strict()
-  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+export const UpdateOrganizationServiceAccountRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      description: z.string().trim().min(1).max(500).nullable().optional(),
+      role: OrganizationServiceAccountRole.optional(),
+    })
+    .strict()
+    .refine((request) => Object.keys(request).length > 0, "At least one change is required"),
+);
 export type UpdateOrganizationServiceAccountRequest = z.infer<
   typeof UpdateOrganizationServiceAccountRequest
 >;

@@ -360,7 +360,7 @@ run "container_insights_rejects_invalid_namespaces" {
   variables {
     aks_container_insights = {
       enabled                  = true
-      namespaces               = ["OpenGeni"]
+      namespaces               = ["Opengeni"]
       workspace_daily_quota_gb = 5
     }
   }

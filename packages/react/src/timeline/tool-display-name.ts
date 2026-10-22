@@ -8,6 +8,8 @@
  */
 
 import type { ToolDisplayMetadata } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
+import { builtInToolStepLabel, type ToolStepPhase } from "./tool-steps";
 
 /** Leaf tool name after the first `__` server boundary (or the whole name). */
 export function mcpToolLeaf(name: string): string {
@@ -25,11 +27,24 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
 }
 
 /**
- * Readable label for a tool call ("session_create" / "opengeni__session_create"
- * → "Session create"). Title-cases the first character of the leaf phrase.
+ * Readable label for a tool call. Opengeni's own tools read as plain steps in
+ * the given phase ("opengeni__session_create" → "Getting help from another
+ * assistant" while running, "Got help from another assistant" once done; see
+ * `tool-steps`). Any other tool title-cases its leaf ("list_issues" → "List
+ * issues"). A connector account is named only when the connector has several
+ * ("List issues · alice@example.com"); the connector itself shows as its logo.
  */
-export function toolDisplayName(name: string, display?: ToolDisplayMetadata): string {
-  if (!display && /^[a-f0-9]{64}$/.test(name)) return "Tool call";
+export function toolDisplayName(
+  t: OpenGeniText,
+  name: string,
+  display?: ToolDisplayMetadata,
+  phase: ToolStepPhase = "done",
+): string {
+  if (!display && /^[a-f0-9]{64}$/.test(name)) return t("timeline.toolDisplayName.toolCall");
+  if (!display?.connector) {
+    const step = builtInToolStepLabel(t, mcpToolLeaf(name), phase);
+    if (step) return step;
+  }
   // "batch modify messages" → "Modify messages": batching is transport, not the action.
   const phrase = (display?.toolName ?? mcpToolLeaf(name))
     .replace(/[_-]+/g, " ")
@@ -37,5 +52,9 @@ export function toolDisplayName(name: string, display?: ToolDisplayMetadata): st
     .replace(/^batch\s+(?=\S)/i, "");
   const title =
     display?.title ?? (phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name);
-  return display?.accountLabel ? `${title} — ${display.accountLabel}` : title;
+  // Older events carry the full "Connector — Personal: account · Only me" route
+  // label for every account route without saying whether there were several.
+  // The tool name alone reads better than that.
+  if (!display?.connector) return title;
+  return display.accountLabel ? `${title} · ${display.accountLabel}` : title;
 }

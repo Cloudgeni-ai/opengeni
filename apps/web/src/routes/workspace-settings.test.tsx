@@ -7,7 +7,7 @@ import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const workspaceA = "22222222-2222-4222-8222-222222222222";
 const workspaceB = "33333333-3333-4333-8333-333333333333";
@@ -87,7 +87,7 @@ const context = {
   accessContext: { subjectId: "user:caller" },
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children, className }: { children: ReactNode; className?: string }) => (
     <a href="#organization" className={className}>
@@ -261,6 +261,29 @@ describe("workspace access settings convergence", () => {
       );
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("a refused candidate list is not requested again when the page remounts", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk");
+    listWorkspaceMemberCandidates.mockImplementation(async () => {
+      throw new OpenGeniApiError(403, '{"error":"workspace member management is not allowed"}');
+    });
+    try {
+      for (let mount = 0; mount < 3; mount += 1) {
+        const rendered = await renderMembers(true, workspaceB, { kind: "add" });
+        try {
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          });
+          expect(document.body.textContent).toContain("You can't add people");
+        } finally {
+          await rendered.unmount();
+        }
+      }
+      expect(listWorkspaceMemberCandidates).toHaveBeenCalledTimes(1);
+    } finally {
+      listWorkspaceMemberCandidates.mockImplementation(async () => [candidateMember]);
     }
   });
 

@@ -8,14 +8,17 @@ import { toast } from "sonner";
 
 import type { OrganizationWorkspaceAdministration } from "@/components/settings/organization-workspace-administration";
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import type { RoleOption } from "@/components/ui/role-select";
-import { Section } from "@/components/ui/section";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import type { OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import type { RoleOption } from "@opengeni/react/ui/role-select";
+import { Section } from "@opengeni/react/ui/section";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import type {
+  OrganizationMember,
+  OrganizationWorkspaceAccessMember,
+} from "@opengeni/react/app/types";
 
 import {
   AddPeoplePage,
@@ -176,7 +179,7 @@ export function OrganizationManagedWorkspaceAccess({
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId: workspace.id }}
       search={{ section: "people" }}
-      className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+      className="rounded-sm font-medium og-link"
     >
       Invite people
     </Link>
@@ -227,6 +230,8 @@ export function OrganizationManagedWorkspaceAccess({
       initials: initialsOf(name),
       kind: member.principalKind === "service" ? "service" : "person",
       isYou: member.subjectId === selfSubjectId,
+      // An organization owner or admin sets their own access here too.
+      managesOwnAccess: true,
       tag: member.organizationRole === "owner" ? "Organization owner" : undefined,
       role: member.role,
       roleLockedReason: editable ? undefined : "Service accounts keep the role they were given.",
@@ -255,7 +260,7 @@ export function OrganizationManagedWorkspaceAccess({
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId: workspace.id }}
               search={{ section: "people" }}
-              className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+              className="rounded-sm font-medium og-link"
             >
               Organization {">"} People
             </Link>

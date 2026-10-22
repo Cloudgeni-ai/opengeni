@@ -1,0 +1,301 @@
+name: Compute CI
+
+# Checks for compute/, Opengeni's own sandbox system (Rust). Runs on pull requests and
+# pushes to main that touch compute/, and on demand; the path filters keep it
+# off every other change. Nothing else in the repository depends on it.
+#
+#   lint      rustfmt, clippy with the workspace's pedantic lints as errors,
+#             and the structure rules (cargo arch)
+#   test      every test that needs no KVM: unit, the seeded simulations of
+#             the core and the fleet protocol, property and crash-boundary
+#             tests, the fleet store against Postgres, checkpoints on XFS,
+#             and the smoke framework's own tests
+#   deploy    the release packaging and deployment around it: shellcheck of
+#             the host bundle's scripts, the GCP host fleet's Terraform
+#             (fmt, validate), the Helm chart's computeControl render
+#             tests, and the e2e environment's scripts and suite typecheck
+#   kvm       real Firecracker VMs on the runner's KVM through the gate
+#             script (compute/ci/gate.sh): the pager's kernel tests, the
+#             per-sandbox network, the engine, save and wake with an agent
+#             restart, many sandboxes through an agent kill, real sandbox
+#             images with our init, the smoke suite and the E2B conformance
+#             suite
+#
+# GitHub's hosted x64 Linux runners expose /dev/kvm on a nested-virtualization
+# VM; the kvm job uses the `nested` memory profile. What it cannot cover (bare
+# metal, object storage in the cloud, several hosts) runs in the opt-in cloud
+# gate described in compute/docs/operations.md#testing.
+
+on:
+  pull_request:
+    paths:
+      - "compute/**"
+      - "deploy/terraform/gcp-compute/**"
+      # The chart's computeControl: its own templates, its values and render
+      # tests, and the shared templates it adds to.
+      - "deploy/helm/opengeni/templates/*compute-control*"
+      - "deploy/helm/opengeni/templates/_helpers.tpl"
+      - "deploy/helm/opengeni/templates/api-deployment.yaml"
+      - "deploy/helm/opengeni/templates/configmap.yaml"
+      - "deploy/helm/opengeni/templates/dependency-networkpolicy.yaml"
+      - "deploy/helm/opengeni/templates/postgres-statefulset.yaml"
+      - "deploy/helm/opengeni/templates/worker-deployment.yaml"
+      - "deploy/helm/opengeni/templates/worker-turns-deployment.yaml"
+      - "deploy/helm/opengeni/values.yaml"
+      - "deploy/helm/opengeni/test/compute-control.test.ts"
+      - ".github/workflows/compute-ci.yml"
+      # A release waits for this to pass on its commit.
+      - ".github/workflows/compute-release.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "compute/**"
+      - "deploy/terraform/gcp-compute/**"
+      - "deploy/helm/opengeni/templates/*compute-control*"
+      - "deploy/helm/opengeni/templates/_helpers.tpl"
+      - "deploy/helm/opengeni/templates/api-deployment.yaml"
+      - "deploy/helm/opengeni/templates/configmap.yaml"
+      - "deploy/helm/opengeni/templates/dependency-networkpolicy.yaml"
+      - "deploy/helm/opengeni/templates/postgres-statefulset.yaml"
+      - "deploy/helm/opengeni/templates/worker-deployment.yaml"
+      - "deploy/helm/opengeni/templates/worker-turns-deployment.yaml"
+      - "deploy/helm/opengeni/values.yaml"
+      - "deploy/helm/opengeni/test/compute-control.test.ts"
+      - ".github/workflows/compute-ci.yml"
+      # A release waits for this to pass on its commit.
+      - ".github/workflows/compute-release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: compute-ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: compute
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint:
+    name: fmt, clippy, structure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The structure check compares the baseline with the base's copy.
+          fetch-depth: 0
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (pedantic, warnings are errors)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: cargo arch
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # Compare the baseline with the one at the commit this change
+          # starts from (the pull request's base, or the previous head of
+          # the pushed branch), whatever branch ARCHITECTURE.toml names.
+          base_copy="$RUNNER_TEMP/base-baseline.toml"
+          if [ -n "$BASE" ] && [ "$BASE" != 0000000000000000000000000000000000000000 ] &&
+            git cat-file -e "$BASE:compute/ARCHITECTURE.toml" 2>/dev/null; then
+            git show "$BASE:compute/architecture-baseline.toml" >"$base_copy" 2>/dev/null || : >"$base_copy"
+            cargo arch --base-baseline "$base_copy"
+          else
+            echo "the base has no compute/ARCHITECTURE.toml: nothing to compare the baseline with"
+            cargo arch --no-base
+          fi
+
+  test:
+    name: unit, simulation and property tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: fleet
+          POSTGRES_PASSWORD: fleet
+          POSTGRES_DB: fleet_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleet" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: An XFS directory for the checkpoint tests
+        run: |
+          sudo apt-get install -y -qq xfsprogs >/dev/null
+          truncate -s 4G "$RUNNER_TEMP/xfs.img"
+          mkfs.xfs -q "$RUNNER_TEMP/xfs.img"
+          sudo mkdir -p /mnt/xfs
+          sudo mount -o loop "$RUNNER_TEMP/xfs.img" /mnt/xfs
+          sudo chown "$(id -u):$(id -g)" /mnt/xfs
+      - name: cargo test --workspace
+        env:
+          COMPUTE_TEST_POSTGRES: host=127.0.0.1 user=fleet password=fleet dbname=fleet_test
+          COMPUTE_TEST_SHARED_EXTENTS_DIR: /mnt/xfs
+          COMPUTE_TEST_REQUIRE: shared-extents
+        run: cargo test --locked --workspace
+      - name: Smoke framework tests
+        working-directory: compute/smoke
+        run: python3 -m unittest discover -s compute_smoke/tests -t .
+
+  deploy:
+    name: packaging and deployment
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck
+        run: |
+          shellcheck --severity=warning compute/deploy/host/install.sh compute/deploy/host/bundle.sh \
+            compute/deploy/host/check-host compute/deploy/host/host-setup \
+            compute/deploy/host/compute-host-certificate \
+            compute/deploy/host/test-compute-host-certificate compute/ci/*.sh \
+            deploy/terraform/gcp-compute/host-startup.sh
+      - name: host certificate script
+        run: compute/deploy/host/test-compute-host-certificate
+      - uses: hashicorp/setup-terraform@v4
+      - name: Terraform (GCP host fleet)
+        run: |
+          terraform -chdir=deploy/terraform/gcp-compute fmt -check
+          terraform -chdir=deploy/terraform/gcp-compute init -backend=false -input=false
+          terraform -chdir=deploy/terraform/gcp-compute validate
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+      - name: Helm chart (computeControl)
+        run: bun test deploy/helm/opengeni/test/compute-control.test.ts
+      # The all-GCP end-to-end environment's scripts and suite: they run only
+      # against a real environment, so CI checks that they parse and that
+      # every name the suite's checks use resolves (a typecheck).
+      - name: e2e environment and suite
+        run: |
+          shellcheck --severity=warning compute/e2e/env.sh compute/e2e/stack/*.sh
+          bun install --frozen-lockfile
+          bun node_modules/tsrs/bin/tsrs -p compute/e2e/suite
+
+  kvm:
+    name: real Firecracker on KVM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compute
+      - name: Room on the runner
+        working-directory: .
+        run: |
+          # The hosted image carries toolchains this job never uses.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / /mnt
+      - name: An XFS lab directory, and access to KVM
+        working-directory: .
+        run: |
+          sudo apt-get install -y -qq xfsprogs >/dev/null
+          # Sparse: it takes only what the gate writes, while each
+          # sandbox books its whole disk in the filesystem's free space,
+          # so the filesystem is far larger than what is written (at
+          # 90G the lab and smoke steps ran out of bookable room).
+          sudo truncate -s 400G /mnt/lab.img
+          sudo mkfs.xfs -q /mnt/lab.img
+          sudo mkdir -p /lab
+          sudo mount -o loop,noatime /mnt/lab.img /lab
+          sudo chown "$(id -u):$(id -g)" /lab
+          # The lab is a file, not a disk for host-setup.sh to format.
+          touch /lab/.scratch-ready
+          sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          grep -c -E 'vmx|svm' /proc/cpuinfo
+          stat -fc %T /sys/fs/cgroup
+          free -m
+      - name: Cache the prepared lab (Firecracker, guest kernel, base image)
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            /lab/bin
+            /lab/vmlinux
+            /lab/base.ext4
+            /lab/ci-artifacts.txt
+          key: compute-lab-${{ hashFiles('compute/lab/host-setup.sh', 'compute/deploy/host/pins.env') }}
+      - name: Huge pages for the nested profile
+        run: |
+          # Half the runner's memory, in 2 MiB pages: the lab step runs its
+          # tests at once, and a quarter (4 GB) left later ones a full host.
+          pages=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 2 / 2048 ))
+          echo "$pages" | sudo tee /proc/sys/vm/nr_hugepages
+          grep -i hugepages_total /proc/meminfo
+      - name: Let sandbox traffic through Docker's firewall
+        run: |
+          # The runner runs Docker, whose FORWARD chain drops forwarded
+          # traffic it did not set up, and a packet must pass every chain
+          # on the hook: without these rules no sandbox reaches anything.
+          # They are what docs/operations.md asks of any host running
+          # Docker; the agent's own rules still decide what guests reach.
+          sudo iptables -I DOCKER-USER -o 'ogc+' -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          sudo iptables -I DOCKER-USER -i 'ogc+' -j ACCEPT
+      - name: The KVM gate
+        env:
+          STEPS: lab-setup pager networking engine save_wake lab guest smoke conformance
+          LAB: /lab
+          PROFILE: nested
+          SANDBOXES: "4"
+        run: |
+          # The runner starts jobs with an out-of-memory score adjustment of
+          # 500; the lab checks that ordinary processes keep the default 0.
+          sudo choom -n 0 -p $$
+          bash ci/gate.sh
+      - name: Where the lab's room went
+        if: failure()
+        run: |
+          df -h / /lab
+          sudo du -xsh /lab/* 2>/dev/null | sort -h | tail -15
+      - name: Collect the conformance logs and results
+        if: failure()
+        run: |
+          # Only its text: the directory also holds sockets and the test
+          # authority's key, which the upload cannot or should not take.
+          out=$RUNNER_TEMP/conformance
+          mkdir -p "$out"
+          [ -d /lab/t/e2b-conformance ] || exit 0
+          cd /lab/t/e2b-conformance
+          sudo find . -path ./clients/node_modules -prune -o -type f \
+            \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' -o -name '*.md' -o -name '*.txt' -o -name '*.xml' \) \
+            -size -20M -exec cp --parents {} "$out" \;
+          sudo chown -R "$(id -u):$(id -g)" "$out"
+      - name: Keep the conformance logs and results
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: compute-conformance-${{ github.run_id }}
+          path: ${{ runner.temp }}/conformance
+          if-no-files-found: ignore
+          retention-days: 14

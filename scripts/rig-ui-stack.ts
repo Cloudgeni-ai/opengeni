@@ -15,21 +15,14 @@ import {
   createRig,
   createRigChange,
   createRigVersion,
-  createVariableSet,
   listRigVersions,
   recordAuditEvent,
   setWorkspaceDefaultRig,
   updateRigChangeStatus,
   type Database,
 } from "@opengeni/db";
-import {
-  freePort,
-  startProcess,
-  startTestServices,
-  waitFor,
-  type StartedProcess,
-  type TestServices,
-} from "@opengeni/testing";
+import { freePort, startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const STATE_FILE = `${process.env.RIG_UI_STATE_DIR ?? "/tmp"}/rig-ui-stack.json`;
@@ -131,27 +124,6 @@ async function main() {
 async function seed(db: Database, accountId: string, workspaceId: string) {
   const ws = { accountId, workspaceId };
 
-  // Two variable sets (values are write-only; the UI shows only counts).
-  const stagingAws = await createVariableSet(db, {
-    ...ws,
-    name: "staging-aws",
-    description: "Staging AWS credentials",
-    variables: [
-      { name: "AWS_ACCESS_KEY_ID", valueEncrypted: "enc" },
-      { name: "AWS_SECRET_ACCESS_KEY", valueEncrypted: "enc" },
-      { name: "AWS_REGION", valueEncrypted: "enc" },
-    ],
-  });
-  const prodDb = await createVariableSet(db, {
-    ...ws,
-    name: "prod-postgres",
-    description: "Production database connection",
-    variables: [
-      { name: "DATABASE_URL", valueEncrypted: "enc" },
-      { name: "PGPASSWORD", valueEncrypted: "enc" },
-    ],
-  });
-
   // 1) The plain workspace default — stock image, no setup, no checks.
   await createRig(db, {
     ...ws,
@@ -173,7 +145,6 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
         { name: "ripgrep present", command: "rg --version" },
         { name: "jq present", command: "jq --version" },
       ],
-      defaultVariableSetIds: [stagingAws.id, prodDb.id],
       changelog: "Initial dev machine",
       createdBy: "user:you",
     },
@@ -216,7 +187,6 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
           { name: "jq present", command: "jq --version" },
           ...(index >= 4 ? [{ name: "docker present", command: "docker --version" }] : []),
         ],
-        defaultVariableSetIds: [stagingAws.id, prodDb.id],
         changelog: changelogs[index] ?? null,
         createdBy: actors[index % actors.length] ?? null,
       },
@@ -318,7 +288,6 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
         { name: "docker present", command: "docker --version" },
         { name: "terraform present", command: "terraform version" },
       ],
-      defaultVariableSetIds: [stagingAws.id, prodDb.id],
       changelog: "Add Terraform for infra work",
     },
     proposedBy: "user:alice",

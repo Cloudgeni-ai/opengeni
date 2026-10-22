@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "../src/vendor/*.d.ts",
+    "../../../packages/react/test/app-model-account-indicator.test.tsx",
+    "../../../packages/react/src/app/components/session/model-account-usage.test.ts",
+    "../../../packages/react/test/app-codex-account-indicator.test.tsx",
+    "model-account-picker-preview.browser.ts",
+    "model-account-picker-preview.vite.config.ts",
+    "fixtures/model-account-picker-preview/*.tsx"
+  ]
+}

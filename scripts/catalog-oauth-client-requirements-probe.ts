@@ -33,7 +33,7 @@ async function probe(mcpUrl: string): Promise<{ issuer: string; selfRegistration
       params: {
         protocolVersion: "2025-03-26",
         capabilities: {},
-        clientInfo: { name: "OpenGeni", version: "1.0" },
+        clientInfo: { name: "Opengeni", version: "1.0" },
       },
     }),
   });

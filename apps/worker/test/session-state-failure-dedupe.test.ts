@@ -3,6 +3,143 @@ import { CancelledFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("DB-only overload recovery keeps its exact next count and timer without widening other causes", async () => {
+    const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+    const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, bus: {}, settings: {}, observability: {} }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 4,
+              metadata: { providerRecoveryCount: 5 },
+            }) as any,
+        ),
+        requestSessionTurnRecovery: recovery as any,
+        applySessionTurnSettlement: terminal as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+    const input = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      postClaimDatabaseRecovery: {
+        turnId: "turn-1",
+        triggerEventId: "trigger-1",
+        executionGeneration: 4,
+        code: "db_failure" as const,
+        providerFailureCode: "provider_overloaded",
+        providerRecoveryCount: 6,
+        providerRecoveryContinueDelayMs: 85_000,
+      },
+    };
+    expect(await activities.failSessionAttempt(input)).toEqual({
+      action: "recovering",
+      continueDelayMs: 85_000,
+    });
+    expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+      reason: "provider_overloaded",
+      providerRecoveryCount: 6,
+      detail: {
+        code: "provider_unavailable",
+        providerCondition: "overloaded",
+        maxProviderRecoveryCount: 15,
+        continueDelayMs: 85_000,
+      },
+    });
+    for (const delta of [
+      { providerFailureCode: "provider_unavailable", providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: 900_000 },
+      { providerRecoveryCount: 7 },
+      { executionGeneration: 3 },
+      { triggerEventId: "other-trigger" },
+    ]) {
+      expect(
+        await activities.failSessionAttempt({
+          ...input,
+          postClaimDatabaseRecovery: { ...input.postClaimDatabaseRecovery, ...delta },
+        } as any),
+      ).toEqual({ action: "stale" });
+    }
+    expect(recovery).toHaveBeenCalledTimes(1);
+    expect(terminal).not.toHaveBeenCalled();
+  });
+  test("DB-only internal MCP wait preserves pacing and exact-attempt CAS after many retries", async () => {
+    const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+    const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, bus: {}, settings: {}, observability: {} }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 4,
+              metadata: { providerRecoveryCount: 120 },
+            }) as any,
+        ),
+        requestSessionTurnRecovery: recovery as any,
+        applySessionTurnSettlement: terminal as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+    const input = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      postClaimDatabaseRecovery: {
+        turnId: "turn-1",
+        triggerEventId: "trigger-1",
+        executionGeneration: 4,
+        code: "db_failure" as const,
+        providerFailureCode: "first_party_mcp_setup_unavailable",
+        providerRecoveryCount: 121,
+        providerRecoveryContinueDelayMs: 30_000,
+      },
+    };
+    expect(await activities.failSessionAttempt(input)).toEqual({
+      action: "recovering",
+      continueDelayMs: 30_000,
+    });
+    expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+      reason: "first_party_mcp_setup_unavailable",
+      retryAfterMs: 30_000,
+      detail: { code: "first_party_mcp_setup_unavailable" },
+    });
+    expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+    expect(recovery.mock.calls[0]?.[2].detail).not.toHaveProperty("providerRecoveryCount");
+    for (const delta of [
+      { providerFailureCode: "provider_unavailable", providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: 29_999 },
+      { providerRecoveryCount: 122 },
+      { executionGeneration: 3 },
+      { triggerEventId: "other-trigger" },
+    ]) {
+      expect(
+        await activities.failSessionAttempt({
+          ...input,
+          postClaimDatabaseRecovery: { ...input.postClaimDatabaseRecovery, ...delta },
+        } as any),
+      ).toEqual({ action: "stale" });
+    }
+    expect(recovery).toHaveBeenCalledTimes(1);
+    expect(terminal).not.toHaveBeenCalled();
+  });
   test.each([true, false])(
     "setup reconciliation re-peeks only after committed completion (%s)",
     async (completed) => {

@@ -8,14 +8,15 @@ import {
   getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
   completeConnectorActionExecution,
-  getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
+  requireWorkspace,
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
-  withCodexAppsRequestAuthorization,
+  subscriptionCoreCodexAppsRequestAuth,
+  getSessionTitleOperation,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -47,17 +48,21 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
+import {
+  materializeConnectorFile,
+  materializeGmailFile,
+  readGmailFileFromChannel,
+} from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
+  type Settings,
+} from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
-import { buildCodexTokenResolver } from "../codex-auth";
-import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { mergeResourceRefs } from "../common";
 import {
   workspaceSessionToolPolicyDefaultServerIds,
-  loadRigDefaultVariableSetEnvironment,
-  mergeRigDefaultVariableSetEnvironment,
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
@@ -65,11 +70,11 @@ import {
   withFrozenPersonalConnectionDelegations,
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
+  scheduledTurnFirstPartyMcpTools,
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
 } from "@opengeni/core";
-import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
@@ -80,6 +85,7 @@ import {
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
+import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
@@ -118,10 +124,15 @@ import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
-import { createWorkspaceSkillTools } from "./skill-tools";
+import {
+  createWorkspaceSkillTools,
+  sessionShadowedSkillNames,
+  withoutSessionShadowedSkills,
+} from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
+import { attemptSecretResolver, type AttemptVaultAccess } from "./secret-resolver";
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -140,7 +151,6 @@ export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   cancellationSignal: AbortSignal | undefined;
-  connectionCredentials: ActivityServices["connectionCredentials"];
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
@@ -151,6 +161,9 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  independentSessionTitles?: boolean;
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   fetchKnowledgeSource?:
     | ((
         input: import("../types").RunKnowledgeSourceSyncBatchInput,
@@ -174,12 +187,14 @@ export type PrepareTurnToolRuntimeDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   capabilitySettings: ClaimTurnOk["capabilitySettings"];
   installedApiIntegrations: ClaimTurnOk["installedApiIntegrations"];
-  codexAppsCredentialId: ClaimTurnOk["codexAppsCredentialId"];
+  codexAppsCoreConnectionId?: ClaimTurnOk["codexAppsCoreConnectionId"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   trigger: ClaimTurnOk["trigger"];
   runSettings: GovernanceModelOk["runSettings"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
+  /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
+  workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -208,14 +223,11 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   const {
     input,
     db,
-    cancellationSignal,
-    connectionCredentials,
     turn,
     session,
     fileAuthoritySubjectId,
     capabilitySettings,
     runSettings,
-    rigVersion,
     workspaceRefs,
   } = deps;
 
@@ -265,122 +277,21 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
-  // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
-  // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
-  // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
-  // no Variable Set work. Organization/workspace sets use the exact turn actor; personal sets
-  // additionally require the causal human frozen into the admitted turn.
+  // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,
+  // and nothing user-defined is injected into the sandbox environment. User
+  // secrets reach a command only through `{{secret:…}}` references resolved at
+  // the exec boundary. Variable Sets stay readable elsewhere until W6 removes them.
   const connectionScope = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   };
-  const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
-  const sessionVariableSetIds = session.variableSetIds;
-  let workspaceVariableSet: Awaited<
-    ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
-  > = null;
-  const explicitEnvironmentValues: Record<string, string> = {};
-  const rigDefaultEnvironmentValues: Record<string, string> = {};
-  if (sessionVariableSetIds.length > 0 || rigDefaultVariableSetIds.length > 0) {
-    const variableSetAuthority = {
-      sessionId: input.sessionId,
-      turnId: turn.id,
-      attemptId: input.attemptId,
-      executionGeneration: turn.executionGeneration,
-      initiator: turn.initiator,
-      initiatingHumanSubjectId: fileAuthoritySubjectId,
-    };
-    // A scheduled attempt may materialize only the exact generation frozen
-    // on its accepted occurrence; ordinary turns resolve to null.
-    const expectedVariableSetGeneration = async (
-      candidateVariableSetId: string,
-    ): Promise<number | null> =>
-      await getScheduledVariableSetExpectedGenerationForAttempt(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: fileAuthoritySubjectId ?? turn.initiator.subjectId,
-        initiatingHumanSubjectId: fileAuthoritySubjectId,
-        sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        variableSetId: candidateVariableSetId,
-      });
-    for (const variableSetId of sessionVariableSetIds) {
-      const selected = await waitForTurnOperation(
-        (async () =>
-          loadWorkspaceEnvironmentForRunWithCredentials(
-            db,
-            runSettings,
-            connectionScope,
-            variableSetId,
-            variableSetAuthority,
-            connectionCredentials?.sandboxSecrets,
-            connectionCredentials?.sandboxSecrets
-              ? { expectedGeneration: await expectedVariableSetGeneration(variableSetId) }
-              : {},
-          ))(),
-        cancellationSignal,
-        undefined,
-      );
-      if (!selected) continue;
-      Object.assign(explicitEnvironmentValues, selected.values);
-      // Preserve the legacy single-set metadata view as the final,
-      // highest-precedence explicit selection while its values represent the
-      // complete ordered explicit layer.
-      workspaceVariableSet = { ...selected, values: { ...explicitEnvironmentValues } };
-    }
-    // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
-    // variable sets and layer them BELOW the session's own set — the session's
-    // values WIN on any key collision. Loaded through the SAME host-secrets
-    // provider path as the session set (embedded-topology parity). Precedence
-    // WITHIN the rig defaults is listed order (a later set overrides an earlier
-    // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
-    // VERSION is frozen per session, so the SET of default variable sets is
-    // fixed for the session's life — the merged manifest env is therefore stable
-    // across the session's turns (the same guarantee the session's own variable
-    // set already relies on), keeping validateNoEnvironmentDelta empty.
-    Object.assign(
-      rigDefaultEnvironmentValues,
-      await loadRigDefaultVariableSetEnvironment(
-        rigDefaultVariableSetIds,
-        async (rigDefaultVariableSetId) =>
-          await waitForTurnOperation(
-            (async () =>
-              loadWorkspaceEnvironmentForRunWithCredentials(
-                db,
-                runSettings,
-                connectionScope,
-                rigDefaultVariableSetId,
-                variableSetAuthority,
-                connectionCredentials?.sandboxSecrets,
-                connectionCredentials?.sandboxSecrets
-                  ? {
-                      expectedGeneration:
-                        await expectedVariableSetGeneration(rigDefaultVariableSetId),
-                    }
-                  : {},
-              ))(),
-            cancellationSignal,
-            undefined,
-          ),
-      ),
-    );
-  }
-  workspaceRefs.variableSetId = workspaceVariableSet?.id ?? "";
-  // Session set wins collisions with the rig defaults (explicit precedence).
-  const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
-    rigDefaultEnvironmentValues,
-    explicitEnvironmentValues,
-  );
+  workspaceRefs.variableSetId = "";
   return {
     turnResources,
     runtimeResources,
     mcpAvailabilityNote,
     turnTools,
     connectionScope,
-    workspaceVariableSet,
-    sandboxWorkspaceEnvironmentValues,
   };
 }
 
@@ -402,12 +313,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     turn,
     session,
     installedApiIntegrations,
-    codexAppsCredentialId,
+    codexAppsCoreConnectionId,
     turnExecutionPolicy,
     trigger,
     runSettings: canonicalRunSettings,
     resolvedModel,
     lazyToolTransport,
+    workspaceCreditModelsAllowed,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -558,32 +470,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolveCredential,
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
-  const codexAppsAuth = codexAppsCredentialId
-    ? (() => {
-        const resolver = buildCodexTokenResolver(
-          db,
-          runSettings,
-          input.workspaceId,
-          codexAppsCredentialId,
-        );
-        return {
-          clientVersion: CODEX_CLIENT_VERSION,
-          withAuthorization: async <T>(
-            use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> => {
-            const snapshot = await resolver.getToken();
-
-            return await withCodexAppsRequestAuthorization(
-              db,
-              {
-                workspaceId: input.workspaceId,
-                credentialId: codexAppsCredentialId,
-              },
-              async () => await use(snapshot),
-            );
-          },
-        };
-      })()
+  // Apps authorization is the exact core designation resolved at claim.
+  const codexAppsAuth = codexAppsCoreConnectionId
+    ? subscriptionCoreCodexAppsRequestAuth(db, runSettings, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        connectionId: codexAppsCoreConnectionId,
+      })
     : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
@@ -605,19 +498,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
+    scheduledTurnMcpServerIds(turn) !== null
+      ? allowedFirstPartyMcpToolsForSession(
+          runSettings,
+          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+        )
+      : resolveSessionFirstPartyMcpTools(
+          runSettings,
+          session,
+          (await requireWorkspace(db, input.workspaceId)).settings,
+        ),
   );
+  // Frozen with the selection and ceiling above; instructions only.
+  const promptToolAvailability = promptToolAvailabilityForTurn({
+    agentConfig: session.agent,
+    selectedFirstPartyMcpTools,
+    firstPartyPermissions: effectiveFirstPartyPermissions,
+  });
+  const needsTitle = shouldRequestMissingSessionTitle({
+    agentConfig: session.agent,
+    title: session.title,
+    titleSource: session.titleSource,
+    firstPartyMcpTools: selectedFirstPartyMcpTools,
+    firstPartyMcpPermissions: effectiveFirstPartyPermissions,
+  });
+  const activeTitle =
+    deps.independentSessionTitles && needsTitle
+      ? await getSessionTitleOperation(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        })
+      : null;
   const titleToolPlan = sessionTitleToolPlan({
     agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
-    shouldRequestTitle: shouldRequestMissingSessionTitle({
-      agentConfig: session.agent,
-      title: session.title,
-      titleSource: session.titleSource,
-      firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: effectiveFirstPartyPermissions,
-    }),
+    shouldRequestTitle: needsTitle && (!activeTitle || activeTitle.sourceTurnId === turn.id),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
@@ -694,13 +611,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolFamilies.skills === false
       ? []
       : [
-          ...sharedSkillDescriptors
-            .filter((entry) => entry.activationMode === "workspace_managed")
-            .map((entry) => ({
-              id: entry.id,
-              name: entry.title,
-              description: entry.description,
-            })),
+          ...withoutSessionShadowedSkills(
+            sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
+            sessionShadowedSkillNames(selectedSkills),
+          ).map((entry) => ({
+            id: entry.id,
+            name: entry.title,
+            description: entry.description,
+          })),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
@@ -746,6 +664,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
+        commandRunner: async (commandSession, args) => {
+          const fence = eventing.toolCancellationFenceRef.current;
+          if (!fence)
+            throw new Error(
+              "Skill filesystem execution requires the active turn cancellation controller.",
+            );
+          return await fence.runSandboxCommandSynchronous(commandSession, args);
+        },
         workspaceRoot: machineRoot ?? "/workspace",
         ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
         leaseEpoch: access.leaseEpoch,
@@ -828,6 +754,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     getEnvironment: async () => {
       const prepared = eventing.preparedTools;
       if (!prepared) return null;
+      prepared.startDeferredPreparation?.();
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
@@ -837,7 +764,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
-    // OpenGeni's Jev key pays for these calls whatever model billing the
+    // The deployment's decision-model account pays whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.
     recordUsage: async (usage) => {
       const shared = {
@@ -849,20 +776,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         turnId: turn.id,
         turnAttemptId: input.attemptId,
       };
-      await recordUsageEvent(db, {
-        ...shared,
-        eventType: "code_search.jev_input_tokens",
-        quantity: usage.jevInputTokens,
-        unit: "tokens",
-        idempotencyKey: `usage:code_search.jev_input_tokens:${input.attemptId}:${usage.operationId}`,
-      });
-      await recordUsageEvent(db, {
-        ...shared,
-        eventType: "code_search.jev_cost",
-        quantity: Math.round(usage.jevCostUsd * 1_000_000),
-        unit: "usd_micros",
-        idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
-      });
+      if (usage.decisionInputTokens !== null)
+        await recordUsageEvent(db, {
+          ...shared,
+          eventType: "code_search.decision_input_tokens",
+          quantity: usage.decisionInputTokens,
+          unit: "tokens",
+          idempotencyKey: `usage:code_search.decision_input_tokens:${input.attemptId}:${usage.operationId}`,
+        });
+      const costEvent = usage.costSources.includes("estimate")
+        ? "decision_estimated_cost"
+        : "decision_cost";
+      if (usage.decisionCostUsd !== null)
+        await recordUsageEvent(db, {
+          ...shared,
+          eventType: `code_search.${costEvent}`,
+          quantity: Math.round(usage.decisionCostUsd * 1_000_000),
+          unit: "usd_micros",
+          idempotencyKey: `usage:code_search.${costEvent}:${input.attemptId}:${usage.operationId}`,
+        });
     },
     workspace: async () => {
       throwIfWorkerShuttingDown();
@@ -893,7 +825,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // when the session's agent configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
+      .providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -941,8 +874,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? "worker:model-access",
-          xaiAuthoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
-          claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
         });
         return {
           selections: resolveWorkspaceModelSelection(selectionInput),
@@ -985,7 +916,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
       selectedTools: selectedFirstPartyMcpTools,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
@@ -1059,6 +990,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       },
     });
   };
+  const connectorFileStaging = () => {
+    if (!deps.objectStorage) throw new Error("Connector file delivery requires object storage");
+    return {
+      workspaceId: input.workspaceId,
+      storage: deps.objectStorage,
+      downloadStorage: objectStorageForSandboxDownloads(
+        runSettings,
+        deps.objectStorage,
+        deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      ),
+      materialize: materializeConnectorAttachments,
+      onCleanupFailure: (key: string) =>
+        console.warn("[connector-files] Temporary transfer cleanup requires operator retry", {
+          objectKey: key,
+        }),
+    };
+  };
   const initiatingHuman = await waitForTurnOperation(
     resolveInitiatingHuman(
       db,
@@ -1073,6 +1021,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
         ...(credentialRestriction ? { credentialRestriction } : {}),
+        inputWaitReplyGuard: async () => (await eventing.inputWaitReplyGuard?.()) ?? null,
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1084,7 +1033,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
         subjectId: "worker:first-party-mcp",
-        subjectLabel: "OpenGeni worker",
+        secretResolver: attemptSecretResolver({
+          db,
+          settings: githubRestMcp.settings,
+          agentConfig: session.agent,
+          vaultAccess: deps.vaultAccess,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: attempt.executionGeneration,
+        }),
+        subjectLabel: "Opengeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
         initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,
@@ -1122,21 +1083,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         materializeGmailFile: async (request) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();
-          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
-          return await materializeGmailFile(request, {
-            workspaceId: input.workspaceId,
-            storage: deps.objectStorage,
-            downloadStorage: objectStorageForSandboxDownloads(
-              runSettings,
-              deps.objectStorage,
-              deps.activeSandboxBackend ?? deps.groupBoxBackend,
-            ),
-            materialize: materializeConnectorAttachments,
-            onCleanupFailure: (key) =>
-              console.warn("[gmail] Temporary transfer cleanup requires operator retry", {
-                objectKey: key,
-              }),
-          });
+          return await materializeGmailFile(request, connectorFileStaging());
+        },
+        materializeConnectorFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          return await materializeConnectorFile(request, connectorFileStaging());
         },
         readGmailFile: async (request) => {
           throwIfWorkerShuttingDown();
@@ -1172,7 +1124,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
         localMcpServers,
-        ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
+        ...(deferNonEagerToolPreparation
+          ? {
+              deferNonEagerUntilToolDemand: true,
+              deferredPreparationStart: "provider-dispatch" as const,
+            }
+          : {}),
         onPreparationPhase: (measurement) => {
           recordToolPreparationPhase(observability, {
             ...measurement,
@@ -1280,6 +1237,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
+    promptToolAvailability,
     skillCatalog,
   };
 }

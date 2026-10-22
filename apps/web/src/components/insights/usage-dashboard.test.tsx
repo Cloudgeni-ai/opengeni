@@ -20,8 +20,23 @@ const requestJson = mock(
     return nextUsage;
   },
 );
-const context = { client: { requestJson } };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+const context = {
+  client: {
+    requestJson,
+    getWorkspaceInsightsSiteUsage: async () => ({ rows: [] }),
+    getSitePlatformUsage: async () => ({
+      workspaceId: "ws",
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [],
+      estimatedMicros: 0,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    }),
+  },
+};
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -143,7 +158,7 @@ describe("Insights usage dashboard", () => {
     try {
       const titles = breakdownTitles(view.container);
       expect(titles).toContain("GPT-6.1 Sol");
-      expect(titles).toContain("Claude Opus 5.5");
+      expect(titles).toContain("Opus 5.5");
       expect(titles).toContain("Grok 4.6");
       const text = view.container.textContent ?? "";
       expect(text).not.toContain("codex/gpt-6.1-sol");
@@ -397,7 +412,7 @@ describe("Insights usage dashboard", () => {
       const chips = [...view.container.querySelectorAll('[aria-label="Active filters"] li')].map(
         (chip) => chip.textContent,
       );
-      expect(chips).toEqual(["Model:Claude Opus 5.5 · Claude plan"]);
+      expect(chips).toEqual(["Model:Opus 5.5 · Claude plan"]);
       await act(async () =>
         view.container
           .querySelector<HTMLButtonElement>('[aria-label^="Remove filter Model"]')
@@ -430,7 +445,7 @@ describe("Insights usage dashboard", () => {
 
   test("falls back to the older Insights endpoint only when the route is missing", async () => {
     // The SDK's error: a display message, with the server's envelope in `body`.
-    nextError = Object.assign(new Error("OpenGeni API 404: Resource not found. Reference: r1."), {
+    nextError = Object.assign(new Error("Opengeni API 404: Resource not found. Reference: r1."), {
       status: 404,
       body: JSON.stringify({
         error: { status: 404, code: "not_found", message: "Resource not found." },
@@ -495,7 +510,7 @@ describe("Insights usage dashboard", () => {
     }
     // A handler's own 404 (an unknown workspace) is an error, not a missing route.
     resetUsageSourceMemo();
-    nextError = Object.assign(new Error("OpenGeni API 404: workspace not found"), {
+    nextError = Object.assign(new Error("Opengeni API 404: workspace not found"), {
       status: 404,
       body: JSON.stringify({
         error: { status: 404, code: "not_found", message: "workspace not found" },

@@ -5,13 +5,37 @@ import {
 } from "@openai/agents/sandbox/local";
 import { NoopSnapshotSpec } from "@openai/agents/sandbox";
 import { execFile } from "node:child_process";
+import { lstat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
-import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
+import { installDurableShellProcesses } from "../durable-shell-process";
+import {
+  SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
+} from "../errors";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
+import {
+  attachDockerWorkspaceForDrain,
+  dockerWorkspaceProvablyAbsent,
+  rememberOwnedDockerSdkState,
+  rememberSerializedDockerOwnership,
+  serializeDockerOwnership,
+} from "./docker-workspace-drain";
+
 const execFileAsync = promisify(execFile);
+
+/** False only for a definite ENOENT; every other answer counts as present. */
+async function pathPresent(path: unknown): Promise<boolean> {
+  if (typeof path !== "string") return true;
+  return await lstat(path).then(
+    () => true,
+    (error: unknown) =>
+      !(error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT"),
+  );
+}
 const DOCKER_EXACT_INSPECT_TIMEOUT_MS = 10_000;
 const DOCKER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
@@ -40,7 +64,7 @@ export function dockerContinuityResumeStateForImage<T>(
 function dockerContinuityKey(state: unknown): string | null {
   if (!state || typeof state !== "object" || Array.isArray(state)) return null;
   const value = state as DockerResumeState;
-  // OpenGeni explicitly disables the SDK's local snapshot facility. Requiring
+  // Opengeni explicitly disables the SDK's local snapshot facility. Requiring
   // that invariant prevents the SDK from restoring an older local snapshot
   // over a newer host workspace before restarting the container.
   return typeof value.workspaceRootPath === "string" &&
@@ -79,16 +103,70 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
     this.#openGeniOptions = options;
   }
 
-  /** Ordinary resume is reserved by OpenGeni for the elected cold continuity
+  override async create(...args: Parameters<DockerSandboxClient["create"]>) {
+    const session = await super.create(...args);
+    rememberOwnedDockerSdkState(session.state);
+    return installDurableShellProcesses(session, "docker");
+  }
+
+  override async deserializeSessionState(
+    state: Parameters<DockerSandboxClient["deserializeSessionState"]>[0],
+  ) {
+    const restored = await super.deserializeSessionState(state);
+    rememberSerializedDockerOwnership(restored, state);
+    return restored;
+  }
+
+  override async serializeSessionState(
+    state: Parameters<DockerSandboxClient["serializeSessionState"]>[0],
+    options?: Parameters<DockerSandboxClient["serializeSessionState"]>[1],
+  ) {
+    const ownership = await serializeDockerOwnership(this, state);
+    return { ...(await super.serializeSessionState(state, options)), ...ownership };
+  }
+
+  /** Only the server reaper uses this capture-only surface. The network
+   * decorator forwards it without setup, connect or ordinary resume. */
+  async attachWorkspaceForDrain(
+    state: Parameters<DockerSandboxClient["resume"]>[0],
+    assertCurrentCapture: () => Promise<{ archivePublished: boolean }>,
+    options?: Parameters<DockerSandboxClient["resume"]>[1],
+  ) {
+    const archiveLimits =
+      options?.archiveLimits === undefined
+        ? this.#openGeniOptions.archiveLimits
+        : options.archiveLimits;
+    return await attachDockerWorkspaceForDrain(
+      this,
+      state,
+      assertCurrentCapture,
+      undefined,
+      archiveLimits,
+    );
+  }
+
+  /** Ordinary resume is reserved by Opengeni for the elected cold continuity
    * owner. Exact live attachment uses resumeExact() below and never reimages. */
   override async resume(
     state: Parameters<DockerSandboxClient["resume"]>[0],
     options?: Parameters<DockerSandboxClient["resume"]>[1],
   ) {
-    return await super.resume(
+    // Without its host directory the SDK can only fail ("resources are
+    // unavailable"). Say whether the workspace is provably gone, so the lease
+    // can record the loss as final instead of retrying it on every turn; any
+    // doubt leaves the SDK's own error, which keeps the continuity receipt.
+    if (
+      !(await pathPresent(state.workspaceRootPath)) &&
+      (await dockerWorkspaceProvablyAbsent(state))
+    ) {
+      throw new SandboxProviderWorkspaceAbsentError("docker", state.containerId);
+    }
+    const session = await super.resume(
       dockerContinuityResumeStateForImage(state, this.#openGeniOptions.image),
       options,
     );
+    rememberOwnedDockerSdkState(session.state);
+    return installDurableShellProcesses(session, "docker");
   }
 
   /** Exact attach must not call the SDK's ordinary resume when the persisted
@@ -129,10 +207,14 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
       options?.archiveLimits === undefined
         ? this.#openGeniOptions.archiveLimits
         : options.archiveLimits;
-    return new DockerSandboxSession({
+    const session = new DockerSandboxSession({
       state,
       ...(archiveLimits !== undefined ? { archiveLimits } : {}),
     });
+    rememberOwnedDockerSdkState(session.state);
+    // Commands run under an in-container supervisor, so any session object
+    // for this container (another turn, worker or the reaper) reaches them.
+    return installDurableShellProcesses(session, "docker");
   }
 }
 
@@ -163,7 +245,7 @@ export const dockerProvider: ProviderRegistration = {
     return new OpenGeniDockerSandboxClient({
       image: settings.dockerImage,
       exposedPorts,
-      // The OpenGeni archive ledger is the recovery authority. SDK-local
+      // The Opengeni archive ledger is the recovery authority. SDK-local
       // snapshots are process-host artifacts and, more importantly, ordinary
       // Docker resume may overwrite a newer live host workspace from them.
       snapshot: new NoopSnapshotSpec(),

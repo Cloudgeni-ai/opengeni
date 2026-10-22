@@ -63,6 +63,25 @@ test("definition mismatch diagnostics survive Temporal without unwrapping arbitr
   expect(workflowFailureMessage(new Error("ordinary failure"))).toBe("ordinary failure");
 });
 
+test("a turn refused because its model is no longer available says so", () => {
+  for (const message of [
+    "Turn execution policy model is retired from new selection",
+    "Turn execution policy model is not present in the configured catalog",
+  ]) {
+    expect(
+      workflowFailureMessage(
+        activityFailure(
+          ApplicationFailure.create({
+            message,
+            type: "TurnExecutionPolicyModelUnavailableError",
+            nonRetryable: true,
+          }),
+        ),
+      ),
+    ).toBe(message);
+  }
+});
+
 describe("turn activity fence-cancellation arbitration", () => {
   test("accepts both direct and Temporal ActivityFailure-wrapped cancellation", () => {
     const cancelled = new CancelledFailure("TURN_ATTEMPT_FENCED");
@@ -219,6 +238,33 @@ describe("post-claim database recovery wire classification", () => {
       details: [providerDetail],
     });
     expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(providerDetail);
+  });
+
+  test("the confirmed-overload checkpoint wire preserves only a valid bounded delay", () => {
+    const parse = (value: unknown) =>
+      postClaimDatabaseRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+            type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+            details: [value],
+          }),
+        ),
+      );
+    const wire = {
+      ...detail,
+      providerFailureCode: "provider_overloaded",
+      providerRecoveryCount: 6,
+      providerRecoveryContinueDelayMs: 85_000,
+    };
+    expect(parse(wire)).toEqual(wire);
+    for (const delta of [
+      { providerRecoveryContinueDelayMs: undefined },
+      { providerRecoveryContinueDelayMs: -1 },
+      { providerRecoveryContinueDelayMs: 900_000 },
+      { providerFailureCode: "provider_unavailable" },
+    ])
+      expect(parse({ ...wire, ...delta })).toBeNull();
   });
 
   test("accepts the setup no-replay checkpoint without new provider retry authority", () => {

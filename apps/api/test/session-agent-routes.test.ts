@@ -18,12 +18,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -43,7 +40,16 @@ const AGENT_PERMISSIONS: Permission[] = [
   "goals:manage",
   "workspace:read",
 ];
-const RUNTIME_TOOLS = ["command_read", "command_wait", "set_session_title", "wait_for_input"];
+// What "none" keeps: runtime mechanics plus reaching the person (humanInput).
+const RUNTIME_TOOLS = [
+  "command_read",
+  "command_wait",
+  "inbox_tidy",
+  "notification_withdraw",
+  "notify_user",
+  "set_session_title",
+  "wait_for_input",
+];
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -101,10 +107,10 @@ function routeDeps(): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-function app(): Hono {
+function app(overrides: Parameters<typeof testSettings>[0] = {}): Hono {
   const deps = routeDeps();
   return createApp({
-    settings: deps.settings,
+    settings: { ...deps.settings, ...overrides },
     db: client.db,
     bus: deps.bus,
     workflowClient: deps.workflowClient,
@@ -194,7 +200,7 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
     const grant = await fixture();
     const config = await request(app(), await humanBearer(grant), "GET", "/v1/config/client");
     expect(config.json.agentConfig).toMatchObject({ enabled: true, defaultForNewSessions: true });
-    expect(config.json.agentConfig.capabilities).toHaveLength(13);
+    expect(config.json.agentConfig.capabilities).toHaveLength(14);
   });
 
   test("MCP session_create exposes optional agent selection", async () => {
@@ -227,6 +233,38 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
+  test("keyed retries never adopt the new eager selection into an existing session", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const body = { idempotencyKey: crypto.randomUUID() };
+    const before = await create(app(), grant, body);
+    expect(before.status).toBe(202);
+    const saved = JSON.stringify(before.json.tools);
+    const replay = await create(
+      app({ mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }] }),
+      grant,
+      body,
+    );
+    expect(replay.status).toBe(202);
+    expect(replay.json.id).toBe(before.json.id);
+    expect(JSON.stringify(replay.json.tools)).toBe(saved);
+  });
+  test("new configured first-party sessions persist eager search, not other Knowledge tools", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app({
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
+    const created = await create(target, grant, {});
+    expect(created.status).toBe(202);
+    expect(
+      created.json.tools.find((tool: { id: string }) => tool.id === "opengeni")?.eager,
+    ).toEqual(["knowledge_search"]);
+    const saved = await getSession(client.db, grant.workspaceId, created.json.id);
+    expect(saved?.tools.find((tool) => tool.id === "opengeni")?.eager).toEqual([
+      "knowledge_search",
+    ]);
+  });
   test('"all" matches an omitted agent exactly; "none" keeps runtime mechanics', async () => {
     if (!available) return;
     const grant = await fixture();
@@ -253,7 +291,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(names).not.toContain("list_models");
   });
 
-  test("typed 422s: goal conflict, instructions alias conflict, explicit tool conflict", async () => {
+  test("typed 422s: goal conflict, instructions alias conflict", async () => {
     if (!available) return;
     const grant = await fixture();
     const target = app();
@@ -271,11 +309,28 @@ describe("agent configuration on create (real PostgreSQL)", () => {
       agent: { instructions: "b" },
     });
     expect(alias.json.details.code).toBe("agent_config_conflict");
+  });
+
+  test("a client's explicit tool of a capability that is off is narrowed away, not refused", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
     const explicit = await create(target, grant, {
       firstPartyMcpTools: ["goal_set"],
       agent: { capabilities: "none" },
     });
-    expect(explicit.json.details.code).toBe("agent_config_conflict");
+    expect(explicit.status).toBe(202);
+    expect(explicit.json.firstPartyMcpTools).not.toContain("goal_set");
+    // A client built before a tool moved under a capability keeps offering it:
+    // the session is still created, without that tool.
+    const stale = await create(target, grant, {
+      firstPartyMcpTools: ["set_session_title", "connected_machine_enable_screen_control"],
+      agent: { capabilities: { from: "all", workspaceAdmin: false } },
+    });
+    expect(stale.status).toBe(202);
+    expect(stale.json.firstPartyMcpTools).toContain("set_session_title");
+    expect(stale.json.firstPartyMcpTools).not.toContain("connected_machine_enable_screen_control");
+    expect(stale.json.agent.capabilities.workspaceAdmin).toBe(false);
   });
 
   test("a goal implies goals; instructions alias writes the session instructions", async () => {

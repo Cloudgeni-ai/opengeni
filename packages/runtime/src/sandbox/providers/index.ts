@@ -15,8 +15,10 @@ import type { RuntimeMetricsHooks } from "../../metrics";
 import { assertDescriptorRegistryInvariants } from "../capabilities";
 import { blaxelProvider } from "./blaxel";
 import { cloudflareProvider } from "./cloudflare";
+import { computeProvider } from "./compute";
 import { daytonaProvider } from "./daytona";
 import { dockerProvider } from "./docker";
+import { dockerDrainCaptureIsPointInTime } from "./docker-workspace-drain";
 import { e2bProvider } from "./e2b";
 import { localProvider } from "./local";
 import { modalProvider } from "./modal";
@@ -24,10 +26,11 @@ import { noneProvider } from "./none";
 import { opensandboxProvider } from "./opensandbox";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
-import type {
-  ProviderImmutableImageBuildResult,
-  ProviderRegistration,
-  ProviderWorkspaceCapturePolicy,
+import {
+  providerWorkspacePersistence,
+  type ProviderImmutableImageBuildResult,
+  type ProviderRegistration,
+  type ProviderWorkspaceCapturePolicy,
 } from "./types";
 import { vercelProvider } from "./vercel";
 
@@ -44,6 +47,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   vercel: vercelProvider,
   selfhosted: selfhostedProvider,
   opensandbox: opensandboxProvider,
+  compute: computeProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the
@@ -68,6 +72,16 @@ const ASSERTION_STUB_SETTINGS = {
   openSandboxApiKey: "stub",
   openSandboxImage:
     "ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  computeApiUrl: "https://compute.example.test",
+  computeApiKey: "stub",
+  computeVcpus: 2,
+  computeMemoryMib: 4096,
+  computeAgentReadyTimeoutMs: 120_000,
+  publicBaseUrl: "https://opengeni.example.test",
+  enrollmentSigningSecret: "stub-enrollment-signing-secret-0123456789",
+  sandboxSelfhostedEnabled: true,
+  selfhostedNatsUrl: "nats://nats.example.test:4222",
+  agentOpStreamEnabled: true,
 } as unknown as Settings;
 
 /**
@@ -163,6 +177,26 @@ export function providerWorkspaceCapturePolicy(
 ): ProviderWorkspaceCapturePolicy | null {
   const registration = PROVIDER_REGISTRY[backend as SandboxBackend];
   return registration?.workspaceCapturePolicy(state) ?? null;
+}
+
+/** True when the provider's workspace capture images the paused box at one
+ * instant (Modal native filesystem/directory snapshots), so a command still
+ * running cannot tear the captured state across files the way a file-by-file
+ * tar read of a running box can. */
+export function providerWorkspaceCaptureIsPointInTime(backend: string, state: unknown): boolean {
+  if (backend !== "modal") return false;
+  const persistence = providerWorkspacePersistence(state);
+  return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
+}
+
+/** True when a drain's capture of this lease envelope is a point-in-time image,
+ * so it may run around a request whose owner crashed: a Modal native snapshot
+ * of the paused box, or a Docker host workspace read after the drain removed
+ * the exact container (`stopForCapture`). Warm captures keep using
+ * `providerWorkspaceCaptureIsPointInTime`, because they keep the box running. */
+export function providerDrainCaptureIsPointInTime(backend: string, envelope: unknown): boolean {
+  if (providerWorkspaceCaptureIsPointInTime(backend, envelope)) return true;
+  return backend === "docker" && dockerDrainCaptureIsPointInTime(envelope);
 }
 
 export function prepareProviderForTeardownAfterCapture(backend: string, session: unknown): void {

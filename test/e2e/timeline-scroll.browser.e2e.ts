@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
 import { chromium, type Browser, type Page } from "playwright";
+import { MARKDOWN_TABLE_MAX_WIDTH_REM } from "../../packages/react/src/components/markdown-table-layout";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const demoRoot = `${repoRoot}/packages/react/demo`;
@@ -287,7 +288,12 @@ describe("timeline scroll ownership browser regression", () => {
           await tablePage.waitForTimeout(100); // ResizeObserver + layout measurement frames.
           const geometry = await tableGeometry(tablePage);
           assertTableContainment(geometry);
-          expect(geometry.tables.Oversized!.width).toBeCloseTo(geometry.right - geometry.left, 0);
+          // An oversized table widens into the panel gutters, but only up to the
+          // readable cap; beyond it its unbreakable cells scroll locally.
+          expect(geometry.tables.Oversized!.width).toBeCloseTo(
+            Math.min(geometry.right - geometry.left, MARKDOWN_TABLE_MAX_WIDTH_REM * 16),
+            0,
+          );
           expect(geometry.tables.Oversized!.scrollWidth).toBeGreaterThan(
             geometry.tables.Oversized!.width + 100,
           );
@@ -941,7 +947,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     // Expanding and collapsing a step changes row height, but it must neither
     // remove surrounding chat rows nor destroy the usable scroll range.
-    const step = page.getByRole("button", { name: /steps/ }).nth(4);
+    const step = page.locator('button[data-og-work-header="outer"]').nth(4);
     const anchor = page.locator('[data-conversation-message="user-201"]');
     // The clicked disclosure owns position; another row can move as it folds.
     await step.evaluate((node) => node.scrollIntoView({ block: "center" }));
@@ -1701,7 +1707,7 @@ describe("timeline scroll ownership browser regression", () => {
     );
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1761,7 +1767,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1806,7 +1812,7 @@ describe("timeline scroll ownership browser regression", () => {
           exact: true,
         },
       );
-      const disclosure = page.getByRole("button", { name: /steps?/ }).first();
+      const disclosure = page.locator('button[data-og-work-header="outer"]').first();
 
       await fallback.waitFor({ timeout: 5_000 });
       expect(await fallback.count()).toBe(1);
@@ -1817,7 +1823,7 @@ describe("timeline scroll ownership browser regression", () => {
       expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
       expect(await fallback.count()).toBe(1);
       expect(await fallback.isVisible()).toBe(true);
-      expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
+      expect(await page.getByText("Waited", { exact: true }).count()).toBe(1);
 
       await disclosure.click();
       expect(await disclosure.getAttribute("aria-expanded")).toBe("false");

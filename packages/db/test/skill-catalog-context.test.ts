@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readSkillCatalogContext, skillCatalogContextItem } from "@opengeni/contracts";
 import {
   createDb,
@@ -15,7 +15,12 @@ import {
   requestSessionCompaction,
   appendSessionHistoryItems,
   sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
+  withWorkspaceRls,
 } from "../src/index";
+import { toolRouterHistoryProbe } from "../src/session-tool-router-history";
+import { sql, type SQL } from "drizzle-orm";
+import type postgres from "postgres";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -141,6 +146,12 @@ test("router protocol history remains visible after compaction and is session-sc
   ).toBe(true);
   expect(await sessionHasToolRouterHistory(client.db, scope)).toBe(true);
   expect(
+    await sessionsWithToolRouterHistory(client.db, {
+      ...scope,
+      sessionIds: [f.sessionId, f.sessionId, other.sessionId, crypto.randomUUID()],
+    }),
+  ).toEqual(new Set([f.sessionId]));
+  expect(
     (
       await applyContextCompaction(client.db, {
         ...f.identity(turn),
@@ -151,12 +162,204 @@ test("router protocol history remains visible after compaction and is session-sc
   ).toBe(true);
   expect(await sessionHasToolRouterHistory(client.db, scope)).toBe(true);
   expect(
+    await sessionsWithToolRouterHistory(client.db, {
+      ...scope,
+      sessionIds: [f.sessionId],
+    }),
+  ).toEqual(new Set([f.sessionId]));
+  expect(
+    await sessionsWithToolRouterHistory(client.db, {
+      accountId: other.accountId,
+      workspaceId: other.workspaceId,
+      sessionIds: [f.sessionId],
+    }),
+  ).toEqual(new Set());
+  expect(
     await sessionHasToolRouterHistory(client.db, {
       accountId: other.accountId,
       workspaceId: other.workspaceId,
       sessionId: other.sessionId,
     }),
   ).toBe(false);
+}, 180_000);
+
+test("the router probe is a partial-index lookup that never visits ordinary history", async () => {
+  const f = await fixture();
+  const turn = await f.claim();
+  expect(
+    await appendSessionHistoryItems(client.db, {
+      ...f.identity(turn),
+      items: Array.from({ length: 200 }, (_, index) => ({
+        position: 100 + index,
+        item: { type: "function_call", name: "exec_command", call_id: `ordinary-${index}` },
+      })),
+    }),
+  ).toBe(true);
+  await shared.admin`analyze session_history_items`;
+  type PlanNode = { "Index Name"?: string; "Node Type": string; Plans?: PlanNode[] };
+  const indexes: string[] = [];
+  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    const query = toolRouterHistoryProbe(tx, f).toSQL();
+    const fragments: SQL[] = query.sql
+      .split(/\$(\d+)/g)
+      .map((part, index) =>
+        index % 2 === 0 ? sql.raw(part) : sql`${query.params[Number(part) - 1]}`,
+      );
+    const result = await tx.execute(sql`explain (format json) ${sql.join(fragments, sql``)}`);
+    const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[] | undefined;
+    const plan = plans?.[0]?.Plan;
+    if (!plan) throw new Error("Skill catalog probe returned no execution plan");
+    const walk = (node: PlanNode) => {
+      if (node["Index Name"]) indexes.push(node["Index Name"]);
+      node.Plans?.forEach(walk);
+    };
+    walk(plan);
+  });
+  expect(indexes).toContain("session_history_items_tool_router_idx");
+  expect(
+    await sessionHasToolRouterHistory(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.sessionId,
+    }),
+  ).toBe(false);
+}, 180_000);
+
+test("response pages batch router probes in one transaction, without scanning retained history", async () => {
+  const f = await fixture();
+  const turn = await f.claim();
+  expect(
+    await appendSessionHistoryItems(client.db, {
+      ...f.identity(turn),
+      items: Array.from({ length: 1000 }, (_, index) => ({
+        position: 100 + index,
+        item: {
+          type: "function_call",
+          name: "tool_list",
+          call_id: `router-${index}`,
+          arguments: "{}",
+        },
+      })),
+    }),
+  ).toBe(true);
+  const sessionIds = [f.sessionId];
+  for (let index = 1; index < 50; index++) {
+    const session = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    sessionIds.push(session.id);
+  }
+  const input = { accountId: f.accountId, workspaceId: f.workspaceId, sessionIds };
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  let statements = 0;
+  let transactions = 0;
+  let batchQuery: { text: string; params: unknown[] } | undefined;
+  let plannerStatement: string | undefined;
+  const measurements: {
+    operation: string;
+    statements: number;
+    transactions: number;
+    ms: number;
+  }[] = [];
+  const measure = async (operation: string, run: () => Promise<Set<string>>) => {
+    statements = 0;
+    transactions = 0;
+    const start = performance.now();
+    expect(await run()).toEqual(new Set([f.sessionId]));
+    measurements.push({ operation, statements, transactions, ms: performance.now() - start });
+  };
+  try {
+    driver.options.debug = (_connection, query, params) => {
+      statements++;
+      if (/^begin/i.test(query.trim())) transactions++;
+      if (query.includes("cross join lateral") && query.includes("requested.session_id")) {
+        batchQuery = { text: query, params: [...params] };
+      }
+      if (query.includes("set_config('enable_bitmapscan'")) plannerStatement = query;
+    };
+    for (let index = 0; index < 3; index++) {
+      await measure("individual", async () => {
+        const rows = await Promise.all(
+          sessionIds.map(
+            async (sessionId) =>
+              [
+                sessionId,
+                await sessionHasToolRouterHistory(client.db, { ...input, sessionId }),
+              ] as const,
+          ),
+        );
+        return new Set(rows.filter(([, present]) => present).map(([id]) => id));
+      });
+      await measure("batch", () => sessionsWithToolRouterHistory(client.db, input));
+    }
+    statements = 0;
+    expect(await sessionsWithToolRouterHistory(client.db, { ...input, sessionIds: [] })).toEqual(
+      new Set(),
+    );
+    expect(statements).toBe(0);
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+  for (const row of measurements) {
+    expect(row.transactions).toBe(row.operation === "batch" ? 1 : 50);
+    // The first single reads may also describe driver types on new connections.
+    // Batch: begin, RLS scope, planner setting, probe, commit.
+    if (row.operation === "batch") expect(row.statements).toBe(5);
+  }
+  if (process.env.OPENGENI_BENCH_ROUTER_HISTORY === "1")
+    console.log(JSON.stringify({ routerHistory: measurements }));
+  if (!batchQuery) throw new Error("No batch query captured");
+  if (!plannerStatement) throw new Error("No batch planner setting captured");
+  await shared.admin`analyze session_history_items`;
+  const query = batchQuery;
+  const planner = plannerStatement;
+  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    // Replay the batch transaction exactly as the product sent it.
+    await tx.execute(sql.raw(planner));
+    const fragments = query.text
+      .split(/\$(\d+)/g)
+      .map((part, index) =>
+        index % 2 === 0 ? sql.raw(part) : sql`${sql.param(query.params[Number(part) - 1])}`,
+      );
+    const rows = await tx.execute(
+      sql`explain (analyze, format json) ${sql.join(fragments, sql``)}`,
+    );
+    type Node = {
+      "Index Name"?: string;
+      "Actual Rows": number;
+      "Actual Loops": number;
+      Plans?: Node[];
+    };
+    const plans = rows[0]?.["QUERY PLAN"] as { Plan: Node }[] | undefined;
+    const plan = plans?.[0]?.Plan;
+    if (!plan) throw new Error("No batch router-history plan returned");
+    const probes: Node[] = [];
+    const visit = (node: Node) => {
+      if (node["Index Name"] === "session_history_items_tool_router_idx") probes.push(node);
+      node.Plans?.forEach(visit);
+    };
+    visit(plan);
+    expect(probes.length).toBeGreaterThan(0);
+    expect(
+      probes.reduce((sum, node) => sum + node["Actual Rows"] * node["Actual Loops"], 0),
+    ).toBeLessThanOrEqual(50);
+  });
+  // Inside a caller's transaction the probe runs in a savepoint; the caller
+  // keeps its own planner setting afterwards.
+  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    expect(await sessionsWithToolRouterHistory(tx, input)).toEqual(new Set([f.sessionId]));
+    const [setting] = await tx.execute<{ enable_bitmapscan: string }>(sql`show enable_bitmapscan`);
+    expect(setting?.enable_bitmapscan).toBe("on");
+  });
 }, 180_000);
 
 test("catalog changes append without rewriting history; unchanged turns and retries freeze the same snapshot", async () => {

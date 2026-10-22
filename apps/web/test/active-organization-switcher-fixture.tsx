@@ -3,8 +3,9 @@ import { createRoot } from "react-dom/client";
 
 import { OrganizationSwitcherLine } from "../src/components/rail/switcher-block";
 import { WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
-import { orgLabel, type OrgOption } from "../src/lib/org";
-import type { Workspace } from "../src/types";
+import { orgLabel, type OrgOption } from "@opengeni/react/app/lib/org";
+import { t } from "@opengeni/react/app/lib/console-text";
+import type { Workspace } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const firstAccountId = "11111111-1111-4111-8111-111111111111";
@@ -12,7 +13,7 @@ const secondAccountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 const organizations: OrgOption[] = [firstAccountId, secondAccountId].map((accountId) => ({
   accountId,
-  label: orgLabel(accountId, []),
+  label: orgLabel(t, accountId, []),
   canManage: false,
 }));
 

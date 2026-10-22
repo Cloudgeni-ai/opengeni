@@ -28,7 +28,7 @@ const context = {
   },
   workspaces: [{ id: DEVELOPMENT, accountId: ORG, kind: "shared", name: "Development" }],
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { error: toastError } }));
 mock.module("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
@@ -49,7 +49,8 @@ mock.module("@tanstack/react-router", () => ({
 }));
 
 const { PlaygroundRoute } = await import("./playground");
-const { ADD_AGENT_DEFAULT_PROMPT } = await import("@/components/new-session-starters");
+const { ADD_AGENT_DEFAULT_PROMPT } =
+  await import("@opengeni/react/app/components/new-session-starters");
 
 const realSetTimeout = globalThis.setTimeout;
 

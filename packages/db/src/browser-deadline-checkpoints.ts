@@ -11,6 +11,11 @@ const Target = z.object({
   instanceId: z.string().min(1).max(512),
   browserSessionId: z.uuid(),
   controllerGeneration: z.string().min(1).max(256),
+  // Absent means the provider-deadline checkpoint (the pre-0705 shape). `idle`
+  // saves a browser nobody used for the sandbox idle grace; only the reaper's
+  // locked idle decision prepares it (with `idleMs`), workers only continue it.
+  reason: z.enum(["provider_deadline", "idle"]).optional(),
+  idleMs: z.number().int().min(60_000).optional(),
 });
 const Claim = z.object({
   operationId: z.uuid(),
@@ -32,7 +37,9 @@ export async function listBrowserDeadlineCheckpoints(
 }
 
 /** The definer rechecks and locks the exact lease, holder, operation and controller.
- * Preparing is allowed only after provider rotation is already requested. */
+ * A provider-deadline checkpoint prepares only after provider rotation is
+ * already requested; an idle checkpoint prepares only an active browser unused
+ * for `idleMs`. */
 export async function browserDeadlineCheckpoint(
   db: Database,
   target: BrowserDeadlineCheckpointTarget,

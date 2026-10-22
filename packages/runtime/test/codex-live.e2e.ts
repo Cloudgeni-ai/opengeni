@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Agent, run, setTracingDisabled } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   accessTokenExpiry,

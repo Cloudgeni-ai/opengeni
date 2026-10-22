@@ -29,12 +29,9 @@ import {
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
@@ -110,7 +107,7 @@ async function botConnection(
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       ...identity,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "subject-a",
@@ -163,7 +160,7 @@ async function taskFixture(
     runMode,
     overlapPolicy: "allow_concurrent",
     agentConfig: {
-      prompt: "Use the explicitly selected OpenGeni Slack bot",
+      prompt: "Use the explicitly selected Opengeni Slack bot",
       resources: [],
       tools: [],
       metadata: {},
@@ -174,7 +171,7 @@ async function taskFixture(
   });
 }
 
-describe("scheduled OpenGeni Slack bot routing", () => {
+describe("scheduled Opengeni Slack bot routing", () => {
   test("binds the exact connection with safe creation evidence and revalidates revocation", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -227,7 +224,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     );
   });
 
-  test("only a task with a person-chosen channel gets the two bot posting tools", async () => {
+  test("scheduled work keeps the ordinary bot tools; a saved channel never adds excluded ones", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const { connection } = await botConnection(workspace);
@@ -253,20 +250,20 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     expect(posting.firstPartyMcpTools).not.toContain("slack_bot_post_message");
     expect(posting.firstPartyMcpTools).toContain("slack_bot_list_channels");
 
-    const readOnly = await dispatch(
+    // Scheduled and interactive work get the same bot capabilities: a task
+    // without a saved destination still has the ordinary posting tools.
+    const unrouted = await dispatch(
       (await taskFixture(workspace, connection.id, "new_session_per_run")).id,
     );
-    expect(readOnly.firstPartyMcpTools).not.toContain("slack_bot_prepare_message");
-    expect(readOnly.firstPartyMcpTools).not.toContain("slack_bot_send_prepared_message");
-    expect([...posting.firstPartyMcpTools!].sort()).toEqual(
-      [
-        ...readOnly.firstPartyMcpTools!,
-        "slack_bot_prepare_message",
-        "slack_bot_send_prepared_message",
-      ].sort(),
+    expect([...unrouted.firstPartyMcpTools!].sort()).toEqual(
+      [...posting.firstPartyMcpTools!].sort(),
+    );
+    const withoutPosting = posting.firstPartyMcpTools!.filter(
+      (tool) => tool !== "slack_bot_prepare_message" && tool !== "slack_bot_send_prepared_message",
     );
 
-    // An operator who disallows the posting tools keeps them off.
+    // An operator who disallows the posting tools keeps them off, even for a
+    // task with a saved channel.
     const ceilingTask = await taskFixture(
       workspace,
       connection.id,
@@ -274,7 +271,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       "C0SCHED01",
     );
     const capped = await activities({
-      allowedFirstPartyMcpTools: readOnly.firstPartyMcpTools!,
+      allowedFirstPartyMcpTools: withoutPosting,
     }).dispatchScheduledTaskRun({
       workspaceId: workspace.workspaceId,
       taskId: ceilingTask.id,
@@ -284,6 +281,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     if (capped.action !== "start") throw new Error("expected a started run");
     const cappedSession = await getSession(client.db, workspace.workspaceId, capped.sessionId);
     expect(cappedSession?.firstPartyMcpTools).not.toContain("slack_bot_prepare_message");
+    expect(cappedSession?.firstPartyMcpTools).not.toContain("slack_bot_send_prepared_message");
   });
 
   test("a person fixes the channel at setup; later edits keep it and an agent cannot choose one", async () => {
@@ -422,8 +420,10 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       canonicalLocalHumanSession: false,
     };
     const verifySlackChannel = async () => undefined;
-    const worker = activities();
-    const materialize = async (slackBotChannelId?: string) => {
+    const materialize = async (
+      slackBotChannelId?: string,
+      worker: ReturnType<typeof activities> = activities(),
+    ) => {
       const task = await taskFixture(
         workspace,
         connection.id,
@@ -469,8 +469,22 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     // That chat still has the tools, so a person can turn posting back on.
     expect((await update(off, "C0OTHER01")).agentConfig?.slackBotChannelId).toBe("C0OTHER01");
 
-    // A chat created without the tools cannot start posting.
-    const silent = await materialize();
+    // A chat created without the posting tools (here: the operator disallowed
+    // them) cannot start posting.
+    const postingSession = (await getSession(
+      client.db,
+      workspace.workspaceId,
+      posting.reusableSessionId!,
+    ))!;
+    const silent = await materialize(
+      undefined,
+      activities({
+        allowedFirstPartyMcpTools: postingSession.firstPartyMcpTools!.filter(
+          (tool) =>
+            tool !== "slack_bot_prepare_message" && tool !== "slack_bot_send_prepared_message",
+        ),
+      }),
+    );
     await expect(update(silent, "C0SCHED01")).rejects.toMatchObject({ status: 409 });
   });
 

@@ -320,7 +320,7 @@ describe("DNS-pinned outbound transport", () => {
         options,
       );
       await overrideResponse.body?.cancel();
-      expect(received).toEqual(["OpenGeni", "ExampleClient/2", "ExampleOverride/3"]);
+      expect(received).toEqual(["Opengeni", "ExampleClient/2", "ExampleOverride/3"]);
     } finally {
       server.stop(true);
     }
@@ -379,7 +379,7 @@ describe("DNS-pinned outbound transport", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: '{"client_name":"OpenGeni"}',
+          body: '{"client_name":"Opengeni"}',
         },
         testEscape,
         {
@@ -392,7 +392,7 @@ describe("DNS-pinned outbound transport", () => {
       expect(received).toEqual({
         method: "POST",
         contentType: "application/json",
-        body: '{"client_name":"OpenGeni"}',
+        body: '{"client_name":"Opengeni"}',
       });
     } finally {
       server.stop(true);

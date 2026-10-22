@@ -1,6 +1,7 @@
 // Thin ChatGPT/Codex API client used outside the streamed turn: the login-check
 // (GET /codex/models) and the usage/limits readback (GET /wham/usage). spec §1.4, §1.8, §F.
 
+import { modelServiceTierCatalogEntry } from "@opengeni/contracts";
 import { CODEX_ORIGINATOR, CODEX_RESPONSES_BASE, CODEX_WHAM_BASE } from "./constants";
 import type { CodexFetch } from "./device-code";
 import {
@@ -55,10 +56,22 @@ export async function fetchCodexModels(
       await res.arrayBuffer().catch(() => undefined);
       return { ok: false, status: res.status, slugs: [] as string[] };
     }
-    const body = (await res.json()) as { models?: Array<{ slug?: string }> };
-    const slugs = (body.models ?? [])
-      .map((model) => model.slug)
-      .filter((slug): slug is string => typeof slug === "string");
+    const body = (await res.json()) as {
+      models?: Array<{ slug?: unknown; service_tiers?: unknown }>;
+    };
+    // The account's entitled models, followed by each model's advertised
+    // service tiers (Ultrafast is offered only on some plans).
+    const slugs: string[] = [];
+    for (const model of body.models ?? []) {
+      if (typeof model.slug !== "string" || model.slug.includes("@")) continue;
+      slugs.push(model.slug);
+      if (!Array.isArray(model.service_tiers)) continue;
+      for (const tier of model.service_tiers as Array<{ id?: unknown }>) {
+        if (typeof tier?.id === "string" && /^[a-z][a-z0-9_-]*$/u.test(tier.id)) {
+          slugs.push(modelServiceTierCatalogEntry(model.slug, tier.id));
+        }
+      }
+    }
     return { ok: true, status: res.status, slugs };
   }, timeoutMs);
   return fetched.ok ? fetched.value : { ok: false, status: 0, slugs: [] };
@@ -132,7 +145,7 @@ export async function fetchCodexRateLimitResetCredits(
  * POST /wham/rate-limit-reset-credits/consume with the exact v0.144.6 body.
  * `idempotencyKey` identifies one logical human redemption and MUST be reused
  * by the server on retries. Supplying `creditId` is preferred; omission leaves
- * provider selection in control and is therefore not used by OpenGeni's
+ * provider selection in control and is therefore not used by Opengeni's
  * human-only flow.
  */
 export async function consumeCodexRateLimitResetCredit(

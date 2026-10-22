@@ -592,7 +592,7 @@ async function personalGitHubProviderFetch(
       headers: {
         accept: "application/vnd.github+json",
         authorization,
-        "user-agent": "OpenGeni",
+        "user-agent": "Opengeni",
         "x-github-api-version": GITHUB_API_VERSION,
       },
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),

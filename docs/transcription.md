@@ -121,7 +121,7 @@ new writes use `voiceInput`.
 Finalization verifies the client totals against durable upload truth, reads every
 chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
 sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
-is the lower of the OpenGeni 50-second target and the selected service's maximum;
+is the lower of the Opengeni 50-second target and the selected service's maximum;
 recordings that would require more than 1,000 segments fail before ffmpeg starts.
 Generation and pre-provider attempt leases become reclaimable after 15 minutes.
 Immediately before a provider call, the server refreshes the durable attempt
@@ -250,7 +250,7 @@ available independently when a provider is ready.
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
 | React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
 | Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
-| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `apps/web/src/components/transcription-settings.tsx` |
+| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `packages/react/src/app/components/transcription-settings.tsx` |
 
 Deprecated host-adapter types remain exported from
 `packages/sdk/src/transcription.ts` for one compatibility release.
@@ -280,6 +280,12 @@ pinned to a provider keeps that provider. Workspace preferences still apply.
   $0.10 per audio hour, so `{"microsPerMinute":1667,"marginBps":500}` (the
   same 5% margin as models). OpenAI/Azure have built-in prices for recognized
   transcription models; override contracted rates.
+
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` replaces the margin on all provider-rate
+transcription prices, including custom entries that specify `marginBps`.
+Leave it unset to preserve current margins; use `0` to bill at the configured
+provider rates without an added margin. Direct fixed credit tariffs are not
+affected.
 
 When Stripe billing or managed usage limits are enabled, deployment-funded
 providers require general credits. Connected subscriptions are never debited.

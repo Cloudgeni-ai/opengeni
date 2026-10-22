@@ -47,3 +47,19 @@ test("model-scoped promotional credits do not claim voice coverage", async () =>
   const container = await openDetails(false);
   expect(container.textContent).not.toContain("Dictation and live voice");
 });
+
+test("a scoped credit row names the models it covers before it is opened", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <CreditScopeDetails
+        label="Credit gift"
+        amount="$100.00"
+        eligibleModelIds={["gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-6-terra"]}
+      />,
+    ),
+  );
+  expect(container.textContent).toMatch(/Only for .+, .+ and 2 more/);
+});

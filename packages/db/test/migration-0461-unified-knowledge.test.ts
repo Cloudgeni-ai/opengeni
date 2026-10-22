@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, withSessionRlsActorContext } from "../src/database";
 import {
@@ -49,6 +49,8 @@ import {
 import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -56,6 +58,8 @@ const forwardMigrations = [
   "0466_agent_instruction_activation_preservation.sql",
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
+  "0640_knowledge_entry_created_since.sql",
+  ...knowledgeActorMigrationTail,
   // Requires the post-0461 Skill lifecycle, including confirm_response.
   "0488_permanent_skill_removal.sql",
   // Rewrites the original-file policy introduced by 0461.
@@ -72,6 +76,32 @@ const forwardMigrations = [
   "0561_scheduled_session_agent_identity.sql",
   // Replaces the private instruction helper created by withheld 0466.
   "0584_agent_instruction_size_parity.sql",
+  // The session storage lifecycle extends the withheld 0560 import guards.
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
+  "0652_session_archive_guard_search_path.sql",
+  "0653_session_archive_tenancy_fence.sql",
+  "0657_session_archive_purge_retained_evidence.sql",
+  // The list notification projection includes withheld archive/import fields.
+  "0888_session_list_invalidation.sql",
+  "0660_session_archive_preference_snapshot_export.sql",
+  // Resolves the Knowledge claim installed by the withheld 0461 migration.
+  "0730_maintenance_work_probes.sql",
+  // Rewrites the visibility transition installed by withheld 0501; replay after it.
+  "0738_private_sessions_share_sandboxes.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Replaces the file ownership trigger from 0461 and reads 0499's file
+  // read-capability table; replay after both.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines from replayed 0738; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and backfills over 0560's import column.
+  "0856_session_fork_workflow_identity.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501.
+  "0873_mcp_binding_delegation_revocation.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -401,6 +431,20 @@ beforeAll(async () => {
   try {
     await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
     await owner`INSERT INTO schema_migrations(name) SELECT unnest(${[migration, ...forwardMigrations]}::text[])`;
+    // The drained SuperGrok cutover reads the withheld 0560 import column; this
+    // fixture never runs that maintenance step or the ones after it (the
+    // Claude cutover and the retirement), so they stay recorded.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
+    // The queue Steer admission repair is a one-time data repair that also
+    // reads the withheld 0560 import column; it changes no schema.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0763_queue_steer_admission_recheck_repair.sql')`;
+    // The private-visibility leftover rewrite anchors on the current
+    // quiescence function body, which this fixture's withheld migrations shape
+    // differently; it adds no storage this fixture reads.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0768_private_visibility_ignores_leftovers.sql')`;
+    // 0769 rewrites the same routines again; it adds a trigger on
+    // session_system_updates whose columns this fixture's withheld migrations shape.
+    await owner`INSERT INTO schema_migrations(name) VALUES ('0769_private_visibility_never_blocks.sql')`;
     await migrate(owned.ownerUrl);
     // Current session adapters select these nullable reader fields. Do not
     // activate the import lifecycle before its withheld 0499 prerequisite.
@@ -409,7 +453,16 @@ beforeAll(async () => {
       ADD COLUMN imported_archive_imported_at timestamptz,
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
-      ADD COLUMN imported_archive_next_offset integer`;
+      ADD COLUMN imported_archive_next_offset integer,
+      ADD COLUMN keep_live boolean NOT NULL DEFAULT false,
+      ADD COLUMN content_archive_state text,
+      ADD COLUMN content_archive_started_at timestamptz,
+      ADD COLUMN content_archived_at timestamptz,
+      ADD COLUMN content_archive jsonb,
+      ADD COLUMN content_archive_purged_at timestamptz`;
+    // The current schedule adapter writes 0720's audience; 0720 stays withheld.
+    await owner`ALTER TABLE scheduled_tasks
+      ADD COLUMN visibility text NOT NULL DEFAULT 'workspace_shared'`;
     await owned.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Acme migration')`;
     await owned.admin`INSERT INTO workspaces(id,account_id,name,settings)
       VALUES(${workspaceId},${accountId},'Migration workspace','{"memoryEnabled":false}')`;
@@ -630,7 +683,14 @@ beforeAll(async () => {
       DROP COLUMN imported_archive_imported_at,
       DROP COLUMN imported_archive_request_hash,
       DROP COLUMN imported_archive_subject_id,
-      DROP COLUMN imported_archive_next_offset`;
+      DROP COLUMN imported_archive_next_offset,
+      DROP COLUMN keep_live,
+      DROP COLUMN content_archive_state,
+      DROP COLUMN content_archive_started_at,
+      DROP COLUMN content_archived_at,
+      DROP COLUMN content_archive,
+      DROP COLUMN content_archive_purged_at`;
+    await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
     await owner`DELETE FROM schema_migrations WHERE name=ANY(${[migration, ...forwardMigrations]}::text[])`;
   } finally {
     await owner.end({ timeout: 5 });

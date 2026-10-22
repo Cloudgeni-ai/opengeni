@@ -12,11 +12,8 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import { createConnection, createDb, grantWorkspaceAccess, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = "slack-channel-routes-delegation-secret";
@@ -107,7 +104,7 @@ async function installation(label: string) {
       slackTeamName: `Slack ${label}`,
       botId: `B_${label}`,
       botUserId: `UB_${label}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });

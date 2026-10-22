@@ -17,6 +17,7 @@ createSessionProxyRoute(og, {
   toolServer: {
     // url defaults to OPENGENI_TOOL_SERVER_URL: public HTTPS, a tunnel when local
     approvals: { ask: ["rename_post"] }, // every write tool; `true` for all tools
+    eager: ["search_posts"], // everyday tools on the first request; the rest stay searchable
   },
 });
 ```
@@ -64,6 +65,11 @@ the user who started the chat, also in shared chats. The token is an HS256 JWT
 signed with a key derived from `OPENGENI_API_KEY`, with `aud` set to the tool
 URL, `sub` the user, and `tenant` and `workspace_id` claims.
 
+`eager` lists the few tools nearly every chat needs (usually reads such as
+search and get). The agent has them from its first request; every other tool
+stays behind tool search. Keep the list short and stable: each listed schema
+is sent on every request, and changing the list changes the cached prefix.
+
 Authorize every call:
 
 - Scope every query to the verified `user` and `tenant`. Treat ids the model
@@ -88,6 +94,30 @@ Your own tokens instead of `toolServer`: add the server in `createSession`
 `{ kind: "mcp", id }` in `tools` when you pass `tools`), and return
 `{ mcpCredentialUpdates: [{ id, headers }] }` from `beforeForwardMessage` to
 rotate it.
+
+Let admins choose Allow, Ask first, or Block per tool. `approvals.ask` (or
+`requireApproval`) is only the recommendation. Saved choices win, and
+Opengeni enforces them; an Ask call waits for a person to approve it. Build
+the settings screen on your server with the same server id and exact URL you
+attach:
+
+```ts
+const server = { serverId: "app", url: process.env.OPENGENI_TOOL_SERVER_URL! };
+const saved = await og.asUser(admin.id).getSessionMcpToolPermissions(workspaceId, server);
+// saved.defaultPermission: "Allow all" and the like; saved.tools: per-tool choices.
+await og.asUser(admin.id).updateSessionMcpToolPermissions(workspaceId, {
+  ...server,
+  target: "tools", // or "default" for every tool without its own choice
+  toolNames: ["delete_post"],
+  permission: "block", // "allow" | "ask" | "block", or null to reset
+  expectedRevision: saved.revision,
+});
+```
+
+Writes need `capabilities:manage`. Agents cannot change their own
+permissions. A change applies from each chat's next run. Choices are keyed to
+the exact URL string, so changing it (even a trailing slash or query) starts
+from no saved choices; re-save them under the new URL when you move the server.
 
 ### Local development
 
@@ -146,8 +176,77 @@ Every session in that workspace uses the same credential, so scope it to what
 any member of the workspace may do. The API must be reachable from Opengeni
 over public HTTPS.
 
-## Credentials
+## Direct current-human tools and Sites
+
+Separate agent `toolServer` attachment above from current-human direct calls.
+An authorized host's `client.tools.forWorkspace(id)` invokes known identities or
+canonical symbolic paths without first loading the workspace catalog. Use
+`$resolve({ identity })` plus `expectedDefinitionDigest` when code needs to pin
+the complete public definition; use `$approveTarget` only after the host's human
+approval UI. Never put these capabilities in iframe code. These endpoints do not
+grant organization keys arbitrary human authority, and are not automatically
+added to the session proxy's supported routes.
+
+Modern `@opengeni/sdk/site` clients negotiate targeted calls. Upgraded hosts also
+adapt old bundled Site clients through a bounded saved-version tool manifest;
+local previews still use the frozen Codemode attempt. Use explicit
+`toolGatewayMode: "catalog"` for older hosts/APIs, not speculative fallback.
+Uncertain execution must be reconciled, never automatically replayed. See the SDK
+README's Workspace tools section for approval and migration details.
+
+## Credential handling
 
 Never put tokens in prompts, Skills, `modelContext`, tool URLs, browser code,
 or logs. Opengeni stores Connection and MCP header secrets encrypted and keeps
 them out of the model's context.
+
+### Your product as a vault provider
+
+Use native vaults when the agent needs to discover and use stored credentials.
+An embedding product can expose multiple remote vaults through a signed
+`external` connection; an in-process host can keep using
+`connectionCredentials.vaultProvider`. Keep the simple chat/tool integration
+above unchanged unless the product actually needs this optional capability.
+
+Configure remote connections on the server with `vaultsApi(client, workspaceId)`
+from `@opengeni/sdk`: `installVaultProvider`, `getVaultProviderCatalog`,
+`listProviderVaults`, and `linkProviderVault`. Never put provider tokens or the
+signing secret in browser code, model context, or URL parameters. Verify each
+request's raw-body signature and map its native account/workspace/subject to
+the host's actual tenant/user before authorizing it. A shared connection must
+not return a different user's inventory into the same metadata mirror; use
+separate user-owned connections for user-specific stores.
+
+Connection setup uses the existing `connections:write` and `secrets:write`
+permissions and native owner checks, including authorized agent attempts for
+shared connections. Personal setup requires the verified owner, and
+organization setup requires its admin. List/read/write operations always use
+the registered connection endpoint, not a per-call URL chosen by a tool caller.
+
+`getVaultProviderCatalog` includes deployment availability even before anyone
+connects; disable unavailable setup choices instead of collecting credentials
+that this deployment cannot use. `listVaultProviderConnections` remains a
+metadata-only convenience when only existing connections are needed.
+
+For a remote host, use `createExternalVaultReceiver` from the server-only
+`@opengeni/sdk/external-vault-receiver` subpath and a durable atomic replay and
+mutation store. The in-memory store is only for local tests. Its
+`resolveConnection` binds the native connection to one fixed host inventory;
+`authorize` checks the mapped person on every operation. If the host must
+register the native connection ID first, install returns saved/pending setup;
+register that ID, then verify. Never accept all unknown connections into one
+default tenant to avoid this registration step.
+
+Provider capabilities are granular: do not assume every read-write vault can
+update TOTP, upload files, restore history or archive items. Distinguish cached
+metadata from live value reads. Incomplete discovery or an unavailable source
+is not proof that the user has no matching secret. For a saved-but-pending
+setup (`discoveryPending: true`), use `verifyVaultProviderConnection` with the
+connection ID rather than resubmitting a consumed bootstrap token.
+
+The native secret ask card still saves to hosted vaults only. If the host must
+own collection, collect in the host UI and expose the saved item via its
+provider. Keep short-lived per-attempt credentials on the existing renewable
+credential callback: a stored item does not replace expiry/renewal, Git/MCP
+transport bindings or cleanup. See the product's external-vault and credential
+provider documentation before implementing either path.

@@ -5,7 +5,7 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   codemodeSessionProxyPermissions,
   CODEMODE_SESSION_PROXY_PERMISSION_CEILING,

@@ -13,6 +13,9 @@ import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-
 import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
 import { LightboxProvider, useLightboxOptional } from "../src/timeline/screenshot-lightbox";
 import { registerDom } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -259,7 +262,7 @@ describe("ChatComposer attachments", () => {
     expect(retained).toEqual([attachment.id]);
   });
 
-  test("loads a restored image into the lightbox only when its preview is clicked", async () => {
+  test("shows a restored image's stored thumbnail and opens it without loading again", async () => {
     const attachment = restoredPreviewChip("restored.png");
     const requested: string[] = [];
     const opened: Parameters<LightboxOpen>[] = [];
@@ -283,13 +286,54 @@ describe("ChatComposer attachments", () => {
       '[aria-label="Preview restored.png"]',
     );
     expect(preview).not.toBeNull();
-    expect(requested).toEqual([]);
+    // The thumbnail loads on its own, so restored drafts show their images.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(preview?.querySelector("img")?.getAttribute("src")).toBe(
+      "https://files.example/restored.png",
+    );
     await act(async () => {
       preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(requested).toEqual([attachment.id]);
     expect(opened[0]?.[0]).toBe("https://files.example/restored.png");
+  });
+
+  test("a broken local preview falls back to the stored copy", async () => {
+    const attachment = { ...restoredPreviewChip("broken.png"), previewUrl: "blob:broken" };
+    const requested: string[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            loadPreview: async (id) => {
+              requested.push(id);
+              return "https://files.example/broken.png";
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+    const image = container.querySelector<HTMLImageElement>(
+      '[aria-label="Preview broken.png"] img',
+    );
+    expect(image?.getAttribute("src")).toBe("blob:broken");
+    expect(requested).toEqual([]);
+    await act(async () => {
+      image?.dispatchEvent(new Event("error"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(
+      container
+        .querySelector<HTMLImageElement>('[aria-label="Preview broken.png"] img')
+        ?.getAttribute("src"),
+    ).toBe("https://files.example/broken.png");
   });
 
   test("replaces a stale unretained blob preview with the durable ready-file source", async () => {
@@ -429,7 +473,7 @@ describe("ChatComposer attachments", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),
@@ -445,7 +489,7 @@ describe("ChatComposer attachments", () => {
       />,
     );
 
-    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(container.textContent ?? "").toContain(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText));
     expect(container.textContent ?? "").toContain("preserved.png");
     expect(container.querySelector('[aria-label="Remove preserved.png"]')).not.toBeNull();
     expect(sendButton(container)?.disabled).toBe(false);
@@ -535,7 +579,7 @@ describe("ChatComposer attachments", () => {
     );
 
     expect(container.textContent ?? "").toContain(
-      "Couldn’t attach this file because Opengeni is open over HTTP.",
+      "Couldn’t attach this file because this page is open over HTTP.",
     );
     expect(container.textContent ?? "").toContain(
       "Open the secure site or configure HTTPS for this deployment.",

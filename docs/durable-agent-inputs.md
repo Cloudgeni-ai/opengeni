@@ -40,6 +40,17 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
+An explicit operator retirement of historical interrupted work is not fresh
+execution intent. Its failed child outcome is a `system.update.settled` timeline
+receipt marked `notificationOnly` with reason `operator_retirement`, not a
+`session_system_updates` row. The parent sees the receipt when the chat is opened;
+it is not injected into model history on the next turn and does not wake a held
+wait, create a turn or block tenancy/schedule quiescence. The agent can inspect
+the timeline explicitly during later authorized work. Retirement supersedes that
+child's obsolete pending progress/action/pause/capacity notices, preserving prior
+terminal answers and unrelated senders. Normal child results still follow the
+canonical input and wake lifecycle above.
+
 Execution ownership is selected before batching. Ordinary same-human agent
 messages and child results use the receiving chat's last started user/API request
 context, including its accepted accounts and provider choices. Sender snapshots
@@ -123,12 +134,19 @@ background-command settlement registers the same wake but does not signal from
 its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 for completed/paused goals without a held wait do not create new work.
+"Eligible" includes the compaction-failure hold: when the newest finished turn
+failed with `context_compaction_failed`, only an input whose pending event is
+newer than that failure (or an Agent Steer) is eligible, so held-only input is
+acknowledged instead of re-signalling a workflow that has nothing to claim,
+and a new input after the failure wakes the session and carries the held
+backlog. See [`context-compaction.md`](context-compaction.md).
 
 The workflow-wake reaper also inventories authentic pending child terminal
 results for idle parents with no goal and a fully acknowledged old wake. A
 bounded keyset scan returns identities only; scoped repair rechecks effective
 control, the child-parent producer ledger, ownership and both writer gates,
-then reserves the pending batch and registers one wake atomically. It never
+then reserves the pending batch and registers one wake atomically. A result
+held by a compaction failure is not repaired until newer input arrives. It never
 replays child/provider work or fabricates output. Completed/paused goals remain
 settled; paused or busy candidates cannot starve later inventory pages.
 

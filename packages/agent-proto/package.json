@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/agent-proto",
-  "version": "1.4.4",
-  "description": "Generated TypeScript wire-protocol types for the OpenGeni self-hosted agent — the control-plane side of the single-source-of-truth codegen from agent/proto/opengeni_agent.proto.",
+  "version": "4.3.1",
+  "description": "Generated TypeScript wire-protocol types for the Opengeni self-hosted agent — the control-plane side of the single-source-of-truth codegen from agent/proto/opengeni_agent.proto.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -28,7 +28,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "codegen": "bash scripts/codegen.sh",
     "test": "bun test ./test",

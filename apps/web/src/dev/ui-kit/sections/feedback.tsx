@@ -2,15 +2,15 @@ import { CheckIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { DisabledReason } from "@/components/ui/disabled-reason";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { HelpLink, HelpTip, InlineHelp } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { StatGroup, StatTile } from "@/components/ui/stat-tile";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { HelpLink, HelpTip, InlineHelp } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   codexWorkspaceAccounts,
   connectedCapabilities,
@@ -254,7 +254,7 @@ function RetryButton({ label = "Try again" }: { label?: string }) {
 function CopyRewrite() {
   const rows = [
     {
-      before: "OpenGeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
+      before: "Opengeni API 404: Connected MCP connector not found Reference: 4b1d7e2a-93c5-…",
       after: "Couldn't load this connection's tools. Try again.",
     },
     {

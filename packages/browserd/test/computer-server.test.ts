@@ -24,7 +24,9 @@ import {
   type ComputerImageFrame,
   type ComputerSupervisorDriver,
   type ComputerSupervisorDriverContext,
+  type ControllerFailureContext,
 } from "../src";
+import { InteractionControllerError } from "@opengeni/interaction";
 
 const adminToken = `admin.${"a".repeat(48)}`;
 const controlToken = `control.${"c".repeat(48)}`;
@@ -33,11 +35,60 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
-  test("includes an open computer controller in the private update idle proof", async () => {
-    await withServer(async ({ server, reference }) => {
-      const idle = async () =>
-        await json(await request(server, "/v1/runtime", { token: adminToken }));
-      expect((await idle()).data).toEqual({ idle: true });
+  test("keeps a large queued frame stream open while the socket drains", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
+      const created = await request(server, "/v1/computer-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      const driver = getDriver();
+      const source = await driver.capture();
+      const image = new Uint8Array(2 * 1024 * 1024);
+      image.set(source.data);
+      driver.subscribeFrames = async () => {
+        const subscription = new LatestComputerFrameSubscription(async () => undefined);
+        queueMicrotask(() => subscription.push({ ...source, sequence: 1, data: image }));
+        setTimeout(() => subscription.push({ ...source, sequence: 2, data: image }), 80);
+        return subscription;
+      };
+
+      const websocket = new WebSocket(
+        `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/window-1/frames`,
+        [
+          COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+        ],
+      );
+      websocket.binaryType = "arraybuffer";
+      try {
+        const sequences = await new Promise<number[]>((resolve, reject) => {
+          const values: number[] = [];
+          const timer = setTimeout(() => reject(new Error("large frame stream stalled")), 3_000);
+          websocket.addEventListener("message", (event) => {
+            values.push(
+              decodeComputerFrameMessage(new Uint8Array(event.data as ArrayBuffer)).sequence,
+            );
+            if (values.length === 2) {
+              clearTimeout(timer);
+              resolve(values);
+            }
+          });
+          websocket.addEventListener("close", (event) => {
+            clearTimeout(timer);
+            reject(new Error(`large frame stream closed: ${event.code}`));
+          });
+        });
+        expect(sequences).toEqual([1, 2]);
+      } finally {
+        websocket.close();
+      }
+    });
+  });
+
+  test("native calls require control tokens, bind the URL resource, and replay through the shared journal", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
       expect(
         (
           await request(server, "/v1/computer-sessions", {
@@ -47,18 +98,277 @@ describe("Computer routes on the placement interaction server", () => {
           })
         ).status,
       ).toBe(201);
-      expect((await idle()).data).toEqual({ idle: false });
+      let dispatches = 0;
+      const driver = getDriver() as ComputerSupervisorDriver;
+      driver.validateNative = async () => {};
+      driver.dispatchNative = async (call) => {
+        dispatches++;
+        return {
+          target: null,
+          ...reference,
+          tool: call.tool,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: call.arguments.large ? "A".repeat(41 * 1024 * 1024) : "native",
+              },
+            ],
+          },
+          outcome: "completed",
+          error: null,
+        };
+      };
+      const body = {
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        ...reference,
+        targetId: null,
+        actor: { kind: "agent", subjectId: "agent:fixture" },
+        tool: "list_apps",
+        arguments: {},
+      };
+      const path = `/v1/computer-sessions/${reference.computerSessionId}/native-calls`;
+      expect((await request(server, path, { method: "POST", token: viewToken, body })).status).toBe(
+        401,
+      );
       expect(
         (
-          await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+          await request(server, path, {
             method: "POST",
-            token: adminToken,
-            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+            token: controlToken,
+            body: { ...body, computerSessionId: randomUUID() },
           })
         ).status,
-      ).toBe(200);
-      expect((await idle()).data).toEqual({ idle: true });
+      ).toBe(409);
+      const first = await json(
+        await request(server, path, { method: "POST", token: controlToken, body }),
+      );
+      expect(first.data).toMatchObject({
+        state: "completed",
+        targetId: null,
+        observation: { tool: "list_apps" },
+      });
+      expect(
+        await json(await request(server, path, { method: "POST", token: controlToken, body })),
+      ).toEqual(first);
+      expect(dispatches).toBe(1);
+      expect(
+        (
+          await json(
+            await request(
+              server,
+              `/v1/computer-sessions/${reference.computerSessionId}/operations/${body.operationId}`,
+              { token: viewToken },
+            ),
+          )
+        ).data,
+      ).toEqual(first.data);
+      const largeBody = { ...body, operationId: randomUUID(), arguments: { large: true } };
+      const large = await json(
+        await request(server, path, { method: "POST", token: controlToken, body: largeBody }),
+      );
+      expect(large.data.state).toBe("completed");
+      expect(large.data.observation.result._meta.opengeniOutputTruncated).toBe(true);
+      expect(JSON.stringify(large).length).toBeLessThan(12 * 1024 * 1024);
+      expect(
+        (
+          await json(
+            await request(
+              server,
+              `/v1/computer-sessions/${reference.computerSessionId}/operations/${largeBody.operationId}`,
+              { token: viewToken },
+            ),
+          )
+        ).data,
+      ).toEqual(large.data);
+      expect(dispatches).toBe(2);
     });
+  });
+  test("closed RFB work remains busy until its queued native validation settles", async () => {
+    await withRfbServer(async ({ server, reference, driver, received }) => {
+      const grant = rfbGrantBody(reference, true);
+      expect(
+        (
+          await request(
+            server,
+            `/v1/computer-sessions/${reference.computerSessionId}/view-grants`,
+            {
+              method: "POST",
+              token: adminToken,
+              body: grant,
+            },
+          )
+        ).status,
+      ).toBe(201);
+      const socket = await openRfb(server, reference.computerSessionId, grant.token);
+      socket.send(rfbHandshake());
+      await waitUntil(() => received.length === rfbHandshake().length);
+      const entered = Promise.withResolvers<void>();
+      const blocked = Promise.withResolvers<void>();
+      driver.beforeTarget = async () => {
+        entered.resolve();
+        await blocked.promise;
+      };
+      const closed = websocketClosed(socket);
+      socket.send(Uint8Array.of(4, 1, 0, 0));
+      await entered.promise;
+      try {
+        expect(
+          (
+            await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+              method: "POST",
+              token: adminToken,
+              body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+            })
+          ).status,
+        ).toBe(200);
+        expect((await closed).code).toBe(1001);
+        expect(
+          (await json(await request(server, "/v1/runtime", { token: adminToken }))).data.idle,
+        ).toBe(false);
+        expect(
+          (
+            await json(
+              await request(server, "/v1/runtime/update", {
+                method: "POST",
+                token: adminToken,
+                body: { operationId: randomUUID() },
+              }),
+            )
+          ).data.idle,
+        ).toBe(false);
+      } finally {
+        blocked.resolve();
+      }
+      let idle = false;
+      for (let attempt = 0; attempt < 20 && !idle; attempt += 1)
+        idle = (await json(await request(server, "/v1/runtime", { token: adminToken }))).data.idle;
+      expect(idle).toBe(true);
+      expect(received).toEqual([...rfbHandshake()]);
+    });
+  });
+
+  test("controller shutdown joins a non-lifecycle HTTP request after closing its session", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
+      expect(
+        (
+          await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const driver = getDriver();
+      const entered = Promise.withResolvers<void>();
+      const blocked = Promise.withResolvers<void>();
+      const retired = Promise.withResolvers<void>();
+      driver.beforeTarget = async () => {
+        entered.resolve();
+        await blocked.promise;
+      };
+      driver.close = async () => {
+        retired.resolve();
+      };
+      const reading = request(
+        server,
+        `/v1/computer-sessions/${reference.computerSessionId}/targets/window-1/observation`,
+        {
+          token: viewToken,
+        },
+      ).catch(() => undefined);
+      await entered.promise;
+      let stopped = false;
+      const stopping = server.stop().then(() => {
+        stopped = true;
+      });
+      try {
+        await retired.promise;
+        await Bun.sleep(0);
+        expect(stopped).toBe(false);
+      } finally {
+        blocked.resolve();
+      }
+      await reading;
+      await stopping;
+      expect(stopped).toBe(true);
+    });
+  });
+
+  test.each([
+    ["physical seat", undefined, true],
+    ["isolated virtual seat", 5901, false],
+  ] as const)(
+    "update idle proof with an open computer controller on a %s",
+    async (_seat, rfbPort, openIsIdle) => {
+      await withServer(
+        async ({ server, reference }) => {
+          const idle = async () =>
+            await json(await request(server, "/v1/runtime", { token: adminToken }));
+          expect((await idle()).data).toEqual({ idle: true, empty: true });
+          expect(
+            (
+              await request(server, "/v1/computer-sessions", {
+                method: "POST",
+                token: adminToken,
+                body: createBody(reference),
+              })
+            ).status,
+          ).toBe(201);
+          // A physical seat keeps nothing a restart would lose; the next
+          // request recreates its controller. A virtual seat owns its desktop.
+          // Either way an open session means the controller is not empty, so
+          // its parent keeps it running.
+          expect((await idle()).data).toEqual({ idle: openIsIdle, empty: false });
+          expect(
+            (
+              await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+                method: "POST",
+                token: adminToken,
+                body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+              })
+            ).status,
+          ).toBe(200);
+          expect((await idle()).data).toEqual({ idle: true, empty: true });
+        },
+        rfbPort === undefined ? {} : { rfbPort },
+      );
+    },
+  );
+
+  test("a driver failure tells operators its class and function, never its variable text", async () => {
+    const reported: Array<{ error: unknown; context: ControllerFailureContext }> = [];
+    await withServer(
+      async ({ server, reference, getDriver }) => {
+        const created = await request(server, "/v1/computer-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const message = "CUA list_windows did not return a valid result: Payroll 2026 - Numbers";
+        getDriver().listTargetsError = new InteractionControllerError("driver_failed", message);
+        const failed = await request(
+          server,
+          `/v1/computer-sessions/${reference.computerSessionId}/targets`,
+          { token: viewToken },
+        );
+        expect(failed.status).toBe(500);
+        const body = await json(failed);
+        // The caller's error is unchanged; the diagnostic rides beside it.
+        expect(body.error).toEqual({ code: "driver_failed", message, retryable: false });
+        expect(body.diagnostic.errorClass).toBe("InteractionControllerError");
+        expect(JSON.stringify(body.diagnostic)).not.toContain("Payroll");
+        expect(reported).toHaveLength(1);
+        expect(reported[0]?.context).toEqual({
+          method: "GET",
+          pathname: `/v1/computer-sessions/${reference.computerSessionId}/targets`,
+          kind: "driver_failed",
+        });
+      },
+      { onUnexpectedError: (error, context) => reported.push({ error, context }) },
+    );
   });
 
   test("share Browser authority, fencing, media, rotation, and lifecycle semantics", async () => {
@@ -625,12 +935,14 @@ async function withServer(
     reference: { computerSessionId: string; controllerGeneration: string };
     getDriver: () => FixtureComputerDriver;
   }) => Promise<void>,
-  options: { rfbPort?: number } = {},
+  options: {
+    rfbPort?: number;
+    onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+  } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/og-computer-server-");
   const browserSupervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "browser-state"),
-    socketRootDirectory: join(directory, "browser-sockets"),
     createDriver: async () => {
       throw new Error("browser driver must not be used by computer routes");
     },
@@ -649,6 +961,7 @@ async function withServer(
     computerSupervisor,
     adminToken,
     port: 0,
+    ...(options.onUnexpectedError ? { onUnexpectedError: options.onUnexpectedError } : {}),
   });
   try {
     await callback({
@@ -689,7 +1002,10 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     private readonly includeScreen = false,
   ) {}
 
+  listTargetsError: Error | null = null;
+
   async listTargets(): Promise<ComputerTarget[]> {
+    if (this.listTargetsError) throw this.listTargetsError;
     return this.includeScreen
       ? [this.buildTarget(), this.buildScreenTarget()]
       : [this.buildTarget()];

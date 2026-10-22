@@ -5,15 +5,83 @@ import {
   type Session,
   type ToolRef,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
+  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
 } from "../src/domain/agent-config-resolution";
 
 const settings = testSettings();
+
+describe("new-session Knowledge search selection", () => {
+  const config = resolveSessionAgentConfigForCreate({
+    settings,
+    creator: "api",
+    request: { capabilities: "all" },
+    instructions: undefined,
+    workspaceSettings: {},
+    parent: null,
+    goal: false,
+  }).config!;
+
+  test("persists only search as eager without mutating the source selection", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["skill_read"] },
+      { kind: "mcp", id: "docs" },
+    ];
+    const saved = JSON.stringify(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"])).toEqual([
+      { kind: "mcp", id: "opengeni", eager: ["skill_read", "knowledge_search"] },
+      tools[1],
+    ]);
+    expect(JSON.stringify(tools)).toBe(saved);
+  });
+
+  test("does not attach servers, enable a disabled family or widen selected tools", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionKnowledgeSearchTools(tools, null, ["knowledge_search"])).toBe(tools);
+    expect(
+      newSessionKnowledgeSearchTools(
+        tools,
+        { ...config, capabilities: { ...config.capabilities, knowledge: false } },
+        ["knowledge_search"],
+      ),
+    ).toBe(tools);
+    expect(newSessionKnowledgeSearchTools(tools, config, [])).toBe(tools);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: [] }];
+    expect(newSessionKnowledgeSearchTools(narrowed, config, ["knowledge_search"])).toBe(narrowed);
+    expect(newSessionKnowledgeSearchTools([], config, ["knowledge_search"])).toEqual([]);
+  });
+
+  test("uses an already attached Docs search if first-party search is unavailable", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "docs", allowedTools: ["knowledge_search"] },
+    ];
+    expect(newSessionKnowledgeSearchTools(tools, config, [])).toEqual([
+      tools[0],
+      { ...tools[1], eager: ["knowledge_search"] },
+    ]);
+  });
+
+  test("preserves explicit all-eager and leaves ordinary configuration updates unchanged", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni", eager: true }];
+    expect(newSessionKnowledgeSearchTools(tools, config, ["knowledge_search"])).toEqual(tools);
+    const oldTools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(
+      applySessionAgentConfigWriteThrough({
+        config,
+        tools: oldTools,
+        firstPartyMcpTools: ["knowledge_search"],
+        productServerIds: [],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      }).tools,
+    ).toEqual(oldTools);
+  });
+});
 
 function failure(fn: () => unknown): { status: number; code: string } | null {
   try {
@@ -84,6 +152,42 @@ describe("resolveSessionAgentConfigForCreate", () => {
     }).config!;
     expect(config.capabilities.webSearch).toBe(false);
     expect(config.unavailable).toEqual(["webSearch"]);
+    expect(config).toHaveProperty(
+      "unavailableReasons.webSearch",
+      "web search is turned off on this server",
+    );
+  });
+
+  test("human-input deployment limits explain defaults and reject an explicit family request", () => {
+    const restricted = testSettings({ allowedFirstPartyMcpTools: ["session_create"] });
+    const config = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings: restricted,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(config).toHaveProperty(
+      "unavailableReasons.humanInput",
+      expect.stringContaining("its tools are not allowed on this server: notify_user"),
+    );
+    const unrestricted = resolveSessionAgentConfigForCreate({
+      ...base,
+      settings,
+      creator: "api",
+      request: { capabilities: "all" },
+    }).config!;
+    expect(unrestricted.unavailable).toEqual([]);
+    expect(unrestricted).not.toHaveProperty("unavailableReasons");
+    expect(
+      failure(() =>
+        resolveSessionAgentConfigForCreate({
+          ...base,
+          settings: restricted,
+          creator: "api",
+          request: { capabilities: { from: "none", humanInput: true } },
+        }),
+      ),
+    ).toEqual({ status: 422, code: "agent_capability_unavailable" });
   });
 
   test("workspace legacy human-input switch and stored defaults", () => {

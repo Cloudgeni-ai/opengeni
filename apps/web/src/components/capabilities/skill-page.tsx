@@ -13,13 +13,13 @@ import {
   scopeLabel,
   skillSummary,
 } from "@/components/capabilities/skill-copy";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Textarea } from "@/components/ui/textarea";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Textarea } from "@opengeni/react/ui/textarea";
 
 /* ----------------------------------------------------------------------------
    A workspace skill's page: what it does, its instructions (SKILL.md and any

@@ -31,7 +31,9 @@ describe("connected-machine computer access", () => {
     ).toEqual({
       status: 409,
       message:
-        "Connected Machine desktop is unavailable because this machine has no capturable display.",
+        "Connected Machine desktop is unavailable because this machine has no capturable display. " +
+        "This is the machine the session is working on, which may not be the person's own computer: " +
+        "if they mean another computer, find it with sandboxes_list, sandbox_swap to it, and open the screen there.",
     });
   });
 
@@ -44,7 +46,8 @@ describe("connected-machine computer access", () => {
     expect(connectedMachineComputerAccessError(state, false)).toBeNull();
     expect(connectedMachineComputerAccessError(state, true)).toEqual({
       status: 403,
-      message: "Screen control is not enabled for this Connected Machine.",
+      message:
+        "Screen control is not enabled for this Connected Machine. Turn it on in place with connected_machine_enable_screen_control (no reconnect or human click needed), then retry.",
     });
   });
 

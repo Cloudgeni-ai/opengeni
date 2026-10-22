@@ -4,6 +4,14 @@ import { parseSync } from "oxc-parser";
 import { currentTraceContext, withTraceContext, type Span } from "@opengeni/observability";
 import { measureSessionCreatePhase } from "../src/session-create-observability";
 import {
+  legacyVariableSetFields,
+  variableSetsRemovedResponse,
+  withoutEmptyLegacyVariableSetFields,
+} from "../src/http/variable-sets-removed";
+import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { currentSiteViewerRlsContext } from "@opengeni/db";
+import {
+  currentSiteSessionOrigin,
   sessionCreationMetadata,
   withSiteSessionOrigin,
 } from "../../../packages/core/src/site-session-origin";
@@ -74,7 +82,10 @@ function productionRoute() {
     `
     const { requireAccessGrantAuthorization, CreateSessionRequest, resolveSiteSessionOrigin,
       withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
-      withEffectivePolicy, measureSessionCreatePhase } = ports;
+      withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
+      variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
+      currentSiteSessionOrigin, currentSiteViewerRlsContext,
+      siteFrameBodyRefusal } = ports;
     ${code}
     return handler;
   `,
@@ -110,6 +121,9 @@ function routeFixture() {
   };
   const ports = {
     measureSessionCreatePhase,
+    legacyVariableSetFields,
+    variableSetsRemovedResponse,
+    withoutEmptyLegacyVariableSetFields,
     requireAccessGrantAuthorization: (...args: unknown[]) => {
       calls.push({ name: "authorization", args });
       return hold.authorization.promise;
@@ -127,6 +141,9 @@ function routeFixture() {
     withSiteSessionOrigin: () => {
       throw new Error("Unexpected Site scope");
     },
+    currentSiteSessionOrigin,
+    currentSiteViewerRlsContext,
+    siteFrameBodyRefusal,
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;
@@ -229,6 +246,8 @@ test("the production Site branch retains request-local provenance without export
   f.hold.projection.resolve(session);
   expect(await running).toEqual({ body: session, status: 202 });
   expect(metadata).toEqual({ _opengeniSiteOrigin: origin });
+  // Origin is attribution, not a replacement execution profile.
+  expect(f.calls.map((c) => c.name)).not.toContain("site profile");
   expect(sessionCreationMetadata({})).toEqual({});
   expect(JSON.stringify(f.o.endings)).not.toContain("private");
 });

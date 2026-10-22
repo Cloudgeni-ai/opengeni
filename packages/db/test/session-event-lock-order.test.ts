@@ -6,11 +6,8 @@ import {
 } from "@opengeni/core";
 import { SESSION_EVENT_RAW_DELTA_TYPES } from "@opengeni/contracts";
 import { appendAndPublishEvents } from "@opengeni/events";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -23,20 +20,17 @@ import {
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
   appendSessionHistoryItems,
-  armCodexCapacityWait,
   applySessionTurnSettlement,
   canonicalSessionCommandHash,
   claimPendingSessionWorkflowWakes,
   createDb,
   enqueueSessionWorkflowWake,
-  ensureCodexRotationSettings,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeFailed,
   mutateSessionControlInTransaction,
   nestedPostgresSqlState,
   QueueCommandConflictError,
-  reconcileCodexCapacityWait,
   recordConsumedChildAnswers,
   recordPendingSessionToolCallResult,
   recoverSessionDispatch,
@@ -54,6 +48,11 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  reconcileCodexCapacityWait,
+} from "./fixtures/legacy-codex";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 import * as schema from "../src/schema";
 

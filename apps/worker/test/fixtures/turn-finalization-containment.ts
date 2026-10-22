@@ -39,6 +39,35 @@ const leases = createTurnCredentialLeases({
   codexWorkspaceKey: "workspace-1",
   getTurnId: () => context.attempt.turnId,
 });
+const cancellation = new AbortController();
+if (mode === "claude-observations" || mode === "claude-observations-cancelled") {
+  context.attempt.turnId = "turn-1";
+  context.providerTurn.claudeSubscriptionCore = {
+    identity: {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      sessionOwnerSubjectId: null,
+      sessionOwnerMembershipId: null,
+      initiatingHumanSubjectId: null,
+      acceptedAuthorityV2: { version: 2, personal: [] },
+    },
+    connectionId: "connection-1",
+    placedRefreshGeneration: 1,
+    personal: false,
+    quota: { settled: () => pending },
+  };
+  leases.claude.held = true;
+  leases.claude.releaseCurrent = async () => {
+    console.log("claude_lease_released");
+    return true;
+  };
+  if (mode === "claude-observations-cancelled") {
+    context.control.activityStatus = "cancelled";
+    cancellation.abort();
+  }
+}
 const containment = createWorkerCleanupContainment({
   drain() {
     console.log("graceful_drain_requested");
@@ -58,6 +87,7 @@ const deps = {
   activityStarted: performance.now(),
   activitySpan: { end() {} },
   sandboxResumeController: new AbortController(),
+  cancellationSignal: cancellation.signal,
   activityContext: {
     heartbeat(details: unknown) { console.log(JSON.stringify(details)); },
   },

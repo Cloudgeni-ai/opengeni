@@ -13,7 +13,7 @@ Supersedes the tenancy assumptions in the still-open predecessor design PR
 
 ## Context
 
-OpenGeni already has strong workspace containment, but its managed-mode
+Opengeni already has strong workspace containment, but its managed-mode
 provisioning and most operational resource foreign keys assume that a human's
 personal authority belongs to one workspace. That is insufficient when a user
 belongs to an organization, has grants to several workspaces, and must use the

@@ -76,7 +76,7 @@ the default agent permission set:
 - `reddit_posts_sync` idempotently stores a Reddit account's recent posts in
   `social_posts`.
 
-Sync requires write authority because it mutates OpenGeni's durable analysis
+Sync requires write authority because it mutates Opengeni's durable analysis
 store, even though it does not publish to the provider. When a human should
 sign off on every outbound post, set both reply tools to Ask first. A
 `requireApproval` policy is only a recommendation; a workspace Allow overrides

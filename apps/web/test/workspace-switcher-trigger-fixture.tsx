@@ -12,9 +12,9 @@ import {
 
 import { WORKSPACE_SWITCHER_GRID_CLASS } from "../src/components/rail/switcher-block";
 import { WorkspaceMenu, WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
-import { TooltipProvider } from "../src/components/ui/tooltip";
-import type { ManagedSelfContext } from "../src/lib/managed-self-context";
-import type { Workspace } from "../src/types";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import type { ManagedSelfContext } from "@opengeni/react/app/lib/managed-self-context";
+import type { Workspace } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const accountId = "11111111-1111-4111-8111-111111111111";

@@ -244,7 +244,7 @@ async fn fixture_targets(adapter: &dyn ComputerAdapter) -> (NativeTarget, Native
     loop {
         let targets = adapter.targets().await.expect("discover native targets");
         if let Some(window) = targets.iter().find(|target| {
-            target.kind == NativeTargetKind::Window && target.title == "OpenGeni Native Fixture"
+            target.kind == NativeTargetKind::Window && target.title == "Opengeni Native Fixture"
         }) {
             if let Some(application) = targets
                 .iter()
@@ -283,7 +283,7 @@ async fn chromium_targets(adapter: &dyn ComputerAdapter) -> (NativeTarget, Nativ
         let targets = adapter.targets().await.expect("discover Chromium targets");
         if let Some(window) = targets.iter().find(|target| {
             target.kind == NativeTargetKind::Window
-                && target.title.contains("OpenGeni Chromium AX Fixture")
+                && target.title.contains("Opengeni Chromium AX Fixture")
         }) {
             let application = targets
                 .iter()

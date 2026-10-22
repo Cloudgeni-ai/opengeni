@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotently launch the placement-local OpenGeni browser controller. The
+# Idempotently launch the placement-local Opengeni browser controller. The
 # controller token is read from an owner-only file; its value never enters argv,
 # stdout, or the process environment.
 set -euo pipefail
@@ -105,7 +105,6 @@ setsid "$REAPER" service -- env \
   OPENGENI_BROWSERD_ADMIN_TOKEN_FILE="$TOKEN_FILE" \
   OPENGENI_BROWSERD_HOSTNAME="0.0.0.0" \
   OPENGENI_BROWSERD_PORT="$PORT" \
-  OPENGENI_BROWSERD_AGENT_BROWSER_BINARY="${OPENGENI_BROWSERD_AGENT_BROWSER_BINARY:-/usr/local/lib/opengeni/agent-browser}" \
   OPENGENI_BROWSERD_LIGHTPANDA_BINARY="${OPENGENI_BROWSERD_LIGHTPANDA_BINARY:-/usr/local/lib/opengeni/lightpanda}" \
   OPENGENI_BROWSERD_BROWSER_EXECUTABLE="$BROWSER_EXECUTABLE" \
   OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY="$COMPUTER_NATIVE_BINARY" \

@@ -8,7 +8,8 @@
      view=connect-agent                       Connect an agent (organization only)
      agent=<id>                               a connected agent's page (organization only)
      view=new-service-account                 New service account (organization only)
-     serviceAccount=<id>                      a service account's page (organization only) */
+     serviceAccount=<id>                      a service account's page (organization only)
+     view=new-personal-key                    Create personal key (organization only) */
 
 export type DeveloperView =
   | "new-webhook"
@@ -16,7 +17,8 @@ export type DeveloperView =
   | "credential-provider"
   | "connect-credential-provider"
   | "connect-agent"
-  | "new-service-account";
+  | "new-service-account"
+  | "new-personal-key";
 
 export const DEVELOPER_VIEWS: readonly DeveloperView[] = [
   "new-webhook",
@@ -25,6 +27,7 @@ export const DEVELOPER_VIEWS: readonly DeveloperView[] = [
   "connect-credential-provider",
   "connect-agent",
   "new-service-account",
+  "new-personal-key",
 ];
 
 export type DeveloperLocation = {

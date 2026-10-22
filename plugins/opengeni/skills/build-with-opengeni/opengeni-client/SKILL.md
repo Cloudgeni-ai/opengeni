@@ -61,10 +61,10 @@ Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
 ```ts
 // app/api/opengeni/[...path]/route.ts
-import { OpenGeni } from "@opengeni/sdk/chat";
+import { Opengeni } from "@opengeni/sdk/chat";
 import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
-const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
 export const dynamic = "force-dynamic";
 export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
@@ -137,6 +137,9 @@ the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed
 `tenant`; `{ user }` alone would give every visitor a workspace of their own.
+Also return `visitor: true` for them: visitors get no file attachments unless
+the handler sets `visitorUploads: true`. Live voice is off in the stock chat
+unless the handler sets `realtimeVoice: true`.
 Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 

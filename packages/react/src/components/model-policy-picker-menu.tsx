@@ -1,7 +1,8 @@
-import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
+import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { ArrowRightIcon, CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
 import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import {
   MENU_CHECK_CLASS,
@@ -9,81 +10,40 @@ import {
   MENU_NOTE_CLASS,
   MENU_SURFACE_CLASS,
 } from "../lib/menu-styles";
+import { labelReasoningEffort, type PickerModelRow } from "../model-policy";
 import {
-  coerceReasoningEffortForModel,
-  effortOptionsForModel,
-  findPickerRow,
-  groupPickerRowsByBillingClass,
-  labelReasoningEffort,
-  payerSummaryForModel,
-  runnableLatencyModesForModel,
-  type PickerModelRow,
-} from "../model-policy";
+  compactEffortLabel,
+  groupPresentationFor,
+  modelPickerChoice,
+  modelPickerMenuView,
+} from "../model-picker-model";
 import {
   BillingClassMark,
   defaultModelPolicyPickerMessages,
-  effectiveRows,
-  groupPresentationFor,
   PickerNavRow,
-  SCOPED_BILLING_HINTS,
   type ModelPolicyPickerProps,
 } from "./model-policy-picker";
 import { ModelMark } from "./model-mark";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const PopoverContainedPortal = containedPortal(Popover.Portal);
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
 export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+  const t = useOpenGeniText();
   const [query, setQuery] = useState("");
-  const rows = effectiveRows(props);
-  const selected = findPickerRow(rows, props.model);
-  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  const filtered = rows.filter((row) => {
-    const description = groupPresentationFor(props, row.billingClass)?.description;
-    const text =
-      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(row.catalog) : (description ?? "")}`.toLowerCase();
-    return words.every((word) => text.includes(word));
-  });
-  const matchingIds = new Set(filtered.map((row) => row.id));
-  const groups = groupPickerRowsByBillingClass(rows, {
-    codexOnly: props.codexOnly === true,
-    selectedId: props.model,
-    collapseScopes: props.collapseScopes !== false,
-  })
-    .map((group) => {
-      const presentation = groupPresentationFor(props, group.billingClass);
-      const override = presentation?.description;
-      const defaultHint =
-        props.collapseScopes === false &&
-        messages.billingHints[group.billingClass] ===
-          defaultModelPolicyPickerMessages.billingHints[group.billingClass]
-          ? (SCOPED_BILLING_HINTS[group.billingClass] ?? messages.billingHints[group.billingClass])
-          : messages.billingHints[group.billingClass];
-      return {
-        ...group,
-        label: presentation?.label ?? group.label,
-        rows: group.rows.filter((row) => matchingIds.has(row.id)),
-        description:
-          override === undefined
-            ? group.billingClass === "opengeni_credits"
-              ? null
-              : defaultHint
-            : override,
-      };
-    })
-    .filter((group) => group.rows.length > 0);
+  const view = modelPickerMenuView(t, props, query);
+  const { messages, rows, groups } = view;
+  const selected = view.selected;
   const choose = (row: ClientPickerModelRow) => {
-    if (!row.selectable || props.disabled) return;
-    if (row.id !== props.model) props.onModelChange(row.id);
-    const effort = coerceReasoningEffortForModel(row.catalog, props.effort);
+    if (props.disabled) return;
+    const choice = modelPickerChoice(props, row);
+    if (!choice) return;
+    if (choice.model !== null) props.onModelChange(choice.model);
     // Hosts may commit the combined model/effort draft through this callback.
-    props.onEffortChange(effort);
-    if (
-      props.latencyMode !== "standard" &&
-      !runnableLatencyModesForModel(row.catalog).includes(props.latencyMode)
-    ) {
-      props.onLatencyModeChange("standard");
-    }
+    props.onEffortChange(choice.effort);
+    if (choice.latencyMode !== null) props.onLatencyModeChange(choice.latencyMode);
   };
   const modelRow = (row: ClientPickerModelRow) => (
     <PickerNavRow
@@ -214,9 +174,9 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
                 {group.rows.map(modelRow)}
               </section>
             ))}
-            {filtered.length === 0 ? (
+            {view.matchCount === 0 ? (
               <p className={MENU_NOTE_CLASS}>
-                {words.length ? messages.noMatches : messages.noModels}
+                {view.searching ? messages.noMatches : messages.noModels}
               </p>
             ) : null}
           </>
@@ -226,43 +186,48 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
       </div>
-      {rows.some((row) => row.selectable) &&
+      {view.anySelectable &&
       selected &&
-      ((props.hasImageAttachments &&
-        selected.catalog.capabilities?.inputModalities.includes("image") === false) ||
-        (effortOptionsForModel(selected.catalog).length > 1 &&
-          selected.catalog.capabilities?.reasoning.runnable !== false) ||
-        (props.allowLatencyMode !== false &&
-          runnableLatencyModesForModel(selected.catalog).includes("fast"))) ? (
+      (view.unsupportedAttachments || (props.allowModelOptions !== false && view.thinking)) ? (
         <div className="border-t border-og-border px-2.5 py-2.5">
-          {props.hasImageAttachments &&
-          selected.catalog.capabilities?.inputModalities.includes("image") === false ? (
+          {view.unsupportedAttachments ? (
             <p className="pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
               {messages.unsupportedAttachments}
             </p>
           ) : null}
-          <ModelThinkingControls {...props} />
+          {props.allowModelOptions !== false ? <ModelThinkingControls {...props} /> : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-const CONNECT_MODEL_OPTIONS: Array<{
+const CONNECT_MODEL_OPTIONS = (
+  t: OpenGeniText,
+): Array<{
   billingClass: "codex_subscription" | "supergrok_subscription" | "byok" | "external";
   title: string;
   detail: string;
-}> = [
-  { billingClass: "codex_subscription", title: "Codex", detail: "ChatGPT" },
+}> => [
+  {
+    billingClass: "codex_subscription",
+    title: t("modelPolicyPickerMenu.codex"),
+    detail: "ChatGPT",
+  },
   { billingClass: "supergrok_subscription", title: "SuperGrok", detail: "xAI" },
-  { billingClass: "byok", title: "AI Gateway", detail: "Vercel" },
-  { billingClass: "external", title: "OpenRouter", detail: "API key" },
+  {
+    billingClass: "byok",
+    title: t("modelPolicyPickerMenu.aiGateway"),
+    detail: t("modelPolicyPickerMenu.vercel"),
+  },
+  { billingClass: "external", title: "OpenRouter", detail: t("modelPolicyPickerMenu.apiKey") },
 ];
 
 function ConnectModelsPanel(props: {
   href: string | undefined;
-  messages: typeof defaultModelPolicyPickerMessages;
+  messages: ReturnType<typeof defaultModelPolicyPickerMessages>;
 }) {
+  const t = useOpenGeniText();
   return (
     <div className="px-1.5 pb-1.5 pt-2" data-testid="model-picker-connect">
       <div className="px-1.5 pb-3">
@@ -274,7 +239,7 @@ function ConnectModelsPanel(props: {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-1">
-        {CONNECT_MODEL_OPTIONS.map((option) => {
+        {CONNECT_MODEL_OPTIONS(t).map((option) => {
           const content = (
             <>
               <span className="flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-surface-2 text-og-fg">
@@ -323,42 +288,45 @@ function ConnectModelsPanel(props: {
 }
 
 function ModelThinkingControls(props: ModelPolicyPickerProps) {
-  const selected = findPickerRow(effectiveRows(props), props.model);
-  if (!selected) return null;
-  const efforts = effortOptionsForModel(selected.catalog);
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
-  const supportsFast = runnableLatencyModesForModel(selected.catalog).includes("fast");
-  const showThinking =
-    efforts.length > 1 && selected.catalog.capabilities?.reasoning.runnable !== false;
-  const showFast = supportsFast && props.allowLatencyMode !== false;
-  if (!showThinking && !showFast) return null;
+  const t = useOpenGeniText();
+  const view = modelPickerMenuView(t, props, "");
+  const thinking = view.thinking;
+  if (!view.selected || !thinking) return null;
+  const messages = view.messages;
+  const efforts = thinking.efforts;
+  const showThinking = thinking.showThinking;
+  const showFast = thinking.showFast;
+  const speeds = thinking.speeds;
+  const selectedSpeed = speeds?.find((speed) => speed.id === props.latencyMode) ?? speeds?.[0];
   return (
     <div className="space-y-2 text-og-control" data-testid="model-picker-reasoning">
-      <div className="flex min-h-7 items-center justify-between gap-3">
-        {showThinking ? <span className="text-og-fg-subtle">{messages.thinking}</span> : <span />}
-        {showFast ? (
-          <button
-            type="button"
-            data-testid="model-picker-fast"
-            disabled={props.disabled || !selected.selectable}
-            aria-pressed={props.latencyMode === "fast"}
-            title={messages.fast + " · " + messages.fastRateHint}
-            onClick={() =>
-              props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
-            }
-            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
-          >
-            <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
-            {messages.fast}
-            <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
-          </button>
-        ) : null}
-      </div>
+      {showThinking || showFast ? (
+        <div className="flex min-h-7 items-center justify-between gap-3">
+          {showThinking ? <span className="text-og-fg-subtle">{messages.thinking}</span> : <span />}
+          {showFast ? (
+            <button
+              type="button"
+              data-testid="model-picker-fast"
+              disabled={props.disabled || thinking.disabled}
+              aria-pressed={props.latencyMode === "fast"}
+              title={messages.fast + " · " + messages.fastRateHint}
+              onClick={() =>
+                props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
+              }
+              className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+            >
+              <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
+              {messages.fast}
+              <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {showThinking ? (
         <RadioGroup.Root
           aria-label={messages.thinkingEffort}
-          value={coerceReasoningEffortForModel(selected.catalog, props.effort)}
-          disabled={props.disabled || !selected.selectable}
+          value={thinking.value}
+          disabled={props.disabled || thinking.disabled}
           onValueChange={(value) => props.onEffortChange(value as ReasoningEffort)}
           orientation="horizontal"
           className="flex flex-wrap gap-0.5 rounded-og-md bg-og-surface-2 p-0.5"
@@ -367,14 +335,53 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
             <RadioGroup.Item
               key={effort}
               value={effort}
-              aria-label={labelReasoningEffort(effort)}
-              title={labelReasoningEffort(effort)}
+              aria-label={labelReasoningEffort(t, effort)}
+              title={labelReasoningEffort(t, effort)}
               className="min-h-8 min-w-10 flex-1 cursor-pointer whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {effort === "xhigh" ? "X-high" : labelReasoningEffort(effort)}
+              {compactEffortLabel(t, effort, labelReasoningEffort(t, effort))}
             </RadioGroup.Item>
           ))}
         </RadioGroup.Root>
+      ) : null}
+      {speeds && selectedSpeed ? (
+        <div className="space-y-2 pt-1" data-testid="model-picker-speed">
+          <div className="flex min-h-7 items-center justify-between gap-3">
+            <span className="text-og-fg-subtle">{messages.speed}</span>
+            {selectedSpeed.hint ? (
+              <span className="text-og-fg-subtle">{selectedSpeed.hint}</span>
+            ) : null}
+          </div>
+          <RadioGroup.Root
+            aria-label={messages.speed}
+            value={selectedSpeed.id}
+            disabled={props.disabled || thinking.disabled}
+            onValueChange={(value) => props.onLatencyModeChange(value as LatencyMode)}
+            orientation="horizontal"
+            className="flex flex-wrap gap-0.5 rounded-og-md bg-og-surface-2 p-0.5"
+          >
+            {speeds.map((speed) => (
+              <RadioGroup.Item
+                key={speed.id}
+                value={speed.id}
+                aria-label={speed.hint ? `${speed.label} · ${speed.hint}` : speed.label}
+                title={speed.hint ? `${speed.label} · ${speed.hint}` : speed.label}
+                className="flex min-h-8 min-w-10 flex-1 cursor-pointer items-center justify-center gap-1 whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {speed.id === "standard" ? null : (
+                  <ZapIcon
+                    aria-hidden
+                    className={cn(
+                      "size-3.5 shrink-0",
+                      speed.id === selectedSpeed.id && "fill-current",
+                    )}
+                  />
+                )}
+                {speed.label}
+              </RadioGroup.Item>
+            ))}
+          </RadioGroup.Root>
+        </div>
       ) : null}
     </div>
   );
@@ -387,12 +394,13 @@ export function ModelPolicyPickerPopover(
     portalStyle: CSSProperties;
   },
 ) {
+  const t = useOpenGeniText();
   const outside = useRef(false);
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+  const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
   return (
     <Popover.Root open onOpenChange={(open) => props.onOpenChange?.(open)}>
       <Popover.Anchor virtualRef={props.anchor} />
-      <Popover.Portal>
+      <PopoverContainedPortal>
         <Popover.Content
           id={props.contentId}
           aria-label={messages.label}
@@ -418,7 +426,7 @@ export function ModelPolicyPickerPopover(
         >
           <ModelPolicyPickerMenu {...props} />
         </Popover.Content>
-      </Popover.Portal>
+      </PopoverContainedPortal>
     </Popover.Root>
   );
 }

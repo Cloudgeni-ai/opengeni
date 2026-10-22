@@ -14,12 +14,12 @@ describe("runtime failures dashboard", () => {
       "Probe age",
       "Worker restarts · 15m",
       "Recovery exhausted",
-      "Firing OpenGeni alerts",
+      "Firing Opengeni alerts",
       "Turn outcomes",
       "Turn failure and recovery ratios",
       "MCP lifecycle operations",
       "MCP tool calls by outcome",
-      "MCP tool-call p95 by outcome",
+      "MCP tool-call p95 by outcome and tool",
       "Failed startup phases",
       "Logical sandbox provision failures",
       "Sandbox visibility-check failures",
@@ -133,8 +133,8 @@ describe("runtime failures dashboard", () => {
     );
     expect(variables.get("release")?.definition).not.toContain("environment=");
 
-    const alertTable = dashboard.panels.find((panel) => panel.title === "Firing OpenGeni alerts");
-    for (const panelTitle of ["Critical alerts", "Warnings", "Firing OpenGeni alerts"]) {
+    const alertTable = dashboard.panels.find((panel) => panel.title === "Firing Opengeni alerts");
+    for (const panelTitle of ["Critical alerts", "Warnings", "Firing Opengeni alerts"]) {
       const expression = dashboard.panels.find((panel) => panel.title === panelTitle)?.targets?.[0]
         ?.expr;
       expect(expression).toContain('namespace="$namespace"');

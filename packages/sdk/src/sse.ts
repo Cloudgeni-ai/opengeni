@@ -1,7 +1,7 @@
 /**
  * Minimal incremental Server-Sent Events parser over a byte stream.
  *
- * Implements the parts of the SSE wire format OpenGeni uses: `id`, `event`,
+ * Implements the parts of the SSE wire format Opengeni uses: `id`, `event`,
  * and `data` fields, multi-line data, comment lines, and both LF and CRLF
  * line endings. Messages without any `data` (comments, id-only blocks) are
  * not emitted.

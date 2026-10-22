@@ -30,12 +30,31 @@ export default defineConfig({
     "src/accounts.tsx",
     "src/composer.ts",
     "src/session.ts",
+    "src/session-app.ts",
     "src/connect.ts",
     "src/sites.ts",
+    "src/native-previews.ts",
     "src/session-ui.ts",
     "src/machines.ts",
+    "src/this-computer.ts",
     "src/usage.ts",
     "src/model-policy.ts",
+    "src/queue-presentation-model.ts",
+    "src/composer-messages.ts",
+    "src/messages.ts",
+    "src/sandbox-label-model.ts",
+    "src/model-picker-model.ts",
+    "src/model-mark-paths.ts",
+    "src/timeline-model.ts",
+    "src/organization-model.ts",
+    "src/session-agents-model.ts",
+    "src/session-realtime.ts",
+    "src/new-session-draft.ts",
+    "src/scrollbars.ts",
+    "src/session-list-model.ts",
+    "src/session-feedback-model.ts",
+    "src/session-attention-model.ts",
+    "src/testing/session-scenarios.ts",
     "src/realtime.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
@@ -47,6 +66,20 @@ export default defineConfig({
     "src/terminal.ts",
     "src/editor.ts",
     "src/desktop.ts",
+    "src/workbench.ts",
+    // `./ui/*` is a subpath pattern export: every primitive is its own entry.
+    "src/ui/*.tsx",
+    "!src/ui/*.test.tsx",
+    "!src/ui/*.browser.test.tsx",
+    "!src/ui/*.dom-fixture.tsx",
+    // `./app/*` is the internal session-app layer the web console and the
+    // embedded surfaces share. Every module is its own entry so a host only
+    // loads the surfaces it renders; it is not part of the public API.
+    "src/app/**/*.tsx",
+    "!src/app/**/*.test.tsx",
+    "!src/app/**/*.browser.test.tsx",
+    "!src/app/**/*.dom-fixture.tsx",
+    "!src/app/**/*.test-fixtures.tsx",
   ],
   format: ["esm"],
   target: "es2022",
@@ -61,6 +94,8 @@ export default defineConfig({
   external,
   esbuildOptions(options) {
     options.jsx = "automatic";
-    options.loader = { ...options.loader, ".ico": "dataurl" };
+    // App-layer components keep their component-scoped stylesheet beside the
+    // compiled module; the host bundler loads it with the component chunk.
+    options.loader = { ...options.loader, ".ico": "dataurl", ".css": "copy" };
   },
 });

@@ -28,6 +28,7 @@ import {
   hashManagedAuthPassword,
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
+import { ApiHttpError } from "../http/api-error";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
@@ -77,7 +78,12 @@ export async function admitManagedSignInMutation(context: Context, deps: ApiRout
     context.req.header("sec-fetch-site") !== "same-origin" ||
     context.req.header("content-type")?.split(";", 1)[0] !== "application/json"
   ) {
-    throw new HTTPException(403, { message: "Same-origin browser mutation required" });
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: "Same-origin JSON browser mutation required",
+      details: { code: "SIGN_IN_METHOD_SAME_ORIGIN_REQUIRED" },
+      retryable: false,
+    });
   }
   const authority = getCookie(context, MANAGED_AUTH_SESSION_SET_COOKIE);
   if (deps.settings.managedAuthSessionSetMode !== "legacy" && authority) {

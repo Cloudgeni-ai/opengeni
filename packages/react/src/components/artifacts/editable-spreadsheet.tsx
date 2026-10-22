@@ -12,7 +12,16 @@ import {
   type SpreadsheetSheetGeneration,
 } from "@opengeni/sdk/editable-artifacts";
 import { PlusIcon } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
@@ -23,14 +32,21 @@ import {
   useEditableArtifactView,
 } from "./editable-artifact-ui";
 import { SparseSpreadsheetCellIndex } from "./spreadsheet-canvas";
+import { SpreadsheetDownloadButton, type SpreadsheetDownload } from "./spreadsheet-download";
+import {
+  SpreadsheetSubmissionProvider,
+  useSpreadsheetSubmissions,
+} from "./spreadsheet-submissions";
 import {
   SpreadsheetProjectionGrid,
   type SpreadsheetCommit,
+  type SpreadsheetDimensionCommit,
   type SpreadsheetGridProjection,
   type SpreadsheetRangeCommit,
   type SpreadsheetSelection,
   type SpreadsheetViewport,
 } from "./spreadsheet-grid";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 const EXCEL_MAX_ROWS = 1_048_576;
 const EXCEL_MAX_COLUMNS = 16_384;
@@ -40,6 +56,11 @@ const MAX_INTERACTIVE_QUERY_CELLS = 65_536;
 const MAX_INTERACTIVE_QUERY_BYTES = 8 * 1024 * 1024;
 const EMPTY_FORMAT = Object.freeze({});
 const EMPTY_SHEETS: readonly EditableSpreadsheetSheetMetadata[] = [];
+const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+// Identity only: a replacement SDK object is a new authoring lifetime, even
+// when artifact, sheet, and generation IDs are unchanged. No model data lives here.
+const SESSION_KEYS = new WeakMap<EditableArtifactSession, number>();
+let nextSessionKey = 0;
 
 export type EditableSpreadsheetGridProps = {
   session: EditableArtifactSession;
@@ -52,6 +73,7 @@ export type EditableSpreadsheetGridProps = {
   overscanColumns?: number | undefined;
   onSelectionChange?: ((selection: SpreadsheetSelection) => void) | undefined;
   onCommit?: ((commit: SpreadsheetCommit) => void) | undefined;
+  onResize?: ((change: SpreadsheetDimensionCommit) => void) | undefined;
   onCommandError?: ((error: Error) => void) | undefined;
   onViewportChange?: ((viewport: SpreadsheetViewport) => void) | undefined;
   className?: string | undefined;
@@ -65,11 +87,15 @@ export type EditableSpreadsheetArtifactSurfaceProps = Omit<
   showHeader?: boolean | undefined;
   subtitle?: ReactNode | undefined;
   actions?: ReactNode | undefined;
+  /** Authenticated XLSX export of the current saved native head. */
+  download?: SpreadsheetDownload | undefined;
   initialSheetId?: string | undefined;
   allowAddSheet?: boolean | undefined;
 };
 
 type ProjectionState = {
+  session: EditableArtifactSession;
+  generationId: string | null;
   query: EditableSpreadsheetViewportQuery;
   projection: EditableSpreadsheetViewportProjection | null;
   error: Error | null;
@@ -79,7 +105,16 @@ type ProjectionState = {
  * Durable spreadsheet editor over one SDK session. Canonical state remains in
  * the dedicated Worker; React receives one bounded immutable viewport only.
  */
-export function EditableSpreadsheetGrid({
+export function EditableSpreadsheetGrid(props: EditableSpreadsheetGridProps) {
+  return (
+    <EditableSpreadsheetGridSession
+      key={`${spreadsheetSessionKey(props.session)}:${props.sheet.sheetId}:${props.sheet.generationId ?? "pending"}`}
+      {...props}
+    />
+  );
+}
+
+function EditableSpreadsheetGridSession({
   session,
   sheet,
   metadataRevision,
@@ -90,10 +125,15 @@ export function EditableSpreadsheetGrid({
   overscanColumns = 2,
   onSelectionChange,
   onCommit,
+  onResize,
   onCommandError,
   onViewportChange,
   className,
 }: EditableSpreadsheetGridProps) {
+  const t = useOpenGeniText();
+  const authoringLifetime = useSpreadsheetAuthoringLifetime();
+  const submissions = useSpreadsheetSubmissions();
+  const view = useEditableArtifactView(session);
   const rowCount = boundedSheetCount(requestedRowCount, EXCEL_MAX_ROWS, sheet.usedBounds?.endRow);
   const columnCount = boundedSheetCount(
     requestedColumnCount,
@@ -101,6 +141,8 @@ export function EditableSpreadsheetGrid({
     sheet.usedBounds?.endColumn,
   );
   const [state, setState] = useState<ProjectionState>(() => ({
+    session,
+    generationId: sheet.generationId,
     query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
     projection: null,
     error: null,
@@ -108,23 +150,36 @@ export function EditableSpreadsheetGrid({
   const activeCellRef = useRef({ row: 0, column: 0 });
 
   useEffect(() => {
-    setState({
-      query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
-      projection: null,
-      error: null,
-    });
+    setState((current) =>
+      current.session === session &&
+      current.generationId === sheet.generationId &&
+      current.query.sheetId === sheet.sheetId
+        ? current
+        : {
+            session,
+            generationId: sheet.generationId,
+            query: initialViewportQuery(sheet.sheetId, rowCount, columnCount),
+            projection: null,
+            error: null,
+          },
+    );
     activeCellRef.current = { row: 0, column: 0 };
-  }, [columnCount, rowCount, session, sheet.sheetId]);
+  }, [columnCount, rowCount, session, sheet.generationId, sheet.sheetId]);
 
   useEffect(() => {
     const query = state.query;
-    return session.subscribeSpreadsheetViewport(
+    const matchesScope = (current: ProjectionState) =>
+      current.session === session &&
+      current.generationId === sheet.generationId &&
+      sameViewportQuery(current.query, query);
+    let active = true;
+    const unsubscribe = session.subscribeSpreadsheetViewport(
       query,
       (projection) => {
-        if (!sameViewport(projection, query)) return;
+        if (!active || !sameViewport(projection, query)) return;
         if (sheet.generationId !== null && projection.generationId !== sheet.generationId) {
           setState((current) =>
-            sameViewportQuery(current.query, query)
+            matchesScope(current)
               ? {
                   ...current,
                   projection: null,
@@ -135,17 +190,20 @@ export function EditableSpreadsheetGrid({
           return;
         }
         setState((current) =>
-          sameViewportQuery(current.query, query) ? { query, projection, error: null } : current,
+          matchesScope(current) ? { ...current, projection, error: null } : current,
         );
       },
       {
         onError(error) {
-          setState((current) =>
-            sameViewportQuery(current.query, query) ? { ...current, error } : current,
-          );
+          if (!active) return;
+          setState((current) => (matchesScope(current) ? { ...current, error } : current));
         },
       },
     );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [session, sheet.generationId, state.query]);
 
   const projection = useMemo(
@@ -154,81 +212,143 @@ export function EditableSpreadsheetGrid({
         sheet,
         metadataRevision,
         state.query,
-        state.projection,
+        state.session === session && state.generationId === sheet.generationId
+          ? state.projection
+          : null,
         rowCount,
         columnCount,
       ),
-    [columnCount, metadataRevision, rowCount, sheet, state.projection, state.query],
+    [columnCount, metadataRevision, rowCount, session, sheet, state],
   );
   const generation = useMemo(() => sheetGeneration(sheet), [sheet]);
-  const editable = !readOnly && generation !== null;
+  const editable =
+    !readOnly && view.writable && !view.authoringBlockedReason && generation !== null;
+  const syncStatus = view.authoringBlockedReason
+    ? t("artifacts.editableSpreadsheet.waitingForEarlierEdits")
+    : view.state === "live"
+      ? editable
+        ? t("artifacts.editableSpreadsheet.saved")
+        : t("artifacts.editableSpreadsheet.readOnly")
+      : editableArtifactStatusLabel(t, view);
+  const syncError =
+    view.blockedPending.length > 0
+      ? t("artifacts.editableSpreadsheet.someEarlierChangesCouldNot")
+      : view.lastError?.message;
+  const resizable =
+    editable && sheet.defaultRowHeight !== undefined && sheet.defaultColumnWidth !== undefined;
 
   const handleCommit = useCallback(
     async (commit: SpreadsheetCommit) => {
-      if (!generation) throw new Error("This sheet generation is not writable yet");
+      const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
+      if (!generation) throw new Error(t("artifacts.editableSpreadsheet.thisSheetGenerationIsNot"));
       const input = spreadsheetCellInput(commit.input, commit.kind);
-      await session.applySpreadsheetCommands({
-        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
-        commands: [
-          {
-            kind: "cells.set",
-            sheet: generation,
-            anchor: { row: commit.cell.row, column: commit.cell.col },
-            rows: 1,
-            columns: 1,
-            cells: [input],
-          },
-        ],
-      });
-      onCommit?.(commit);
+      await submissions.run(() =>
+        session.applySpreadsheetCommands({
+          version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+          commands: [
+            {
+              kind: "cells.set",
+              sheet: generation,
+              anchor: { row: commit.cell.row, column: commit.cell.col },
+              rows: 1,
+              columns: 1,
+              cells: [input],
+            },
+          ],
+        }),
+      );
+      if (authoringLifetime.current === lifetime) onCommit?.(commit);
     },
-    [generation, onCommit, session],
+    [authoringLifetime, generation, onCommit, session, submissions, t],
   );
 
   const handleClear = useCallback(
     async (selection: SpreadsheetSelection) => {
-      if (!generation) throw new Error("This sheet generation is not writable yet");
+      requireSpreadsheetAuthoringLifetime(authoringLifetime);
+      if (!generation) throw new Error(t("artifacts.editableSpreadsheet.thisSheetGenerationIsNot"));
       const top = Math.min(selection.anchor.row, selection.focus.row);
       const bottom = Math.max(selection.anchor.row, selection.focus.row);
       const left = Math.min(selection.anchor.col, selection.focus.col);
       const right = Math.max(selection.anchor.col, selection.focus.col);
-      await session.applySpreadsheetCommands({
-        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
-        commands: [
-          {
-            kind: "range.clear",
-            sheet: generation,
-            range: {
-              start: { row: top, column: left },
-              end: { row: bottom, column: right },
+      await submissions.run(() =>
+        session.applySpreadsheetCommands({
+          version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+          commands: [
+            {
+              kind: "range.clear",
+              sheet: generation,
+              range: {
+                start: { row: top, column: left },
+                end: { row: bottom, column: right },
+              },
             },
-          },
-        ],
-      });
+          ],
+        }),
+      );
     },
-    [generation, session],
+    [authoringLifetime, generation, session, submissions, t],
   );
 
   const handleCommitRange = useCallback(
     async (commit: SpreadsheetRangeCommit) => {
-      if (!generation) throw new Error("This sheet generation is not writable yet");
-      await session.applySpreadsheetCommands({
-        version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
-        commands: [
-          {
-            kind: "cells.set",
-            sheet: generation,
-            anchor: { row: commit.anchor.row, column: commit.anchor.col },
-            rows: commit.rows,
-            columns: commit.columns,
-            cells: commit.inputs.map((input) =>
-              spreadsheetCellInput(input, input.startsWith("=") ? "formula" : "value"),
-            ),
-          },
-        ],
-      });
+      requireSpreadsheetAuthoringLifetime(authoringLifetime);
+      if (!generation) throw new Error(t("artifacts.editableSpreadsheet.thisSheetGenerationIsNot"));
+      await submissions.run(() =>
+        session.applySpreadsheetCommands({
+          version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+          commands: [
+            {
+              kind: "cells.set",
+              sheet: generation,
+              anchor: { row: commit.anchor.row, column: commit.anchor.col },
+              rows: commit.rows,
+              columns: commit.columns,
+              cells: commit.inputs.map((input) =>
+                spreadsheetCellInput(input, input.startsWith("=") ? "formula" : "value"),
+              ),
+            },
+          ],
+        }),
+      );
     },
-    [generation, session],
+    [authoringLifetime, generation, session, submissions, t],
+  );
+  const handleResize = useCallback(
+    async (change: SpreadsheetDimensionCommit) => {
+      const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
+      if (!generation) throw new Error(t("artifacts.editableSpreadsheet.thisSheetGenerationIsNot"));
+      await submissions.run(() =>
+        session.applySpreadsheetCommands({
+          version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+          commands: [
+            change.axis === "column"
+              ? {
+                  kind: "column.width.set",
+                  sheet: generation,
+                  column: change.index,
+                  width: change.size === sheet.defaultColumnWidth ? null : change.size,
+                }
+              : {
+                  kind: "row.height.set",
+                  sheet: generation,
+                  row: change.index,
+                  height: change.size === sheet.defaultRowHeight ? null : change.size,
+                },
+          ],
+        }),
+      );
+      if (authoringLifetime.current === lifetime) onResize?.(change);
+    },
+    [
+      authoringLifetime,
+      generation,
+      onResize,
+      session,
+      sheet.defaultColumnWidth,
+      sheet.defaultRowHeight,
+      submissions,
+      t,
+    ],
   );
 
   const handleSelection = useCallback(
@@ -240,6 +360,7 @@ export function EditableSpreadsheetGrid({
       setState((current) => {
         if (queryContains(current.query, selection.focus.row, selection.focus.col)) return current;
         return {
+          ...current,
           query: boundedViewportQuery(
             sheet.sheetId,
             selection.focus.row,
@@ -272,14 +393,21 @@ export function EditableSpreadsheetGrid({
         activeCellRef.current,
       );
       setState((current) =>
-        sameViewportQuery(current.query, next)
-          ? current
-          : { query: next, projection: current.projection, error: null },
+        sameViewportQuery(current.query, next) ? current : { ...current, query: next, error: null },
       );
       onViewportChange?.(viewport);
     },
     [columnCount, onViewportChange, rowCount, sheet.sheetId],
   );
+
+  if (editableArtifactAccessRevoked(view)) {
+    return (
+      <EditableArtifactMessage
+        title={t("artifacts.editableSpreadsheet.spreadsheetUnavailable")}
+        detail={t("artifacts.editableSpreadsheet.youNoLongerHaveAccess")}
+      />
+    );
+  }
 
   return (
     <div className={cn("relative h-full min-h-0", className)}>
@@ -292,10 +420,14 @@ export function EditableSpreadsheetGrid({
         commit={editable ? handleCommit : undefined}
         commitRange={editable ? handleCommitRange : undefined}
         clear={editable ? handleClear : undefined}
+        resize={resizable ? handleResize : undefined}
+        pendingTransactions={view.pendingTransactions}
+        syncStatus={syncStatus}
+        syncError={syncError}
         onCommandError={onCommandError}
         onViewportChange={handleViewport}
       />
-      {state.error ? (
+      {state.error && state.session === session && state.generationId === sheet.generationId ? (
         <output
           role="status"
           className="pointer-events-none absolute bottom-2 left-2 z-50 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
@@ -309,17 +441,30 @@ export function EditableSpreadsheetGrid({
 }
 
 /** Artifact chrome, sheet navigation, and one Worker-backed spreadsheet grid. */
-export function EditableSpreadsheetArtifactSurface({
+export function EditableSpreadsheetArtifactSurface(props: EditableSpreadsheetArtifactSurfaceProps) {
+  return (
+    <SpreadsheetSubmissionProvider key={spreadsheetSessionKey(props.session)}>
+      <EditableSpreadsheetArtifactSurfaceSession {...props} />
+    </SpreadsheetSubmissionProvider>
+  );
+}
+
+function EditableSpreadsheetArtifactSurfaceSession({
   session,
-  title = "Workbook",
+  title: titleProp,
   showHeader,
   subtitle,
   actions,
+  download,
   initialSheetId,
   allowAddSheet = true,
   readOnly = false,
   ...gridProps
 }: EditableSpreadsheetArtifactSurfaceProps) {
+  const t = useOpenGeniText();
+  const title = titleProp === undefined ? t("artifacts.editableSpreadsheet.workbook") : titleProp;
+  const authoringLifetime = useSpreadsheetAuthoringLifetime();
+  const submissions = useSpreadsheetSubmissions();
   const { metadata, error: metadataError } = useSpreadsheetMetadata(session);
   const view = useEditableArtifactView(session);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(initialSheetId ?? null);
@@ -331,56 +476,58 @@ export function EditableSpreadsheetArtifactSurface({
     (initialSheetId ? sheets.find((sheet) => sheet.sheetId === initialSheetId) : undefined) ??
     sheets[0] ??
     null;
-  const writable = !readOnly && view.writable;
+  const writable = !readOnly && view.writable && !view.authoringBlockedReason;
   const accessRevoked = editableArtifactAccessRevoked(view);
 
   const addSheet = useCallback(async () => {
     if (!writable || creatingSheet) return;
+    const lifetime = requireSpreadsheetAuthoringLifetime(authoringLifetime);
     setCreatingSheet(true);
     setSurfaceError(null);
     try {
       const after = activeSheet ? sheetGeneration(activeSheet) : null;
-      const created = await session.createSpreadsheetSheet({
-        name: nextAvailableSheetName(sheets),
-        after,
-      });
-      setActiveSheetId(created.sheetId);
+      const created = await submissions.run(() =>
+        session.createSpreadsheetSheet({
+          name: nextAvailableSheetName(t, sheets),
+          after,
+        }),
+      );
+      if (authoringLifetime.current === lifetime) setActiveSheetId(created.sheetId);
     } catch (cause) {
-      setSurfaceError(asError(cause));
+      if (authoringLifetime.current === lifetime) setSurfaceError(asError(cause));
     } finally {
-      setCreatingSheet(false);
+      if (authoringLifetime.current === lifetime) setCreatingSheet(false);
     }
-  }, [activeSheet, creatingSheet, session, sheets, writable]);
+  }, [activeSheet, authoringLifetime, creatingSheet, session, sheets, submissions, writable, t]);
 
   const footer = (
     <div
       className="flex min-h-9 items-center gap-1 overflow-x-auto px-2"
       role="tablist"
-      aria-label="Worksheets"
+      aria-label={t("artifacts.editableSpreadsheet.worksheets")}
     >
       {sheets.map((sheet) => (
-        <button
+        <EditableWorksheetTab
           key={`${sheet.sheetId}:${sheet.generationId ?? "pending"}`}
-          type="button"
-          role="tab"
-          aria-selected={sheet.sheetId === activeSheet?.sheetId}
-          onClick={() => setActiveSheetId(sheet.sheetId)}
-          className={cn(
-            "h-7 shrink-0 rounded-og-sm px-2.5 text-og-sm outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent",
-            sheet.sheetId === activeSheet?.sheetId
-              ? "bg-og-surface-3 font-medium text-og-fg"
-              : "text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg",
-          )}
-        >
-          {sheet.name}
-        </button>
+          session={session}
+          sheet={sheet}
+          sheets={sheets}
+          selected={sheet.sheetId === activeSheet?.sheetId}
+          writable={writable}
+          onSelect={() => setActiveSheetId(sheet.sheetId)}
+          onCommandError={gridProps.onCommandError}
+        />
       ))}
       {writable && allowAddSheet ? (
         <button
           type="button"
           onClick={() => void addSheet()}
           disabled={creatingSheet}
-          aria-label={creatingSheet ? "Adding worksheet" : "Add worksheet"}
+          aria-label={
+            creatingSheet
+              ? t("artifacts.editableSpreadsheet.addingWorksheet")
+              : t("artifacts.editableSpreadsheet.addWorksheet")
+          }
           className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted outline-hidden hover:bg-og-surface-3 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50 [&>svg]:size-3.5"
         >
           <PlusIcon />
@@ -398,19 +545,28 @@ export function EditableSpreadsheetArtifactSurface({
       subtitle={
         subtitle ??
         (accessRevoked
-          ? editableArtifactStatusLabel(view)
+          ? editableArtifactStatusLabel(t, view)
           : metadata
-            ? `${sheets.length} sheet${sheets.length === 1 ? "" : "s"}`
-            : editableArtifactStatusLabel(view))
+            ? t("counts.sheets", { count: sheets.length })
+            : editableArtifactStatusLabel(t, view))
       }
-      actions={actions}
+      actions={
+        download ? (
+          <>
+            {actions}
+            <SpreadsheetDownloadButton session={session} title={title} download={download} />
+          </>
+        ) : (
+          actions
+        )
+      }
       footer={accessRevoked ? undefined : footer}
       busy={!accessRevoked && !metadata && !error}
     >
       {accessRevoked ? (
         <EditableArtifactMessage
-          title="Access changed"
-          detail={editableArtifactStatusLabel(view)}
+          title={t("artifacts.editableSpreadsheet.accessChanged")}
+          detail={editableArtifactStatusLabel(t, view)}
         />
       ) : activeSheet && metadata ? (
         <EditableSpreadsheetGrid
@@ -422,11 +578,16 @@ export function EditableSpreadsheetArtifactSurface({
           readOnly={!writable}
         />
       ) : error ? (
-        <EditableArtifactMessage title="Could not open this workbook" detail={error.message} />
+        <EditableArtifactMessage
+          title={t("artifacts.editableSpreadsheet.couldNotOpenThisWorkbook")}
+          detail={error.message}
+        />
       ) : metadata ? (
         <div className="grid h-full place-items-center bg-og-bg p-6 text-center">
           <div>
-            <p className="text-og-base font-medium text-og-fg">This workbook has no worksheets.</p>
+            <p className="text-og-base font-medium text-og-fg">
+              {t("artifacts.editableSpreadsheet.thisWorkbookHasNoWorksheets")}
+            </p>
             {writable && allowAddSheet ? (
               <button
                 type="button"
@@ -434,19 +595,286 @@ export function EditableSpreadsheetArtifactSurface({
                 disabled={creatingSheet}
                 className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
               >
-                {creatingSheet ? "Adding…" : "Add worksheet"}
+                {creatingSheet
+                  ? t("artifacts.editableSpreadsheet.adding")
+                  : t("artifacts.editableSpreadsheet.addWorksheet")}
               </button>
             ) : null}
           </div>
         </div>
       ) : (
         <EditableArtifactMessage
-          title="Opening workbook"
-          detail={editableArtifactStatusLabel(view)}
+          title={t("artifacts.editableSpreadsheet.openingWorkbook")}
+          detail={editableArtifactStatusLabel(t, view)}
         />
       )}
     </ArtifactSurface>
   );
+}
+
+/** Inline authoring state only; the tab label always comes from canonical metadata. */
+function EditableWorksheetTab({
+  session,
+  sheet,
+  sheets,
+  selected,
+  writable,
+  onSelect,
+  onCommandError,
+}: {
+  session: EditableArtifactSession;
+  sheet: EditableSpreadsheetSheetMetadata;
+  sheets: readonly EditableSpreadsheetSheetMetadata[];
+  selected: boolean;
+  writable: boolean;
+  onSelect: () => void;
+  onCommandError?: ((error: Error) => void) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const submissions = useSpreadsheetSubmissions();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(sheet.name);
+  const [saving, setSaving] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const tabRef = useRef<HTMLButtonElement>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const latestRef = useRef({ session, sheet, writable });
+  latestRef.current = { session, sheet, writable };
+  const errorId = useId();
+  const canRename = writable && sheet.generationId !== null;
+  const scopeRef = useRef({
+    session,
+    sheetId: sheet.sheetId,
+    generationId: sheet.generationId,
+    canRename,
+  });
+  if (
+    scopeRef.current.session !== session ||
+    scopeRef.current.sheetId !== sheet.sheetId ||
+    scopeRef.current.generationId !== sheet.generationId ||
+    scopeRef.current.canRename !== canRename
+  ) {
+    scopeRef.current = {
+      session,
+      sheetId: sheet.sheetId,
+      generationId: sheet.generationId,
+      canRename,
+    };
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    setEditing(false);
+    setSaving(false);
+    setAccepted(false);
+    setError(null);
+    busyRef.current = false;
+  }, [session, sheet.generationId, sheet.sheetId, canRename]);
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+  useEffect(() => {
+    if (!accepted || !editing || sheet.name !== name) return;
+    const restoreFocus =
+      document.activeElement === document.body || document.activeElement === inputRef.current;
+    setEditing(false);
+    setSaving(false);
+    setAccepted(false);
+    busyRef.current = false;
+    if (restoreFocus) queueMicrotask(() => tabRef.current?.focus({ preventScroll: true }));
+  }, [accepted, editing, name, sheet.name]);
+
+  const start = () => {
+    if (!canRename || busyRef.current) return;
+    onSelect();
+    setName(sheet.name);
+    setError(null);
+    setAccepted(false);
+    setEditing(true);
+  };
+  const cancel = () => {
+    if (busyRef.current) return;
+    setEditing(false);
+    setError(null);
+    queueMicrotask(() => tabRef.current?.focus({ preventScroll: true }));
+  };
+  const rename = async () => {
+    if (!canRename || busyRef.current) return;
+    const generation = sheetGeneration(sheet);
+    if (!generation) return;
+    const next = name.trim();
+    if (!next || next.length > 31 || /[\\/?*[\]:\0]/u.test(next)) {
+      setError(t("artifacts.editableSpreadsheet.use131CharactersWithout"));
+      return;
+    }
+    if (sheets.some((other) => other.sheetId !== sheet.sheetId && other.name === next)) {
+      setError(t("artifacts.editableSpreadsheet.aWorksheetAlreadyHasThis"));
+      return;
+    }
+    if (next === sheet.name) {
+      cancel();
+      return;
+    }
+    setName(next);
+    setError(null);
+    setSaving(true);
+    busyRef.current = true;
+    const scope = scopeRef.current;
+    const current = () =>
+      mountedRef.current && scopeRef.current === scope && latestRef.current.writable;
+    try {
+      await submissions.run(() =>
+        session.applySpreadsheetCommands({
+          version: SPREADSHEET_ARTIFACT_COMMAND_VERSION,
+          commands: [{ kind: "sheet.rename", sheet: generation, name: next }],
+        }),
+      );
+      if (current()) setAccepted(true);
+    } catch (cause) {
+      if (!current()) return;
+      const failure = asError(cause);
+      busyRef.current = false;
+      setSaving(false);
+      setError(failure.message || t("artifacts.editableSpreadsheet.couldNotRenameWorksheetTry"));
+      onCommandError?.(failure);
+      queueMicrotask(() => inputRef.current?.focus());
+    }
+  };
+
+  const tab = (
+    <button
+      ref={tabRef}
+      type="button"
+      role="tab"
+      tabIndex={editing && canRename ? -1 : undefined}
+      aria-selected={selected}
+      aria-keyshortcuts={canRename ? "F2" : undefined}
+      title={canRename ? t("artifacts.editableSpreadsheet.doubleClickOrPressF2") : undefined}
+      onClick={onSelect}
+      onDoubleClick={start}
+      onKeyDown={(event) => {
+        if (event.key === "F2") {
+          event.preventDefault();
+          start();
+        }
+      }}
+      className={cn(
+        "h-7 shrink-0 rounded-og-sm px-2.5 text-og-sm outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent",
+        selected
+          ? "bg-og-surface-3 font-medium text-og-fg"
+          : "text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg",
+      )}
+    >
+      {sheet.name}
+    </button>
+  );
+
+  return editing && canRename ? (
+    <>
+      <span className="sr-only">{tab}</span>
+      <form
+        className="flex min-w-0 flex-wrap items-center gap-1 py-1"
+        style={{ width: "min(18rem, 100%)" }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void rename();
+        }}
+      >
+        <input
+          ref={inputRef}
+          aria-label={t("artifacts.editableSpreadsheet.worksheetName")}
+          aria-invalid={error ? "true" : undefined}
+          aria-describedby={error ? errorId : undefined}
+          disabled={saving}
+          value={name}
+          onInput={(event) => {
+            setName(event.currentTarget.value);
+            setError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancel();
+            }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void rename();
+            }
+          }}
+          className="h-7 w-40 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-sm text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+        />
+        {saving ? (
+          <span role="status" className="text-og-xs text-og-fg-muted">
+            {t("artifacts.editableSpreadsheet.renaming")}
+          </span>
+        ) : (
+          <>
+            <button
+              type="submit"
+              className="rounded-og-sm px-2 py-1 text-og-xs text-og-fg outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
+            >
+              {t("artifacts.editableSpreadsheet.save")}
+            </button>
+            <button
+              type="button"
+              onClick={cancel}
+              className="rounded-og-sm px-2 py-1 text-og-xs text-og-fg-muted outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
+            >
+              {t("artifacts.editableSpreadsheet.cancel")}
+            </button>
+          </>
+        )}
+        {error ? (
+          <span
+            id={errorId}
+            role="alert"
+            className="text-og-xs text-og-status-failed"
+            style={{ flexBasis: "100%", overflowWrap: "anywhere" }}
+          >
+            {error}
+          </span>
+        ) : null}
+      </form>
+    </>
+  ) : (
+    tab
+  );
+}
+
+function spreadsheetSessionKey(session: EditableArtifactSession): number {
+  let key = SESSION_KEYS.get(session);
+  if (key === undefined) {
+    key = ++nextSessionKey;
+    SESSION_KEYS.set(session, key);
+  }
+  return key;
+}
+
+function useSpreadsheetAuthoringLifetime() {
+  const lifetime = useRef<object | null>({});
+  useClientLayoutEffect(() => {
+    lifetime.current = {};
+    return () => {
+      lifetime.current = null;
+    };
+  }, []);
+  return lifetime;
+}
+
+function requireSpreadsheetAuthoringLifetime(lifetime: { current: object | null }): object {
+  if (!lifetime.current) throw new Error("Spreadsheet authoring session changed");
+  return lifetime.current;
 }
 
 function useSpreadsheetMetadata(session: EditableArtifactSession): {
@@ -454,17 +882,34 @@ function useSpreadsheetMetadata(session: EditableArtifactSession): {
   error: Error | null;
 } {
   const [state, setState] = useState<{
+    session: EditableArtifactSession;
     metadata: EditableSpreadsheetMetadataProjection | null;
     error: Error | null;
-  }>({ metadata: null, error: null });
-  useEffect(
-    () =>
-      session.subscribeSpreadsheetMetadata({}, (metadata) => setState({ metadata, error: null }), {
-        onError: (error) => setState((current) => ({ ...current, error })),
-      }),
-    [session],
-  );
-  return state;
+  }>({ session, metadata: null, error: null });
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = session.subscribeSpreadsheetMetadata(
+      {},
+      (metadata) => {
+        if (active) setState({ session, metadata, error: null });
+      },
+      {
+        onError: (error) => {
+          if (active)
+            setState((current) =>
+              current.session === session
+                ? { ...current, error }
+                : { session, metadata: null, error },
+            );
+        },
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [session]);
+  return state.session === session ? state : { metadata: null, error: null };
 }
 
 function projectSdkViewport(
@@ -475,7 +920,12 @@ function projectSdkViewport(
   rowCount: number,
   columnCount: number,
 ): SpreadsheetGridProjection {
-  const current = viewport && sameViewport(viewport, query) ? viewport : null;
+  // Keep the last valid bounded coverage while a resize/scroll query is replaced.
+  // Never carry cells across a session, sheet, or generation boundary.
+  const current =
+    viewport && viewport.sheetId === sheet.sheetId && viewport.generationId === sheet.generationId
+      ? viewport
+      : null;
   const projectedCells = (current?.cells ?? []).map((cell) => ({
     row: cell.row,
     col: cell.column,
@@ -492,8 +942,12 @@ function projectSdkViewport(
     sheetId: sheet.sheetId,
     sheetName: sheet.name,
     generationId: current?.generationId ?? sheet.generationId,
-    revision: `${metadataRevision}:${current?.revision ?? "loading"}`,
+    revision: current?.revision.toString() ?? "loading",
     dimensionRevision: metadataRevision.toString(),
+    defaultRowHeight: sheet.defaultRowHeight,
+    defaultColumnWidth: sheet.defaultColumnWidth,
+    rowHeights: sheet.rowHeights,
+    columnWidths: sheet.columnWidths,
     rowCount,
     columnCount,
     usedRange: used
@@ -720,10 +1174,13 @@ function displayValue(value: unknown): string {
   return String(value);
 }
 
-function nextAvailableSheetName(sheets: readonly EditableSpreadsheetSheetMetadata[]): string {
+function nextAvailableSheetName(
+  t: OpenGeniText,
+  sheets: readonly EditableSpreadsheetSheetMetadata[],
+): string {
   let index = sheets.length + 1;
   while (sheets.some((sheet) => sheet.name === `Sheet${index}`)) index += 1;
-  return `Sheet${index}`;
+  return t("artifacts.editableSpreadsheet.sheetIndex", { index });
 }
 
 function clampInteger(value: number, minimum: number, maximum: number): number {

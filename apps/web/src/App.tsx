@@ -7,9 +7,14 @@
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
-//   /workspaces/:id/variable-sets            → variable sets (?view=new)
-//   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
+//   /workspaces/:id/secrets                  → vaults (?view=new|connect-1password,
+//                                               ?connection=<id>[&view=choose-vaults|replace-token])
+//   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
+//   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
+//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
+//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
@@ -28,9 +33,12 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
+//   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
+// The shared session UI renders through this app's router and API helpers.
+import "./app-host";
 import {
   Navigate,
   RouterProvider,
@@ -41,28 +49,48 @@ import {
   useParams,
   useSearch,
 } from "@tanstack/react-router";
-import { ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
+import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
-import { RootRouteComponent, useAppContext } from "@/context";
-import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
-import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { RootRouteComponent } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  parseComposerLaunchSearch,
+  type ComposerLaunchSearch,
+} from "@opengeni/react/app/lib/composer-launch";
+import {
+  parseSessionSearchRoute,
+  type SessionSearchRoute,
+} from "@opengeni/react/app/lib/session-search-route";
+import {
+  artifactReturnSearch,
+  parseCheckoutOutcome,
+  type CheckoutOutcome,
+} from "@opengeni/react/app/lib/routes";
 import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
-import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
+import {
+  parseReturnTo,
+  returnToOf,
+  returnToSearch,
+  type ReturnToSearch,
+} from "@opengeni/react/app/lib/return-to";
 import {
   parseModelsAccount,
   parseModelsView,
   workspaceModelsRedirect,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import {
   documentsRedirectSearch,
   parseKnowledgeSearch,
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
+import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { siteAuthSearch } from "@/lib/site-auth";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -71,15 +99,16 @@ import {
   type DeveloperView,
 } from "@/lib/developer-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
+import { parseSecretsIndexSearch, type SecretsIndexSearch } from "@/lib/secrets-route";
 import {
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 import {
   parseOrganizationSection,
   type LegacyOrganizationAdminSection,
   type OrganizationAdminSection as OrganizationSettingsSection,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   parseOrganizationRecordId,
   parseOrganizationView,
@@ -91,14 +120,19 @@ import {
   resolveLandingWorkspaceId,
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
-} from "@/lib/workspace-navigation-preference";
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
+import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
 type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
 
-export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
+export {
+  workspaceAgentPath,
+  workspaceSessionPath,
+  workspaceSessionsPath,
+} from "@opengeni/react/app/lib/routes";
 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
@@ -113,10 +147,7 @@ const LazyConnectAgentRoute = lazyRouteComponent(
   () => import("@/routes/connect-agent"),
   "ConnectAgentRoute",
 );
-const LazyVariableSetsRoute = lazyRouteComponent(
-  () => import("@/routes/variable-sets"),
-  "VariableSetsRoute",
-);
+const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
@@ -126,6 +157,14 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazyExcelAddinRoute = lazyRouteComponent(
+  () => import("@/routes/excel-addin"),
+  "ExcelAddinRoute",
+);
+const LazyDesktopReturnRoute = lazyRouteComponent(
+  () => import("@/routes/desktop-return"),
+  "DesktopReturnRoute",
 );
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
@@ -139,11 +178,28 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
 );
+const LazyNativeSignInRoute = lazyRouteComponent(
+  () => import("@/routes/native-sign-in"),
+  "NativeSignInRoute",
+);
+const LazySiteAuthorizeRoute = lazyRouteComponent(
+  () => import("@/routes/site-auth"),
+  "SiteAuthorizeRoute",
+);
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
 );
+const LazySubscriptionPlansPreview = lazyRouteComponent(
+  () => import("@/dev/subscription-plans-preview"),
+  "SubscriptionPlansPreview",
+);
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
+const LazyReadOnlyChatsRoute = lazyRouteComponent(
+  () => import("@/routes/read-only-chats"),
+  "ReadOnlyChatsRoute",
+);
+const LazyInboxRoute = lazyRouteComponent(() => import("@/routes/inbox"), "InboxRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
@@ -157,7 +213,7 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   () => import("@/routes/schedules"),
   "ScheduleFormRoute",
 );
-const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
   () => import("@/routes/playground"),
   "PlaygroundRoute",
@@ -167,7 +223,7 @@ const LazySessionDeepLinkRoute = lazyRouteComponent(
   "SessionDeepLinkRoute",
 );
 const LazySessionsIndexRoute = lazyRouteComponent(
-  () => import("@/routes/sessions-index"),
+  () => import("@opengeni/react/app/routes/sessions-index"),
   "SessionsIndexRoute",
 );
 const LazyWorkspaceSettingsRoute = lazyRouteComponent(
@@ -178,9 +234,12 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
-const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyArtifactsRoute = lazyRouteComponent(
+  () => import("@opengeni/react/app/routes/artifacts"),
+  "ArtifactsRoute",
+);
 const LazyRetainedArtifactRoute = lazyRouteComponent(
-  () => import("@/routes/retained-artifact"),
+  () => import("@opengeni/react/app/routes/retained-artifact"),
   "RetainedArtifactRoute",
 );
 const LazyIdentityLinkRoute = lazyRouteComponent(
@@ -198,6 +257,10 @@ const LazyWorkspaceShellRoute = lazyRouteComponent(
 const LazyComposerChromeGalleryRoute = lazyRouteComponent(
   () => import("@/routes/composer-chrome"),
   "ComposerChromeGalleryRoute",
+);
+const LazyDevSessionTimelineRoute = lazyRouteComponent(
+  () => import("@/routes/dev-session-timeline"),
+  "DevSessionTimelineRoute",
 );
 
 const rootRoute = createRootRoute({
@@ -281,6 +344,20 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
+// colleagues send this link to people who may not be signed in.
+const excelAddinRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: EXCEL_ADDIN_PATH.slice(1),
+  component: LazyExcelAddinRoute,
+});
+// Where a sign-in started in the desktop app lands in the person's browser:
+// hand them back to the app. PUBLIC, like `/reset-password`.
+const desktopReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: DESKTOP_APP_RETURN_PATH.slice(1),
+  component: LazyDesktopReturnRoute,
+});
 const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "setup-account",
@@ -302,6 +379,32 @@ const personalSecurityRoute = createRoute({
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
 });
+// Where the Opengeni phone app's sign-in opens in the system auth browser:
+// sign in with any web method, then allow the device (code + PKCE).
+const nativeSignInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-sign-in",
+  validateSearch: (search: Record<string, unknown>): NativeSignInSearch => {
+    const text = (key: string) =>
+      typeof search[key] === "string" && search[key] ? { [key]: search[key] } : {};
+    return {
+      ...text("redirect_uri"),
+      ...text("code_challenge"),
+      ...text("state"),
+      ...text("device_name"),
+      ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
+    };
+  },
+  component: NativeSignIn,
+});
+// Where a published Site's gateway sends a viewer to sign in: confirm the
+// Site and account, then hand the gateway a one-time code (code + PKCE).
+const siteAuthorizeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "site-auth/authorize",
+  validateSearch: siteAuthSearch,
+  component: SiteAuthorize,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -314,6 +417,17 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+const subscriptionPlansPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/subscription-plans",
+  component: LazySubscriptionPlansPreview,
+});
+// DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
+const devSessionTimelineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/session-timeline",
+  component: LazyDevSessionTimelineRoute,
 });
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
@@ -368,31 +482,50 @@ const workspaceSessionRoute = createRoute({
   }),
   component: SessionView,
 });
+const workspaceSecretsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "secrets",
+  // The list, each vault and each item share one component, so moving between
+  // them never re-reads the vaults. The child routes only match the URL.
+  component: Secrets,
+});
+const workspaceSecretsIndexRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "/",
+  validateSearch: (search: Record<string, unknown>): SecretsIndexSearch =>
+    parseSecretsIndexSearch(search),
+});
+const workspaceSecretsVaultRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "$vaultId",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "availability" | "new-item"; type?: string } => ({
+    ...(search.view === "availability" || search.view === "new-item" ? { view: search.view } : {}),
+    ...(search.view === "new-item" && typeof search.type === "string" ? { type: search.type } : {}),
+  }),
+});
+const workspaceSecretsItemRoute = createRoute({
+  getParentRoute: () => workspaceSecretsRoute,
+  path: "$vaultId/$itemId",
+  validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
+    search.view === "edit" ? { view: "edit" } : {},
+});
+// Variable sets became Secrets (Q-48): old links land on the same place.
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "variable-sets",
-  // The list and each set's page share one component, so moving between them
-  // never re-reads the sets. The child routes only match the URL.
-  component: VariableSets,
-});
-const workspaceVariableSetsIndexRoute = createRoute({
-  getParentRoute: () => workspaceVariableSetsRoute,
-  path: "/",
-  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
-    search.view === "new" ? { view: "new" } : {},
+  component: SecretsRedirect,
 });
 const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceVariableSetsRoute,
-  path: "$variableSetId",
-  validateSearch: (search: Record<string, unknown>): { view?: "add" | "paste" | "edit" } =>
-    search.view === "add" || search.view === "paste" || search.view === "edit"
-      ? { view: search.view }
-      : {},
+  getParentRoute: () => workspaceRoute,
+  path: "variable-sets/$variableSetId",
+  component: SecretsRedirect,
 });
 const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "environments",
-  component: VariableSetsRedirect,
+  component: SecretsRedirect,
 });
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -400,6 +533,16 @@ const workspaceRigsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
     search.view === "new" ? { view: "new" } : {},
   component: Rigs,
+});
+const workspaceReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: ReadOnlyChats,
+});
+const workspaceInboxRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "inbox",
+  component: Inbox,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -651,7 +794,14 @@ const workspaceOrganizationRoute = createRoute({
     const checkout = parseCheckoutOutcome(search);
     const checkoutSession =
       checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
-    const section = parseOrganizationSection(search.section);
+    const requestedSection = parseOrganizationSection(search.section);
+    // Connected agents moved from Developer to their own page; older links
+    // (Connect an agent, an agent's page) still land on it.
+    const section =
+      requestedSection === "developer" &&
+      (search.view === "connect-agent" || parseAgentParam(search.agent))
+        ? ("agents" as const)
+        : requestedSection;
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view =
       section === "models"
@@ -662,7 +812,7 @@ const workspaceOrganizationRoute = createRoute({
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
             : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
-    const agent = section === "developer" ? parseAgentParam(search.agent) : undefined;
+    const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -718,11 +868,22 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   connectAgentRoute,
   resetPasswordRoute,
+  excelAddinRoute,
+  desktopReturnRoute,
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, onboardingPreviewRoute] : []),
+  nativeSignInRoute,
+  siteAuthorizeRoute,
+  ...(import.meta.env.DEV
+    ? [
+        composerChromeGalleryRoute,
+        onboardingPreviewRoute,
+        subscriptionPlansPreviewRoute,
+        devSessionTimelineRoute,
+      ]
+    : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
@@ -731,13 +892,18 @@ const routeTree = rootRoute.addChildren([
     workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
-    workspaceVariableSetsRoute.addChildren([
-      workspaceVariableSetsIndexRoute,
-      workspaceVariableSetDetailRoute,
+    workspaceSecretsRoute.addChildren([
+      workspaceSecretsIndexRoute,
+      workspaceSecretsVaultRoute,
+      workspaceSecretsItemRoute,
     ]),
+    workspaceVariableSetsRoute,
+    workspaceVariableSetDetailRoute,
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
+    workspaceReadOnlyChatsRoute,
+    workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
@@ -771,6 +937,15 @@ const router = createRouter({
   ...ROUTER_PENDING_OPTIONS,
   ...routerErrorOptions(() => appRoutePattern()),
 });
+installDesktopShell((path) => router.history.push(path));
+warmDesktopPages([
+  LazySessionRoute,
+  LazySessionsIndexRoute,
+  LazyInboxRoute,
+  LazyCapabilitiesRoute,
+  LazySchedulesRoute,
+  LazyArtifactsRoute,
+]);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {
@@ -853,24 +1028,52 @@ function SessionDeepLink() {
   return <LazySessionDeepLinkRoute sessionId={sessionId} />;
 }
 
-function VariableSets() {
-  const { workspaceId } = workspaceVariableSetsRoute.useParams();
-  const { variableSetId } = useParams({ strict: false });
-  const { view } = useSearch({ strict: false });
+function Secrets() {
+  const { workspaceId } = workspaceSecretsRoute.useParams();
+  const { vaultId, itemId } = useParams({ strict: false });
+  const { view, type, connection, owner } = useSearch({ strict: false });
   return (
-    <LazyVariableSetsRoute workspaceId={workspaceId} variableSetId={variableSetId} view={view} />
+    <LazySecretsRoute
+      workspaceId={workspaceId}
+      vaultId={vaultId}
+      itemId={itemId}
+      view={view}
+      type={type}
+      connectionId={connection}
+      owner={owner}
+    />
   );
 }
 
-function VariableSetsRedirect() {
-  const { workspaceId } = workspaceEnvironmentsRoute.useParams();
-  return <Navigate to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }} replace />;
+function SecretsRedirect() {
+  const { workspaceId, variableSetId } = useParams({ strict: false });
+  if (!workspaceId) return null;
+  // A variable set's id is kept by its vault, so its page maps one to one.
+  return variableSetId ? (
+    <Navigate
+      to="/workspaces/$workspaceId/secrets/$vaultId"
+      params={{ workspaceId, vaultId: variableSetId }}
+      replace
+    />
+  ) : (
+    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
+  );
 }
 
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
   const { view } = workspaceRigsRoute.useSearch();
   return <LazyRigsRoute workspaceId={workspaceId} view={view} />;
+}
+
+function ReadOnlyChats() {
+  const { workspaceId } = workspaceReadOnlyChatsRoute.useParams();
+  return <LazyReadOnlyChatsRoute workspaceId={workspaceId} />;
+}
+
+function Inbox() {
+  const { workspaceId } = workspaceInboxRoute.useParams();
+  return <LazyInboxRoute workspaceId={workspaceId} />;
 }
 
 function RigDetail() {
@@ -1009,17 +1212,6 @@ function WorkspaceSettings() {
       />
     );
   }
-  // Agent learning is the Learning page of Knowledge now.
-  if (section === "learning") {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/state"
-        params={{ workspaceId }}
-        search={{ page: "learning" }}
-        replace
-      />
-    );
-  }
   return (
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}
@@ -1115,11 +1307,11 @@ function Organization() {
           ? {
               ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
               ...(webhook ? { webhook } : {}),
-              ...(agent ? { agent } : {}),
               ...(serviceAccount ? { serviceAccount } : {}),
             }
           : undefined
       }
+      connectedAgent={page === "agents" ? agent : undefined}
       person={person}
       invitation={invitation}
       workspace={workspace}
@@ -1161,6 +1353,16 @@ function ConnectAgent() {
 function Device() {
   const { user_code } = deviceRoute.useSearch();
   return <LazyDeviceRoute userCode={user_code} />;
+}
+
+function NativeSignIn() {
+  const search = nativeSignInRoute.useSearch();
+  return <LazyNativeSignInRoute search={search} />;
+}
+
+function SiteAuthorize() {
+  const search = siteAuthorizeRoute.useSearch();
+  return <LazySiteAuthorizeRoute search={search} />;
 }
 
 function ResetPassword() {

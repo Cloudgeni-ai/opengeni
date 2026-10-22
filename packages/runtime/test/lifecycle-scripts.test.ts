@@ -27,6 +27,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     statSync,
     readFileSync,
     readdirSync,
+    utimesSync,
   } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
@@ -84,6 +85,8 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubRepositoryId: 456,
     },
     ref = resource.ref,
+    subpath = "",
+    credentialSource?: "connection" | "provider",
   ): string {
     const generated = repositoryCloneCommand([
       { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
@@ -95,7 +98,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
-    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' '${ref}' '' '${resource.expectedCommitSha ?? ""}'`;
+    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' '${ref}' '${subpath}' '${resource.expectedCommitSha ?? ""}'${credentialSource ? ` '${credentialSource}'` : ""}`;
   }
 
   function setupScript(
@@ -126,8 +129,6 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     execFileSync("git", ["-C", origin, "commit", "-m", "init"], {
       env: gitEnv,
     });
-    // file:// partial clone (--filter=blob:none) needs the origin to allow it.
-    execFileSync("git", ["-C", origin, "config", "uploadpack.allowfilter", "true"]);
     return origin;
   }
 
@@ -262,7 +263,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           output = failure.stdout ?? "";
         }
         expect({ name, status }).toEqual({ name, status: 78 });
-        expect(output).toContain("Refusing to provision OpenGeni Git credentials");
+        expect(output).toContain("Refusing to provision Opengeni Git credentials");
         expect(readFileSync(join(home, ".gitconfig"), "utf8")).toBe(gitconfig);
         expect(readFileSync(join(home, ".config", "git", "config"), "utf8")).toBe(xdgConfig);
         expect(existsSync(join(home, ".opengeni"))).toBe(false);
@@ -330,7 +331,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ]) {
         const refused = await bareSession.exec({ cmd: command });
         expect(refused.exitCode).toBe(78);
-        expect(refused.stderr).toContain("Refusing to provision OpenGeni Git credentials");
+        expect(refused.stderr).toContain("Refusing to provision Opengeni Git credentials");
       }
       expect(readdirSync(bareHome)).toEqual([]);
       expect(existsSync(join(workspace, "repos"))).toBe(false);
@@ -366,12 +367,121 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("a box that already holds the verified clone program re-runs setup in one command", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-staged-clone-"));
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = "https://github.com/opengeni/staged.git";
+      const inner = hostShellSession(join(root, "home"), {
+        shell: "bash",
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: remote,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const commands: string[] = [];
+      let withoutGzip = false;
+      const session = {
+        ...inner,
+        exec: async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          const cmd = withoutGzip
+            ? args.cmd.replaceAll("command -v gzip >/dev/null 2>&1", "false")
+            : args.cmd;
+          return await inner.exec({ ...args, cmd } as never);
+        },
+      };
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: remote,
+          ref: "main",
+          mountPath: "repos/test/staged",
+        },
+      ];
+      const runHook = async (token: string) => {
+        commands.length = 0;
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitTokenSeeds: { github: token },
+        });
+        return [...commands];
+      };
+
+      // Fresh box: the launcher carries the compressed program, installs it
+      // under its content hash and clones, all in one command.
+      const first = await runHook("first-token");
+      expect(first).toHaveLength(1);
+      expect(readFileSync(join(workspace, "repos", "test", "staged", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      const programDirs = readdirSync(join(workspace, ".opengeni")).filter((name) =>
+        name.startsWith("setup-programs-"),
+      );
+      expect(programDirs).toHaveLength(1);
+      const programDir = join(workspace, ".opengeni", programDirs[0]!);
+      const programs = readdirSync(programDir).filter((name) => name.endsWith(".sh"));
+      expect(programs).toHaveLength(1);
+      expect(programs[0]).toMatch(/^[0-9a-f]{64}\.sh$/u);
+      const programFile = join(programDir, programs[0]!);
+      // No secret is written into the reusable program.
+      expect(readFileSync(programFile, "utf8")).not.toContain("first-token");
+
+      // Next turn on the same box: exactly one command, carrying this turn's seed.
+      // A day-old program from an earlier repository set is pruned in passing.
+      const staleProgram = join(programDir, `${"0".repeat(64)}.sh`);
+      writeFileSync(staleProgram, "exit 0\n");
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      utimesSync(staleProgram, twoDaysAgo, twoDaysAgo);
+      const second = await runHook("second-token");
+      expect(second).toHaveLength(1);
+      expect(second[0]).toContain("second-token");
+      expect(existsSync(staleProgram)).toBe(false);
+      expect(existsSync(programFile)).toBe(true);
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "second-token",
+      );
+
+      // A modified program is never executed: it is reinstalled and verified
+      // again by the same single command.
+      writeFileSync(programFile, "echo tampered; exit 0\n");
+      const third = await runHook("third-token");
+      expect(third).toHaveLength(1);
+      expect(third[0]).not.toContain("tampered");
+      expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "third-token",
+      );
+
+      // A box without gzip cannot unpack the embedded program; the launcher
+      // reports it missing and the program is staged uncompressed instead.
+      rmSync(programFile);
+      withoutGzip = true;
+      const fourth = await runHook("fourth-token");
+      expect(fourth.length).toBeGreaterThan(2);
+      expect(readFileSync(programFile, "utf8")).toContain("clone_repository");
+      expect(readFileSync(join(join(root, "home", ".opengeni"), "git-token"), "utf8")).toBe(
+        "fourth-token",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("an optional repository that cannot be cloned is skipped with a warning while a required one stays fatal", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-optional-clone-"));
     try {
       const origin = makeOrigin(root);
-      // A repository with no commits: the fetch of its default branch fails,
-      // exactly like an empty GitHub repository.
+      // A repository that does not exist: its fetch fails like an inaccessible
+      // GitHub repository. (An empty repository is attachable; see below.)
+      const missing = join(root, "missing");
+      // A freshly created repository with no commits is attachable, optional or not.
       const empty = join(root, "empty");
       execFileSync("git", ["init", "--bare", "-b", "main", empty]);
       const workspace = join(root, "workspace");
@@ -382,13 +492,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         cwd: workspace,
         env: {
           GIT_TERMINAL_PROMPT: "0",
-          GIT_CONFIG_COUNT: "3",
+          GIT_CONFIG_COUNT: "4",
           GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
           GIT_CONFIG_VALUE_0: remote("required"),
           GIT_CONFIG_KEY_1: `url.file://${origin}.insteadOf`,
           GIT_CONFIG_VALUE_1: remote("recent"),
-          GIT_CONFIG_KEY_2: `url.file://${empty}.insteadOf`,
-          GIT_CONFIG_VALUE_2: remote("empty"),
+          GIT_CONFIG_KEY_2: `url.file://${missing}.insteadOf`,
+          GIT_CONFIG_VALUE_2: remote("missing"),
+          GIT_CONFIG_KEY_3: `url.file://${empty}.insteadOf`,
+          GIT_CONFIG_VALUE_3: remote("empty"),
         },
         rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
       });
@@ -408,7 +520,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       try {
         await runRepositoryCloneHook(
           session as never,
-          [repository("required", false), repository("empty", true), repository("recent", true)],
+          [
+            repository("required", false),
+            repository("missing", true),
+            repository("empty", true),
+            repository("recent", true),
+          ],
           {
             environment: {},
             onRuntimeEvent: async (event) => {
@@ -425,10 +542,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(readFileSync(join(workspace, "repos", "test", "recent", "README.md"), "utf8")).toBe(
         "hello\n",
       );
+      expect(
+        execFileSync("git", [
+          "-C",
+          join(workspace, "repos", "test", "empty"),
+          "symbolic-ref",
+          "HEAD",
+        ]),
+      ).toBe("refs/heads/main\n");
       // The failed optional clone leaves no partial tree or temporary clone.
       expect(
-        existsSync(join(workspace, "repos", "test", "empty")) &&
-          readdirSync(join(workspace, "repos", "test", "empty")).length > 0,
+        existsSync(join(workspace, "repos", "test", "missing")) &&
+          readdirSync(join(workspace, "repos", "test", "missing")).length > 0,
       ).toBe(false);
       expect(
         readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
@@ -439,21 +564,21 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ]);
       expect(events[1]!.payload).toMatchObject({
         name: "repository-clone",
-        repositoryCount: 3,
-        skippedOptionalRepositories: ["repos/test/empty"],
+        repositoryCount: 4,
+        skippedOptionalRepositories: ["repos/test/missing"],
       });
       expect(warnings).toEqual([
         [
           "[sandbox] optional repository resources were not cloned",
-          { skippedCount: 1, repositoryCount: 3 },
+          { skippedCount: 1, repositoryCount: 4 },
         ],
       ]);
 
-      // The same empty repository attached explicitly keeps today's strict
-      // behavior: the hook fails and reports the failure.
+      // The same unreachable repository attached explicitly stays strict: the
+      // hook fails and reports the failure.
       const strictEvents: string[] = [];
       await expect(
-        runRepositoryCloneHook(session as never, [repository("empty", false)], {
+        runRepositoryCloneHook(session as never, [repository("missing", false)], {
           environment: {},
           onRuntimeEvent: async (event) => {
             strictEvents.push(event.type);
@@ -461,6 +586,28 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         }),
       ).rejects.toThrow("Repository resource fetch failed");
       expect(strictEvents).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+
+      // An explicitly attached empty repository no longer fails the turn.
+      const emptyEvents: string[] = [];
+      await runRepositoryCloneHook(
+        session as never,
+        [{ ...repository("empty", false), mountPath: "repos/test/empty-required" }],
+        {
+          environment: {},
+          onRuntimeEvent: async (event) => {
+            emptyEvents.push(event.type);
+          },
+        },
+      );
+      expect(emptyEvents).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
+      expect(
+        execFileSync("git", [
+          "-C",
+          join(workspace, "repos", "test", "empty-required"),
+          "symbolic-ref",
+          "HEAD",
+        ]),
+      ).toBe("refs/heads/main\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1524,6 +1671,180 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("an empty remote materializes as an unborn branch with origin set, so the agent can commit and push", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-empty-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const env = { HOME: home };
+      const cases = [
+        { ref: "main", branch: "main", source: undefined },
+        { ref: "backup", branch: "backup", source: "provider" as const },
+        { ref: "refs/heads/feature/x", branch: "feature/x", source: undefined },
+        { ref: "HEAD", branch: "main", source: "connection" as const },
+      ];
+      for (const [index, { ref, branch, source }] of cases.entries()) {
+        // A freshly created GitHub repository: no commits, no refs at all.
+        const empty = join(root, `empty-${index}.git`);
+        execFileSync("git", ["init", "--bare", "-b", "main", empty]);
+        const uri = `file://${empty}`;
+        const target = join(root, "ws", "repos", "acme", `empty-${index}`);
+        const script = cloneScriptWithTarget(target, uri, undefined, ref, "", source);
+        const run = runScript(script, env);
+        expect({ ref, status: run.status }).toEqual({ ref, status: 0 });
+        expect(run.output).toContain(`starts on unborn branch ${branch}`);
+        expect(run.output).toContain(`Repository resource ready at ${target}`);
+        expect(run.output).not.toContain("couldn't find remote ref");
+        expect(run.output).not.toContain("hint:");
+        expect(execFileSync("git", ["-C", target, "symbolic-ref", "HEAD"]).trim()).toBe(
+          `refs/heads/${branch}`,
+        );
+        expect(execFileSync("git", ["-C", target, "remote", "get-url", "origin"]).trim()).toBe(uri);
+
+        // Later turns keep the work tree, including uncommitted agent work,
+        // without consulting the remote again.
+        writeFileSync(join(target, "README.md"), "backup\n");
+        const again = runScript(script, env);
+        expect(again.status).toBe(0);
+        expect(again.output).toContain("already present");
+        expect(readFileSync(join(target, "README.md"), "utf8")).toBe("backup\n");
+
+        execFileSync("git", ["-C", target, "add", "README.md"]);
+        execFileSync("git", [
+          "-C",
+          target,
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@t",
+          "commit",
+          "-m",
+          "init",
+        ]);
+        // The branch tracks origin, so a plain `git push` publishes it.
+        execFileSync("git", ["-C", target, "push"]);
+        expect(execFileSync("git", ["-C", empty, "rev-parse", `refs/heads/${branch}`]).trim()).toBe(
+          execFileSync("git", ["-C", target, "rev-parse", "HEAD"]).trim(),
+        );
+        expect(
+          readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+        ).toEqual([]);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an untouched empty-remote mount is cloned properly once the remote gains commits", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-empty-filled-"));
+    try {
+      const empty = join(root, "empty.git");
+      execFileSync("git", ["init", "--bare", "-b", "main", empty]);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const uri = `file://${empty}`;
+      const untouched = join(root, "ws", "untouched");
+      const worked = join(root, "ws", "worked");
+      for (const target of [untouched, worked]) {
+        expect(runScript(cloneScriptWithTarget(target, uri), { HOME: home }).status).toBe(0);
+      }
+      writeFileSync(join(worked, "NOTES.md"), "agent work\n");
+
+      // Someone else pushes the first commit (for example the user's backup).
+      // Commits on another branch only keep the stub; the mount's branch is
+      // still absent on the remote, so re-fetching it would fail every turn.
+      const origin = makeOrigin(root);
+      execFileSync("git", ["-C", origin, "push", uri, "main:master"]);
+      const otherBranch = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });
+      expect(otherBranch.status).toBe(0);
+      expect(otherBranch.output).toContain("already present");
+      expect(execFileSync("git", ["-C", untouched, "symbolic-ref", "HEAD"])).toBe(
+        "refs/heads/main\n",
+      );
+
+      execFileSync("git", ["-C", origin, "push", uri, "main"]);
+
+      const refilled = runScript(cloneScriptWithTarget(untouched, uri), { HOME: home });
+      expect(refilled.status).toBe(0);
+      expect(refilled.output).toContain("now has commits; rematerializing");
+      expect(readFileSync(join(untouched, "README.md"), "utf8")).toBe("hello\n");
+
+      // A mount with agent work is never replaced.
+      const kept = runScript(cloneScriptWithTarget(worked, uri), { HOME: home });
+      expect(kept.status).toBe(0);
+      expect(kept.output).toContain("already present");
+      expect(readFileSync(join(worked, "NOTES.md"), "utf8")).toBe("agent work\n");
+      expect(existsSync(join(worked, "README.md"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an empty remote stays fatal for a pinned commit or non-branch ref and says the repository is empty", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-empty-strict-"));
+    try {
+      const empty = join(root, "empty.git");
+      execFileSync("git", ["init", "--bare", "-b", "main", empty]);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const sha = "a".repeat(40);
+      const uri = "https://github.com/opengeni/empty.git";
+      const cases = [
+        {
+          resource: { kind: "repository" as const, uri, ref: "main", expectedCommitSha: sha },
+          subpath: "",
+        },
+        { resource: { kind: "repository" as const, uri, ref: sha }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "abc1234" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "pull/1/head" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "refs/tags/v1" }, subpath: "" },
+        { resource: { kind: "repository" as const, uri, ref: "main" }, subpath: "packages/api" },
+      ];
+      for (const [index, { resource, subpath }] of cases.entries()) {
+        const target = join(root, "ws", `repo-${index}`);
+        const run = runScript(
+          cloneScriptWithTarget(target, `file://${empty}`, resource, resource.ref, subpath),
+          { HOME: home },
+        );
+        expect({ ref: resource.ref, subpath, status: run.status }).toEqual({
+          ref: resource.ref,
+          subpath,
+          status: 1,
+        });
+        expect(run.output).toContain(`Repository resource fetch failed for ${target}`);
+        expect(run.output).toContain("The remote repository is empty");
+        expect(existsSync(target)).toBe(false);
+        expect(readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing ref on a non-empty remote still fails loudly without the empty-repository fallback", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-missing-ref-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repo");
+      const run = runScript(
+        cloneScriptWithTarget(target, `file://${origin}`, undefined, "does-not-exist"),
+        { HOME: home },
+      );
+      expect(run.status).toBe(1);
+      expect(run.output).toContain("couldn't find remote ref does-not-exist");
+      expect(run.output).toContain(`Repository resource fetch failed for ${target}`);
+      expect(run.output).toContain("Check repository access and the requested ref");
+      expect(run.output).not.toContain("empty");
+      expect(run.output).not.toContain("hint:");
+      expect(existsSync(target)).toBe(false);
+      expect(readdirSync(join(root, "ws")).filter((f) => f.includes(".tmp."))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("clone failure (bad ref/uri) exits non-zero and leaks no tmp clone", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
@@ -1556,7 +1877,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ]);
     const lines = command.split("\n");
     const fetchIndex = lines.findIndex((line) =>
-      line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
+      line.includes('git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"'),
     );
     const guardIndex = lines.findIndex((line) =>
       line.includes(
@@ -1567,7 +1888,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
     );
     const checkoutIndex = lines.findIndex((line) =>
-      line.includes('if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD'),
+      line.includes('! repository_git -C "$tmp" checkout --detach FETCH_HEAD'),
     );
 
     expect(fetchIndex).toBeGreaterThan(-1);

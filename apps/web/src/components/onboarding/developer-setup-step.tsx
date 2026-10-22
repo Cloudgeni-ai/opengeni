@@ -4,25 +4,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
-import { Button } from "@/components/ui/button";
-import { useCopyToClipboard } from "@/components/ui/copy-field";
-import { Disclosure } from "@/components/ui/disclosure";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Skeleton } from "@/components/ui/skeleton";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { useCopyToClipboard } from "@opengeni/react/ui/copy-field";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   DEVELOPER_SETUP_INITIAL_MESSAGE,
-  DEVELOPER_SETUP_KEY_VARIABLE,
-  DEVELOPER_SETUP_VARIABLE_SET_NAME,
+  DEVELOPER_SETUP_KEY_ITEM_NAME,
   DEVELOPER_SETUP_WORKSPACE_NAME,
   CODING_AGENT_KEY_VARIABLE,
   codingAgentSetupPrompt,
   deploymentApiOrigin,
   developerSetupKeyRequest,
   developerSetupModelContext,
-} from "@/lib/onboarding-use-case";
+} from "@opengeni/react/app/lib/onboarding-use-case";
 import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 /**
@@ -37,10 +40,33 @@ type DeveloperSetupClient = Pick<
   | "listOrganizationApiKeys"
   | "deleteOrganizationApiKey"
   | "createWorkspace"
-  | "createVariableSet"
+  | "vaults"
   | "getNewSessionDraft"
   | "saveNewSessionDraft"
 >;
+
+/**
+ * Saves the signup key in the person's Only-me vault in the setup workspace,
+ * so the setup chat (and workers it starts) use it through a reference.
+ */
+async function saveSetupKey(
+  client: DeveloperSetupClient,
+  workspaceId: string,
+  token: string,
+): Promise<void> {
+  const vaults = client.vaults(workspaceId);
+  const existing = await vaults.listVaults();
+  const vault =
+    existing.find((each) => each.ownerKind === "user" && each.isDefault && each.canWrite) ??
+    existing.find((each) => each.ownerKind === "user" && each.canWrite) ??
+    // "Private" is the Only-me default vault's name; the server adopts it as the default.
+    (await vaults.createVault({ name: "Private", ownerKind: "user" }));
+  await vaults.createItem(vault.id, {
+    type: "api_key",
+    name: DEVELOPER_SETUP_KEY_ITEM_NAME,
+    fields: [{ name: "value", value: token }],
+  });
+}
 
 type KeyState =
   | { status: "creating" }
@@ -82,9 +108,9 @@ async function liveSetupKeys(
  * send, so it works before any model is connected), or uses their own coding agent: copy the key into the
  * product's server-only env, then copy a prompt that names that variable.
  *
- * The key never enters a chat: the setup chat reads it from a write-only
- * variable set in its sandbox, its instructions name only where it is, and
- * the coding-agent prompt carries the variable name, never the key.
+ * The key never enters a chat: it is saved in the person's Only-me vault, the
+ * setup chat's instructions name only its {{secret:...}} reference, and the
+ * coding-agent prompt carries the variable name, never the key.
  */
 export function DeveloperSetupStep({
   client,
@@ -106,7 +132,7 @@ export function DeveloperSetupStep({
   // Earlier setup keys to revoke before the next attempt creates a new one.
   const replaceKeyIds = useRef<string[]>([]);
   // What "Let Opengeni implement it" already created, so a retry resumes.
-  const implementProgress = useRef<{ workspaceId?: string; variableSetId?: string | null }>({});
+  const implementProgress = useRef<{ workspaceId?: string; keySaved?: boolean }>({});
   const promptCopy = useCopyToClipboard();
   const keyCopy = useCopyToClipboard();
   const facts = {
@@ -196,21 +222,14 @@ export function DeveloperSetupStep({
         })
       ).id;
       const workspaceId = progress.workspaceId;
-      if (token && progress.variableSetId === undefined) {
-        // Without it the chat still works; its instructions say no key is attached.
-        progress.variableSetId = await client
-          .createVariableSet(workspaceId, {
-            scope: "workspace",
-            name: DEVELOPER_SETUP_VARIABLE_SET_NAME,
-            description: "The full-access setup API key from signup, for the setup chat's sandbox.",
-            variables: [{ name: DEVELOPER_SETUP_KEY_VARIABLE, value: token }],
-          })
-          .then(
-            (variableSet) => variableSet.id,
-            () => null,
-          );
+      if (token && progress.keySaved === undefined) {
+        // Without it the chat still works; its instructions say no key is saved.
+        progress.keySaved = await saveSetupKey(client, workspaceId, token).then(
+          () => true,
+          () => false,
+        );
       }
-      const variableSetId = progress.variableSetId ?? null;
+      const keySaved = progress.keySaved ?? false;
       // The setup chat waits in that workspace's composer, ready to send. It
       // starts on whatever model the person has, and with none yet the
       // composer offers to connect one, so this works before any model or
@@ -227,12 +246,11 @@ export function DeveloperSetupStep({
         ...(draft.modelProvided !== undefined ? { modelProvided: draft.modelProvided } : {}),
         options: {
           ...draft.options,
-          ...(variableSetId ? { variableSetIds: [variableSetId], variableSetId } : {}),
           agent: {
             ...draft.options.agent,
             instructions: developerSetupModelContext({
               ...facts,
-              keyInSandbox: variableSetId !== null,
+              keySaved,
             }),
           },
         },

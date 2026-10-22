@@ -102,7 +102,7 @@ fn home_dir() -> Option<PathBuf> {
 const CREDENTIALS_FILE: &str = "credentials.json";
 
 /// Directory containing one independently replaceable credential document per
-/// OpenGeni deployment/workspace connection. Separate files avoid a global
+/// Opengeni deployment/workspace connection. Separate files avoid a global
 /// read-modify-write race when two `connect` commands run concurrently and let
 /// the running agent notice additions/removals without restarting.
 const CONNECTIONS_DIR: &str = "connections";
@@ -114,7 +114,7 @@ const CONNECTION_SCHEMA_VERSION: u32 = 1;
 /// processes are already separated by pid.
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// One local connection to one workspace on one OpenGeni deployment.
+/// One local connection to one workspace on one Opengeni deployment.
 ///
 /// `api_url` is part of the identity because two independent deployments may
 /// legitimately contain the same workspace UUID. The runtime credentials stay
@@ -134,8 +134,22 @@ pub struct StoredConnection {
     /// explicit reconnect to that deployment replaces it.
     #[serde(default)]
     pub legacy_origin: bool,
+    /// A refused transport is suspended until renewal or explicit reconnect.
+    /// This belongs to this credential document, never the shared host engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_state: Option<AuthenticationState>,
     /// The existing workspace-scoped runtime credentials.
     pub credentials: StoredCredentials,
+}
+
+/// Persisted recovery state for one connection's exact credentials.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationState {
+    /// The transport refused these credentials; the renewal loop checks authority.
+    RenewalRequired,
+    /// Renewal refused the grant or cannot recover the rejected transport.
+    ReconnectRequired,
 }
 
 impl StoredConnection {
@@ -149,6 +163,7 @@ impl StoredConnection {
             connection_id,
             api_url,
             legacy_origin: false,
+            authentication_state: None,
             credentials,
         }
     }
@@ -161,6 +176,7 @@ impl StoredConnection {
             connection_id,
             api_url,
             legacy_origin: true,
+            authentication_state: None,
             credentials,
         }
     }
@@ -327,7 +343,7 @@ pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigErro
     Ok(path)
 }
 
-/// Loads every configured OpenGeni connection, ordered by local connection id.
+/// Loads every configured Opengeni connection, ordered by local connection id.
 ///
 /// A pre-multi-connection `credentials.json` is migrated exactly once into the
 /// new per-connection directory using `legacy_api_url` as its deployment origin.
@@ -403,6 +419,31 @@ fn validate_connection(path: &Path, connection: &StoredConnection) -> Result<(),
         });
     }
     Ok(())
+}
+
+/// Reads one connection file by its id, without legacy migration. `None` when
+/// that connection no longer exists (disconnected or replaced).
+pub fn load_connection(connection_id: &str) -> Result<Option<StoredConnection>, ConfigError> {
+    if connection_id.is_empty()
+        || !connection_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(None);
+    }
+    let path = connections_dir()?.join(format!("{connection_id}.json"));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ConfigError::io(&path, error)),
+    };
+    let connection: StoredConnection =
+        serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    validate_connection(&path, &connection)?;
+    Ok(Some(connection))
 }
 
 /// Finds one configured deployment/workspace connection.
@@ -653,7 +694,7 @@ fn restrict_permissions(_path: &Path) -> Result<(), ConfigError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
@@ -667,7 +708,7 @@ mod tests {
     /// Points the config dir at a fresh temp dir for the duration of the test,
     /// returning both the env-serialization guard and the temp-dir guard so they
     /// outlive the test body.
-    fn with_temp_config() -> (MutexGuard<'static, ()>, tempfile::TempDir) {
+    pub(crate) fn with_temp_config() -> (MutexGuard<'static, ()>, tempfile::TempDir) {
         let lock = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 describe("worker fleet dashboard scope", () => {
-  test("requires one exact namespace, environment, and release for every OpenGeni panel", async () => {
+  test("requires one exact namespace, environment, and release for every Opengeni panel", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
     );

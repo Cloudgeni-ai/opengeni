@@ -6,7 +6,7 @@ import {
   IdentityLinkConsent,
   DeviceAuthorization,
 } from "@opengeni/react/connect";
-import { NativeConnectSetup } from "../src/components/capabilities/native-connect-setup";
+import { NativeConnectSetup } from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import "../src/styles.css";
 import "@opengeni/react/connect.css";
 

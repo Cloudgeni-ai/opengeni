@@ -578,7 +578,11 @@ mod tests {
     #[tokio::test]
     async fn guard_drop_during_first_clone_refuses_both_deliveries_without_renewing_epoch() {
         use std::future::Future;
-        use std::task::{Context, Poll, Waker};
+        use std::task::{Context, Poll, Wake, Waker};
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
         let frames = std::sync::Arc::new(tokio::sync::RwLock::new(super::CapturedFrames::new()));
         let background_frames = std::sync::Arc::clone(&frames);
         let mut background = Box::pin(async move {
@@ -587,7 +591,8 @@ mod tests {
             })
             .await
         });
-        let mut context = Context::from_waker(Waker::noop());
+        let waker = Waker::from(std::sync::Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
         assert!(matches!(
             background.as_mut().poll(&mut context),
             Poll::Pending

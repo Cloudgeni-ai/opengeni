@@ -9,7 +9,7 @@ import {
 } from "@opengeni/contracts";
 import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   organizationApiKeyExpiryDate,
   organizationApiKeyPermissionsForAccess,
@@ -87,6 +87,7 @@ function fixture(overrides: Partial<ApiKey> = {}, credentialKind = "organization
   );
   track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
   const workspace = track(spyOn(db, "requireWorkspace").mockResolvedValue(workspaceRecord));
+  track(spyOn(db, "getWorkspace").mockImplementation(async (...args) => workspace(...args)));
   const deps = {
     db: {} as never,
     settings: testSettings({

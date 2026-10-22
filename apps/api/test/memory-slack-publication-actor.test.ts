@@ -57,7 +57,7 @@ describe("Memory Slack publication causal actor", () => {
           initiator: {
             kind: "service",
             subjectId: "goal-continuation",
-            label: "OpenGeni goal continuation",
+            label: "Opengeni goal continuation",
           },
           initiatingHumanSubjectId: "user:causal-owner",
         }),
@@ -73,7 +73,7 @@ describe("Memory Slack publication causal actor", () => {
         turnId,
         attemptId,
       },
-      ownerLabel: "OpenGeni goal continuation",
+      ownerLabel: "Opengeni goal continuation",
     });
   });
 

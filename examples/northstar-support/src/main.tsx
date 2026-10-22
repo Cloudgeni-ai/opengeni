@@ -202,7 +202,7 @@ function ProductHeader({
             className={agentEnabled ? "size-4 text-[#5f50c7]" : "size-4 text-[#96938e]"}
           />
           <span className="min-w-[88px]">
-            <span className="block text-[12px] font-semibold text-[#333632]">OpenGeni</span>
+            <span className="block text-[12px] font-semibold text-[#333632]">Opengeni</span>
             <span
               className={
                 agentEnabled

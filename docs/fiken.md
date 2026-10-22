@@ -1,6 +1,6 @@
 # Fiken connector (first-party)
 
-OpenGeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
+Opengeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
 small-business accounting service. A workspace connects Fiken either through
 the **registered-app OAuth flow** (the default in the UI) or by pasting a
 **personal API token**; both produce the same workspace-shared connection, and

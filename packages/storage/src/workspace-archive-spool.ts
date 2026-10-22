@@ -19,6 +19,21 @@ export type WorkspaceArchiveSpool = {
 const CHUNK_BYTES = DEFAULT_BOUNDED_OBJECT_CHUNK_BYTES;
 type ExpectedArchive = { bytes: number; sha256: string };
 
+/**
+ * Waits before re-verifying a fresh upload that is not yet visible. Object
+ * stores without read-after-write consistency (for example replicated
+ * self-hosted stores that acknowledge a write on one node) can briefly answer
+ * 404 or a stale range right after a successful PUT. About 16 seconds total.
+ */
+export const WORKSPACE_ARCHIVE_READBACK_RETRY_DELAYS_MS: readonly number[] = [
+  250, 500, 1_000, 2_000, 4_000, 8_000,
+];
+
+export type UploadWorkspaceArchiveSpoolOptions = {
+  readbackRetryDelaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+};
+
 /** Restore classification shared with runtime without importing runtime. */
 export class WorkspaceArchiveStorageError extends Error {
   constructor(
@@ -41,6 +56,7 @@ export async function uploadWorkspaceArchiveSpool(
   storage: ObjectStorage,
   key: string,
   spool: WorkspaceArchiveSpool,
+  options: UploadWorkspaceArchiveSpoolOptions = {},
 ): Promise<void> {
   requireBoundedReads(storage);
   if (!storage.putObjectStream) {
@@ -102,7 +118,7 @@ export async function uploadWorkspaceArchiveSpool(
       );
     }
     // A successful PUT and SHA metadata are not proof of stored content.
-    await verifyRanges(storage, key, expected);
+    await verifyFreshUpload(storage, key, expected, options);
   } catch (error) {
     const failure = streamFailed ? streamFailure : error;
     if (failure instanceof WorkspaceArchiveStorageError) throw failure;
@@ -118,16 +134,65 @@ export async function uploadWorkspaceArchiveSpool(
   }
 }
 
+/**
+ * Readback of a just-written object. Only "not visible yet" outcomes are
+ * retried: a missing object or a pinned range that is temporarily unavailable.
+ * Size or digest mismatches still fail immediately.
+ */
+async function verifyFreshUpload(
+  storage: ObjectStorage,
+  key: string,
+  expected: ExpectedArchive,
+  options: UploadWorkspaceArchiveSpoolOptions,
+): Promise<void> {
+  const delays = options.readbackRetryDelaysMs ?? WORKSPACE_ARCHIVE_READBACK_RETRY_DELAYS_MS;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await verifyRanges(storage, key, expected);
+      return;
+    } catch (error) {
+      const notVisibleYet =
+        error instanceof WorkspaceArchiveStorageError &&
+        (error.code === "archive_object_missing" ||
+          (error.code === "archive_hydration_failed" && error.retryable));
+      if (!notVisibleYet || attempt >= delays.length) throw error;
+      await sleep(delays[attempt]!);
+    }
+  }
+}
+
+/** Where a download spool lives. Server processes pass an owner-marked
+ * implementation (runtime's `workspaceArchiveDownloadTemporaryDirectory`) so a
+ * process killed mid-download leaves a directory a later process can reclaim;
+ * storage cannot depend on runtime, so the plain default is unmarked. */
+export type WorkspaceArchiveTemporaryDirectory = {
+  create: () => Promise<string>;
+  remove: (directory: string) => Promise<void>;
+};
+
+const plainTemporaryDirectory: WorkspaceArchiveTemporaryDirectory = {
+  create: async () => await mkdtemp(join(tmpdir(), "opengeni-workspace-archive-")),
+  remove: async (directory) => await rm(directory, { recursive: true, force: true }),
+};
+
+export type DownloadWorkspaceArchiveSpoolOptions = {
+  temporaryDirectory?: WorkspaceArchiveTemporaryDirectory;
+};
+
 /** Caller owns the returned private spool and must dispose it after use. */
 export async function downloadWorkspaceArchiveSpool(
   storage: ObjectStorage,
   key: string,
   inputExpected: ExpectedArchive,
+  options: DownloadWorkspaceArchiveSpoolOptions = {},
 ): Promise<WorkspaceArchiveSpool> {
   const expected = { bytes: inputExpected.bytes, sha256: inputExpected.sha256 };
   requireBoundedReads(storage);
   validateExpected(expected);
-  const directory = await mkdtemp(join(tmpdir(), "opengeni-workspace-archive-"));
+  const temporary = options.temporaryDirectory ?? plainTemporaryDirectory;
+  const directory = await temporary.create();
   const path = join(directory, "archive.tar");
   let handle: FileHandle | undefined;
   try {
@@ -164,12 +229,12 @@ export async function downloadWorkspaceArchiveSpool(
       },
       async dispose() {
         disposed = true;
-        await rm(directory, { recursive: true, force: true });
+        await temporary.remove(directory);
       },
     };
   } catch (error) {
     await handle?.close().catch(() => undefined);
-    await rm(directory, { recursive: true, force: true });
+    await temporary.remove(directory);
     if (error instanceof WorkspaceArchiveStorageError) throw error;
     throw new WorkspaceArchiveStorageError(
       "archive_hydration_failed",

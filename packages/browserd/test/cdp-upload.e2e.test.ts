@@ -4,11 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserLocator } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection, CdpProtocolError } from "../src/cdp";
 
 const e2e =
@@ -23,10 +19,12 @@ for (const mode of [
   "label",
   "dynamic",
   "iframe",
+  "cross-origin iframe",
   "no chooser",
   "dialog",
   "navigated",
   "single input rejects multiple",
+  "covered",
 ] as const) {
   e2e(
     `uploads through native file selection: ${mode}`,
@@ -37,19 +35,9 @@ for (const mode of [
       const ids: string[] = paths.map(() => randomUUID());
       const browserSessionId = randomUUID(),
         controllerGeneration = randomUUID();
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: `upload_${randomUUID().slice(0, 8)}`,
-        sessionName: "s",
-        socketDirectory: join(directory, "s"),
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: join(directory, "profile"),
-        downloadDirectory: join(directory, "downloads"),
-        screenshotDirectory: join(directory, "screenshots"),
         headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
-        binary: await resolvePinnedAgentBrowserBinary(
-          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-            : {},
-        ),
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
@@ -101,8 +89,10 @@ for (const mode of [
         driver,
       });
       let cdp: CdpConnection | null = null;
+      let server: ReturnType<typeof Bun.serve> | null = null;
       try {
         const multiple = mode === "multiple";
+        const crossOrigin = mode === "cross-origin iframe";
         const handler =
           mode === "no chooser"
             ? ""
@@ -113,15 +103,37 @@ for (const mode of [
                 : "document.querySelector('input').click()";
         const content = `<!doctype html><script>
         globalThis.clicks=0;globalThis.changes=0;globalThis.uploaded=[];
-        function record(event){changes++; uploaded=Array.from(event.target.files,file=>file.name);document.querySelector('p').textContent='Uploaded '+uploaded.join(', ')}
+        function report(){if(parent!==window)parent.postMessage({clicks,changes,uploaded},'*')}
+        function record(event){changes++; uploaded=Array.from(event.target.files,file=>file.name);document.querySelector('p').textContent='Uploaded '+uploaded.join(', ');report()}
+        addEventListener('load',report);
       </script>
       <input id="file" type="file" aria-label="Upload input" ${multiple ? "multiple" : ""} ${mode === "direct" || mode === "single input rejects multiple" ? "" : "hidden"} onchange="record(event)">
-      ${mode === "label" ? '<label for="file">Upload files</label>' : `<button onclick="clicks++;${handler}">Upload files</button>`}<p>Ready</p>`;
+      ${mode === "label" ? '<label for="file">Upload files</label>' : `<button onclick="clicks++;report();${handler}">Upload files</button>`}<p>Ready</p>
+      ${mode === "covered" ? '<div style="position:fixed;inset:0;background:white"></div>' : ""}`;
+        if (crossOrigin) {
+          // localhost and 127.0.0.1 are different sites, so Chromium renders
+          // the frame in its own process with its own CDP session.
+          server = Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            fetch: (request) =>
+              new Response(
+                new URL(request.url).pathname === "/frame"
+                  ? content
+                  : `<!doctype html><script>globalThis.frame=null;addEventListener('message',e=>{frame=e.data})</script><iframe title="Upload frame" src="http://127.0.0.1:${server!.port}/frame"></iframe>`,
+                { headers: { "content-type": "text/html" } },
+              ),
+          });
+        }
         const html =
           mode === "iframe"
             ? `<!doctype html><iframe title="Upload frame" srcdoc="${content.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"></iframe>`
             : content;
-        let page = await driver.start("data:text/html," + encodeURIComponent(html));
+        let page = await driver.start(
+          crossOrigin
+            ? `http://localhost:${server!.port}/`
+            : "data:text/html," + encodeURIComponent(html),
+        );
         const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
         cdp = await CdpConnection.connect(endpoint.cdpUrl);
         const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
@@ -129,8 +141,21 @@ for (const mode of [
           flatten: true,
         });
         await cdp.send("Page.enable", {}, { sessionId });
+        const frameState = async () =>
+          (
+            await cdp!.send<{ result: { value: unknown } }>(
+              "Runtime.evaluate",
+              { expression: "frame", returnByValue: true },
+              { sessionId },
+            )
+          ).result.value;
+        if (crossOrigin) {
+          // The frame reports once loaded; then observe so its controls are known.
+          for (let i = 0; i < 100 && (await frameState()) === null; i++) await Bun.sleep(50);
+          expect(await frameState()).not.toBeNull();
+        }
         // Wait for iframe parsing through ordinary observation, not a fixed delay.
-        if (mode === "iframe") page = await driver.observe(page.target.id);
+        if (mode === "iframe" || crossOrigin) page = await driver.observe(page.target.id);
         const locator: BrowserLocator =
           mode === "direct" || mode === "single input rejects multiple"
             ? { kind: "css", selector: "#file" }
@@ -156,7 +181,8 @@ for (const mode of [
         };
         const receipt = await controller.run(command);
         const rejected = mode === "single input rejects multiple";
-        const uncertain = mode === "no chooser" || mode === "dialog" || mode === "navigated";
+        const uncertain =
+          mode === "no chooser" || mode === "dialog" || mode === "navigated" || mode === "covered";
         expect(receipt.state).toBe(
           rejected ? "failed" : uncertain ? "outcome_unknown" : "completed",
         );
@@ -164,6 +190,10 @@ for (const mode of [
           rejected ? "invalid_action" : uncertain ? "outcome_unknown" : null,
         );
         expect(await controller.run(command)).toEqual(receipt);
+        if (mode === "covered") {
+          // The wrapped receipt must still say why the action failed.
+          expect(receipt.error?.message).toContain("covered by div at its center");
+        }
         if (mode === "dialog") {
           expect(receipt.error?.message).toContain("JavaScript dialog");
           // Some managed headless builds dismiss alerts automatically.
@@ -183,19 +213,29 @@ for (const mode of [
           );
           return;
         }
-        const data = await cdp.send<{ result: { value: unknown } }>(
-          "Runtime.evaluate",
-          {
-            expression:
-              mode === "iframe"
-                ? "(()=>{const w=document.querySelector('iframe').contentWindow;return {clicks:w.clicks,changes:w.changes,uploaded:w.uploaded}})()"
-                : "({clicks,changes,uploaded})",
-            returnByValue: true,
-          },
-          { sessionId },
-        );
+        if (crossOrigin) {
+          // The frame's report crosses processes asynchronously.
+          for (let i = 0; i < 40; i++) {
+            const state = (await frameState()) as { changes?: number } | null;
+            if ((state?.changes ?? 0) > 0) break;
+            await Bun.sleep(50);
+          }
+        }
+        const data = crossOrigin
+          ? { result: { value: await frameState() } }
+          : await cdp.send<{ result: { value: unknown } }>(
+              "Runtime.evaluate",
+              {
+                expression:
+                  mode === "iframe"
+                    ? "(()=>{const w=document.querySelector('iframe').contentWindow;return {clicks:w.clicks,changes:w.changes,uploaded:w.uploaded}})()"
+                    : "({clicks,changes,uploaded})",
+                returnByValue: true,
+              },
+              { sessionId },
+            );
         expect(data.result.value).toEqual({
-          clicks: mode === "direct" || mode === "label" || rejected ? 0 : 1,
+          clicks: mode === "direct" || mode === "label" || mode === "covered" || rejected ? 0 : 1,
           changes: rejected || uncertain ? 0 : 1,
           uploaded: rejected || uncertain ? [] : multiple ? ["one.txt", "two.txt"] : ["one.txt"],
         });
@@ -205,6 +245,7 @@ for (const mode of [
         );
       } finally {
         cdp?.close();
+        server?.stop(true);
         await driver.close();
         await rm(directory, { recursive: true, force: true });
       }

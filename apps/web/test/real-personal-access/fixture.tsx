@@ -9,26 +9,22 @@ import {
   type TimelineItem,
 } from "@opengeni/react";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
-import { ConsoleComposer } from "../../src/components/Composer";
+import { ConsoleComposer } from "@opengeni/react/app/components/Composer";
 import {
   ModelPicker,
   SessionToolPicker,
   type SessionToolSelection,
-} from "../../src/components/pickers";
-import {
-  SessionVariableSetPicker,
-  type SessionVariableSetPickerSharedState,
-} from "../../src/components/session/session-variable-set-picker";
+} from "@opengeni/react/app/components/pickers";
 import {
   FollowUpRepositoryPicker,
   FollowUpRepositoryMenuBody,
-} from "../../src/components/follow-up-repository-picker";
-import { ComposerMobilePlus } from "../../src/components/composer-mobile-plus";
-import { Button } from "../../src/components/ui/button";
-import { TooltipProvider } from "../../src/components/ui/tooltip";
-import type { RepositoryContextPickerProps } from "../../src/components/repository-picker";
-import { PersonalResourceAttachmentControl } from "../../src/components/personal-resource-attachment-control";
-import type { PersonalResourceAttachmentController } from "../../src/lib/use-personal-resource-attachment";
+} from "@opengeni/react/app/components/follow-up-repository-picker";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { Button } from "@opengeni/react/ui/button";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import type { RepositoryContextPickerProps } from "@opengeni/react/app/components/repository-picker";
+import { PersonalResourceAttachmentControl } from "@opengeni/react/app/components/personal-resource-attachment-control";
+import type { PersonalResourceAttachmentController } from "@opengeni/react/app/lib/use-personal-resource-attachment";
 import { fixtureClient } from "./context";
 import "../../src/styles.css";
 
@@ -80,20 +76,6 @@ const repos: RepositoryContextPickerProps = {
   onStartGitHubApp: noop,
   onDisconnectInstallation: asyncNoop,
 };
-const session = {
-  id: "preview-session",
-  workspaceId: "preview",
-  status: "idle" as const,
-  activeTurnId: null,
-  tenancy: {
-    visibility: "workspace" as const,
-    authorityEpoch: 1,
-    ownedByCurrentUser: true,
-    fork: null,
-  },
-  variableSetId: "preview-setup",
-  variableSetIds: ["preview-setup"],
-};
 const initialItems: TimelineItem[] = [
   {
     kind: "user-message",
@@ -123,10 +105,6 @@ function Review() {
   const [selection, setSelection] = useState<SessionToolSelection>({
     mcpServerIds: new Set(),
     firstPartyToolIds: new Set(tools.map((tool) => tool.id)),
-  });
-  const [shared, setShared] = useState<SessionVariableSetPickerSharedState>({
-    saving: false,
-    committedSelection: null,
   });
   const [items, setItems] = useState<TimelineItem[]>(initialItems);
   const attachments = useFileAttachments({ client: fixtureClient, workspaceId: "preview" });
@@ -172,16 +150,6 @@ function Review() {
     error: null,
     clearError: noop,
   };
-  const variableProps = {
-    session,
-    canControl: false,
-    canAttach: false,
-    canUse: true,
-    canList: true,
-    sharedState: shared,
-    setSharedState: setShared,
-    onReloadSession: asyncNoop,
-  };
   const personalController: PersonalResourceAttachmentController = {
     eligible: true,
     loading: false,
@@ -192,7 +160,6 @@ function Review() {
     truncated: false,
     catalog: null,
     selected: {
-      variableSets: [],
       rigs: [],
       connectedMachines: [],
       resourceCount: 1,
@@ -247,9 +214,9 @@ function Review() {
               <div className="max-w-md text-center">
                 <p className="text-sm font-medium">The real session composer</p>
                 <p className="mt-2 text-xs leading-5 text-fg-muted">
-                  ConsoleComposer, ChatComposer, model picker, tools, repositories and Variable Sets
-                  are imported unchanged from the app. Attached resources need no additional
-                  authorization control.
+                  ConsoleComposer, ChatComposer, model picker, tools, repositories are imported
+                  unchanged from the app. Attached resources need no additional authorization
+                  control.
                 </p>
               </div>
             </div>
@@ -278,11 +245,6 @@ function Review() {
                     panel: <FollowUpRepositoryMenuBody {...repos} />,
                   }}
                 />
-                <SessionVariableSetPicker
-                  {...variableProps}
-                  compact
-                  triggerClassName="console-composer-compact-control sm:hidden"
-                />
               </>
             }
             controls={
@@ -307,10 +269,6 @@ function Review() {
                 />
                 <FollowUpRepositoryPicker
                   {...repos}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                />
-                <SessionVariableSetPicker
-                  {...variableProps}
                   triggerClassName="console-composer-wide-control max-sm:hidden"
                 />
               </div>

@@ -1,5 +1,8 @@
 import type {
   ComputerAction,
+  ComputerActionBatch,
+  ComputerNativeCallRequest,
+  ComputerNativeResult,
   ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
@@ -16,6 +19,8 @@ export type ComputerBackendTarget = {
   title: string;
   bounds: InteractionRect | null;
   focused: boolean;
+  /** A window that cannot be captured or read until it is back on screen. */
+  offScreen?: true;
 };
 
 export type ComputerBackendObservation = {
@@ -24,6 +29,8 @@ export type ComputerBackendObservation = {
   frameId: string | null;
   roots: InteractionSemanticNodeValue[];
   nodeCount: number;
+  /** The platform stopped reading the tree early; listed nodes are real. */
+  incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
 };
@@ -35,7 +42,8 @@ export type ComputerBackendActionCommand = {
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
   expectedFrameId: string | null;
-  action: ComputerAction;
+  /** A batch reaches only a backend whose capabilities include actionBatches. */
+  action: ComputerAction | ComputerActionBatch;
 };
 
 export type ComputerBackendFrame = {
@@ -75,6 +83,10 @@ export type ComputerBackendErrorCode =
   | "outcome_unknown";
 
 export class ComputerBackendError extends Error {
+  /** Optional structured facts about the failure, kept in the receipt's
+   * error (for a batch, how many of its actions completed). */
+  details: Record<string, string | number | boolean> | undefined = undefined;
+
   constructor(
     readonly code: ComputerBackendErrorCode,
     message: string,
@@ -87,6 +99,10 @@ export class ComputerBackendError extends Error {
 }
 
 export interface ComputerBackend {
+  validateNative?(request: ComputerNativeCallRequest): Promise<void>;
+  callNative?(
+    request: ComputerNativeCallRequest,
+  ): Promise<Pick<ComputerNativeResult, "result" | "outcome" | "error">>;
   readonly identity: { adapterId: string; platform: "linux" | "macos" | "windows" };
   readonly initialCapabilities: ComputerSessionCapabilities;
   capabilities(): Promise<ComputerSessionCapabilities>;

@@ -1,6 +1,7 @@
-import { claudeProviderId } from "@opengeni/config";
+import { claudeProviderId, opperCredentialProblem } from "@opengeni/config";
 import {
   CreateOrganizationProviderCustomModelRequest,
+  DirectModelName,
   DeleteOrganizationProviderCustomModelRequest,
   OrganizationModelProviderConnectionResponse,
   OrganizationModelProviderKind,
@@ -9,24 +10,32 @@ import {
   RevokeOrganizationModelProviderConnectionRequest,
   UpsertOrganizationModelProviderConnectionRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireEnvironmentEncryption,
+  verifyOrganizationDirectModel,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   createOrganizationModelProviderCustomModel,
   encryptEnvironmentValue,
   getOrganizationModelProviderConnection,
   listOrganizationModelProviderCustomModels,
+  loadOrganizationModelProviderCredentialForAdministrator,
   organizationModelProviderCredentialDigest,
   OrganizationModelProviderConflictError,
   OrganizationModelProviderLimitError,
   retireOrganizationModelProviderCustomModel,
   revokeOrganizationModelProviderConnection,
   upsertOrganizationModelProviderConnection,
+  type OrganizationModelProviderConnection,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { offerClaudeDefaultModels } from "../claude-default-models";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 const OrganizationId = z.string().uuid();
 
@@ -48,15 +57,20 @@ function providerKind(value: string) {
   return parsed.data;
 }
 
-function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
-  status: "active" | "revoked";
-  version: number;
-  createdAt: Date;
-  updatedAt: Date;
-}) {
+/** Providers whose organization key runs models the organization can add by ID. */
+function modelProviderKind(value: string) {
+  const kind = providerKind(value);
+  if (kind === "elevenlabs") throw new HTTPException(404, { message: "model provider not found" });
+  return kind;
+}
+
+function connectionJson(connection: OrganizationModelProviderConnection) {
+  // Metadata only: the encrypted key never leaves the database layer. Azure's
+  // resource endpoint is non-secret configuration and is returned.
+  const { endpoint, ...rest } = connection;
   return OrganizationModelProviderConnectionResponse.parse({
-    ...connection,
+    ...rest,
+    ...(endpoint ? { endpoint } : {}),
     createdAt: connection.createdAt.toISOString(),
     updatedAt: connection.updatedAt.toISOString(),
   });
@@ -158,6 +172,16 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       throw new HTTPException(422, {
         message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
       });
+    const opperProblem = kind === "opper" ? opperCredentialProblem(payload.apiKey) : null;
+    if (opperProblem) throw new HTTPException(422, { message: opperProblem });
+    if (kind === "azure_openai" && !payload.endpoint)
+      throw new HTTPException(422, {
+        message: "Enter your Azure OpenAI resource endpoint (https://RESOURCE.openai.azure.com).",
+      });
+    if (kind !== "azure_openai" && payload.endpoint !== undefined)
+      throw new HTTPException(422, {
+        message: "An endpoint is only valid for an Azure OpenAI connection.",
+      });
     if (payload.claudeIdentity)
       throw new HTTPException(422, {
         message: "Claude identity is only valid for subscription connections.",
@@ -173,11 +197,18 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
           credential,
         ),
         credentialDigest: organizationModelProviderCredentialDigest(credential),
+        ...(kind === "azure_openai" ? { endpoint: payload.endpoint ?? null } : {}),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}
           : { expectedVersion: payload.expectedVersion }),
       });
+      if (kind === "anthropic")
+        await offerClaudeDefaultModels(deps, {
+          organizationId,
+          actorSubjectId: human.subjectId,
+          providerKind: kind,
+        });
       return c.json(connectionJson(connection));
     } catch (error) {
       conflict(error);
@@ -218,7 +249,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       const models = await listOrganizationModelProviderCustomModels(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,
-        providerKind: providerKind(c.req.param("providerKind")),
+        providerKind: modelProviderKind(c.req.param("providerKind")),
       });
       return c.json(
         OrganizationProviderCustomModelsResponse.parse({ models: models.map(modelJson) }),
@@ -238,17 +269,51 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         CreateOrganizationProviderCustomModelRequest,
         "invalid organization custom model",
       );
-      const kind = providerKind(c.req.param("providerKind"));
+      const kind = modelProviderKind(c.req.param("providerKind"));
       if (
         (kind === "anthropic" || kind === "claude_subscription") &&
         `${claudeProviderId(kind)}/${payload.upstreamModelId}`.length > 256
       )
         throw new HTTPException(422, { message: "Claude model ID is too long" });
+      if (kind === "openai" || kind === "azure_openai") {
+        // The upstream id is the exact OpenAI model or Azure deployment name.
+        // Check that the organization's own key (and Azure endpoint) can call
+        // it before saving, with the same short Responses request as workspace
+        // direct setup and the same model-name rule.
+        const title = kind === "openai" ? "OpenAI" : "Azure OpenAI";
+        if (!DirectModelName.safeParse(payload.upstreamModelId).success)
+          throw new HTTPException(422, {
+            message:
+              kind === "openai"
+                ? "Enter the exact OpenAI model ID."
+                : "Enter the exact Azure OpenAI deployment name.",
+          });
+        const credential = await loadOrganizationModelProviderCredentialForAdministrator(
+          deps.db,
+          deps.settings,
+          { organizationId, actorSubjectId: human.subjectId, providerKind: kind },
+        );
+        if (!credential || (kind === "azure_openai" && !credential.endpoint))
+          throw new HTTPException(409, {
+            message: `Connect ${title} for the organization before adding ${kind === "openai" ? "models" : "deployments"}.`,
+          });
+        await verifyOrganizationDirectModel(
+          kind === "openai"
+            ? { provider: "openai", model: payload.upstreamModelId }
+            : {
+                provider: "azure_openai",
+                model: payload.upstreamModelId,
+                endpoint: credential.endpoint!,
+              },
+          credential.apiKey,
+          deps.directModelFetch,
+        );
+      }
       try {
         const model = await createOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: providerKind(c.req.param("providerKind")),
+          providerKind: modelProviderKind(c.req.param("providerKind")),
           operationId: payload.operationId,
           upstreamModelId: payload.upstreamModelId,
           ...(payload.label === undefined ? {} : { label: payload.label }),
@@ -280,7 +345,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         const model = await retireOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: providerKind(c.req.param("providerKind")),
+          providerKind: modelProviderKind(c.req.param("providerKind")),
           customModelId: customModelId.data,
           ...payload,
         });

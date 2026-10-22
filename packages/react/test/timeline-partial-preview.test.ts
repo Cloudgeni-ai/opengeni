@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const event = (sequence: number, type: string, payload: unknown): SessionEvent => ({
   id: `event-${sequence}`,
@@ -18,13 +21,13 @@ test("partial replay never exposes an interactive message suffix", () => {
     messageId: "preview",
     text: "body { color: red; }",
   });
-  expect(buildTimeline([suffix], { partialStart: true })).toEqual([]);
+  expect(buildTimeline(englishText, [suffix], { partialStart: true })).toEqual([]);
   const text = "```opengeni-html\n<style>body { color: red; }</style>\n```";
   const complete = event(501, "agent.message.completed", {
     messageId: "preview",
     text,
   });
-  const items = buildTimeline([suffix, complete], { partialStart: true });
+  const items = buildTimeline(englishText, [suffix, complete], { partialStart: true });
   expect(items).toHaveLength(1);
   expect(items[0]).toMatchObject({
     kind: "agent-message",
@@ -41,16 +44,24 @@ test("known boundaries and subsequent messages still stream normally", () => {
     "session.created",
     "agent.message.completed",
   ]) {
-    const items = buildTimeline([event(500, type, { text: "Prior", messageId: "prior" }), delta], {
-      partialStart: true,
-    });
+    const items = buildTimeline(
+      englishText,
+      [event(500, type, { text: "Prior", messageId: "prior" }), delta],
+      {
+        partialStart: true,
+      },
+    );
     expect(items.at(-1)).toMatchObject({ kind: "agent-message", text: "Hello", streaming: true });
   }
-  expect(buildTimeline([delta]).at(-1)).toMatchObject({ text: "Hello", streaming: true });
+  expect(buildTimeline(englishText, [delta]).at(-1)).toMatchObject({
+    text: "Hello",
+    streaming: true,
+  });
 });
 
 test("late deltas for a missing-prefix message do not leak after another receipt", () => {
   const items = buildTimeline(
+    englishText,
     [
       event(500, "agent.message.delta", { messageId: "preview", text: "body {" }),
       event(501, "agent.message.completed", { messageId: "other", text: "Another response" }),
@@ -72,10 +83,11 @@ test("accepted Steer cannot expose the old turn's partial preview", () => {
       messageId: "old-preview",
       text: "body { color: red; }",
     });
-    const partial = buildTimeline([accepted, suffix], { partialStart: true });
+    const partial = buildTimeline(englishText, [accepted, suffix], { partialStart: true });
     expect(partial.filter((item) => item.kind === "agent-message")).toEqual([]);
     const text = "```opengeni-html\n<style>body { color: red; }</style>\n```";
     const restored = buildTimeline(
+      englishText,
       [
         accepted,
         suffix,
@@ -97,6 +109,7 @@ test("accepted Steer cannot expose the old turn's partial preview", () => {
 
 test("a boundary in another turn does not authorize an old message suffix", () => {
   const items = buildTimeline(
+    englishText,
     [
       { ...event(500, "turn.started", {}), turnId: "replacement" },
       event(501, "agent.message.delta", { messageId: "old-preview", text: "body { color: red; }" }),

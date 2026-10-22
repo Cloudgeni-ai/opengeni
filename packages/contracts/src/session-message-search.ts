@@ -1,38 +1,43 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Literal Unicode case-insensitive search, without trimming or normalization. */
-export const SessionMessageSearchRequest = z
-  .object({
-    query: z.string().min(1).max(200),
-    sessionId: z.string().uuid().optional(),
-    groupBy: z.literal("session").optional(),
-    archiveStatus: z.enum(["active", "archived", "all"]).optional(),
-    limit: z.number().int().min(1).max(50).optional(),
-    cursor: z.string().min(1).max(4096).optional(),
-  })
-  .strict()
-  .refine((request) => !request.groupBy || !request.sessionId, {
-    message: "groupBy=session is only supported for workspace search without sessionId",
-    path: ["groupBy"],
-  });
+export const SessionMessageSearchRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      query: z.string().min(1).max(200),
+      sessionId: z.string().uuid().optional(),
+      groupBy: z.literal("session").optional(),
+      archiveStatus: z.enum(["active", "archived", "all"]).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+      cursor: z.string().min(1).max(4096).optional(),
+    })
+    .strict()
+    .refine((request) => !request.groupBy || !request.sessionId, {
+      message: "groupBy=session is only supported for workspace search without sessionId",
+      path: ["groupBy"],
+    }),
+);
 export type SessionMessageSearchRequest = z.infer<typeof SessionMessageSearchRequest>;
 
-export const SessionMessageSearchMatch = z.object({
-  sessionId: z.string().uuid(),
-  sessionTitle: z.string().nullable(),
-  eventId: z.string().uuid(),
-  sequence: z.number().int().positive(),
-  turnId: z.string().uuid().nullable(),
-  role: z.enum(["user", "assistant"]),
-  messageId: z.string().nullable(),
-  /** All offsets are zero-based UTF-16 code units; ends are exclusive. */
-  messageMatchOffset: z.number().int().nonnegative(),
-  snippet: z.object({
-    text: z.string(),
-    matchStart: z.number().int().nonnegative(),
-    matchEnd: z.number().int().nonnegative(),
+export const SessionMessageSearchMatch = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sessionId: z.string().uuid(),
+    sessionTitle: z.string().nullable(),
+    eventId: z.string().uuid(),
+    sequence: z.number().int().positive(),
+    turnId: z.string().uuid().nullable(),
+    role: z.enum(["user", "assistant"]),
+    messageId: z.string().nullable(),
+    /** All offsets are zero-based UTF-16 code units; ends are exclusive. */
+    messageMatchOffset: z.number().int().nonnegative(),
+    snippet: z.object({
+      text: z.string(),
+      matchStart: z.number().int().nonnegative(),
+      matchEnd: z.number().int().nonnegative(),
+    }),
   }),
-});
+);
 export type SessionMessageSearchMatch = z.infer<typeof SessionMessageSearchMatch>;
 
 /** A bounded scan page, not necessarily a full page of matches. Continue even
@@ -42,13 +47,15 @@ export type SessionMessageSearchMatch = z.infer<typeof SessionMessageSearchMatch
  * With groupBy=session, matches and both matched counts describe one first-hit
  * representative per matching session, not full message/occurrence totals.
  */
-export const SessionMessageSearchResponse = z.object({
-  matches: z.array(SessionMessageSearchMatch).max(50),
-  nextCursor: z.string().nullable(),
-  hasMore: z.boolean(),
-  scannedMessages: z.number().int().nonnegative(),
-  matchedMessageCount: z.number().int().nonnegative(),
-  matchedOccurrenceCount: z.number().int().nonnegative(),
-  countIsExact: z.boolean(),
-});
+export const SessionMessageSearchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    matches: z.array(SessionMessageSearchMatch).max(50),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
+    scannedMessages: z.number().int().nonnegative(),
+    matchedMessageCount: z.number().int().nonnegative(),
+    matchedOccurrenceCount: z.number().int().nonnegative(),
+    countIsExact: z.boolean(),
+  }),
+);
 export type SessionMessageSearchResponse = z.infer<typeof SessionMessageSearchResponse>;

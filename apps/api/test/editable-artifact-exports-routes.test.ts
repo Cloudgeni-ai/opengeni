@@ -4,7 +4,7 @@ import type {
   EditableArtifactDurableExportService,
   EditableArtifactMaterializationDownload,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";

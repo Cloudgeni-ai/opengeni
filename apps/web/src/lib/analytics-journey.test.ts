@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ANALYTICS_ACTIONS } from "./analytics-actions";
+import { ANALYTICS_ACTIONS } from "@opengeni/react/ui/analytics-actions";
 import {
   journeyAction,
   journeyMilestone,
@@ -7,8 +7,11 @@ import {
   journeyOutcome,
   journeyPage,
 } from "./analytics-journey";
-import { LEGACY_ORGANIZATION_SECTIONS, ORGANIZATION_ADMIN_SECTIONS } from "./organization-admin";
-import { WORKSPACE_SETTINGS_SECTIONS } from "./workspace-management-location";
+import {
+  LEGACY_ORGANIZATION_SECTIONS,
+  ORGANIZATION_ADMIN_SECTIONS,
+} from "@opengeni/react/app/lib/organization-admin";
+import { WORKSPACE_SETTINGS_SECTIONS } from "@opengeni/react/app/lib/workspace-management-location";
 
 const workspace = "11111111-1111-4111-8111-111111111111";
 const session = "22222222-2222-4222-8222-222222222222";
@@ -29,6 +32,7 @@ describe("content-free customer journey", () => {
   });
   test("labels every workspace page, including agents, variable sets, and environments", () => {
     for (const page of [
+      "read-only-chats",
       "agents",
       "variable-sets",
       "environments",

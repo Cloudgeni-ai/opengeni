@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   acquireLease,
   authorizeAutomaticSandboxCheckpointRecovery,
@@ -22,11 +22,16 @@ import {
   failWarmingToCold,
   getSandboxRecoveryDiscontinuity,
   markSandboxRestoreVerifying,
+  markWarmLeaseInstanceLost,
+  claimWorkspaceArchiveCapture,
+  persistDrainSnapshot,
   readLease,
   readRecentSandboxRecoveryObservations,
   reapStaleLeaseHolders,
   releaseLeaseHolder,
   readPublicSandboxRecovery,
+  readSandboxWorkspaceRecoveryAsOperator,
+  recoverSandboxWorkspaceAsOperator,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
   withWorkspaceSubjectRls,
@@ -35,6 +40,557 @@ import {
 } from "../src/index";
 import type { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
+
+describe("explicit current-workspace recovery", () => {
+  test("a newer explicit receipt leaves an earlier legacy instruction warning byte-identical", async () => {
+    const f = await completedRecoveryLostAgain();
+    const legacy = await getSandboxRecoveryDiscontinuity(
+      client.db,
+      f.workspaceId,
+      f.session.id,
+      "legacy_instructions",
+    );
+    expect(legacy).toContain("human explicitly consented");
+    const scope = { ...f.scope, sessionId: f.session.id };
+    const preview = (await readSandboxWorkspaceRecoveryAsOperator(client.db, scope))!;
+    await recoverSandboxWorkspaceAsOperator(client.db, {
+      ...scope,
+      request: {
+        operationId: crypto.randomUUID(),
+        action: "continue_fresh",
+        acceptEmptyWorkspace: true,
+        target: preview.target!,
+      },
+    });
+    expect(
+      await getSandboxRecoveryDiscontinuity(
+        client.db,
+        f.workspaceId,
+        f.session.id,
+        "legacy_instructions",
+      ),
+    ).toBe(legacy);
+    expect(
+      await getSandboxRecoveryDiscontinuity(
+        client.db,
+        f.workspaceId,
+        f.session.id,
+        "explicit_notice",
+      ),
+    ).toContain("authorized person chose");
+  });
+
+  test("concurrent operator retries acquire organization before exclusive tenancy without lock upgrades", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set workspace_generation = archive_generation where id = ${f.leaseId}`;
+    const scope = { ...f.scope, sessionId: f.session.id };
+    const preview = (await readSandboxWorkspaceRecoveryAsOperator(client.db, scope))!;
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "retry" as const,
+      target: preview.target!,
+    };
+    let outcomes!: Promise<PromiseSettledResult<unknown>[]>;
+    await shared.admin.begin(async (gate) => {
+      const pid = (await gate`select pg_backend_pid() as pid`)[0]!.pid;
+      await gate`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${f.accountId}`}, 0))`;
+      outcomes = Promise.allSettled(
+        [0, 1].map(() => recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request })),
+      );
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        const n = (
+          await shared.admin`select count(*)::int as n from pg_stat_activity where ${pid}::int = any(pg_blocking_pids(pid))`
+        )[0]!.n;
+        if (n === 2) break;
+        if (Date.now() >= deadline)
+          throw new Error("both operator requests did not reach the organization fence");
+        await Bun.sleep(5);
+      }
+    });
+    const results = await outcomes;
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(
+      results
+        .filter((result) => result.status === "fulfilled")
+        .map((result) => (result.value as { outcome: string }).outcome)
+        .sort(),
+    ).toEqual(["accepted", "replayed"]);
+  });
+
+  test("real private group membership cannot be authorized through the core no-host-port path", async () => {
+    const f = await fixture();
+    const hidden = await f.create(f.session.sandboxGroupId);
+    const ownerId = crypto.randomUUID();
+    const ownerSubject = `user:hidden-${ownerId}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into organization_memberships(id,account_id,subject_id,status) values(${ownerId},${f.accountId},${ownerSubject},'suspended')`;
+      await tx`update sessions set visibility = 'user_private', owner_organization_membership_id = ${ownerId}, owner_subject_id = ${ownerSubject} where id = ${hidden.id}`;
+      await tx`update sandbox_leases set resume_state = jsonb_set(resume_state, '{opengeniRecovery,provider}', '{"status":"not_created","instanceId":null,"diagnostic":"replacement_failed"}') where id = ${f.leaseId}`;
+    });
+    const { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } =
+      await import("@opengeni/core");
+    const authorization = {
+      grant: { ...f.scope, permissions: ["sessions:read" as const, "sessions:control" as const] },
+      accountGrant: null,
+      authenticatedSubjectId: f.subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+      canonicalLocalHumanSession: false,
+    };
+    const projection = await getManagedHumanSandboxRecovery(
+      { db: client.db },
+      authorization,
+      f.workspaceId,
+      f.session.id,
+    );
+    expect(projection.freshWorkspaceAvailable).toBe(false);
+    expect(JSON.stringify(projection)).not.toContain(hidden.id);
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "continue_fresh" as const,
+      acceptEmptyWorkspace: true as const,
+      target: projection.target!,
+    };
+    await expect(
+      consentManagedHumanSandboxRecovery(
+        { db: client.db },
+        authorization,
+        f.workspaceId,
+        f.session.id,
+        request,
+      ),
+    ).rejects.toThrow("complete sandbox group");
+    expect(
+      await shared.admin`select id from audit_events where id = ${request.operationId}`,
+    ).toHaveLength(0);
+  });
+
+  test("operator retry is exact, audited and idempotent without rewriting the archive", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set workspace_generation = archive_generation where id = ${f.leaseId}`;
+    const scope = { ...f.scope, sessionId: f.session.id };
+    const before = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    const preview = await readSandboxWorkspaceRecoveryAsOperator(client.db, scope);
+    expect(preview?.retryAvailable).toBe(true);
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "retry" as const,
+      target: preview!.target!,
+    };
+    await expect(
+      recoverSandboxWorkspaceAsOperator(client.db, {
+        ...scope,
+        request: { ...request, target: { ...request.target, leaseEpoch: 900 } },
+      }),
+    ).rejects.toThrow("selection changed");
+    expect(await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request })).toMatchObject(
+      { outcome: "accepted" },
+    );
+    expect(await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request })).toMatchObject(
+      { outcome: "replayed" },
+    );
+    const after = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(after?.recovery.restore.status).toBe("pending");
+    expect(after?.resumeState?.sessionState).toEqual(before?.resumeState?.sessionState);
+    expect(after?.archiveGeneration).toBe(before?.archiveGeneration);
+    expect(after?.workspaceGeneration).toBe(before?.workspaceGeneration);
+    expect((await readPublicSandboxRecovery(client.db, scope)).operationId).toBe(
+      request.operationId,
+    );
+    let elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "current-retry",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected.role).toBe("spawner");
+    await failWarmingToCold(client.db, {
+      ...groupLease(f),
+      expectedEpoch: elected.lease.leaseEpoch,
+    });
+    expect((await readPublicSandboxRecovery(client.db, scope)).operationId).toBe(
+      request.operationId,
+    );
+    elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "current-retry",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected.role).toBe("spawner");
+    const attempt = {
+      ...groupLease(f),
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId: crypto.randomUUID(),
+    };
+    expect(await beginSandboxRematerialization(client.db, attempt)).toMatchObject({
+      status: "started",
+    });
+    await recordWarmingSandboxCreated(client.db, {
+      ...attempt,
+      instanceId: "retried-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "retried-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, attempt);
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch: attempt.expectedEpoch,
+        instanceId: "retried-box",
+        leaseTtlMs: 60_000,
+        resumeBackendId: "modal",
+        resumeState: { backendId: "modal" },
+        rematerialization: {
+          id: attempt.rematerializationId,
+          verifiedRevision: request.target.revision!,
+        },
+      }),
+    ).toMatchObject({ committed: true });
+    expect(await readPublicSandboxRecovery(client.db, scope)).toMatchObject({
+      status: "restored",
+      reason: "archive_retry_selected",
+      operationId: request.operationId,
+    });
+    expect(await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request })).toMatchObject(
+      { outcome: "replayed" },
+    );
+  });
+
+  test("fresh continuation requires control of every member and preserves group/archive identity", async () => {
+    const f = await fixture();
+    const child = await f.create(f.session.sandboxGroupId);
+    const scope = { ...f.scope, sessionId: f.session.id };
+    const canControlMember = async (_tx: unknown, id: string) => id === f.session.id;
+    const preview = await readSandboxWorkspaceRecoveryAsOperator(client.db, scope);
+    expect(preview?.freshWorkspaceAvailable).toBe(true);
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "continue_fresh" as const,
+      acceptEmptyWorkspace: true as const,
+      target: preview!.target!,
+    };
+    await expect(
+      consentPublicSandboxRecovery(client.db, { ...scope, request, canControlMember }),
+    ).rejects.toThrow("complete sandbox group");
+    const before = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    const result = await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request });
+    expect(result.outcome).toBe("accepted");
+    expect(
+      (await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request })).outcome,
+    ).toBe("replayed");
+    const accepted = await readLease(client.db, f.workspaceId, f.session.sandboxGroupId);
+    expect(accepted?.resumeState?.sessionState).toEqual(before?.resumeState?.sessionState);
+    expect(accepted?.workspaceGeneration).toBe(before?.workspaceGeneration);
+    expect(accepted?.archiveGeneration).toBe(before?.archiveGeneration);
+    for (const member of [f.session, child]) {
+      const warning = await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, member.id);
+      expect(warning).toContain("authorized person chose");
+      expect(warning).toContain("previous archive is retained");
+      expect(warning).not.toContain("sandbox was lost");
+      expect(
+        await getSandboxRecoveryDiscontinuity(
+          client.db,
+          f.workspaceId,
+          member.id,
+          "legacy_instructions",
+        ),
+      ).toBeNull();
+      expect(
+        await getSandboxRecoveryDiscontinuity(
+          client.db,
+          f.workspaceId,
+          member.id,
+          "explicit_notice",
+        ),
+      ).toBe(warning);
+      const receipts = await shared.admin`select count(*)::int as n from session_command_receipts
+        where target_session_id = ${member.id} and action = 'sandbox.recovery.fresh_workspace'`;
+      expect(receipts[0]!.n).toBe(1);
+      const notices = await shared.admin`select count(*)::int as n from session_events
+        where session_id = ${member.id} and type = 'sandbox.recovery.selected'`;
+      expect(notices[0]!.n).toBe(1);
+    }
+    const elected = await acquireLease(client.db, {
+      ...groupLease(f),
+      kind: "viewer",
+      holderId: "explicit-empty",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({
+      role: "spawner",
+      lease: { freshWorkspaceRecoveryId: request.operationId },
+    });
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        ...groupLease(f),
+        expectedEpoch: elected.lease.leaseEpoch,
+        rematerializationId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ status: "blocked", code: "fresh_workspace_pending" });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch: elected.lease.leaseEpoch,
+        instanceId: "empty-box",
+        leaseTtlMs: 60_000,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "empty-box" } },
+        },
+        freshWorkspace: { operationId: request.operationId },
+      }),
+    ).toMatchObject({ committed: true });
+    expect(await readPublicSandboxRecovery(client.db, scope)).toMatchObject({
+      status: "restored",
+      reason: "fresh_workspace_selected",
+    });
+    await promptSession(f, child.id);
+    const claim = attemptClaim(child.id);
+    await rejectsWithSqlState(
+      claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...claim,
+        filesystemDiscontinuityProtocol: 3,
+      }),
+    );
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...claim,
+        filesystemDiscontinuityProtocol: 4,
+      }),
+    ).toMatchObject({ action: "claimed" });
+  });
+
+  test.each([false, true])(
+    "losing an explicitly empty replacement never resurrects its abandoned archive (new capture=%s)",
+    async (newCapture) => {
+      const f = await fixture();
+      await shared.admin`update sandbox_leases set workspace_generation = archive_generation where id = ${f.leaseId}`;
+      const scope = { ...f.scope, sessionId: f.session.id };
+      const before = (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))!;
+      const preview = (await readSandboxWorkspaceRecoveryAsOperator(client.db, scope))!;
+      const request = {
+        operationId: crypto.randomUUID(),
+        action: "continue_fresh" as const,
+        acceptEmptyWorkspace: true as const,
+        target: preview.target!,
+      };
+      await recoverSandboxWorkspaceAsOperator(client.db, { ...scope, request });
+      const elected = await acquireLease(client.db, {
+        ...groupLease(f),
+        kind: "viewer",
+        holderId: "empty-replacement",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      await expect(
+        Promise.resolve(
+          shared.admin`update sandbox_leases set liveness = 'warm', instance_id = 'old-writer' where id = ${f.leaseId}`,
+        ),
+      ).rejects.toThrow("explicit empty publication requires a new workspace generation");
+      const warm = await commitWarmingToWarm(client.db, {
+        ...groupLease(f),
+        expectedEpoch: elected.lease.leaseEpoch,
+        instanceId: "empty-replacement",
+        leaseTtlMs: 60_000,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "empty-replacement" } },
+        },
+        freshWorkspace: { operationId: request.operationId },
+      });
+      expect(warm.committed).toBe(true);
+      expect(warm.lease?.workspaceGeneration).toBe(before.workspaceGeneration + 1);
+      expect(warm.lease?.archiveGeneration).toBe(before.archiveGeneration);
+      expect(warm.lease?.resumeState?.sessionState).toMatchObject(
+        before.resumeState!.sessionState as object,
+      );
+      await expect(
+        Promise.resolve(
+          shared.admin`update sandbox_leases set resume_state = resume_state - 'opengeniFreshWorkspaceRecovery' where id = ${f.leaseId}`,
+        ),
+      ).rejects.toThrow("retained abandoned archive requires its recovery receipt");
+      let newRevision: string | null = null;
+      if (newCapture) {
+        await releaseLeaseHolder(client.db, {
+          ...groupLease(f),
+          kind: "viewer",
+          holderId: "empty-replacement",
+          idleGraceMs: 0,
+        });
+        const source = (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))!;
+        const captureId = crypto.randomUUID();
+        expect(
+          await claimWorkspaceArchiveCapture(client.db, {
+            ...groupLease(f),
+            captureId,
+            expectedEpoch: source.leaseEpoch,
+            expectedInstanceId: "empty-replacement",
+            liveness: "draining",
+            captureTimeoutMs: 60_000,
+            minIntervalMs: 0,
+          }),
+        ).toMatchObject({ status: "claimed" });
+        const bytes = Buffer.from("new workspace capture");
+        const archiveSha256 = createHash("sha256").update(bytes).digest("hex");
+        const capturedAtMs = Date.now();
+        newRevision = `wa1:${capturedAtMs}:${archiveSha256}`;
+        expect(
+          await persistDrainSnapshot(client.db, {
+            ...groupLease(f),
+            captureId,
+            expectedEpoch: source.leaseEpoch,
+            expectedInstanceId: "empty-replacement",
+            expectedWorkspaceGeneration: source.workspaceGeneration,
+            workspaceArchive: bytes.toString("base64"),
+            workspaceArchiveMeta: {
+              version: 1,
+              revision: newRevision,
+              archiveSha256,
+              archiveBytes: bytes.length,
+              capturedAt: new Date(capturedAtMs).toISOString(),
+              workspace: {
+                algorithm: "sha256",
+                sha256: archiveSha256,
+                entryCount: 1,
+                fileCount: 1,
+                totalFileBytes: bytes.length,
+              },
+            },
+          }),
+        ).toMatchObject({ wrote: true });
+        expect(
+          await confirmDrainCold(client.db, {
+            ...groupLease(f),
+            expectedEpoch: source.leaseEpoch,
+            expectedCaptureId: captureId,
+          }),
+        ).toMatchObject({ wentCold: true });
+      }
+      if (!newCapture) {
+        await markWarmLeaseInstanceLost(client.db, {
+          ...groupLease(f),
+          expectedEpoch: warm.lease!.leaseEpoch,
+          expectedInstanceId: "empty-replacement",
+          expectedBackend: "modal",
+        });
+        await releaseLeaseHolder(client.db, {
+          ...groupLease(f),
+          kind: "viewer",
+          holderId: "empty-replacement",
+          idleGraceMs: 0,
+        });
+      }
+      const cold = (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))!;
+      if (newCapture) {
+        expect(cold.archiveComplete).toBe(true);
+        const next = await acquireLease(client.db, {
+          ...groupLease(f),
+          kind: "viewer",
+          holderId: "new-capture-restore",
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        });
+        expect(next.role).toBe("spawner");
+        const restoring = await beginSandboxRematerialization(client.db, {
+          ...groupLease(f),
+          expectedEpoch: next.lease.leaseEpoch,
+          rematerializationId: crypto.randomUUID(),
+        });
+        expect(restoring).toMatchObject({
+          status: "started",
+          lease: { recovery: { restore: { selectedRevision: newRevision } } },
+        });
+        return;
+      }
+      expect(cold.archiveComplete).toBe(false);
+      expect(cold.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+        abandonedRevision: request.target.revision,
+      });
+      expect(await readSandboxWorkspaceRecoveryAsOperator(client.db, scope)).toMatchObject({
+        retryAvailable: false,
+        freshWorkspaceAvailable: true,
+      });
+      expect(
+        await acquireLease(client.db, {
+          ...groupLease(f),
+          kind: "viewer",
+          holderId: "do-not-resurrect",
+          backend: "modal",
+          leaseTtlMs: 60_000,
+        }),
+      ).toMatchObject({ role: "blocked" });
+      const initiator = await claimedAttempt(f, f.session.id, 4);
+      const automatic = await authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...scope,
+        attemptId: initiator.attemptId,
+      });
+      expect(automatic.status === "not_eligible" || automatic.lane === "fresh_workspace").toBe(
+        true,
+      );
+    },
+  );
+
+  test("a human controlling a quiescent shared group can deliberately continue empty", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniRecovery,provider}', '{"status":"not_created","instanceId":null,"diagnostic":"replacement_failed"}') where id = ${f.leaseId}`;
+    await f.create(f.session.sandboxGroupId);
+    const scope = { ...f.scope, sessionId: f.session.id, canControlMember: async () => true };
+    const preview = await readPublicSandboxRecovery(client.db, scope);
+    expect(preview).toMatchObject({ freshWorkspaceAvailable: true, groupSessionCount: 2 });
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "continue_fresh" as const,
+      acceptEmptyWorkspace: true as const,
+      target: preview.target!,
+    };
+    expect(await consentPublicSandboxRecovery(client.db, { ...scope, request })).toMatchObject({
+      outcome: "accepted",
+    });
+    // Idempotence never becomes a bypass for newly revoked group authority.
+    await expect(
+      consentPublicSandboxRecovery(client.db, {
+        ...scope,
+        request,
+        canControlMember: async () => false,
+      }),
+    ).rejects.toThrow("complete sandbox group");
+  });
+
+  test("human fresh continuation rechecks authority and rejects active group work", async () => {
+    const f = await fixture();
+    await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniRecovery,provider}', '{"status":"not_created","instanceId":null,"diagnostic":"replacement_failed"}') where id = ${f.leaseId}`;
+    const scope = { ...f.scope, sessionId: f.session.id, canControlMember: async () => true };
+    const preview = await readPublicSandboxRecovery(client.db, scope);
+    expect(preview.freshWorkspaceAvailable).toBe(true);
+    const request = {
+      operationId: crypto.randomUUID(),
+      action: "continue_fresh" as const,
+      acceptEmptyWorkspace: true as const,
+      target: preview.target!,
+    };
+    await promptSession(f, f.session.id);
+    await expect(consentPublicSandboxRecovery(client.db, { ...scope, request })).rejects.toThrow(
+      "quiescent",
+    );
+    expect(
+      await shared.admin`select id from audit_events where id = ${request.operationId}`,
+    ).toHaveLength(0);
+  });
+});
 
 async function rejectsWithSqlState(operation: PromiseLike<unknown>, code = "55000") {
   const error = await Promise.resolve(operation).then(
@@ -609,7 +1165,7 @@ describe("explicit singleton checkpoint recovery", () => {
     await rejectsWithSqlState(
       claimSessionWorkForAttempt(client.db, f.workspaceId, {
         ...input,
-        filesystemDiscontinuityProtocol: 4 as 1 | 2 | 3,
+        filesystemDiscontinuityProtocol: 5 as 1 | 2 | 3 | 4,
       }),
     );
     expect(
@@ -1391,13 +1947,13 @@ function attemptClaim(sessionId: string) {
 }
 
 /** A running attempt for `sessionId`, claimed by a v3 worker. */
-async function claimedAttempt(f: RecoveryFixture, sessionId: string) {
+async function claimedAttempt(f: RecoveryFixture, sessionId: string, protocol: 3 | 4 = 3) {
   await promptSession(f, sessionId);
   const input = attemptClaim(sessionId);
   expect(
     await claimSessionWorkForAttempt(client.db, f.workspaceId, {
       ...input,
-      filesystemDiscontinuityProtocol: 3,
+      filesystemDiscontinuityProtocol: protocol,
     }),
   ).toMatchObject({ action: "claimed" });
   return input;

@@ -18,8 +18,8 @@ import { createObjectStorage } from "../../packages/storage/src/index";
 import {
   GARAGE_FIXTURE_ACCESS_KEY_ID,
   GARAGE_FIXTURE_SECRET_ACCESS_KEY,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/object-storage-fixture";
+import { testSettings } from "@opengeni/testing/settings";
 import { WorkspaceCaptureManifest } from "@opengeni/contracts";
 import {
   computeWorkspaceCaptureGcPlan,

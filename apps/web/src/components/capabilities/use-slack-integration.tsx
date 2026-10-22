@@ -12,7 +12,10 @@ import type {
   SlackReactionChannel,
 } from "@opengeni/sdk";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { toast } from "sonner";
 
 import type {
@@ -22,15 +25,15 @@ import type {
   IntegrationFooter,
   IntegrationOption,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { SlackChannelRoutingDialog } from "@/components/capabilities/slack-channel-routing-dialog";
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
 import { useSlackInstallationDiscovery } from "@/components/capabilities/use-slack-installation-discovery";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
   enableNewSlackAccountTools,
@@ -49,7 +52,7 @@ import type {
   ConnectionMetadata,
   ConnectorDocumentDestinationAuthority,
   SlackInstallationBinding,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 // The publication dialog and its SDK client stay behind a lazy boundary: they
 // are admin-only detail and would otherwise fold the memory-slack client into
@@ -125,7 +128,7 @@ export function localConnectedSlackPreview(
         slackTeamName: "CloudGeni",
         botId: "B_CLOUDGENI_PREVIEW",
         botUserId: "U_CLOUDGENI_PREVIEW",
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
       },
     } satisfies ConnectionMetadata,
     personal: {
@@ -147,7 +150,9 @@ export function canInstallOpenGeniSlackBot(
   accessContext: ReturnType<typeof useAppContext>["accessContext"],
   workspaceId: string,
 ): boolean {
-  return canWriteWorkspaceConnections(accessContext, workspaceId);
+  // The workspace Slack bot is workspace configuration (capabilities:manage);
+  // Members with connections:write connect their own Slack instead.
+  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
 export function canManageSlackReactionSummon(
@@ -186,11 +191,10 @@ export const SLACK_PERSONAL_PERMISSION_SENTENCE =
   "Slack connects here as your own personal Slack account. Connection management permission is required to connect or change it; ask a workspace admin to grant it.";
 
 /**
- * Maps Slack onto the shared integration view-model. Anyone with connection
- * management permission (connections:write or workspace admin) sees the
- * OpenGeni bot (its installation, what it can see, and install/reconnect/
- * disconnect; the options stay admin-gated); everyone else sees their own
- * personal Slack account. Nobody is offered both.
+ * Maps Slack onto the shared integration view-model. Anyone who manages
+ * workspace integrations (capabilities:manage) sees the Opengeni bot (its
+ * installation, what it can see, and install/reconnect/disconnect); everyone
+ * else sees their own personal Slack account. Nobody is offered both.
  */
 export function useSlackIntegration({
   workspaceId,
@@ -201,7 +205,9 @@ export function useSlackIntegration({
   sheetOpen,
   refresh,
   onRuntimeChanged,
+  selectedBotConnectionId,
 }: {
+  selectedBotConnectionId?: string;
   workspaceId: string;
   items: CapabilityCatalogItem[];
   connections: ConnectionMetadata[] | null;
@@ -267,6 +273,8 @@ export function useSlackIntegration({
   // allowlist, so saving from it actually enables the shortcut.
   const [reactionEnableIntent, setReactionEnableIntent] = useState(false);
   const [publicationOpen, setPublicationOpen] = useState(false);
+  // Opened by an attempt to turn publishing on: saving the dialog turns it on.
+  const [publicationEnableIntent, setPublicationEnableIntent] = useState(false);
   const [invitedChannels, setInvitedChannels] = useState<SlackReactionChannel[] | null>(null);
   const [channelRoutes, setChannelRoutes] = useState<SlackChannelRoute[] | null>(null);
   // Null until the read succeeds. With routing off the stored routes are inert,
@@ -283,8 +291,15 @@ export function useSlackIntegration({
   const preview = localConnectedSlackPreview(window.location.search, workspaceId);
   const readOnly = preview !== null;
   const loaded = connectionsLoaded || readOnly;
-  const botConnections = openGeniSlackBotConnections(connections ?? []);
-  const botConnection = preview?.bot ?? preferredOpenGeniSlackBotConnection(botConnections);
+  const botConnections = useMemo(
+    () => openGeniSlackBotConnections(connections ?? []),
+    [connections],
+  );
+  const botConnection =
+    preview?.bot ??
+    (selectedBotConnectionId
+      ? (botConnections.find((connection) => connection.id === selectedBotConnectionId) ?? null)
+      : preferredOpenGeniSlackBotConnection(botConnections));
   const botMetadata = botConnection ? openGeniSlackBotUiMetadata(botConnection) : null;
   const binding = botConnection
     ? (slackInstallationBindings.find((row) => row.connectionId === botConnection.id) ?? null)
@@ -296,11 +311,15 @@ export function useSlackIntegration({
   // different Slack team. Replacing it would hide Reconnect or create loops.
   const discovery = useSlackInstallationDiscovery(
     workspaceId,
-    loaded && !botConnection && slackInstallationBindings.length === 0 && !readOnly,
+    loaded &&
+      !selectedBotConnectionId &&
+      !botConnection &&
+      slackInstallationBindings.length === 0 &&
+      !readOnly,
   );
   const canMutateInstalledBot = canInstallBot && bindingActive;
-  // Reaction summon, knowledge destination, and decision publication remain
-  // admin-gated even though any connections:write holder sees the bot sheet.
+  // Reaction summon, knowledge destination, and decision publication are
+  // gated on the same integration-administration authority as the bot sheet.
   const canManageReaction = isAdmin && bindingActive;
   const scopeReady = botConnection
     ? hasOpenGeniSlackReactionScope(botConnection.grantedScopes)
@@ -657,6 +676,7 @@ export function useSlackIntegration({
 
   async function togglePublication(enabled: boolean) {
     if (enabled && (!publication?.connectionId || !publication.slackChannelId)) {
+      setPublicationEnableIntent(true);
       setPublicationOpen(true);
       return;
     }
@@ -683,12 +703,12 @@ export function useSlackIntegration({
     }
   }
 
-  // Anyone who can manage workspace connections (connections:write or admin)
-  // manages the bot; everyone else sees their own personal Slack account.
+  // Integration administrators manage the bot; everyone else sees their own
+  // personal Slack account.
   const model =
     discovery.bindings.length > 0 || discovery.loading || discovery.failed
       ? organizationModel()
-      : canInstallBot
+      : canInstallBot || selectedBotConnectionId
         ? botModel()
         : memberModel();
 
@@ -941,7 +961,7 @@ export function useSlackIntegration({
         id: "slack-publication",
         label: "Publish important decisions to Slack",
         description: publication?.slackChannelName
-          ? `Posts to ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
+          ? `Posts as ${botConnections.find((row) => row.id === publication.connectionId)?.metadata.slackTeamName ?? "the configured Slack workspace"} · ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
           : "Posts short summaries of workspace Knowledge changes to one channel you choose.",
         checked: publication?.enabled ?? false,
         disabled: !isAdmin || !botActive || readOnly || !publicationLoaded,
@@ -1264,6 +1284,7 @@ export function useSlackIntegration({
           <SlackReactionChannelsDialog
             workspaceId={workspaceId}
             connectionId={botConnectionId}
+            connections={botConnections}
             // Opened by an enable attempt, the dialog carries that intent so
             // picking channels and saving actually enables the shortcut.
             settings={
@@ -1283,8 +1304,12 @@ export function useSlackIntegration({
                 workspaceId={workspaceId}
                 connections={botConnections}
                 canManage={isAdmin && !readOnly}
+                enableOnSave={publicationEnableIntent}
                 open={publicationOpen}
-                onOpenChange={setPublicationOpen}
+                onOpenChange={(open) => {
+                  setPublicationOpen(open);
+                  if (!open) setPublicationEnableIntent(false);
+                }}
                 onSaved={setPublication}
               />
             </Suspense>

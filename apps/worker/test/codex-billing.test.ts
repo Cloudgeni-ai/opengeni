@@ -1,15 +1,18 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database } from "@opengeni/db";
 import { ensureRunAllowed, recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 const db = {} as Database;
 
-// Live config that reproduces the bug: stripe + managed, 0 OpenGeni credits.
+// Live config that reproduces the bug: stripe + managed, 0 Opengeni credits.
 function billedSettings() {
   return testSettings({ billingMode: "stripe", usageLimitsMode: "managed" });
 }
@@ -27,6 +30,7 @@ function mockZeroBalance(): () => void {
 describe("worker ensureRunAllowed — codex bypass", () => {
   test("(a) codex turn with 0 credits does NOT throw (credit gate skipped, balance never read)", async () => {
     let balanceRead = false;
+    const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
     const spy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
       balanceRead = true;
       return {
@@ -41,21 +45,23 @@ describe("worker ensureRunAllowed — codex bypass", () => {
       expect(balanceRead).toBe(false); // short-circuited before any balance read
     } finally {
       spy.mockRestore();
+      allowance.mockRestore();
     }
   });
 
-  test("(c) a normal turn with 0 credits still throws insufficient OpenGeni credits", async () => {
+  test("(c) a normal turn with 0 credits still throws insufficient workspace credits", async () => {
     const restore = mockZeroBalance();
     try {
       await expect(
         ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
-      ).rejects.toThrow("insufficient Opengeni credits");
+      ).rejects.toThrow("insufficient workspace credits");
     } finally {
       restore();
     }
   });
 
   test("a deployment-funded free turn skips credits but still enforces the token cap", async () => {
+    const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
     const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
       throw new Error("free turns must not read the credit balance");
     });
@@ -82,6 +88,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     } finally {
       balanceSpy.mockRestore();
       usageSpy.mockRestore();
+      allowance.mockRestore();
     }
   });
 });
@@ -273,7 +280,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sourceKey: "response-1",
       });
       // Exactly one event: a zero-cost audit marker. NO model.tokens row (it would
-      // feed the OpenGeni token cap a codex turn is exempt from).
+      // feed the Opengeni token cap a codex turn is exempt from).
       expect(recorded).toEqual([{ eventType: "model.cost", quantity: 0, unit: "usd_micros" }]);
       expect(debitSpy).not.toHaveBeenCalled();
     } finally {

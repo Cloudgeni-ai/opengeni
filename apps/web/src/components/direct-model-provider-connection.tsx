@@ -6,9 +6,9 @@ import {
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 
 export function DirectModelProviderForm({
   client,
@@ -132,7 +132,7 @@ export function DirectModelProviderForm({
         />
         {provider === "openai" ? (
           <a
-            className="text-xs text-brand hover:underline"
+            className="text-xs og-link"
             href="https://platform.openai.com/api-keys"
             target="_blank"
             rel="noreferrer"

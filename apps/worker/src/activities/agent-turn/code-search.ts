@@ -1,5 +1,6 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import { usableJevApiKey, type Settings } from "@opengeni/config";
+import { decisionModelConfiguration, type Settings } from "@opengeni/config";
+import { DecisionUnavailableError, DecisionRequestError } from "@opengeni/decisions";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
   CODE_SEARCH_TOOL_NAME,
@@ -7,9 +8,6 @@ import {
   CodeSearchRipgrepMissingError,
   CodeSearchWorkspaceError,
   JevCircuitBreaker,
-  JevClient,
-  JevRequestError,
-  JevUnavailableError,
   codeSearchInputSchema,
   parseCodeSearchArguments,
   renderCodeSearchError,
@@ -27,9 +25,10 @@ import {
   type SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
 import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
+import { configuredDecisionModel, type WorkerDecisionSettings } from "./decision-model";
 
 /**
- * One breaker per worker process. Repeated Jev outages (including an exhausted
+ * One breaker per worker process. Repeated decision-provider outages (including an exhausted
  * account) make `code_search` calls on this worker fail at once for a cooldown
  * instead of each running a full retry cycle. The breaker never changes which
  * tools a turn is offered: the tool list and instructions are the start of the
@@ -80,12 +79,15 @@ export function codeSearchWorkspaceFromChannel(channel: CodeSearchChannel): Code
   };
 }
 
-/** Jev work done by one completed `code_search` call, for per-workspace usage records. */
+/** Typed inference used by one code-search call, owned by the deployment. */
 export type CodeSearchUsage = {
   operationId: string;
-  jevRequests: number;
-  jevInputTokens: number;
-  jevCostUsd: number;
+  decisionRequests: number;
+  decisionInputTokens: number | null;
+  decisionCostUsd: number | null;
+  model: string | null;
+  provider: string | null;
+  costSources: Array<"provider-reported" | "estimate" | "unknown">;
 };
 
 function textResult(text: string, isError: boolean) {
@@ -93,29 +95,35 @@ function textResult(text: string, isError: boolean) {
 }
 
 /**
- * The model-facing `code_search` tool. Jev scores candidates inside the worker;
- * the sandbox only runs read-only ripgrep and file reads, so the Jev key never
- * leaves this process. A Jev failure is reported to the model instead of
+ * The model-facing `code_search` tool. A typed decision model scores candidates
+ * inside the worker; the sandbox only runs read-only ripgrep and file reads, so
+ * provider credentials never leave this process. A provider failure is reported instead of
  * degrading to keyword-only ranking, which lowered answer quality in testing.
  */
 export function createCodeSearchAttemptToolDefinition(input: {
-  settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
-  apiKey: string;
+  settings: WorkerDecisionSettings;
+  /** Compatibility for existing direct Jev constructor callers. */
+  apiKey?: string;
   workspace: () => Promise<CodeSearchWorkspace>;
   observability: Observability;
-  /** Records Jev usage against the workspace. Failures are logged, never surfaced. */
+  /** Records decision usage against the workspace. Persistence failures are logged. */
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
   fetch?: typeof fetch;
 }): AttemptToolDefinition {
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
-  const jev = new JevClient({
-    apiKey: input.apiKey,
-    baseUrl: input.settings.jevBaseUrl,
-    model: input.settings.jevModel,
-    timeoutMs: input.settings.jevRequestTimeoutMs,
-    ...(input.fetch ? { fetch: input.fetch } : {}),
-  });
+  const configured = configuredDecisionModel(
+    {
+      ...input.settings,
+      ...(input.apiKey ? { jevApiKey: input.apiKey } : {}),
+    },
+    {
+      allowLegacyCodeSearch: true,
+      ...(input.fetch ? { fetch: input.fetch } : {}),
+    },
+  );
+  if (!configured)
+    throw new DecisionUnavailableError("Code search needs a configured decision model");
   return {
     identity: { serverId: "opengeni", toolName: CODE_SEARCH_TOOL_NAME },
     modelName: CODE_SEARCH_TOOL_NAME,
@@ -135,10 +143,14 @@ export function createCodeSearchAttemptToolDefinition(input: {
     execute: async (args, context) => {
       const startedAt = performance.now();
       let outcome: CodeSearchCallOutcome = "failed";
-      let jevRequests = 0;
-      let jevCostUsd = 0;
+      let decisionRequests = 0;
+      let decisionCostUsd: number | null = 0;
+      let decisionInputTokens: number | null = 0;
+      let decisionModel: string | null = null,
+        decisionProvider: string | null = null;
+      const costSources = new Set<"provider-reported" | "estimate" | "unknown">();
       // The breaker lease (the single trial while half-open) is settled exactly
-      // once: by what Jev did, or released when Jev was never judged. Settling
+      // once: by what the provider did, or released when no judgment ran. Settling
       // takes it, so the finally block releases only a lease still held.
       let lease: JevCircuitLease | null = null;
       try {
@@ -148,7 +160,9 @@ export function createCodeSearchAttemptToolDefinition(input: {
           outcome = "breaker_open";
           return textResult(
             renderCodeSearchError(
-              new JevUnavailableError("Jev is not responding; calls are paused for a few minutes"),
+              new DecisionUnavailableError(
+                "The decision model is not responding; calls are paused for a few minutes",
+              ),
             ),
             true,
           );
@@ -157,36 +171,34 @@ export function createCodeSearchAttemptToolDefinition(input: {
         const result = await runCodeSearch({
           ...request,
           workspace,
-          jev,
+          decisionModel: configured.model,
+          onDecisionUsage: (usage) => {
+            decisionRequests += usage.requests;
+            decisionInputTokens =
+              decisionInputTokens === null || usage.inputTokens === null
+                ? null
+                : decisionInputTokens + usage.inputTokens;
+            decisionCostUsd =
+              decisionCostUsd === null || usage.costUsd === null
+                ? null
+                : decisionCostUsd + usage.costUsd;
+            decisionModel = usage.model;
+            decisionProvider = usage.provider;
+            costSources.add(usage.costSource);
+          },
           ...(context.signal ? { signal: context.signal } : {}),
         });
         const held = lease;
         lease = null;
-        // A pack whose final status check hit an outage still counts against Jev.
-        if (result.statusCheckError instanceof JevUnavailableError) {
+        // A pack whose final status check hit an outage still counts against the provider.
+        if (result.statusCheckError instanceof DecisionUnavailableError) {
           breaker.recordFailure(result.statusCheckError, Date.now(), held);
-        } else if (result.stats.jev.requests > 0) {
+        } else if (result.stats.decision.requests > 0) {
           breaker.recordSuccess(held);
         } else {
           breaker.release(held);
         }
         outcome = "completed";
-        jevRequests = result.stats.jev.requests;
-        jevCostUsd = result.stats.jev.costUsd;
-        if (input.recordUsage && jevRequests > 0) {
-          await input
-            .recordUsage({
-              operationId: context.operationId,
-              jevRequests,
-              jevInputTokens: result.stats.jev.inputTokens,
-              jevCostUsd,
-            })
-            .catch((error: unknown) => {
-              input.observability.warn("code_search usage record failed", {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
-        }
         return textResult(result.text, false);
       } catch (error) {
         if (context.signal?.aborted) {
@@ -197,15 +209,15 @@ export function createCodeSearchAttemptToolDefinition(input: {
           outcome = "invalid_arguments";
           return textResult(error.message, true);
         }
-        if (error instanceof JevUnavailableError) {
+        if (error instanceof DecisionUnavailableError) {
           const held = lease;
           lease = null;
           breaker.recordFailure(error, Date.now(), held);
-          outcome = "jev_unavailable";
+          outcome = "decision_unavailable";
           return textResult(renderCodeSearchError(error), true);
         }
-        if (error instanceof JevRequestError) {
-          outcome = "jev_rejected";
+        if (error instanceof DecisionRequestError) {
+          outcome = "decision_rejected";
           return textResult(renderCodeSearchError(error), true);
         }
         if (error instanceof CodeSearchWorkspaceError) {
@@ -226,11 +238,28 @@ export function createCodeSearchAttemptToolDefinition(input: {
         throw error;
       } finally {
         if (lease) breaker.release(lease);
+        if (input.recordUsage && decisionRequests > 0) {
+          await input
+            .recordUsage({
+              operationId: context.operationId,
+              decisionRequests,
+              decisionInputTokens,
+              decisionCostUsd,
+              model: decisionModel,
+              provider: decisionProvider,
+              costSources: [...costSources],
+            })
+            .catch((error: unknown) => {
+              input.observability.warn("code_search usage record failed", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        }
         recordCodeSearchCall(input.observability, {
           outcome,
           durationSeconds: (performance.now() - startedAt) / 1_000,
-          jevRequests,
-          jevCostUsd,
+          decisionRequests,
+          decisionCostUsd,
         });
       }
     },
@@ -239,15 +268,15 @@ export function createCodeSearchAttemptToolDefinition(input: {
 
 /**
  * The `code_search` definition for one turn, or none. It is offered only when
- * the session's frozen decision and the deployment enable it, a usable Jev key
+ * the session's frozen decision and the deployment enable it, a usable typed model
  * exists, and the turn has compute that can run its POSIX shell commands (not
  * a Windows Connected Machine). Every input is durable, so the tool list stays
- * the same from turn to turn and on every worker. Transient Jev health never
+ * the same from turn to turn and on every worker. Transient provider health never
  * hides the tool; the breaker only refuses calls.
  */
 export function codeSearchToolDefinitions(input: {
   enabled: boolean;
-  settings: Pick<Settings, "jevApiKey" | "jevBaseUrl" | "jevModel" | "jevRequestTimeoutMs">;
+  settings: WorkerDecisionSettings;
   backend: Settings["sandboxBackend"];
   /** The turn's Connected Machine workspace root, when a machine is primary. */
   machineWorkspaceRoot?: string | null;
@@ -256,16 +285,15 @@ export function codeSearchToolDefinitions(input: {
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
 }): AttemptToolDefinition[] {
-  const apiKey = usableJevApiKey(input.settings);
+  const config = decisionModelConfiguration(input.settings, true);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
-  if (!input.enabled || !apiKey || input.backend === "none") return [];
+  if (!input.enabled || !config || input.backend === "none") return [];
   if (input.machineWorkspaceRoot && isWindowsConnectedMachinePath(input.machineWorkspaceRoot)) {
     return [];
   }
   return [
     createCodeSearchAttemptToolDefinition({
       settings: input.settings,
-      apiKey,
       workspace: input.workspace,
       observability: input.observability,
       ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),

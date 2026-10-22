@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { expandAlertAnnotations } from "./prometheus-alert-template";
 
 // Optional tooling, not a runtime dependency. CI/operator validation can supply
 // the pinned Prometheus binary using OPENGENI_PROMTOOL or its ordinary PATH.
@@ -37,11 +38,24 @@ function rule(template: string, kind: "record" | "alert", name: string): Record<
     .split("\n")
     .map((line) => line.slice(8))
     .join("\n");
+  let parsed: Record<string, any>;
   try {
-    return (Bun.YAML.parse(fixture) as Array<Record<string, any>>)[0]!;
+    parsed = (Bun.YAML.parse(fixture) as Array<Record<string, any>>)[0]!;
   } catch (error) {
     throw new Error(`Cannot parse fixture rule ${name}`, { cause: error });
   }
+  // Helm renders `{{ "{{ ... }}" }}` to the literal Prometheus template action.
+  if (parsed.annotations) {
+    parsed.annotations = Object.fromEntries(
+      Object.entries(parsed.annotations as Record<string, string>).map(([key, text]) => [
+        key,
+        text.replace(/\{\{ "((?:[^"\\]|\\.)*)" \}\}/g, (_, inner: string) =>
+          JSON.parse(`"${inner}"`),
+        ),
+      ]),
+    );
+  }
+  return parsed;
 }
 
 function inputs(
@@ -123,7 +137,8 @@ test.skipIf(!promtool)(
     const byName = new Map(
       rules.filter((entry) => entry.alert).map((entry) => [entry.alert, entry]),
     );
-    function expectations(evalTime: string, firing: string[] = []) {
+    // The value each firing alert renders into its notification annotations.
+    function expectations(evalTime: string, firing: string[] = [], value = 0) {
       return alerts.map((name) => ({
         eval_time: evalTime,
         alertname: name,
@@ -137,19 +152,27 @@ test.skipIf(!promtool)(
                     ? { pod: "pending-turn-worker" }
                     : {}),
                 },
-                exp_annotations: byName.get(name)!.annotations,
+                exp_annotations: expandAlertAnnotations(byName.get(name)!.annotations, {
+                  value,
+                }),
               },
             ]
           : [],
       }));
     }
     const scenarios: Record<string, any>[] = [];
-    function scenario(name: string, source: Input[], firing: string[] = [], evalTime = "2m") {
+    function scenario(
+      name: string,
+      source: Input[],
+      firing: string[] = [],
+      evalTime = "2m",
+      value = 0,
+    ) {
       scenarios.push({
         name,
         interval: "30s",
         input_series: source,
-        alert_rule_test: expectations(evalTime, firing),
+        alert_rule_test: expectations(evalTime, firing, value),
       });
       return scenarios.at(-1)!;
     }
@@ -184,16 +207,20 @@ test.skipIf(!promtool)(
         ],
       },
     ];
-    for (const [age, firing] of [
-      [30, [alerts[2]!]],
-      [90, [alerts[0]!]],
-      [120, [alerts[0]!]],
-      [121, [alerts[1]!]],
+    // Queue-age tiers render the oldest age; the slot warning renders the
+    // saturated slot ratio (1, i.e. 100%).
+    for (const [age, firing, value] of [
+      [30, [alerts[2]!], 1],
+      [90, [alerts[0]!], 90],
+      [120, [alerts[0]!], 120],
+      [121, [alerts[1]!], 121],
     ] as const) {
       scenario(
         `age tier ${age} seconds`,
         inputs({ age: `${age}+0x20`, slots: "1+0x20", ceiling: true }),
         [...firing],
+        "2m",
+        value,
       );
     }
     scenario("warning waits for one minute", inputs({ age: "90+0x20" }), [], "30s");
@@ -202,6 +229,7 @@ test.skipIf(!promtool)(
       inputs({ age: "90+0x20" }),
       [alerts[0]!],
       "1m",
+      90,
     );
     scenario("critical is not an instant page", inputs({ age: "121+0x20" }), [], "0s");
     scenario(
@@ -209,6 +237,7 @@ test.skipIf(!promtool)(
       inputs({ age: "121+0x20" }),
       [alerts[1]!],
       "30s",
+      121,
     );
     scenario("transient queue-age blip never fires", inputs({ age: "90 90 0+0x18" }));
     for (const [name, options] of [
@@ -289,11 +318,15 @@ test.skipIf(!promtool)(
       "ceiling and growing queue replace slot warning",
       inputs({ age: "20+0x20", backlog: "1+1x20", slots: "1+0x20", ceiling: true }),
       [alerts[5]!],
+      "2m",
+      2,
     );
     scenario(
       "flat queue at ceiling does not trigger growth alert",
       inputs({ age: "20+0x20", slots: "1+0x20", ceiling: true }),
       [alerts[2]!],
+      "2m",
+      1,
     );
     scenario("absent HPA is not a scaling ceiling", inputs({ age: "20+0x20", backlog: "1+1x20" }));
     scenario(

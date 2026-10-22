@@ -146,10 +146,10 @@ describe("Slack App Home projection", () => {
     const blocks = buildSlackAppHomeAccessBlocks({
       title: "Opengeni access changed",
       message: "Reconnect before tasks are shown here.",
-      actionLabel: "Reconnect OpenGeni",
+      actionLabel: "Reconnect Opengeni",
       actionUrl: "https://app.example.test/workspaces/workspace/capabilities#slack_link=signed",
     });
-    expect(JSON.stringify(blocks)).toContain("Reconnect OpenGeni");
+    expect(JSON.stringify(blocks)).toContain("Reconnect Opengeni");
     expect(JSON.stringify(blocks)).not.toContain("Your Opengeni tasks");
   });
 });

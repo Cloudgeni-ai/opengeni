@@ -7,7 +7,7 @@
 // - codex-rs/backend-client/src/client/rate_limit_resets.rs
 // - codex-rs/app-server-protocol/src/protocol/v2/account.rs
 //
-// The backend wire is snake_case. Public OpenGeni callers only receive the
+// The backend wire is snake_case. Public Opengeni callers only receive the
 // normalized camelCase types below. Unknown reset types/statuses remain visible
 // but fail closed as `unknown`; they are never made actionable by this parser.
 
@@ -92,7 +92,7 @@ const backendConsumeOutcomes = [
 const backendConsumeSchema = z
   .object({
     code: z.enum(backendConsumeOutcomes),
-    // The app-server intentionally discards this field. OpenGeni also refetches
+    // The app-server intentionally discards this field. Opengeni also refetches
     // rather than inferring post-redemption state from it.
     windows_reset: nonNegativeInteger.default(0),
   })

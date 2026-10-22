@@ -1,5 +1,9 @@
+import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
@@ -23,7 +27,6 @@ import {
   confirmDrainCold,
   createDb,
   createSession,
-  createVariableSet,
   deleteWorkspaceIfQuiescent,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -57,8 +60,11 @@ import {
   workspaceArchiveCaptureDeadlineElapsed,
   SandboxCheckpointArtifactRegistrationConflictError,
   SandboxImageConflictError,
+  SandboxBackendConflictError,
   SandboxRigConflictError,
   settleTemporalScheduleCleanup,
+  settleSandboxCheckpointArtifactGc,
+  pruneDeletedSandboxCheckpointArtifacts,
   settleSandboxSharedPreparation,
   type Database,
   type DbClient,
@@ -89,7 +95,7 @@ import {
 // afterAll regardless of outcome.
 
 let available = true;
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -368,7 +374,7 @@ async function assertExpiredDrainFence(
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("sandbox-leases");
+  shared = await acquireRestrictedRuntimeTestDatabase("sandbox-leases", "public");
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
@@ -409,7 +415,11 @@ async function seedLiveCanonicalAttempt(input: {
     status: "running",
     initialMessage: "live canonical attempt fixture",
   });
-  await admin`
+  await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${input.accountId}, true),
+      set_config('opengeni.workspace_id', ${input.workspaceId}, true),
+      set_config('application_name', 'opengeni-lossless-v1-session-variable-sets-v1', true)`;
+    await tx`
     insert into session_turns (
       id, account_id, workspace_id, session_id, trigger_event_id,
       temporal_workflow_id, status, source, position, prompt, resources,
@@ -421,7 +431,11 @@ async function seedLiveCanonicalAttempt(input: {
       1, 'live canonical attempt fixture', '[]'::jsonb, '[]'::jsonb,
       'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
     )`;
+  });
   await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${input.accountId}, true),
+      set_config('opengeni.workspace_id', ${input.workspaceId}, true),
+      set_config('application_name', 'opengeni-lossless-v1-session-variable-sets-v1', true)`;
     await tx`
       update sessions set active_turn_id = ${turnId}
       where workspace_id = ${input.workspaceId} and id = ${input.sessionId}`;
@@ -1285,7 +1299,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // A workspace owns both the selected variable set and the selecting
     // session. Deletion must detach that relationship through the session
     // activity gate before the parent cascade reaches workspace_variable_sets.
-    const selectedVariableSet = await createVariableSet(db, {
+    const selectedVariableSet = await createLegacyVariableSet(db, {
       accountId,
       workspaceId,
       name: "workspace deletion fixture",
@@ -2791,48 +2805,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const sessionId = crypto.randomUUID();
-    const turnId = crypto.randomUUID();
-    const attemptId = crypto.randomUUID();
-    const holderId = `turn-attempt:${attemptId}`;
-
-    await seedSession({
+    const { turnId, attemptId, holderId } = await seedLiveCanonicalAttempt({
       accountId,
       workspaceId,
       groupId,
       sessionId,
-      status: "running",
-      initialMessage: "lease heartbeat fixture",
-    });
-    await admin`
-      insert into session_turns (
-        id, account_id, workspace_id, session_id, trigger_event_id,
-        temporal_workflow_id, status, source, position, prompt, resources,
-        tools, model, reasoning_effort, sandbox_backend, metadata, lineage,
-        execution_generation
-      ) values (
-        ${turnId}, ${accountId}, ${workspaceId}, ${sessionId},
-        ${crypto.randomUUID()}, ${`session-${sessionId}`}, 'running', 'user',
-        1, 'lease heartbeat fixture', '[]'::jsonb, '[]'::jsonb,
-        'test-model', 'low', 'modal', '{}'::jsonb, '{}'::jsonb, 1
-      )`;
-    await admin.begin(async (tx) => {
-      await tx`
-        update sessions set active_turn_id = ${turnId}
-        where workspace_id = ${workspaceId} and id = ${sessionId}`;
-      await tx`
-        update session_turns set active_attempt_id = ${attemptId}
-        where workspace_id = ${workspaceId} and id = ${turnId}`;
-      await tx`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id,
-          execution_generation, state, temporal_workflow_id,
-          temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, mcp_approval_policies
-        ) values (
-          ${attemptId}, ${accountId}, ${workspaceId}, ${sessionId}, ${turnId},
-          1, 'running', ${`session-${sessionId}`}, ${crypto.randomUUID()}, '2',
-          0, '{}'::jsonb
-        )`;
+      state: "running",
     });
 
     await acquireLease(db, {
@@ -5010,6 +4988,135 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
+  test("(8a-docker) a Docker container missing at drain keeps its host workspace for the next owner", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const workspaceRootPath = "/var/lib/opengeni/docker-workspaces/drain-missing";
+    const envelope = (containerId: string, owned = true) => ({
+      backendId: "docker",
+      opengeniProviderInstanceId: containerId,
+      sessionState: {
+        providerState: {
+          containerId,
+          workspaceRootPath,
+          workspaceRootOwned: owned,
+          snapshot: null,
+        },
+      },
+    });
+    const drainMissing = async (group: string, containerId: string, owned: boolean) => {
+      await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        kind: "turn",
+        holderId: `docker-drain-${containerId}`,
+        backend: "docker",
+        leaseTtlMs: 45_000,
+      });
+      const warm = await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: 0,
+        instanceId: containerId,
+        resumeBackendId: "docker",
+        resumeState: envelope(containerId, owned),
+        leaseTtlMs: 45_000,
+      });
+      expect(warm.committed).toBe(true);
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        kind: "turn",
+        holderId: `docker-drain-${containerId}`,
+        idleGraceMs: 0,
+      });
+      const before = await readLease(db, workspaceId, group);
+      expect(before?.liveness).toBe("draining");
+      const cold = await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: group,
+        expectedEpoch: before!.leaseEpoch,
+        providerMissingBeforeCapture: true,
+        providerStopped: true,
+      });
+      expect(cold.wentCold).toBe(true);
+      return (await readLease(db, workspaceId, group))!;
+    };
+
+    const lease = await drainMissing(groupId, "docker-drain-old", true);
+    expect(lease.liveness).toBe("cold");
+    expect(lease.instanceId).toBeNull();
+    expect(lease.recovery.provider).toMatchObject({
+      status: "missing",
+      instanceId: "docker-drain-old",
+      diagnostic: "provider_not_found_before_workspace_capture",
+    });
+    expect(lease.recovery.restore.status).toBe("pending");
+    expect(lease.recovery.workspace.status).toBe("not_ready");
+    const continuity = {
+      version: 1 as const,
+      backend: "docker" as const,
+      kind: "docker_workspace" as const,
+      sourceInstanceId: "docker-drain-old",
+      continuityKey: workspaceRootPath,
+    };
+    expect(lease.recovery.continuity).toEqual(continuity);
+    // The exact provider state survives so the owner can restart on that path.
+    expect(lease.resumeState).toMatchObject(envelope("docker-drain-old"));
+
+    const owner = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-drain-recovery",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(owner.role).toBe("spawner");
+    expect(owner.lease.recovery.continuity).toEqual(continuity);
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: owner.lease.leaseEpoch,
+      instanceId: "docker-drain-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-drain-new"),
+      continuityRecovery: owner.lease.recovery.continuity!,
+      leaseTtlMs: 45_000,
+    });
+    expect(recorded.recorded).toBe(true);
+    const adopted = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: owner.lease.leaseEpoch,
+      instanceId: "docker-drain-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-drain-new"),
+      continuityRecovery: owner.lease.recovery.continuity!,
+      leaseTtlMs: 45_000,
+    });
+    expect(adopted.committed).toBe(true);
+    expect(adopted.lease?.liveness).toBe("warm");
+    expect(adopted.lease?.recovery.continuity).toBeUndefined();
+
+    // A host directory Opengeni does not own carries no continuity: with no
+    // archive the missing provider is still a lost workspace.
+    const unownedGroupId = crypto.randomUUID();
+    const unowned = await drainMissing(unownedGroupId, "docker-drain-unowned", false);
+    expect(unowned.recovery.continuity).toBeUndefined();
+    expect(unowned.recovery.restore).toMatchObject({
+      status: "unrecoverable",
+      failureCode: "archive_unavailable",
+    });
+  }, 60_000);
+
   // Production 2026-10-05: a worker shutdown cancelled the spawner after Modal
   // create returned. It terminated its unpublished box but died before
   // failWarmingToCold, so the warming-death reaper drained the attributed
@@ -5200,6 +5307,126 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expect(retry.lease.leaseEpoch).toBeGreaterThan(drained!.leaseEpoch);
     }, 60_000);
   }
+
+  for (const status of ["unrecoverable", "degraded", "pending"] as const) {
+    test(`a new attempt revalidates a current archive after an old ${status} verdict`, async () => {
+      if (!available) return;
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const scope = { accountId, workspaceId, sandboxGroupId: groupId };
+      const archive = Buffer.from("portable retained workspace").toString("base64");
+      const descriptor = archiveDescriptor(archive, 1_900_000_000_222);
+      const ref = archiveObjectRef({ accountId, workspaceId, groupId }, descriptor);
+      const resume = {
+        backendId: "docker",
+        sessionState: { workspaceArchiveRef: ref, workspaceArchiveMeta: descriptor },
+        opengeniRecovery: {
+          provider: { status: "not_created", instanceId: null, diagnostic: "replacement_failed" },
+          restore: { status, failureCode: "archive_metadata_invalid", retryable: false },
+          workspace: { status },
+        },
+      };
+      await admin`insert into sandbox_leases
+        (id, account_id, workspace_id, sandbox_group_id, backend, liveness, lease_epoch,
+         workspace_generation, archive_generation, resume_backend_id, resume_state, expires_at)
+        values (${crypto.randomUUID()}, ${accountId}, ${workspaceId}, ${groupId}, 'docker', 'cold',
+          3, 7, 7, 'docker', ${admin.json(resume)}, now())`;
+      const attempts = await Promise.all(
+        ["first", "second"].map((holderId) =>
+          acquireLease(db, {
+            ...scope,
+            kind: "turn",
+            holderId,
+            backend: "modal",
+            leaseTtlMs: 45_000,
+          }),
+        ),
+      );
+      expect(attempts.map((result) => result.role).sort()).toEqual(["attached", "spawner"]);
+      expect(attempts.every((result) => result.lease.backend === "modal")).toBe(true);
+      const rematerializationId = crypto.randomUUID();
+      const begun = await beginSandboxRematerialization(db, {
+        ...scope,
+        expectedEpoch: 3,
+        rematerializationId,
+      });
+      expect(begun.status).toBe("started");
+      expect(begun.lease?.recovery.restore.selectedRevision).toBe(descriptor.revision);
+      expect(begun.lease?.resumeState?.sessionState).toEqual(resume.sessionState);
+      expect(begun.lease?.workspaceGeneration).toBe(7);
+      expect(begun.lease?.archiveGeneration).toBe(7);
+      const operationId = crypto.randomUUID();
+      expect(
+        await beginModalProviderCreate(db, {
+          ...scope,
+          expectedEpoch: 3,
+          operationId,
+          providerBindingKey: "migrated-provider",
+          rematerializationId,
+          selectedRevision: descriptor.revision,
+          imageId: "im-migrated",
+          imageRef: null,
+          appId: "ap-migrated",
+          providerName: `opengeni-create-${operationId}`,
+          requestSha256: "b".repeat(64),
+        }),
+      ).not.toBeNull();
+      // Admission is not verification: a fresh box still cannot publish until
+      // the selected archive has actually passed restore verification.
+      expect(
+        await commitWarmingToWarm(db, {
+          ...scope,
+          expectedEpoch: 3,
+          instanceId: "unverified-replacement",
+          resumeBackendId: "modal",
+          leaseTtlMs: 45_000,
+        }),
+      ).toMatchObject({ committed: false });
+    }, 60_000);
+  }
+
+  test("a backend change never steals a live or outcome-unknown provider create", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const input = {
+      ...scope,
+      kind: "turn" as const,
+      holderId: "original",
+      backend: "modal" as const,
+      leaseTtlMs: 45_000,
+    };
+    const original = await acquireLease(db, input);
+    await expect(
+      acquireLease(db, { ...input, holderId: "replacement", backend: "docker" }),
+    ).rejects.toThrow(SandboxBackendConflictError);
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...scope,
+      expectedEpoch: original.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: "fixture-provider",
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "c".repeat(64),
+    });
+    await expect(
+      Promise.resolve(
+        admin`update sandbox_leases set liveness = 'cold' where id = ${original.lease.id}`,
+      ),
+    ).rejects.toThrow("provider_create_outcome_unknown");
+    await expect(
+      acquireLease(db, { ...input, holderId: "replacement", backend: "docker" }),
+    ).rejects.toThrow(SandboxBackendConflictError);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.backend).toBe("modal");
+  }, 60_000);
 
   test("(8b) a provider-loss cold commit adopts the exact late capture callback", async () => {
     if (!available) return;
@@ -7582,12 +7809,27 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         begun.lease.recovery.restore.selectedRevision ?? undefined,
       );
     }
+    const gcClaimId = crypto.randomUUID();
     const claims = await claimSandboxCheckpointArtifactsForGc(db, {
-      claimId: crypto.randomUUID(),
+      claimId: gcClaimId,
       limit: 10,
       claimTtlMs: 60_000,
     });
     expect(claims.map((claim) => claim.id)).toEqual([evictedArtifactId]);
+    // Each API call commits separately: deferred reference validators must
+    // still work after the claim's temporary capability has been removed.
+    const gcClaim = claims[0]!;
+    expect(
+      await settleSandboxCheckpointArtifactGc(db, {
+        artifactId: gcClaim.id,
+        claimId: gcClaimId,
+        deleted: true,
+        retryAfterMs: 0,
+      }),
+    ).toBe(true);
+    await admin`UPDATE sandbox_checkpoint_artifacts SET deleted_at=now()-interval '2 days'
+      WHERE id=${gcClaim.id}`;
+    expect(await pruneDeletedSandboxCheckpointArtifacts(db, 86_400_000, 10)).toBe(1);
   }, 60_000);
 
   test("(23) Docker continuity serializes restart ownership and preserves the workspace across retry", async () => {

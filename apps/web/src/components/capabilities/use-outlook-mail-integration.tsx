@@ -2,7 +2,10 @@ import {
   useIntegrationDefinitionRow,
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
-import type { ApiIntegrationInstallationSummary, IntegrationDefinitionSummary } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  IntegrationDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 export const OUTLOOK_MAIL_DEFINITION_ID = "microsoft-outlook-mail";
 export const OUTLOOK_LOGO_URL =

@@ -925,12 +925,12 @@ mod tests {
     #[test]
     fn native_and_wasm_profiles_emit_the_exact_same_layout_vector() {
         let assets = vec![TextLayoutFontAsset {
-            bytes: Arc::from(test_font("OpenGeni אבג 漢字 👩🚀- ", 600)),
+            bytes: Arc::from(test_font("Opengeni אבג 漢字 👩🚀- ", 600)),
             face_index: 0,
             descriptor: FontDescriptor::new("Fixture"),
         }];
         let bundle = encode_text_layout_font_bundle(&assets).expect("font bundle");
-        let text = "OpenGeni\tאבג 漢\u{00ad}字 👩‍🚀";
+        let text = "Opengeni\tאבג 漢\u{00ad}字 👩‍🚀";
         let mut base = TextStyle::new("Fixture", LayoutUnit::from_raw(1_024));
         base.language = Some("en".into());
         let mut emphasized = base.clone();

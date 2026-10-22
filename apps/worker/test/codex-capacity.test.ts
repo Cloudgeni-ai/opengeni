@@ -1,13 +1,13 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import type { CodexCapacitySelectionContext, CodexLeaseAccountStatus } from "@opengeni/db";
+import { createCodexCapacityActivities } from "../src/activities/codex-capacity";
 import {
   codexCapacityDecision,
-  createCodexCapacityActivities,
   refreshCodexUsageAndRepairCapacityWaiters,
   signalCodexCapacityWakeTargets,
-} from "../src/activities/codex-capacity";
-import { selectCodexCredentialLeaseForTurn } from "../src/activities/codex-rotation";
+} from "./fixtures/legacy-codex/capacity";
+import { selectCodexCredentialLeaseForTurn } from "./fixtures/legacy-codex/rotation";
 import { unresolvedCodexCredentialFailures } from "../../../packages/db/src/codex-failure-eligibility";
 
 function account(
@@ -505,54 +505,28 @@ describe("Codex capacity availability diagnostics", () => {
     expect(order.at(-1)).toBe("repair");
   });
 
-  test("a due mutation-only waiter re-evaluates status without provider quota polling", async () => {
-    const waiter = {
-      id: "waiter-mutation-only",
-      generation: 2,
-      resetKind: "mutation_only",
-      nextCheckAt: new Date("2026-09-03T00:00:00.000Z"),
-      wakeRevision: 4,
-      observedWakeRevision: 4,
-    };
-    const getWait = spyOn(opengeniDb, "getCodexCapacityWaitForSession").mockResolvedValue(
-      waiter as never,
-    );
-    const refresh = spyOn(opengeniDb, "fetchCodexUsageForAccount");
-    const reconcile = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockResolvedValue({
-      action: "waiting",
-      waiter,
-      events: [],
-    } as never);
+  test("an omitted-provider historical waiter missing from core is stale without a legacy lookup", async () => {
+    const coreWait = spyOn(
+      opengeniDb,
+      "getSubscriptionCoreCodexCapacityWaitById",
+    ).mockResolvedValue(null);
     const activities = createCodexCapacityActivities(
-      async () =>
-        ({
-          db: {},
-          bus: { publish: async () => undefined },
-          wakeSessionWorkflow: async () => undefined,
-          signalCodexCapacityWorkflow: async () => undefined,
-        }) as never,
+      async () => ({ db: {}, bus: { publish: async () => undefined } }) as never,
     );
-
     try {
-      const result = await activities.reconcileCodexCapacityWait({
-        accountId: "account",
-        workspaceId: "workspace",
-        sessionId: "session",
-        waiterId: waiter.id,
-        generation: waiter.generation,
-        cause: "timer",
-      });
-      expect(result.action).toBe("waiting");
-      expect(refresh).not.toHaveBeenCalled();
-      expect(reconcile).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ boundedRefreshAttempted: false }),
-        expect.any(Function),
-      );
+      expect(
+        await activities.reconcileCodexCapacityWait({
+          accountId: "account",
+          workspaceId: "workspace",
+          sessionId: "session",
+          waiterId: "historical-waiter",
+          generation: 2,
+          cause: "timer",
+        }),
+      ).toEqual({ action: "stale" });
+      expect(coreWait).toHaveBeenCalledTimes(1);
     } finally {
-      getWait.mockRestore();
-      refresh.mockRestore();
-      reconcile.mockRestore();
+      coreWait.mockRestore();
     }
   });
 });

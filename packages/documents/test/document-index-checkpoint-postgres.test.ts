@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createDb } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { listEffectiveIndexedDocuments } from "../src";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";

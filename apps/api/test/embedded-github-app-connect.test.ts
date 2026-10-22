@@ -15,11 +15,8 @@ import {
 import { grantWorkspaceAccess, withWorkspaceSubjectRls } from "@opengeni/db";
 
 import { createSignedState, readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 let fixture: SharedTestDatabase;
@@ -267,7 +264,7 @@ for (const providerId of ["github-app", "github-lens"] as const)
       );
       expect(forged.status).toBe(400);
       expect(forged.headers.get("location")).toBeNull();
-      expect(await forged.text()).not.toContain("OpenGeni");
+      expect(await forged.text()).not.toContain("Opengeni");
       expect(await listGitHubInstallationAccessForWorkspace(client.db, workspaceId)).toHaveLength(
         providerId === "github-app" ? 1 : 0,
       );

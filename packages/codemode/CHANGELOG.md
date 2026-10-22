@@ -1,5 +1,312 @@
 # @opengeni/codemode
 
+## 4.3.1
+
+### Patch Changes
+
+- Updated dependencies [49f2177]
+- Updated dependencies [bb438b0]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [fda625e]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [c236847]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [16781e5]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [724b529]
+- Updated dependencies [2058cd3]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [83a467d]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+
+## 4.2.0
+
+### Patch Changes
+
+- c27cffc: Make bulk browser work easy to script with Opengeni's own browsers. `navigate` takes an optional `waitUntil` (`load` or `network_idle`), and `viewport` defaults to desktop layout when `mobile` is omitted. `tab.navigate(url, { waitUntil })` passes it through in Code Mode. An explicit `load` wait now waits for the page's load event (images and other subresources finished), not just a parsed document. `ogtool call` and the native `codemode call` now write image blocks such as screenshots to files and print their paths instead of base64 pixels, and `--save-image <path>` saves the single image at an exact path. An existing `--save-image` path is refused before the call; a completed call whose image cannot be saved still prints its result with `imageSaveError` and exits with status 4. Expired temporary image directories are removed only when private and owned by the same user.
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- e4e30b8: Reuse integrity verification for the exact immutable catalog snapshot produced by `createAttemptToolEnvironment`, reducing repeated turn-start parsing and hashing. The factory's catalog is now deeply frozen and detached from caller-owned schemas; callers constructing modified fixtures should clone it first. Deserialized catalogs and database reads retain full integrity checks. Catalog bytes, tool definitions and execution authority are unchanged.
+
+  Allow an owning runtime to start deferred tool preparation at provider dispatch rather than during first-request setup. Earlier tool demand starts the same operation, while closing before either event releases resources without starting unused preparation. Existing embedded callers retain immediate background preparation by default.
+
+- Updated dependencies [afff3f9]
+- Updated dependencies [04019de]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+
+## 4.0.4
+
+### Patch Changes
+
+- 26b4c24: Lead the compact browser outline with what needs attention on dense pages. An opened menu, dialog, listbox or tooltip, live messages such as toasts, and the focused or acted-on element with its small enclosing group now come first, the page's own content next, and site navigation last; empty live regions are left out. The omitted-element note names the largest regions it left out. A role or text locator that matches several elements now picks the single one whose whole name is the requested text, and an ambiguous locator lists its candidates with refs. A covered target names the element on top of it, and a failed step in a batch says which step failed.
+- 9ddadf6: Codemode calls and other reads of a turn's tool catalog no longer reload and re-verify the whole catalog every time. A catalog can be hundreds of tools and megabytes of JSON, and every Codemode call read it twice, once while holding the turn's admission lock. Verified catalogs are now kept in memory per server process, bounded by size, and each read still checks the stored row first, so access rules are unchanged.
+- Updated dependencies [e7113e3]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2a81601]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+- Updated dependencies [5b10fc9]
+- Updated dependencies [e2e75c0]
+- Updated dependencies [24b346d]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/tool-gateway@4.0.0
+
+## 3.4.0
+
+### Patch Changes
+
+- Updated dependencies [28844d8]
+- Updated dependencies [ceaf911]
+- Updated dependencies [60191f6]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/tool-gateway@3.4.0
+
+## 3.3.0
+
+### Patch Changes
+
+- Updated dependencies [38ac98e]
+  - @opengeni/sdk@3.3.0
+  - @opengeni/contracts@3.3.0
+  - @opengeni/tool-gateway@3.3.0
+
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+  - @opengeni/sdk@3.2.0
+  - @opengeni/tool-gateway@3.2.0
+
+## 3.1.2
+
+### Patch Changes
+
+- 99d545d: Browser observe, act, tab and attached-browser discovery results default to a lean shape: empty, zero and default fields are omitted, and tab targets carry only identity, page, selection and fences. Pass `view: "full"` (or use `observeFull()`) for the complete contract objects.
+
+  `browser.open({ placement: { kind: "attached_device" } })` without a `deviceId` opens the person's own connected Chrome: the only connected profile, or the most recently active one.
+
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+
+## 3.0.0
+
+### Minor Changes
+
+- db3efc5: Sites can now be published to the web. A Site's owner or a workspace admin can give it its own address under the deployment's Sites domain (for example `team-crm-4k9x.opengeni.site`) and choose who can open it: workspace members, invited people who sign in with their email, or anyone, with anonymous visitors as guests. Published Sites keep their Site Data and embedded agent, but their direct tool calls return 403 (tools need a person's session in the console), and only a workspace admin can give the embedded agent workspace tools (guests get them only with `agent.guestTools`). Site code reads the viewer with `site.viewer` and starts sign-in with `site.auth.signIn()`, and no Opengeni credential reaches the Site. Collections gain a guest rule (`none`, `read`, `append`, `own`). Embedded agent use is paid by the organization under a limit profile (free, credits, unlimited or custom) per workspace and per Site. Visitors can report a Site, and managers can take it down and restore it. Breaking: Site HTTP is limited to an explicit operation allowlist (`SITE_OPERATIONS`) in every host, so a console Site that called other API routes through the bridge is now refused; an agent started from a Site page may send workspace API writes only to its tools, its conversations, files and content, and other writes return 403. The SDK adds `getSitePublication`, `updateSitePublication`, `unpublishSite`, `checkSiteHostname`, `takeDownSite`, `restoreSite`, `listSiteAbuseReports`, `updateSiteAbuseReport`, `getSiteLimitProfile`, `updateSiteLimitProfile` and `authorizeSiteViewer`; `ArtifactSandbox` and `SiteView` accept a `viewer`; agents get `site_publication_get`, `site_publication_update` and `site_hostname_check`. Publishing is off until `OPENGENI_SITES_DOMAIN` is set.
+
+### Patch Changes
+
+- Updated dependencies [9a15dda]
+- Updated dependencies [501bb83]
+- Updated dependencies [664368a]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+- Updated dependencies [d367818]
+  - @opengeni/sdk@3.0.0
+  - @opengeni/contracts@3.0.0
+  - @opengeni/tool-gateway@3.0.0
+
+## 2.0.1
+
+### Patch Changes
+
+- Updated dependencies [2ea5f7b]
+- Updated dependencies [e8d18da]
+  - @opengeni/contracts@2.0.1
+  - @opengeni/sdk@2.0.1
+  - @opengeni/tool-gateway@2.0.1
+
+## 2.0.0
+
+### Minor Changes
+
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+### Patch Changes
+
+- 810d1d9: Add targeted current-human tool resolution and invocation without whole-workspace
+  provider discovery. Fence caller, pinned Site and selected live action policy
+  after awaited physical credential authorization. Preserve success/unknown
+  outcomes through cleanup failures, prevent stale retries on contradictory
+  transport flags, and retain Site entry pins through Codemode refresh. Preserve
+  live account authority, versioned executable-effect one-shot approval
+  bindings, optional full-definition preconditions, and explicit legacy discovery.
+  SDK calls use the targeted path by default; older APIs require explicit catalog
+  mode. Upgraded Site hosts adapt saved legacy bundles using bounded manifests.
+  Raw/local target approvals bind existing executable/configuration authority
+  instead of public catalog presentation. Retained catalog clients also veto
+  uncertain stale retries; explicit malformed pins are never silently omitted.
+  The host also separates executed stale-named provider diagnostics from legacy
+  Site retry control without rewriting saved bundles or changing success outputs.
+  Deploy rolling migration 0686 before enabling the new API and matched SDK/host.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [c08dfcd]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [8017d94]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [121f6ed]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [4d8eb5e]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [e125c0c]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [945c247]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [5441ac9]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [cb9e426]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [7852cda]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [a51c96e]
+- Updated dependencies [7f3f19f]
+- Updated dependencies [7ce535f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [fa73fc0]
+- Updated dependencies [0bc3889]
+- Updated dependencies [003cd3d]
+- Updated dependencies [945c247]
+- Updated dependencies [c676ae8]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/sdk@2.0.0
+  - @opengeni/tool-gateway@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes

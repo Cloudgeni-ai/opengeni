@@ -9,29 +9,33 @@ import {
   RenameAccountDialog,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "./models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
+  managesSubscriptionAccount,
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import {
+  ACCOUNT_ENABLED_LABELS,
+  EnableAccountRow,
+} from "@/components/models/subscription-account-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import {
   DetailFact,
   DetailFacts,
   DetailSection,
   DetailSkeleton,
-} from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;
@@ -40,6 +44,7 @@ export type SubscriptionAccountPlaces = {
   openAccount: (id: string) => void;
   openConnect: (id?: string) => void;
   openAccess: (id: string) => void;
+  sharePersonal?: ((id: string) => void) | undefined;
   backToList: () => void;
 };
 type AccountSummary = SubscriptionPoolAccount & {
@@ -177,25 +182,28 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = subscriptionAccountName(account);
-  const canEdit = pool.canManageAccounts;
+  const canEdit = managesSubscriptionAccount(pool, account);
+  // A workspace also lists the organization's shared accounts; the organization manages them.
+  const organizationManaged =
+    pool.inherited || (!pool.organizationId && account.scope === "organization");
   const organization = Boolean(pool.organizationId);
   const status =
     account.status !== "active"
       ? "needs_reconnect"
       : account.allocatorEnabled
         ? "connected"
-        : "paused";
+        : "disabled";
   const access = useConnectionAccess({
     client,
     organizationId: pool.organizationId,
     workspaceId: pool.workspaceId,
     kind: connectionKind,
     connectionId: account.id,
-    enabled: canEdit,
+    enabled: canEdit && account.scope !== "user",
   });
   const scopeLabel = pool.organizationId
     ? organizationReachLabel(places.scope, access.data)
-    : pool.inherited
+    : organizationManaged
       ? places.scope.organization
       : account.scope === "user"
         ? places.scope.user
@@ -231,7 +239,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         }
       />
       <DetailPageBody>
-        {pool.inherited ? (
+        {organizationManaged ? (
           <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
@@ -266,27 +274,17 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         {canEdit ? (
           <DetailSection title="Settings">
             <SettingRowGroup className="-my-3">
-              <SettingRow
-                label="Use for new work"
-                description="When off, this account isn't picked for new chats or schedules. Work already running continues."
-                control={
-                  <Switch
-                    aria-label={`Use ${name} for new work`}
-                    checked={account.allocatorEnabled}
-                    pending={pool.working === `allocator:${account.id}`}
-                    disabled={pool.busy}
-                    onCheckedChange={(next) => void pool.setAllocator(account, next)}
-                  />
-                }
+              <EnableAccountRow
+                name={name}
+                checked={account.allocatorEnabled}
+                pending={pool.working === `allocator:${account.id}`}
+                disabled={pool.busy}
+                onCheckedChange={(next) => void pool.setAllocator(account, next)}
               />
               {pool.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
-                  description={
-                    account.id === pool.activeAccountId
-                      ? "With Primary only, this is the only account used for new work."
-                      : "Choose the account used when allocation is set to Primary only."
-                  }
+                  description="Used for new work when sharing is off."
                   control={
                     account.id === pool.activeAccountId ? (
                       <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
@@ -314,19 +312,35 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
                   </RowButton>
                 }
               />
-              <ConnectionAccessRows
-                access={access}
-                organization={organization}
-                canManage={canEdit}
-                onEdit={() => places.openAccess(account.id)}
-              />
+              {account.scope !== "user" ? (
+                <ConnectionAccessRows
+                  access={access}
+                  organization={organization}
+                  canManage={canEdit}
+                  onEdit={() => places.openAccess(account.id)}
+                />
+              ) : null}
+              {account.scope === "user" && places.sharePersonal ? (
+                <SettingRow
+                  label="Share with your organization"
+                  description="Choose which workspaces can use this account."
+                  control={
+                    <RowButton
+                      disabled={pool.busy}
+                      onClick={() => places.sharePersonal?.(account.id)}
+                    >
+                      Share account
+                    </RowButton>
+                  }
+                />
+              ) : null}
             </SettingRowGroup>
           </DetailSection>
         ) : (
           <DetailSection title="Details">
             <DetailFacts>
-              <DetailFact label="Use for new work">
-                {account.allocatorEnabled ? "On" : "Off"}
+              <DetailFact label="Account">
+                {account.allocatorEnabled ? ACCOUNT_ENABLED_LABELS.on : ACCOUNT_ENABLED_LABELS.off}
               </DetailFact>
               {pool.accounts.length > 1 ? (
                 <DetailFact label="Primary">

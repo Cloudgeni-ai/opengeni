@@ -29,6 +29,10 @@ const ALLOWED_RUNTIME_SUBPATHS = new Set([
   // an erased MCPServer type import; it does not import or execute the loop.
   "@opengeni/runtime/gmail-rest-mcp",
   "@opengeni/runtime/mcp-network",
+  // Stateless single model calls (the Chat Completions endpoint). Exposes one
+  // bounded model request, provider binding resolution and usage
+  // normalization; never Agent/run/Runner/RunState, tools or sandbox APIs.
+  "@opengeni/runtime/model-call",
   "@opengeni/runtime/sandbox",
   // Immutable curated Skill metadata/artifact reader. This leaf imports only
   // Node filesystem/crypto utilities and does not import the agent loop.

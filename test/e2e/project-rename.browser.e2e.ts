@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 let browser: Browser;
 let page: Page;
@@ -148,6 +149,11 @@ test("production project menu renames, guards saves, and preserves failed drafts
 
 test("an off-page project keeps its first-page retry visible", async () => {
   await page.evaluate(() => {
+    // Start compact, as a new tab does: the first test's Show more windows are
+    // tab-scoped navigation memory and would otherwise be restored on reload.
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith("og.session.groupWindows:")) sessionStorage.removeItem(key);
+    }
     sessionStorage.setItem("rename-qa-fail-channel-page", "00000000-0000-4000-8000-000000000002");
   });
   await page.reload();

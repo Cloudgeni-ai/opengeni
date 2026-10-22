@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import type {
-  ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
   EntitlementsPort,
@@ -11,6 +10,9 @@ import type {
   TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
+import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
+import type { OnePasswordVaultProviderFactory } from "./domain/vaults/provider-registry";
+import type { ExternalVaultProviderFactories } from "./domain/vaults/external-provider-connections";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -20,6 +22,7 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
+import type { ModelCallService } from "./model-call";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
 import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
@@ -71,7 +74,7 @@ export type SessionWorkflowClient = {
     workflowWakeRevision: number;
   }) => Promise<void>;
   syncScheduledTask: (input: {
-    task: ScheduledTask;
+    task: Pick<ScheduledTask, "id" | "workspaceId" | "temporalScheduleId">;
     /**
      * Compensate under the same per-schedule writer lock. Return the error to
      * throw only after this transaction commits; lock/commit failures bypass
@@ -117,7 +120,8 @@ export type ManagedEmailMessage = {
     | "email_verification"
     | "password_reset"
     | "organization_user_setup"
-    | "sign_in_method_changed";
+    | "sign_in_method_changed"
+    | "site_abuse_notice";
   from: string;
   to: string;
   subject: string;
@@ -196,14 +200,23 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
-  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  /** Optional provider seam for the separately registered Opengeni Lens App. */
   prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
-   * for model MCP, Git, and sandbox-secret resolution.
+   * for model MCP, Git, and run credentials. `vaultProvider` is the host's
+   * password manager, linked as vaults with `source: "host"` (OP-6).
    */
-  connectionCredentials?: ConnectionCredentialsPort | null;
+  connectionCredentials?: VaultConnectionCredentialsPort | null;
+  /**
+   * Builds 1Password providers for linked vaults. apps/api and apps/worker
+   * bind it to a dynamic `import("@opengeni/vaults-onepassword")`; unset means
+   * 1Password vaults report `provider_unavailable`.
+   */
+  onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  /** Lazy native/remote vault adapters; null disables the first-wave integrations. */
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
   /**
    * Optional embedding-host session ACL. Unset preserves standalone workspace
    * authorization; once bound, every session-addressed surface fails closed on
@@ -225,6 +238,8 @@ export type AppDependencies = {
   githubAnonymousFetch?: typeof fetch;
   /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
   xaiFetch?: typeof fetch;
+  /** Injectable Claude usage transport on the shared core, for deterministic API tests. */
+  claudeFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
@@ -235,6 +250,8 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
+  mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
@@ -244,6 +261,8 @@ export type AppDependencies = {
   transcription?: TranscriptionService | null;
   /** Optional host-owned long-form audio normalization/segmentation service. */
   transcriptionSegmenter?: TranscriptionSegmenter | null;
+  /** Stateless single model calls (chat completions); built from settings when omitted. */
+  modelCalls?: ModelCallService | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes

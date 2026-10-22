@@ -1,7 +1,7 @@
 export * from "./types";
 export { pollDeviceAuthorization } from "./device";
 export { findConnectRecoveryAccount } from "./recovery";
-export { pollConnectAttempt } from "./poll";
+export { ConnectWaitTimedOutError, pollConnectAttempt } from "./poll";
 export {
   authorizeConnectAttempt,
   ConnectPopupClosedError,
@@ -54,6 +54,7 @@ export class ConnectController {
     idempotencyKey: string;
     reconnectAccountId?: string;
     installationTarget?: import("./types").ConnectInstallationTarget;
+    mcpSetup?: import("./types").PreparedMcpSetup;
   }): Promise<ConnectAttempt> {
     // Validation must not serialize or decorate the host's exact return string.
     const url = new URL(input.returnUrl);
@@ -113,6 +114,7 @@ export class ConnectController {
           ...options,
           signal,
           minimumRevision: attempt.revision,
+          expiresAt: attempt.expiresAt,
         }),
       false,
       attempt.id,

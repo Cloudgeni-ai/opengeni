@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as capabilities from "@opengeni/capabilities";
 import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
@@ -17,15 +18,13 @@ import {
   listConnectorToolPermissionPolicies,
   upsertCapabilityCatalogItem,
   updateWorkspaceSettings,
+  withWorkspaceSubjectRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
 import {
@@ -161,6 +160,41 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("catalog reads serialize savepoints and preserve the enclosing actor", async () => {
+    if (!available) throw new Error("Catalog transaction regression requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    await withWorkspaceSubjectRls(db, workspace.workspaceId, "catalog-owner", async (tx) => {
+      const transaction = tx.transaction.bind(tx);
+      let active = 0;
+      let maximum = 0;
+      const spy = spyOn(tx, "transaction").mockImplementation(async (...args) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        try {
+          return await transaction(...args);
+        } finally {
+          active -= 1;
+        }
+      });
+      try {
+        await buildCapabilityCatalog({ db: tx, ...workspace, settings });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(maximum).toBe(1);
+      expect(active).toBe(0);
+      const rows = await tx.execute(sql`select
+        current_setting('opengeni.account_id') as account,
+        current_setting('opengeni.workspace_id') as workspace,
+        current_setting('opengeni.subject_id') as subject`);
+      expect(rows[0]).toEqual({
+        account: workspace.accountId,
+        workspace: workspace.workspaceId,
+        subject: "catalog-owner",
+      });
+    });
+  });
+
   test.each([
     {
       provider: "gmailmcp.googleapis.com",
@@ -230,6 +264,11 @@ describe("subject-owned capability connection references", () => {
                       inputSchema: { type: "object" },
                       annotations: { readOnlyHint: true },
                     },
+                    {
+                      name: "change_fixture",
+                      inputSchema: { type: "object" },
+                      _meta: { "opengeni/recommendedPermission": "ask" },
+                    },
                   ],
                 };
           return Response.json({ jsonrpc: "2.0", id: request.id, result });
@@ -257,6 +296,16 @@ describe("subject-owned capability connection references", () => {
         if (!reviewed) {
           expect(authorization.length).toBeGreaterThan(0);
           expect(new Set(authorization)).toEqual(new Set(["Bearer synthetic-origin"]));
+          // A tool's own tools/list recommendation is its default when nothing is saved.
+          const byName = new Map(before.tools.map((tool) => [tool.name, tool]));
+          expect(byName.get("inspect_fixture")).toMatchObject({
+            permission: "allow",
+            source: "recommended",
+          });
+          expect(byName.get("change_fixture")).toMatchObject({
+            permission: "ask",
+            source: "recommended",
+          });
         }
         await updateConnectorToolPermissions({
           ...input,
@@ -315,6 +364,41 @@ describe("subject-owned capability connection references", () => {
       }
     },
   );
+
+  test("an accountless connector reports a connection requirement without provider discovery", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:missing-account-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://missing.example.test/mcp",
+    });
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          providerDomain: "missing.example.test",
+          kind: "oauth2",
+          accountSelection: "all_eligible",
+        },
+      },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    });
+    await expect(
+      getConnectorToolPermissions({
+        db,
+        settings,
+        workspaceId: workspace.workspaceId,
+        capabilityId,
+        grant: grant(workspace, "subject-alice"),
+        personalOwnerVerified: true,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Connect an account to manage its tool permissions",
+    });
+  });
 
   test("tool permissions enumerate eligible accounts and honor an explicit account choice", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
@@ -863,7 +947,7 @@ describe("subject-owned capability connection references", () => {
       settings: {
         ...settings,
         mcpServers: [
-          { id: "opengeni", name: "OpenGeni", url: "http://localhost:8000/mcp" },
+          { id: "opengeni", name: "Opengeni", url: "http://localhost:8000/mcp" },
           { id: "files", name: "Files", url: "http://localhost:8000/mcp/files" },
           { id: "docs", name: "Document Search", url: "http://localhost:8000/mcp/docs" },
           {
@@ -1291,13 +1375,13 @@ describe("subject-owned capability connection references", () => {
     };
     await expect(
       getConnectorToolPermissions({ ...permissionInput, connectionId: sharedConnection.id }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     await expect(
       updateConnectorToolPermissions({
         ...permissionInput,
         payload: { connectionId: sharedConnection.id, target: "default", permission: "allow" },
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
     expect(
       await listConnectorToolPermissionPolicies(db, {
         ...workspace,
@@ -1323,7 +1407,7 @@ describe("subject-owned capability connection references", () => {
         capabilityId,
         personalOwnerVerified: true,
       }),
-    ).rejects.toThrow("Reconnect this connector");
+    ).rejects.toThrow("Connect an account to manage its tool permissions");
   });
 
   test.each([

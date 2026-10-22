@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Settings } from "@opengeni/config";
 
 // The get.<domain> install-serving routes. These only read
@@ -29,12 +29,9 @@ function appFor(settings: Settings) {
 // build artifacts; the baked-path tests stage a throwaway file and clean it up.
 const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
 const BAKED_TARGET = "x86_64-unknown-linux-musl-test-fixture";
-const BAKED_ASSETS = [
-  "opengeni-agent",
-  "opengeni-browserd",
-  "opengeni-agent-browser",
-  "opengeni-computer-native",
-].map((name) => `${name}-${BAKED_TARGET}`);
+const BAKED_ASSETS = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].map(
+  (name) => `${name}-${BAKED_TARGET}`,
+);
 const BAKED_FIXTURE = BAKED_ASSETS[0]!;
 const BAKED_FILES = BAKED_ASSETS.flatMap((asset) =>
   ["", ".sha256", ".minisig"].map((suffix) => `${asset}${suffix}`),
@@ -66,7 +63,7 @@ describe("get.<domain> install routes", () => {
     const body = await res.text();
     expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://cp.example.com"');
     expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://cp.example.com"');
-    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
     expect(body).not.toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
     // The user-facing override var name is untouched (operator can still repoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
@@ -78,18 +75,24 @@ describe("get.<domain> install routes", () => {
     const body = await res.text();
     expect(body).toContain("$OpengeniInstallDefaultBaseUrl = 'https://cp.example.com'");
     expect(body).toContain("$OpengeniApiDefaultUrl = 'https://cp.example.com'");
-    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'");
+    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
     expect(body).not.toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
   });
 
-  test("GET /install.sh keeps the public-archive default when no public base URL is configured", async () => {
+  test("standalone installers use the managed application for scripts, assets and enrollment", async () => {
     const settings = testSettings({ publicBaseUrl: undefined });
     const res = await appFor(settings).request("/install.sh");
     const body = await res.text();
-    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
+    expect(body).toContain("curl -fsSL https://app.opengeni.ai/install.sh | sh");
     expect(body).toContain('OPENGENI_API_DEFAULT_URL="https://app.opengeni.ai"');
     const windows = await appFor(settings).request("/install.ps1");
-    expect(await windows.text()).toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
+    const windowsBody = await windows.text();
+    expect(windowsBody).toContain("$OpengeniApiDefaultUrl = 'https://app.opengeni.ai'");
+    expect(windowsBody).toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
+    expect(windowsBody).toContain("irm https://app.opengeni.ai/install.ps1 | iex");
+    expect(body).not.toContain("get.opengeni.ai");
+    expect(windowsBody).not.toContain("get.opengeni.ai");
   });
 
   test("GET /install.ps1 serves the Windows installer", async () => {

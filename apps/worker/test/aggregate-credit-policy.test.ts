@@ -1,10 +1,13 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   aggregateCreditPolicyRevision,
   recordModelUsageAndDebitCredits,
 } from "../src/activities/agent-turn/model-usage";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const restores: Array<{ mockRestore(): void }> = [];
 afterEach(() => {

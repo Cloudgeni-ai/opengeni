@@ -397,6 +397,63 @@ describe("WorkspaceDock", () => {
     window.localStorage.removeItem(storageKey);
   });
 
+  test("a closed dock stays closed when the window widens past the overlay breakpoint", async () => {
+    const autoSaveId = "og.test.workspace-dock-widen";
+    const storageKey = `react-resizable-panels:${autoSaveId}:primary:dock`;
+    window.localStorage.setItem(storageKey, JSON.stringify({ primary: 66, dock: 34 }));
+    const original = window.matchMedia;
+    const listeners = new Set<() => void>();
+    let narrow = false;
+    window.matchMedia = ((query: string) => ({
+      get matches() {
+        return narrow;
+      },
+      media: query,
+      onchange: null,
+      addEventListener(_type: string, listener: () => void) {
+        listeners.add(listener);
+      },
+      removeEventListener(_type: string, listener: () => void) {
+        listeners.delete(listener);
+      },
+      addListener() {},
+      removeListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    })) as unknown as typeof window.matchMedia;
+    const resize = async (next: boolean) => {
+      narrow = next;
+      await act(async () => {
+        for (const listener of [...listeners]) listener();
+      });
+      await flush(5);
+    };
+    try {
+      const rendered = await renderComponent(
+        <WorkspaceDock
+          autoSaveId={autoSaveId}
+          primary={<div>Chat pane</div>}
+          tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
+          collapsed
+          onCollapsedChange={() => {}}
+        />,
+      );
+      const dockGrow = () =>
+        rendered.container.querySelector<HTMLElement>('[data-panel][id="dock"]')?.style.flexGrow;
+      await flush(5);
+      expect(dockGrow()).toBe("0");
+      await resize(true);
+      expect(rendered.container.querySelector('[data-panel][id="dock"]')).toBeNull();
+      await resize(false);
+      expect(dockGrow()).toBe("0");
+      await rendered.unmount();
+    } finally {
+      window.matchMedia = original;
+      window.localStorage.removeItem(storageKey);
+    }
+  });
+
   test("below the breakpoint the dock is a full-screen overlay with no resize splitter", async () => {
     await withNarrowViewport(async () => {
       const changes: boolean[] = [];

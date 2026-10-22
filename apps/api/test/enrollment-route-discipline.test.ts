@@ -138,6 +138,22 @@ describe("M5 enrollment route discipline", () => {
     expect(deny).toContain('"enrollments:manage"');
     const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
     expect(token).toContain('"enrollments:manage"');
+    // The permission is checked inside the authorization itself, so a request
+    // that lacks it never provisions a first-use membership before its 403.
+    expect(token).toMatch(
+      /requireAccessGrantAuthorization\(\s*c,\s*deps,\s*workspaceId,\s*"enrollments:manage",?\s*\)/,
+    );
+  });
+
+  test("a personal token is only for an authenticated person, who is always its owner", () => {
+    const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
+    const check = token.indexOf("isPersonalConnectionOwnerPrincipal(authorization)");
+    const mint = token.indexOf("mintEnrollToken(");
+    expect(check, "the personal scope must check the principal").toBeGreaterThanOrEqual(0);
+    expect(check, "the principal check must precede minting").toBeLessThan(mint);
+    // The owner is the authenticated caller, never a request field.
+    expect(token).toContain("ownerSubjectId: grant.subjectId");
+    expect(token).not.toMatch(/ownerSubjectId:\s*parsed/);
   });
 
   test("lookup is rate-limited + authorizes against the resolved workspace (enrollments:read)", () => {

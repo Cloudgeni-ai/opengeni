@@ -234,7 +234,7 @@ function ModeBanner({ agentEnabled }: { agentEnabled: boolean }) {
             </p>
             <p className="mt-0.5 text-[11px] text-[#85857f]">
               {agentEnabled
-                ? "OpenGeni can read and update this case through your product tools."
+                ? "Opengeni can read and update this case through your product tools."
                 : "Maya reviews the customer context and takes each action manually."}
             </p>
           </div>

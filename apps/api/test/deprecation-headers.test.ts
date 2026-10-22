@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import {
   DEPRECATED_ROUTES,

@@ -2,7 +2,7 @@ import type { Tool } from "@openai/agents";
 
 /**
  * `computer_screenshot` is retained only so durable history produced by older
- * OpenGeni releases can still pass through the image-retention boundary.
+ * Opengeni releases can still pass through the image-retention boundary.
  * Newly built agents expose managed ComputerSession interaction tools instead.
  */
 export type RetainableSessionImageToolName = "view_image" | "computer_screenshot";

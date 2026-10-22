@@ -4,7 +4,7 @@
  * A flush form page (DESIGN.md section 8): starting point, capabilities in
  * three groups, identity, Save. Running chats keep what they started with.
  *
- * Saved as `settings.sessionAgentDefaults`; OpenGeni's own defaults (every
+ * Saved as `settings.sessionAgentDefaults`; Opengeni's own defaults (every
  * capability, the default identity) are stored as no value at all.
  */
 import {
@@ -17,18 +17,18 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
+import { AgentCapabilityPicker } from "@opengeni/react/app/components/agent/agent-capability-picker";
 import {
   learningModesEqual,
   useLearningSettings,
   type LearningModes,
-} from "@/components/agent/capability-learning";
-import { InAppHelpLink } from "@/components/in-app-help-link";
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { Notice } from "@/components/ui/notice";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/app/components/agent/capability-learning";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { Notice } from "@opengeni/react/ui/notice";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   agentConfigErrorText,
   capabilityAvailability,
@@ -37,8 +37,8 @@ import {
   requestFromDraft,
   workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
-} from "@/lib/agent-capabilities";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
+} from "@opengeni/react/app/lib/agent-capabilities";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 
 export const IDENTITY_PLACEHOLDER =
   "You are Acme's operations assistant. You help the team triage support tickets and keep answers short and friendly.";
@@ -207,7 +207,7 @@ export function SessionDefaultsPage({
           {!personal ? (
             <p className="-mt-2 text-xs leading-4.5 text-fg-muted">
               These apply to shared chats. Only-me chats use{" "}
-              <InAppHelpLink href={`/workspaces/${workspaceId}/state?page=learning`}>
+              <InAppHelpLink href={`/workspaces/${workspaceId}/settings?section=learning`}>
                 your private chat settings
               </InAppHelpLink>
               .

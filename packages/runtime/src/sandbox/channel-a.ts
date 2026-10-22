@@ -65,6 +65,7 @@ import type {
 } from "@opengeni/contracts";
 import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
 import type { ProviderCommandSession } from "./provider-command-session";
+import type { RemoteOperationObservation } from "./op-correlation";
 import {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
@@ -74,6 +75,16 @@ import {
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
 import { ModalProcessObservationUnavailableError } from "./errors";
+import {
+  executeSynchronousCommand,
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandResult,
+  type SynchronousCommandPage,
+} from "./synchronous-command";
+import {
+  isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+} from "./routing/routing-session";
 import {
   directoryCheckFragment,
   directoryCreateFragment,
@@ -98,6 +109,7 @@ import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
 } from "./turn-tool-cancellation";
+import { SelfhostedControlError } from "./selfhosted/control-rpc";
 
 export {
   isExecSessionLostBanner,
@@ -131,12 +143,25 @@ export type ChannelAEditor = {
   deleteFile?(op: unknown): Promise<unknown>;
 };
 export type ChannelASession = ProviderCommandSession & {
+  /** Trusted native SDK stream capture; never inferred from presentation text. */
+  getSynchronousCommandOutput?(result: unknown): SynchronousCommandPage | null;
   /** Commit a provider output page only after durable capture succeeds. */
   acknowledgeCommandOutput?(result: string): Promise<void>;
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
   /** Internal control-plane read. Routing sessions can bypass mutation
    * admission without leaking private marker fields into provider arguments. */
-  execReadOnly?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
+  execReadOnly?(
+    args: ChannelAExecArgs,
+    runner?: SynchronousCommandRunner,
+  ): Promise<ChannelAExecResult>;
+  /** Internal only. Promote/capture the raw start receipt before observing the
+   * same retained process; never force public shell or PTY calls to finish. */
+  execSynchronous?(
+    args: ChannelAExecArgs,
+    runner?: SynchronousCommandRunner,
+  ): Promise<SynchronousCommandResult>;
+  /** Observe an exact remote op without starting it or acknowledging its output. */
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
   execCommand?(args: ChannelAExecArgs): Promise<string>;
   readFile?(args: {
     path: string;
@@ -191,8 +216,10 @@ export type ChannelASession = ProviderCommandSession & {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
+  commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
   hasRetainedProcess?(providerSessionId: number): boolean;
   /** Cleanup only: forget the local route after exact durable terminal proof. */
   reconcileRetainedProcess?(providerSessionId: number): Promise<boolean>;
@@ -202,11 +229,19 @@ export type ChannelASession = ProviderCommandSession & {
   supportsPty?(): boolean;
   /** Provider-native directory listing. Channel A uses this for depth-1 Files
    *  trees when present so a slow exec data plane cannot stall the dock. */
-  listDir?(args: {
-    path: string;
-    runAs?: string;
-  }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>>;
+  listDir?(
+    args: {
+      path: string;
+      runAs?: string;
+    },
+    runner?: SynchronousCommandRunner,
+  ): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>>;
 };
+
+export type SynchronousCommandRunner = (
+  session: ChannelASession,
+  args: ChannelAExecArgs,
+) => Promise<SynchronousCommandResult>;
 
 export type WorkspaceFileImportRequest = {
   operationId: string;
@@ -230,6 +265,27 @@ export type WorkspaceFileImportReceipt = {
   sha256: string;
   replayed: boolean;
   revision: number;
+};
+
+/** Size and SHA-256 of one workspace file, computed where the file lives. */
+export type WorkspaceFileDigest = {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+};
+
+/** Upload one exact workspace file to a signed PUT URL from the box itself, so
+ * its bytes never cross the control plane. The file must still have `sizeBytes`
+ * and `sha256` before and after the upload. */
+export type WorkspaceFileExportRequest = {
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  upload: {
+    url: string;
+    requiredHeaders: Readonly<Record<string, string>>;
+    expiresAt: string;
+  };
 };
 
 export type ChannelARoutedWorkspaceImportRequest = {
@@ -333,6 +389,8 @@ export type ChannelAEmitter = (
 
 export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
+  /** Worker lifecycle registration/cancellation, without model background adoption. */
+  commandRunner?: SynchronousCommandRunner;
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
   // after validation against the operation's path scope.
@@ -622,8 +680,18 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
   return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }
 
+function isNonReplayableCommandFault(error: unknown): boolean {
+  return (
+    error instanceof SynchronousCommandOutcomeUnknownError ||
+    isRoutingMutationOutcomeUnknownError(error) ||
+    isRoutingMutationOutputRejectedError(error) ||
+    error instanceof TurnSandboxCommandCancelledError
+  );
+}
+
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
+  private readonly commandRunner: SynchronousCommandRunner | undefined;
   private readonly workspaceRoot: string;
   private readonly providerPathMode: "canonical" | "workspace-relative";
   private readonly fileReadScope: "workspace" | "machine";
@@ -634,6 +702,7 @@ export class SandboxChannelAService {
 
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
+    this.commandRunner = opts.commandRunner;
     const workspaceRoot = opts.workspaceRoot ?? "";
     this.workspaceRoot = isConnectedMachineAbsolutePath(workspaceRoot)
       ? resolveConnectedMachinePath(workspaceRoot, undefined)
@@ -730,10 +799,15 @@ export class SandboxChannelAService {
    * provider sessions safely use the ordinary exec path. */
   private async runReadOnly(args: ChannelAExecArgs): ReturnType<SandboxChannelAService["run"]> {
     if (!this.session.execReadOnly) {
-      return await this.run(args);
+      return await this.runSynchronous(args);
     }
     const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
-    const result = await this.session.execReadOnly(withRunAs);
+    const result = await this.session.execReadOnly(withRunAs, this.commandRunner);
+    if (result.sessionId !== undefined || result.exitCode == null)
+      throw new SynchronousCommandOutcomeUnknownError(result.sessionId ?? null, {
+        stdout: result.stdout ?? result.output ?? "",
+        stderr: result.stderr ?? "",
+      });
     return {
       stdout: result.stdout ?? result.output ?? "",
       stderr: result.stderr ?? "",
@@ -741,6 +815,15 @@ export class SandboxChannelAService {
       ...(typeof result.sessionId === "number" ? { sessionId: result.sessionId } : {}),
       wallTimeSeconds: result.wallTimeSeconds ?? 0,
     };
+  }
+
+  private async runSynchronous(args: ChannelAExecArgs): Promise<SynchronousCommandResult> {
+    const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
+    if (!this.session.exec && !this.session.execCommand && !this.session.execSynchronous)
+      throw new ChannelAUnsupportedError("the box does not support command execution");
+    if (this.session.execSynchronous)
+      return await this.session.execSynchronous(withRunAs, this.commandRunner);
+    return await (this.commandRunner ?? executeSynchronousCommand)(this.session, withRunAs);
   }
 
   // ════════════════════════════ FileSystem (A2) ═════════════════════════════
@@ -773,7 +856,8 @@ export class SandboxChannelAService {
     if (pruneNames.length === 0 && this.session.listDir && Math.max(req.depth, 1) === 1) {
       try {
         return await this.fsListFromNativeListDir(req);
-      } catch {
+      } catch (error) {
+        if (isNonReplayableCommandFault(error)) throw error;
         // Native listing is an accelerator. The find/exec path remains the
         // authoritative Channel-A contract when the provider listing fails.
       }
@@ -959,6 +1043,7 @@ export class SandboxChannelAService {
         ...(this.runAs ? { runAs: this.runAs } : {}),
       });
     } catch (error) {
+      if (isNonReplayableCommandFault(error)) throw error;
       // A provider guard is the final race-safe check after our preflight. Never
       // bypass it through exec: that would turn an in-workspace symlink into an
       // arbitrary read outside the workspace root.
@@ -1042,7 +1127,7 @@ export class SandboxChannelAService {
         "Workspace files are temporarily unavailable. Retry the operation.",
       );
     }
-    if (result.stdout.includes("__OPENGENI_FS_CONFINED_OK__")) return;
+    if (result.exitCode === 0 && result.stdout.includes("__OPENGENI_FS_CONFINED_OK__")) return;
     if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
@@ -1092,7 +1177,8 @@ export class SandboxChannelAService {
         maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
       });
     } catch (error) {
-      if (error instanceof ChannelAUnsupportedError) throw error;
+      if (error instanceof ChannelAUnsupportedError || isNonReplayableCommandFault(error))
+        throw error;
       throw new ChannelAUnavailableError(
         "Workspace files are temporarily unavailable. Retry the file read.",
       );
@@ -1111,7 +1197,7 @@ export class SandboxChannelAService {
     }
     const prefix = "__OPENGENI_FS_READ_OK__\n";
     const successIndex = stdout.indexOf(prefix);
-    if (successIndex < 0 || (exitCode !== null && exitCode !== 0)) {
+    if (successIndex < 0 || exitCode !== 0) {
       throw new ChannelAUnavailableError(
         "Workspace files are temporarily unavailable. Retry the file read.",
       );
@@ -1155,16 +1241,24 @@ export class SandboxChannelAService {
     });
 
     if (!req.overwrite) {
-      const { exitCode } = await this.run({
+      const { exitCode } = await this.runReadOnly({
         cmd: `test -e ${shellQuote(abs)} || test -L ${shellQuote(abs)}`,
       });
       if (exitCode === 0) {
         throw new ChannelAConflictError(`path exists and overwrite is false: ${path}`);
       }
+      if (exitCode !== 1)
+        throw new ChannelAUnavailableError("Workspace path existence could not be established.");
     }
     if (req.createParents) {
       const dir = dirnameAbs(abs);
-      if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
+      if (dir) {
+        const result = await this.runSynchronous({ cmd: `mkdir -p ${shellQuote(dir)}` });
+        if (result.exitCode !== 0)
+          throw new ChannelAValidationError(
+            `failed to create parent directory: ${result.stderr || result.exitCode}`,
+          );
+      }
       await this.assertConfinedMutationParent(path, {
         allowMissingParents: false,
         rejectFinalSymlink: true,
@@ -1181,23 +1275,15 @@ export class SandboxChannelAService {
       // the whole file). A non-existent parent with createParents:false surfaces a
       // non-zero exit -> 400.
       const b64 = bytes.toString("base64");
-      const { exitCode, stderr } = await this.run({
+      const { exitCode, stderr } = await this.runSynchronous({
         cmd: `printf %s ${shellQuote(b64)} | base64 -d > ${shellQuote(abs)}`,
       });
-      if (exitCode !== null && exitCode !== 0) {
-        // createEditor fallback for text when exec-write failed and we have a
-        // text payload (binary cannot go through apply-patch).
-        if (req.encoding !== "base64" && this.session.createEditor) {
-          const ok = await this.tryEditorWrite(abs, req.content);
-          if (!ok)
-            throw new ChannelAValidationError(
-              `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
-            );
-        } else {
-          throw new ChannelAValidationError(
-            `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
-          );
-        }
+      if (exitCode !== 0) {
+        // A failed shell write can already have changed bytes. Never replay it
+        // through the editor (nor use observation loss to select another path).
+        throw new ChannelAValidationError(
+          `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
+        );
       }
     }
     this.revision++;
@@ -1318,17 +1404,17 @@ export class SandboxChannelAService {
       batch: { files: PlannedWriteFile[]; directories: Set<number> },
     ): Promise<WriteFilesOutput> => {
       const cmd = command(mode, batch);
-      const result = mode === "check" ? await this.runReadOnly({ cmd }) : await this.run({ cmd });
+      const result =
+        mode === "check" ? await this.runReadOnly({ cmd }) : await this.runSynchronous({ cmd });
       const output = parseWriteFilesOutput(result.stdout);
       for (const index of output.written) written.add(index);
       for (const index of output.same) unchanged.add(index);
       for (const index of output.createdDirectories) createdDirectories.add(index);
       const reported = new Set([...output.same, ...output.missing, ...output.written]);
       if (
-        result.sessionId !== undefined ||
         output.failure ||
         !output.complete ||
-        (result.exitCode !== null && result.exitCode !== 0) ||
+        result.exitCode !== 0 ||
         batch.files.some((file) => !reported.has(file.index))
       ) {
         throw this.writeFilesError(plan, output, result.stderr);
@@ -1385,9 +1471,10 @@ export class SandboxChannelAService {
       await this.emitWriteFilesChanges(plan, written, createdDirectories, emittedSeparately).catch(
         () => undefined,
       );
+      if (isNonReplayableCommandFault(error)) throw error;
       if (written.size > 0 && !(error instanceof ChannelAPartialMutationError)) {
         throw new ChannelAPartialMutationError(
-          "Workspace file batch failed after some files were written; repeating the same request keeps identical files and creates the rest",
+          "Workspace file batch failed after some files were written; inspect the applied files before further changes",
           { cause: error },
         );
       }
@@ -1592,6 +1679,7 @@ export class SandboxChannelAService {
         receipts.push(receipt);
         if (!receipt.replayed) mutated = true;
       } catch (error) {
+        if (isNonReplayableCommandFault(error)) throw error;
         if (mutated) {
           throw new ChannelAPartialMutationError(
             "Workspace file import batch failed after an earlier file was applied",
@@ -1709,10 +1797,10 @@ export class SandboxChannelAService {
         `destination resolves outside workspace: ${destinationPath}`,
       );
     }
-    if (result.stdout.includes(absentMarker)) return null;
+    if (result.exitCode === 0 && result.stdout.includes(absentMarker)) return null;
     if (
       !result.stdout.includes(replayMarker) ||
-      (result.exitCode !== null && result.exitCode !== 0) ||
+      result.exitCode !== 0 ||
       result.stdout.includes(unavailableMarker)
     ) {
       throw new ChannelAUnavailableError("Workspace file inspection is temporarily unavailable.");
@@ -1724,6 +1812,110 @@ export class SandboxChannelAService {
       replayed: true,
       revision: this.revision,
     };
+  }
+
+  /** Size and SHA-256 of one regular workspace file, computed on the box. The
+   * resolved file must stay inside the workspace root. */
+  async digestWorkspaceFile(value: string): Promise<WorkspaceFileDigest> {
+    const path = assertSafeRelPath(value, this.workspaceRoot);
+    const frame = crypto.randomUUID().replaceAll("-", "");
+    const markers = workspaceFileMarkers("DIGEST", frame);
+    const script = [
+      "set +e",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      ...this.confinedWorkspaceFileScript(path, markers),
+      `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `printf '%s\\t%s\\t%s' ${shellQuote(markers.ok)} "$bytes" "$digest"`,
+    ].join("; ");
+    const result = await this.runReadOnly({ cmd: internalBashCommand(script) });
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError("Workspace file digest did not settle; retry it.");
+    }
+    throwWorkspaceFileMarkerError(result, markers, path);
+    const prefix = `${markers.ok}\t`;
+    const index = result.stdout.indexOf(prefix);
+    const [bytes, digest] = (index < 0 ? "" : result.stdout.slice(index + prefix.length))
+      .trim()
+      .split("\t");
+    const sizeBytes = Number(bytes);
+    if (
+      result.exitCode !== 0 ||
+      !Number.isSafeInteger(sizeBytes) ||
+      sizeBytes < 0 ||
+      !digest ||
+      !/^[0-9a-f]{64}$/u.test(digest)
+    ) {
+      throw new ChannelAUnavailableError("Workspace file digest is temporarily unavailable.");
+    }
+    return { path, sizeBytes, sha256: digest };
+  }
+
+  /** Upload one exact workspace file to a signed PUT URL from the box. Like an
+   * import, the signed URL and headers are staged outside the workspace and
+   * never enter argv, environment, stdout or events. The file is verified
+   * against the expected size and digest before and after the upload, so a
+   * file changed mid-upload is reported instead of published. */
+  async exportWorkspaceFile(req: WorkspaceFileExportRequest): Promise<WorkspaceFileDigest> {
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+    if (!Number.isSafeInteger(req.sizeBytes) || req.sizeBytes < 0) {
+      throw new ChannelAValidationError("workspace export size is invalid");
+    }
+    const expectedSha256 = workspaceImportSha256(req.sha256);
+    const config = workspaceExportCurlConfig(req.upload, req.sizeBytes);
+    const transferId = crypto.randomUUID();
+    const configPath = `/tmp/opengeni-private/workspace-exports/${transferId}.curl`;
+    const frame = transferId.replaceAll("-", "");
+    const markers = workspaceFileMarkers("EXPORT", frame);
+    const verify = (when: string) =>
+      `bytes=$(wc -c <"$target" | tr -d ' \\n') && digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }; if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf '%s\\t%s' ${shellQuote(markers.integrity)} ${when}; exit 74; fi`;
+    const script = [
+      "set +e",
+      "umask 077",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      `config=${shellQuote(configPath)}`,
+      `trap 'rm -f "$config"' EXIT`,
+      ...this.confinedWorkspaceFileScript(path, markers),
+      verify("before"),
+      `curl --config "$config" --upload-file "$target" >/dev/null 2>&1 || { printf %s ${shellQuote(markers.unavailable)}; exit 73; }`,
+      verify("after"),
+      `printf %s ${shellQuote(markers.ok)}`,
+    ].join("; ");
+    let result: SynchronousCommandResult;
+    let unsettled = false;
+    try {
+      await this.writePlacementPrivate(configPath, config.content);
+      result = await this.runSynchronous({
+        cmd: internalBashCommand(script),
+        yieldTimeMs: (config.maxTimeSeconds + 60) * 1_000,
+        maxOutputTokens: 2_048,
+      });
+    } catch (error) {
+      unsettled = isNonReplayableCommandFault(error);
+      throw error;
+    } finally {
+      if (!unsettled) await this.session.deletePlacementPrivate?.(configPath, this.runAs);
+    }
+    throwWorkspaceFileMarkerError(result, markers, path);
+    if (result.exitCode !== 0 || !result.stdout.includes(markers.ok)) {
+      throw new ChannelAUnavailableError("Workspace file upload is temporarily unavailable.");
+    }
+    return { path, sizeBytes: req.sizeBytes, sha256: expectedSha256 };
+  }
+
+  /** Shell steps that set `$target` to the resolved regular file at `path`,
+   * failing with the frame's markers when it is missing or escapes the root. */
+  private confinedWorkspaceFileScript(path: string, markers: WorkspaceFileMarkers): string[] {
+    const file = this.workspaceRoot ? this.joinRoot(path) : `./${path}`;
+    return [
+      `root=$(opengeni_realpath_existing ${shellQuote(this.providerWorkspaceRoot())}) || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
+      `file=${shellQuote(file)}`,
+      `target=$(opengeni_realpath_existing "$file") || { printf %s ${shellQuote(markers.missing)}; exit 66; }`,
+      `case "$target" in "\${root%/}/"*) ;; *) printf %s ${shellQuote(markers.escape)}; exit 67 ;; esac`,
+      `test -f "$target" || { printf %s ${shellQuote(markers.notFile)}; exit 65; }`,
+    ];
   }
 
   /** Import one exact signed object into /workspace. The signed URL is staged
@@ -1850,19 +2042,22 @@ export class SandboxChannelAService {
       `printf '%s\\t%s' ${shellQuote(okMarker)} "$outcome"`,
     ].join("; ");
 
-    let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+    let result: SynchronousCommandResult;
+    let unsettled = false;
     try {
       await this.writePlacementPrivate(configPath, config);
-      result = await this.run({
+      result = await this.runSynchronous({
         cmd: internalBashCommand(script),
         yieldTimeMs: 20 * 60_000,
         maxOutputTokens: 2_048,
       });
+    } catch (error) {
+      unsettled = isNonReplayableCommandFault(error);
+      throw error;
     } finally {
-      await this.session.deletePlacementPrivate?.(configPath, this.runAs);
-    }
-    if (result.sessionId !== undefined) {
-      throw new ChannelAUnavailableError("Workspace file import did not settle; retry it.");
+      // The same shell may still need its signed configuration. Observation
+      // loss cannot authorize removing input from an in-flight invocation.
+      if (!unsettled) await this.session.deletePlacementPrivate?.(configPath, this.runAs);
     }
     if (result.stdout.includes(conflictMarker) || result.exitCode === 72) {
       throw new ChannelAConflictError(`destination differs from this download: ${destinationPath}`);
@@ -1880,11 +2075,7 @@ export class SandboxChannelAService {
     }
     const prefix = `${okMarker}\t`;
     const markerIndex = result.stdout.indexOf(prefix);
-    if (
-      markerIndex < 0 ||
-      (result.exitCode !== null && result.exitCode !== 0) ||
-      result.stdout.includes(unavailableMarker)
-    ) {
+    if (markerIndex < 0 || result.exitCode !== 0 || result.stdout.includes(unavailableMarker)) {
       throw new ChannelAUnavailableError("Workspace file import is temporarily unavailable.");
     }
     const outcome = result.stdout.slice(markerIndex + prefix.length).trim();
@@ -1929,24 +2120,9 @@ export class SandboxChannelAService {
         createParents: true,
         ...(this.runAs ? { runAs: this.runAs } : {}),
       });
-    } catch {
+    } catch (error) {
+      if (isNonReplayableCommandFault(error)) throw error;
       throw new ChannelAUnavailableError("Workspace file import could not be staged.");
-    }
-  }
-
-  private async tryEditorWrite(absPath: string, content: string): Promise<boolean> {
-    const editor = this.session.createEditor?.(this.runAs);
-    if (!editor?.createFile) return false;
-    try {
-      // The apply-patch op shape — a whole-file "create" diff (last-writer-wins).
-      const diff = content
-        .split("\n")
-        .map((line) => `+${line}`)
-        .join("\n");
-      await editor.createFile({ type: "create_file", path: absPath, diff });
-      return true;
-    } catch {
-      return false;
     }
   }
 
@@ -1959,8 +2135,10 @@ export class SandboxChannelAService {
       rejectFinalSymlink: false,
     });
     const flag = req.recursive ? "-rf" : "-f";
-    const { exitCode, stderr } = await this.run({ cmd: `rm ${flag} ${shellQuote(abs)}` });
-    if (exitCode !== null && exitCode !== 0) {
+    const { exitCode, stderr } = await this.runSynchronous({
+      cmd: `rm ${flag} ${shellQuote(abs)}`,
+    });
+    if (exitCode !== 0) {
       throw new ChannelAValidationError(
         `failed to delete ${path}: ${stderr || `exit ${exitCode}`}`,
       );
@@ -1987,16 +2165,26 @@ export class SandboxChannelAService {
     });
 
     if (!req.overwrite) {
-      const { exitCode } = await this.run({
+      const { exitCode } = await this.runReadOnly({
         cmd: `test -e ${shellQuote(newAbs)} || test -L ${shellQuote(newAbs)}`,
       });
       if (exitCode === 0) {
         throw new ChannelAConflictError(`destination exists and overwrite is false: ${newPath}`);
       }
+      if (exitCode !== 1)
+        throw new ChannelAUnavailableError(
+          "Workspace destination existence could not be established.",
+        );
     }
     if (req.createParents) {
       const dir = dirnameAbs(newAbs);
-      if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
+      if (dir) {
+        const result = await this.runSynchronous({ cmd: `mkdir -p ${shellQuote(dir)}` });
+        if (result.exitCode !== 0)
+          throw new ChannelAValidationError(
+            `failed to create parent directory: ${result.stderr || result.exitCode}`,
+          );
+      }
       await this.assertConfinedMutationParent(newPath, {
         allowMissingParents: false,
         rejectFinalSymlink: true,
@@ -2005,10 +2193,10 @@ export class SandboxChannelAService {
     // -f only when overwrite — otherwise a clobber would silently succeed past
     // the guard above on a race. A missing source surfaces a non-zero exit -> 400.
     const flag = req.overwrite ? "-f " : "";
-    const { exitCode, stderr } = await this.run({
+    const { exitCode, stderr } = await this.runSynchronous({
       cmd: `mv ${flag}${shellQuote(abs)} ${shellQuote(newAbs)}`,
     });
-    if (exitCode !== null && exitCode !== 0) {
+    if (exitCode !== 0) {
       throw new ChannelAValidationError(
         `failed to move ${path} -> ${newPath}: ${stderr || `exit ${exitCode}`}`,
       );
@@ -2035,8 +2223,10 @@ export class SandboxChannelAService {
     // A plain mkdir on an existing path returns non-zero -> 400, matching the
     // write-on-existing semantics; -p makes the create idempotent + builds parents.
     const flag = req.recursive ? "-p " : "";
-    const { exitCode, stderr } = await this.run({ cmd: `mkdir ${flag}${shellQuote(abs)}` });
-    if (exitCode !== null && exitCode !== 0) {
+    const { exitCode, stderr } = await this.runSynchronous({
+      cmd: `mkdir ${flag}${shellQuote(abs)}`,
+    });
+    if (exitCode !== 0) {
       throw new ChannelAValidationError(`failed to mkdir ${path}: ${stderr || `exit ${exitCode}`}`);
     }
     await this.assertConfinedExistingDirectory(path);
@@ -2069,11 +2259,7 @@ export class SandboxChannelAService {
     const match = measured.stdout.match(
       new RegExp(`^${GIT_MEASURE_FRAME}\\t(\\d+)\\t(\\d+)\\t([0-9a-f]{64})$`),
     );
-    if (
-      !match ||
-      (measured.exitCode !== null && measured.exitCode !== 0) ||
-      Number(match[1]) !== 0
-    ) {
+    if (!match || measured.exitCode !== 0 || Number(match[1]) !== 0) {
       throw new ChannelAUnavailableError(
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
@@ -2139,7 +2325,7 @@ export class SandboxChannelAService {
         ].join("; "),
         maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
       });
-      if (chunk.exitCode !== null && chunk.exitCode !== 0) {
+      if (chunk.exitCode !== 0) {
         throw new ChannelAUnavailableError(
           "Workspace Git data is temporarily unavailable. Retry the operation.",
         );
@@ -2195,7 +2381,7 @@ export class SandboxChannelAService {
       ].join("; "),
       maxOutputTokens: Math.ceil((GIT_COMMAND_CHUNK_BYTES * 4) / 3) + 1_024,
     });
-    if (captured.exitCode !== null && captured.exitCode !== 0) {
+    if (captured.exitCode !== 0) {
       throw new ChannelAUnavailableError(
         "Workspace Git data is temporarily unavailable. Retry the operation.",
       );
@@ -2788,7 +2974,7 @@ export class SandboxChannelAService {
         `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' "$status"`,
         'exit "$status"',
       ].join("\n");
-      const { stdout } = await this.runReadOnly({
+      const { stdout, exitCode } = await this.runReadOnly({
         cmd: internalBashCommand(command),
         workdir: this.providerWorkspaceRoot(),
         yieldTimeMs: 20_000,
@@ -2806,7 +2992,8 @@ export class SandboxChannelAService {
       // The command always prints this trailer after discovery settles. Missing
       // means provider-side output truncation or an outer-shell failure, neither
       // of which is authoritative discovery even if exec reports exit 0.
-      const status = Number.isInteger(embeddedStatus) ? embeddedStatus : null;
+      const status =
+        Number.isInteger(embeddedStatus) && embeddedStatus === exitCode ? embeddedStatus : null;
       if (status === 124) {
         return { repos: [], complete: false, degradedReason: "command_timed_out" };
       }
@@ -2920,14 +3107,14 @@ export class SandboxChannelAService {
       `head -c ${CODE_SEARCH_RG_CHUNK_BYTES} "$gz_file" | base64 | tr -d '\\r\\n'`,
       `printf '${CODE_SEARCH_RG_END}%s:%s:%s:%s:%s:%s__' "$rg_status" "$timed_out" "$gz_size" "$token" "$raw_size" "$stored"`,
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
+    const { stdout, exitCode: providerExitCode } = await this.runReadOnly({
       cmd: internalBashCommand(script),
       workdir: this.providerWorkspaceRoot(),
       yieldTimeMs: (seconds + 15) * 1_000,
       maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
     });
     const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
-    if (!trailer) {
+    if (providerExitCode !== 0 || !trailer) {
       throw new ChannelAUnavailableError("code search did not complete in this workspace");
     }
     const exitCode = Number.parseInt(trailer[1]!, 10);
@@ -3023,14 +3210,14 @@ export class SandboxChannelAService {
       `printf '${CODE_SEARCH_RG_END}0:0:0:-__'`,
       'if [ "$4" = 1 ]; then rm -f "$f"; fi',
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
+    const { stdout, exitCode } = await this.runReadOnly({
       cmd: `${internalBashCommand(script)} opengeni-code-search ${shellQuote(token)} ${offset + 1} ${length} ${last ? 1 : 0}`,
       workdir: this.providerWorkspaceRoot(),
       yieldTimeMs: 30_000,
       maxOutputTokens: CODE_SEARCH_RG_FRAME_CHARS,
     });
     const trailer = CODE_SEARCH_RG_TRAILER.exec(stdout);
-    if (!trailer) {
+    if (exitCode !== 0 || !trailer) {
       throw new ChannelAUnavailableError("code search did not complete in this workspace");
     }
     if (trailer[4] === "missing") return null;
@@ -3075,7 +3262,7 @@ export class SandboxChannelAService {
       'for p in "$@"; do if denied "$p"; then printf m; elif [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
       `printf '${CODE_SEARCH_KINDS_END}'`,
     ].join("\n");
-    const { stdout } = await this.runReadOnly({
+    const { stdout, exitCode } = await this.runReadOnly({
       cmd: `${internalBashCommand(script)} opengeni-code-search ${checked.map(shellQuote).join(" ")}`,
       workdir: this.providerWorkspaceRoot(),
       yieldTimeMs: 20_000,
@@ -3084,7 +3271,7 @@ export class SandboxChannelAService {
     const match = new RegExp(`${CODE_SEARCH_KINDS_BEGIN}([dfm]*)${CODE_SEARCH_KINDS_END}`).exec(
       stdout,
     );
-    if (!match || match[1]!.length !== checked.length) {
+    if (exitCode !== 0 || !match || match[1]!.length !== checked.length) {
       throw new ChannelAUnavailableError("code search path check did not complete");
     }
     const kinds: Record<string, "file" | "directory" | "missing"> = {};
@@ -3099,7 +3286,12 @@ export class SandboxChannelAService {
 
   /** Run a bounded command to physical completion and return buffered output.
    *  A deadline cancels the exact provider operation, proves its process group
-   *  absent, and settles any retained-process admission before returning 124. */
+   *  absent, and settles any retained-process admission before returning 124.
+   *  124 says the deadline ended the command, so it is returned only with that
+   *  proof. A machine agent's failure past the deadline means the command's end
+   *  was not proven (its agent was replaced or stopped answering and the
+   *  command was handed to the session's ledger, or it never reached an agent):
+   *  that failure is thrown as it is, since its message says what is known. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
@@ -3130,6 +3322,7 @@ export class SandboxChannelAService {
     } catch (error) {
       controller.cancel(error);
       await controller.waitForQuiescence();
+      if (timedOut && error instanceof SelfhostedControlError) throw error;
       if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
       r = {
         stdout: "",
@@ -3321,10 +3514,13 @@ export class SandboxChannelAService {
       );
     }
     const root = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
-    const listed = await listDir({
-      path: this.joinRoot(root),
-      ...(this.runAs ? { runAs: this.runAs } : {}),
-    });
+    const listed = await listDir(
+      {
+        path: this.joinRoot(root),
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      },
+      this.commandRunner,
+    );
     const children: FsTreeNode[] = [];
     let truncated = false;
     for (const entry of listed) {
@@ -3412,7 +3608,8 @@ export class SandboxChannelAService {
           workdir: undefined,
         });
       } catch (error) {
-        if (error instanceof ChannelAUnsupportedError) throw error;
+        if (error instanceof ChannelAUnsupportedError || isNonReplayableCommandFault(error))
+          throw error;
         if (attempt === 0) continue;
         throw new ChannelAUnavailableError(
           "Workspace files are temporarily unavailable. Retry the operation.",
@@ -3426,6 +3623,10 @@ export class SandboxChannelAService {
       const framed = parseConfinedCommandStdout(result.stdout, frameId);
       if (framed) {
         if (framed.exitCode > 255) continue;
+        if (result.exitCode !== framed.exitCode)
+          throw new ChannelAUnavailableError(
+            "Confined command status disagrees with its provider terminal receipt.",
+          );
         return {
           ...result,
           stdout: framed.payload,
@@ -3735,6 +3936,80 @@ function workspaceImportCurlConfig(url: string): string {
     "connect-timeout = 30",
     "max-time = 900",
   ].join("\n");
+}
+
+type WorkspaceFileMarkers = {
+  ok: string;
+  missing: string;
+  notFile: string;
+  escape: string;
+  integrity: string;
+  unavailable: string;
+};
+
+function workspaceFileMarkers(kind: "DIGEST" | "EXPORT", frame: string): WorkspaceFileMarkers {
+  const marker = (name: string) => `__OPENGENI_WORKSPACE_${kind}_${frame}_${name}__`;
+  return {
+    ok: marker("OK"),
+    missing: marker("MISSING"),
+    notFile: marker("NOT_FILE"),
+    escape: marker("ESCAPE"),
+    integrity: marker("INTEGRITY"),
+    unavailable: marker("UNAVAILABLE"),
+  };
+}
+
+function throwWorkspaceFileMarkerError(
+  result: { stdout: string; exitCode: number | null },
+  markers: WorkspaceFileMarkers,
+  path: string,
+): void {
+  if (result.stdout.includes(markers.missing) || result.exitCode === 66) {
+    throw new ChannelANotFoundError(`file not found: ${path}`);
+  }
+  if (result.stdout.includes(markers.escape) || result.exitCode === 67) {
+    throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+  }
+  if (result.stdout.includes(markers.notFile) || result.exitCode === 65) {
+    throw new ChannelAValidationError(`path is not a regular file: ${path}`);
+  }
+  if (result.stdout.includes(markers.integrity) || result.exitCode === 74) {
+    throw new ChannelAConflictError(`file changed while it was being uploaded: ${path}`);
+  }
+}
+
+/** At least 1 MB/s, at most three hours, and never less than 15 minutes. */
+function workspaceExportCurlConfig(
+  upload: WorkspaceFileExportRequest["upload"],
+  sizeBytes: number,
+): { content: string; maxTimeSeconds: number } {
+  const target = workspaceImportSource({ url: upload.url, expiresAt: upload.expiresAt });
+  const quote = (value: string) => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  const headers = Object.entries(upload.requiredHeaders ?? {}).map(([name, value]) => {
+    if (
+      !/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$/u.test(name) ||
+      typeof value !== "string" ||
+      value.length > 4_096 ||
+      /[\u0000-\u001f\u007f]/u.test(value)
+    ) {
+      throw new ChannelAValidationError("workspace export upload header is invalid");
+    }
+    return `header = "${quote(`${name}: ${value}`)}"`;
+  });
+  const maxTimeSeconds = Math.min(3 * 60 * 60, Math.max(900, Math.ceil(sizeBytes / 1_000_000)));
+  return {
+    content: [
+      `url = "${quote(target.url)}"`,
+      ...headers,
+      "fail",
+      "silent",
+      "show-error",
+      'proto = "=http,https"',
+      "connect-timeout = 30",
+      `max-time = ${maxTimeSeconds}`,
+    ].join("\n"),
+    maxTimeSeconds,
+  };
 }
 
 function shellQuote(s: string): string {

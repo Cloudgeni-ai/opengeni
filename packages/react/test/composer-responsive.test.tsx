@@ -253,4 +253,32 @@ describe("container-responsive composer", () => {
         ?.style.getPropertyValue("--og-source-version"),
     ).toBe("alternate");
   });
+
+  test("refits the input height when its width changes without an edit", async () => {
+    globalThis.ResizeObserver = ControlledResizeObserver;
+    mounted = await renderComponent(
+      <ChatComposer composer={{ ...composer(), value: "a draft that wraps when narrow" }} />,
+    );
+    const textarea = mounted.container.querySelector<HTMLTextAreaElement>("textarea")!;
+    let width = 400;
+    let contentHeight = 40;
+    Object.defineProperty(textarea, "clientWidth", { configurable: true, get: () => width });
+    Object.defineProperty(textarea, "clientHeight", { configurable: true, get: () => 40 });
+    Object.defineProperty(textarea, "offsetHeight", { configurable: true, get: () => 40 });
+    Object.defineProperty(textarea, "scrollHeight", {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    const [observer] = observersFor(textarea);
+    expect(observer).toBeDefined();
+
+    // Narrower box: the same draft now needs two lines.
+    width = 200;
+    contentHeight = 64;
+    await act(async () => {
+      observer!.emit();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    });
+    expect(textarea.style.height).toBe("64px");
+  });
 });

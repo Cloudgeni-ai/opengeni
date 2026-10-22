@@ -22,12 +22,9 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import {
-  MemoryEventBus,
-  ScriptedModel,
-  startTestMcpServer,
-  type ScriptedModelStep,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { ScriptedModel, type ScriptedModelStep } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
 
@@ -2350,7 +2347,7 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
     mcpServers: [
       {
         id: "opengeni",
-        name: "OpenGeni density profile",
+        name: "Opengeni density profile",
         url: densityMcpUrl,
         cacheToolsList: false,
       },

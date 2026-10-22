@@ -18,11 +18,8 @@ import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-i
 import { FIKEN_CREDENTIAL_ROLE, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import type { ConnectAttempt } from "@opengeni/contracts/connect";
 import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   claimOAuthAcquisition,
   finishOAuthAcquisition,

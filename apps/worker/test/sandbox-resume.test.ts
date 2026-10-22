@@ -46,11 +46,8 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   captureVerifiedWorkspaceArchive,
   establishSandboxSessionFromEnvelope,
@@ -194,7 +191,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // resumeBoxForTurn so the box manifest matches the agent manifest (no
     // provided-session env delta — the ownership regression turn-killer fix).
     const sandboxEnvironment = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       HOME: "/workspace",
       MY_VAR: "value-xyz",
     };
@@ -2335,6 +2332,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         modalImageRef: image,
       });
       const route = await resolveSandboxRoute({
+        turn: { id: "turn-1", executionGeneration: 1 } as never,
         input: { accountId, workspaceId, sessionId: groupId } as never,
         settings,
         db,

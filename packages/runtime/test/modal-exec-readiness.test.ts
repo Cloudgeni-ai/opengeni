@@ -75,6 +75,9 @@ let preparationPending = false;
 let preparationEntered: () => void;
 let completePreparation: () => void;
 let foregroundReadFailures = 0;
+/** A loaded provider answers a failing read late, after a retry's remaining
+ * slice budget has already elapsed on the client. */
+let foregroundReadFailureDelayMs = 0;
 let foregroundPollFailure = false;
 let foregroundPollPending = false;
 let foregroundPollCancelled = 0;
@@ -198,7 +201,10 @@ beforeAll(async () => {
         }
         if (foregroundReadFailures > 0) {
           foregroundReadFailures--;
-          call.emit("error", { code: status.UNAVAILABLE, details: "read DNS unavailable" });
+          const fail = () =>
+            call.emit("error", { code: status.UNAVAILABLE, details: "read DNS unavailable" });
+          if (foregroundReadFailureDelayMs > 0) setTimeout(fail, foregroundReadFailureDelayMs);
+          else fail();
           return;
         }
         if (mode === "unobservable" || (mode === "lost-read" && !failedRead)) {
@@ -288,6 +294,7 @@ function fixture(
   failedRead = false;
   preparations = [];
   foregroundReadFailures = 0;
+  foregroundReadFailureDelayMs = 0;
   foregroundPollFailure = false;
   foregroundPollPending = false;
   foregroundPollCancelled = 0;
@@ -769,13 +776,18 @@ test("command_input observation exhaustion contains uncertainty without resendin
   }
 });
 
-test.each([false, true])(
-  "lifecycle exact-read uncertainty is typed rather than a fake successful exit (exhausted=%s)",
-  async (exhausted) => {
+test.each([
+  [false, 0],
+  [true, 0],
+  [true, 120],
+])(
+  "lifecycle exact-read uncertainty is typed rather than a fake successful exit (exhausted=%s, failure latency=%sms)",
+  async (exhausted, failureLatencyMs) => {
     const f = fixture();
     const tools = foregroundTools(f);
     const controller = createTurnToolCancellationController();
     foregroundReadFailures = exhausted ? 100 : 1;
+    foregroundReadFailureDelayMs = failureLatencyMs;
     try {
       const session = {
         execCommand: async (args: { cmd: string }) => tools.invoke({}, JSON.stringify(args)),

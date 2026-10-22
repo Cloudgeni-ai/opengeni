@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { checkLimit, requireLimit } from "../src/billing/limits";
 import {
@@ -9,6 +9,9 @@ import {
   retryFailedSession,
 } from "../src/domain/sessions";
 import type { ApiRouteDeps } from "../src/dependencies";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
@@ -31,6 +34,7 @@ describe("core usage allowance admission", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
   let codex: ReturnType<typeof spyOn<typeof opengeniDb, "isCodexBilledTurn">>;
+  let route: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreRouteFunding">>;
 
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
@@ -41,12 +45,18 @@ describe("core usage allowance admission", () => {
       updatedAt: "2026-09-30T00:00:00.000Z",
     });
     codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
+    // A provider still on its legacy route keeps its legacy funding (Claude);
+    // SuperGrok's tests answer from the core, its only route.
+    route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
+      route: "legacy",
+    });
   });
 
   afterEach(() => {
     allowance.mockRestore();
     balance.mockRestore();
     codex.mockRestore();
+    route.mockRestore();
   });
 
   test.each(["workspace", "member"] as const)(
@@ -104,6 +114,33 @@ describe("core usage allowance admission", () => {
     });
   });
 
+  test("accepted Codex funding passes the exact turn and needs no deployment credit balance", async () => {
+    codex.mockResolvedValue(true);
+    const acceptedTurn = { sessionId: crypto.randomUUID(), turnId: crypto.randomUUID() };
+    const spendable = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      balanceMicros: 0,
+    } as never);
+    try {
+      expect(
+        await checkLimit(
+          {
+            ...deps,
+            settings: testSettings({
+              billingMode: "stripe",
+              usageLimitsMode: "managed",
+              codexSubscriptionEnabled: true,
+            }),
+          },
+          { ...input, model: "codex/gpt-5.5", acceptedTurn },
+        ),
+      ).toEqual({ allowed: true });
+      expect(codex.mock.calls.at(-1)?.[0].acceptedTurn).toEqual(acceptedTurn);
+      expect(spendable).not.toHaveBeenCalled();
+    } finally {
+      spendable.mockRestore();
+    }
+  });
+
   test.each([HUMAN, null])(
     "retry uses the original frozen human %s rather than the retrying administrator",
     async (originalHuman) => {
@@ -114,11 +151,10 @@ describe("core usage allowance admission", () => {
         opengeniDb,
         "withWorkspaceSubjectSessionActivityRls",
       ).mockImplementation(async (db, _workspaceId, _subjectId, fn) => await fn(db as never));
-      const slack = spyOn(
-        opengeniDb,
-        "getSlackInteractionSessionAccessForSession",
-      ).mockResolvedValue(null);
-      const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+      const authorization = spyOn(opengeniDb, "getSessionAuthorizationFacts").mockResolvedValue({
+        target: null,
+        caller: null,
+      });
       const replay = spyOn(opengeniDb, "getSessionRetryReceiptInTransaction").mockResolvedValue(
         null,
       );
@@ -174,8 +210,7 @@ describe("core usage allowance admission", () => {
         });
       } finally {
         workspaceRls.mockRestore();
-        slack.mockRestore();
-        authority.mockRestore();
+        authorization.mockRestore();
         replay.mockRestore();
         session.mockRestore();
         failure.mockRestore();
@@ -203,15 +238,22 @@ describe("core usage allowance admission", () => {
       overrides: { modelCostPolicyJson: '{"scripted-model":"free"}' },
     },
   ])(
-    "exempts externally funded $model from allowance checks",
+    "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, codexBilled, overrides }) => {
       codex.mockResolvedValue(codexBilled);
-      allowance.mockResolvedValue({
-        code: "allowance_exhausted",
-        scope: "workspace",
-        resetsAt: null,
-        message: "Exhausted",
-      });
+      if (model.startsWith("supergrok/")) route.mockResolvedValue({ route: "core", value: true });
+      // The real check admits credit-free work unless the allowance opts into
+      // counting unbilled usage.
+      allowance.mockImplementation(async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: null,
+              message: "Exhausted",
+            },
+      );
       await requireLimit(
         {
           ...deps,
@@ -223,7 +265,12 @@ describe("core usage allowance admission", () => {
         },
         { ...input, model },
       );
-      expect(allowance).not.toHaveBeenCalled();
+      expect(allowance).toHaveBeenCalledWith(deps.db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        subjectId: HUMAN,
+        fundedWithoutCredits: true,
+      });
       expect(balance).not.toHaveBeenCalled();
     },
   );

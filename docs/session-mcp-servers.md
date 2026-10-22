@@ -1,6 +1,6 @@
 # Per-session MCP servers
 
-OpenGeni supports third-party MCP servers attached to a single session. This is
+Opengeni supports third-party MCP servers attached to a single session. This is
 for embedding hosts that need per-session tool endpoints and per-session bearer
 credentials, without making those servers deployment-global.
 
@@ -19,9 +19,15 @@ credentials, without making those servers deployment-global.
   tool names. A workspace's explicit Allow, Ask or Block choice for a tool wins
   over this recommendation. Selective policies are canonicalized as a sorted set and bounded to
   2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
+  The server can also recommend Ask per tool in its own `tools/list` with
+  `_meta: { "opengeni/recommendedPermission": "ask" }`
+  (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). Opengeni lists tools again on
+  every attempt, so a new recommendation applies from the next attempt of every
+  session without reattaching. A tool asks by default when either source asks;
+  `"allow"` never removes a `requireApproval` entry.
 - `headers`: configured credential headers, authenticated-encrypted at rest.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
-  deployments resolve it through OpenGeni's connection store; embedded hosts
+  deployments resolve it through Opengeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
 
 ### Tool selection
@@ -32,8 +38,13 @@ omitted (workspace-default mode) or explicit, including `tools: []`. Attaching i
 already an explicit, `mcp_servers:attach`-authorized choice of this endpoint, so
 selection grants nothing further; each call still follows the effective
 permission (an explicit workspace choice, otherwise `requireApproval`). An explicit ref for the same id is kept exactly, so `tools` is only
-needed to set `eager: true` (put its schemas on the first model request instead
-of behind `tool_search`) or `optional: true` (skip it on connect/list failure).
+needed to set `optional: true` (skip it on connect/list failure) or `eager`.
+The attachment itself may also carry `eager`, which seeds the same ref marker
+without turning an omitted `tools` list into an explicit allow-list: `true`
+puts all of the server's schemas on the first model request instead of behind
+`tool_search`; a list of exact unprefixed tool names (for example
+`["search_records", "get_record"]`) puts only those on it and keeps the rest
+searchable. An attachment's list joins an explicit ref's own marker.
 Before this, an attached server that `tools` did not name was stored but never
 contacted, and the model reported that no tools existed. Agent-created children
 keep their inherited selection and may only narrow it.
@@ -131,14 +142,14 @@ endpoint.
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with
-the same AES-GCM helper used by workspace variable sets. The deployment must set
+the same AES-GCM helper used by hosted vault values. The deployment must set
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` before accepting session MCP credentials;
 otherwise create/rotation requests fail with 503.
 
 `connection_ref` is non-secret JSON and does not require the encryption key by
 itself. This lets an embedding host attach its existing GitHub, GitLab, Azure
 DevOps, or other provider connection without copying a token or creating an
-OpenGeni connection row. Opaque host ids are accepted; standalone connection
+Opengeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
@@ -333,6 +344,27 @@ and Codemode enforce the same frozen connector policies before provider calls.
 Codemode Ask returns its typed approval-required error and must be invoked via
 the normal model tool path to request human approval.
 
+### Host-attached server permissions
+
+A host that attaches its own credential-free or header-authenticated MCP server
+has no catalog capability to open, so it manages the same workspace policies
+through `GET /v1/workspaces/:workspaceId/session-mcp-tool-permissions?serverId=&url=`
+and `PATCH` on the same route (`OpenGeniClient.getSessionMcpToolPermissions` and
+`updateSessionMcpToolPermissions`). The host names the server id and the exact
+URL it attaches; Opengeni derives the `session-mcp:` identity above, so a
+different URL is a different server. The identity hashes the exact URL string
+without normalizing it, so changing the attached URL (including a trailing
+slash or query) orphans the saved rules; the host must re-save them under the
+new URL. Every reader and writer derives the identity through the runtime's
+`sessionMcpApprovalConnectionId`. The response lists only saved choices:
+`defaultPermission` (the `*` rule) and whole-tool rules, plus `revision` for
+`expectedRevision`. Tools without a choice follow the default, then the
+server's recommendation (the tool's `opengeni/recommendedPermission` `_meta`
+or the session's `requireApproval`), then Allow. The host owns its tool
+catalog and its recommendations and never asks Opengeni to discover them. Writes use the same
+`capabilities:manage` rule as connector settings, so agent attempts and service
+principals cannot change the permissions that bound them.
+
 ## Connector action policy enforcement
 
 Connection-backed MCP tools can additionally be governed by workspace
@@ -345,7 +377,8 @@ decision across the approval-resume attempt.
 
 Resolution is most-specific-first. Two matching policies with equal specificity
 fail closed as Block. No matching row preserves the historical unmanaged
-behavior. `requireApproval` only supplies the recommended default when no explicit
+behavior. `requireApproval` and a tool's `opengeni/recommendedPermission` `_meta`
+only supply the recommended default when no explicit
 choice matches: Block stops before MCP invocation, Ask requires the ordinary
 durable approval, and an explicit Allow runs the tool without asking.
 
@@ -394,10 +427,22 @@ attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
 
-Each durable session tool ref may set `eager: true`. Eagerness is not inferred
-from mandatory/strict selection: on a fresh progressive-disclosure turn, only
-those exact servers join the first-provider-request barrier. Every other MCP,
-including strict first-party OpenGeni, begins connection/listing concurrently.
+Each durable session tool ref may set `eager: true` or `eager: [names]`.
+Eagerness is not inferred from mandatory/strict selection: on a fresh
+progressive-disclosure turn, only those exact servers join the
+first-provider-request barrier. With `true` all of the server's authorized
+schemas are in the first request. With a list the server joins the barrier the
+same way, but only the listed tools it actually authorizes (after `allowedTools`
+and permissions) are in the first request, in the server's own listing order;
+its other tools stay searchable, and a name the server does not list grants
+nothing. Best-effort refs (optional or connection-backed) follow the existing
+`eager: true` rule and never become a first-request dependency. The same
+per-tool rule covers first-party Opengeni when its signed selection and
+permission ceiling can admit a harness control tool (goal lifecycle,
+`command_read`, `command_wait`, `wait_for_input`): it joins the barrier so those
+exact tools are always visible from the first request with a stable tool block,
+while its other tools stay searchable. Every other MCP, including first-party
+Opengeni without a harness tool, begins connection/listing concurrently.
 Ordinary text may settle without waiting; `tool_search`, deferred invocation,
 Codemode activation, and catalog-dependent work join the same attempt promise.
 Generic deferred invocation then renames a valid `tool_invoke` to the exact
@@ -406,7 +451,7 @@ model response; leftover historical registration items stay absent from provider
 history and user-visible events. This is never a second authority registry or a
 weaker authorization path. Duplicate refs
 merge conservatively: strict wins for failure semantics and eager wins for the
-startup choice. Approval/human-input resumes and editable-artifact turns remain
+startup choice (`true` wins over a list; two lists unite). Approval/human-input resumes and editable-artifact turns remain
 fully prepared because continuation requires their exact prior execution/catalog
 identity.
 

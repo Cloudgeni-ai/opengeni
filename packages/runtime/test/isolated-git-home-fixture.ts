@@ -75,7 +75,7 @@ export function assertIsolatedHome(home: string | undefined): string {
   return home;
 }
 
-/** Ambient variables that can point Git, askpass, or OpenGeni provisioning at
+/** Ambient variables that can point Git, askpass, or Opengeni provisioning at
  *  state outside the fixture HOME (a git hook's GIT_DIR, GIT_CONFIG_* overrides,
  *  OPENGENI_GIT_* credential paths, and similar). Callers re-add what they need. */
 function isAmbientRedirect(name: string): boolean {
@@ -99,7 +99,7 @@ export type IsolatedGitEnvironmentOptions = {
 /**
  * A child-process environment whose HOME, GIT_CONFIG_GLOBAL, and XDG_CONFIG_HOME
  * all resolve inside `overrides.HOME`, which must be an isolated temporary
- * directory. Ambient Git/OpenGeni redirects are dropped; explicit `overrides`
+ * directory. Ambient Git/Opengeni redirects are dropped; explicit `overrides`
  * (other than those three pinned paths) are kept, and `undefined` removes a name.
  */
 export function isolatedGitEnvironment(
@@ -171,6 +171,26 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
         if (options.shell === "bash") {
           cmd = cmd.replaceAll("exec /bin/sh ", "exec bash --noprofile --norc ");
         }
+      }
+      // Content-addressed setup programs are verified by hash before they run,
+      // so never rewrite them in place: the launcher checks the original and
+      // then executes a host-mapped copy. Programs can be installed (or decoded
+      // for one run) by the same command, so the copy is mapped in-shell with
+      // the workspace prefix this session's rewrite applies.
+      const workspacePrefix = options.rewriteCommand?.("'/workspace/");
+      if (workspacePrefix && workspacePrefix !== "'/workspace/") {
+        const runner = options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh";
+        const mapTo = (source: string, target: string) =>
+          `sed "s#'/workspace/#${workspacePrefix}#g" "${source}" > "${target}"`;
+        cmd = cmd
+          .replace(
+            'exec /bin/sh "$opengeni_setup_program"',
+            `${mapTo("$opengeni_setup_program", "$opengeni_setup_program.host-mapped")} && exec ${runner} "$opengeni_setup_program.host-mapped"`,
+          )
+          .replace(
+            '/bin/sh "$opengeni_setup_payload"',
+            `( ${mapTo("$opengeni_setup_payload", "$opengeni_setup_payload.host-mapped")} && ${runner} "$opengeni_setup_payload.host-mapped"; host_status=$?; rm -f "$opengeni_setup_payload.host-mapped"; exit "$host_status" )`,
+          );
       }
       const child = Bun.spawn(
         [

@@ -2,25 +2,28 @@ import { expect, test } from "bun:test";
 import { sitePortFetch, serveSiteHttp, siteSessionPath, isSiteHttpRequest } from "../src/site-http";
 import { createOpenGeniSiteClient } from "../src/site";
 
-test("HEAD and OPTIONS pass the published message validator and round-trip", async () => {
+test("HEAD and OPTIONS pass the published message validator; Site routing refuses them", async () => {
   for (const method of ["HEAD", "OPTIONS"]) {
+    expect(
+      isSiteHttpRequest({
+        type: "opengeni.site.http",
+        requestId: "one",
+        path: "/v1/workspaces/site-host/sessions/one",
+        headers: [],
+        method,
+      }),
+    ).toBe(true);
     const channel = new MessageChannel();
-    channel.port2.onmessage = (event) => {
-      expect(isSiteHttpRequest(event.data)).toBe(true);
-      expect(event.data.method).toBe(method);
-      void serveSiteHttp(
-        event.data,
-        event.ports[0]!,
-        async () => new Response(null, { status: 204 }),
-        new AbortController().signal,
-      );
+    let posted = 0;
+    channel.port2.onmessage = () => {
+      posted += 1;
     };
-    const response = await sitePortFetch(
-      channel.port1,
-      "https://site.test/v1/workspaces/site-host/projects",
-      { method },
-    );
-    expect(response.status).toBe(204);
+    await expect(
+      sitePortFetch(channel.port1, "https://site.test/v1/workspaces/site-host/sessions/one", {
+        method,
+      }),
+    ).rejects.toThrow("Unsupported");
+    expect(posted).toBe(0);
     channel.port1.close();
     channel.port2.close();
   }
@@ -49,6 +52,8 @@ test("Site SDK routing cannot change workspace or escape the host API", () => {
     "/v1/workspaces/other/sessions",
     "/v1/workspaces/site-host/sessions/../billing",
     "/v1/workspaces/site-host/sessions/%2e%2e/billing",
+    "/v1/workspaces/site-host/projects",
+    "/v1/workspaces/site-host/scheduled-tasks",
   ]) {
     expect(() => siteSessionPath(path, "ws")).toThrow();
   }
@@ -110,9 +115,11 @@ test("MessagePort fetch delivers SSE before completion and cancels upstream", as
   channel.port2.close();
 });
 
-test("newly reachable goal routes preserve API authorization errors", async () => {
+test("routes outside SITE_OPERATIONS never leave the Site; allowed ones keep API errors", async () => {
   const channel = new MessageChannel();
+  const paths: string[] = [];
   channel.port2.onmessage = (event) => {
+    paths.push(event.data.path);
     void serveSiteHttp(
       event.data,
       event.ports[0]!,
@@ -120,13 +127,20 @@ test("newly reachable goal routes preserve API authorization errors", async () =
       new AbortController().signal,
     );
   };
+  await expect(
+    sitePortFetch(channel.port1, "https://site.test/v1/workspaces/site-host/sessions/one/goal", {
+      method: "PATCH",
+      body: JSON.stringify({ status: "paused" }),
+    }),
+  ).rejects.toThrow("Unsupported");
   const response = await sitePortFetch(
     channel.port1,
-    "https://site.test/v1/workspaces/site-host/sessions/one/goal",
-    { method: "PATCH", body: JSON.stringify({ status: "paused" }) },
+    "https://site.test/v1/workspaces/site-host/sessions/one/control",
+    { method: "POST", body: JSON.stringify({ action: "pause" }) },
   );
   expect(response.status).toBe(403);
   expect(await response.json()).toEqual({ error: { message: "No access" } });
+  expect(paths).toEqual(["/v1/workspaces/site-host/sessions/one/control"]);
   channel.port1.close();
   channel.port2.close();
 });

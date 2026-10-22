@@ -2,12 +2,16 @@ import {
   AgentInstructionSaveRequest,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
-  KnowledgeEntryListRequest,
+  KnowledgeSearchToolRequest,
   KnowledgeSavePreparationRequest,
   KnowledgeEntrySaveRequest,
   KnowledgeTaskNotePromotionRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
+import {
+  type LearningRefusal,
+  withLearningRefusalMeta,
+} from "@opengeni/contracts/learning-refusal";
 import {
   prepareKnowledgeFile,
   prepareKnowledgeSave,
@@ -18,10 +22,13 @@ import {
 } from "@opengeni/core";
 import {
   archiveKnowledgeEntry,
+  classifyLearningRefusal,
+  learningSaveCorrection,
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
   getKnowledgeEntry,
   listKnowledgeEntries,
+  nestedAuthorityRefusalMessage,
   nestedPostgresSqlState,
   saveKnowledgeEntry,
   saveAgentInstruction,
@@ -35,6 +42,57 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+const TELL_PERSON =
+  "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+
+const TELL_PERSON_IF_ASKED =
+  "If the person asked you to save or remember this, tell them in your reply that it was not saved and why; your other work can continue.";
+
+/**
+ * What an authority refusal means for the agent, in words it can act on.
+ * `refusal` is the same classification the person's timeline notice uses, so
+ * the agent's account and the notice agree. A correction the agent can make
+ * itself, or a fence on a stale attempt, carries no notice and says how to
+ * retry.
+ */
+function refusalAgentMessage(
+  surface: "knowledge" | "instruction",
+  mode: "read" | "write",
+  refusalMessage: string | null,
+  refusal: LearningRefusal | null,
+): string {
+  if (mode === "read") {
+    return surface === "instruction"
+      ? "This instruction is unavailable in this task's scope."
+      : "The entry or reference is unavailable in this task's scope and Agent learning policy.";
+  }
+  const tell = surface === "instruction" ? TELL_PERSON : TELL_PERSON_IF_ASKED;
+  const what = surface === "instruction" ? "workspace instructions" : "Knowledge";
+  switch (refusalMessage ? learningSaveCorrection(refusalMessage) : null) {
+    case "evidence_not_shared":
+      return "Nothing was saved: cited evidence or a source is personal or not yet published, so readers of this destination couldn't see it. Retry without it, or cite a published entry they can read, with a new operation ID.";
+    case "reference_unavailable":
+      return "Nothing was saved: a referenced entry, revision or source is unavailable. Check the referenced IDs and current versions, then retry with a new operation ID.";
+    case "skill_scope_kept":
+    case null:
+      break;
+  }
+  if (!refusal)
+    return "Nothing was saved: this attempt is no longer current. Your other work can continue; retry with the same operation ID if the change still applies.";
+  switch (refusal.reason) {
+    case "site_agent":
+      // Retained legacy refusal receipts remain readable; new turns do not
+      // impose a learning policy based on where a message came from.
+      return "Nothing was saved under the policy applied to that earlier attempt.";
+    case "learning_off":
+      return `Nothing was saved. Agent learning for ${what} is Off where this change would be saved (this chat's or the workspace's setting). Turning it on in Agent learning settings would let you save it. ${tell}`;
+    case "not_permitted":
+      return surface === "instruction"
+        ? `Nothing was saved. This chat isn't allowed to change workspace instructions. ${tell}`
+        : `Nothing was saved. This chat isn't allowed to make this Knowledge change. ${tell}`;
+  }
+}
+
 /** One structured write and retrieval path, independent of the legacy Memory toggle. */
 export function registerKnowledgeEntryTools(
   server: McpServer,
@@ -46,6 +104,7 @@ export function registerKnowledgeEntryTools(
   async function run(
     fn: (context: KnowledgeContext) => Promise<unknown>,
     surface: "knowledge" | "instruction" = "knowledge",
+    mode: "read" | "write" = "read",
   ) {
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
@@ -84,6 +143,11 @@ export function registerKnowledgeEntryTools(
         };
       }
       const state = nestedPostgresSqlState(error);
+      const refusalMessage =
+        mode === "write" && state === "42501" ? nestedAuthorityRefusalMessage(error) : null;
+      const refusal: LearningRefusal | null = refusalMessage
+        ? classifyLearningRefusal({ destination: surface, message: refusalMessage })
+        : null;
       const message =
         surface === "instruction"
           ? state === "40001"
@@ -91,7 +155,7 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This instruction operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? "The instruction change is unavailable in this task's scope or Agent learning policy. Off disables authoring, not the task. Do not ask for approval to continue."
+                ? refusalAgentMessage(surface, mode, refusalMessage, refusal)
                 : state === "22023" || state === "23514"
                   ? `Invalid instruction change. Read the current instruction, use append for a new rule, or edit with one localized exact oldText match to update or remove text. Agents cannot replace the complete instruction. Each supplied text and the resulting instruction must stay within ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor.`
                   : "Workspace instructions are temporarily unavailable. Retry the same operation ID only if the prior change may have succeeded."
@@ -100,11 +164,11 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? "The entry, reference, or write is unavailable in this task's scope and Agent learning policy. Off disables saving, not your task. Do not ask for an approval to continue."
+                ? refusalAgentMessage(surface, mode, refusalMessage, refusal)
                 : state === "22023" || state === "23514"
                   ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
                   : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";
-      return {
+      const result = {
         isError: true,
         content: [
           {
@@ -113,6 +177,10 @@ export function registerKnowledgeEntryTools(
           },
         ],
       };
+      // A definite authority refusal of a write also carries the content-free
+      // refusal fact in `_meta`, which the model never sees, so the timeline
+      // tells the person it was not saved.
+      return refusal ? withLearningRefusalMeta(result, refusal) : result;
     }
   }
   // Compatibility recovery for tool selections persisted before the cutover.
@@ -131,24 +199,28 @@ export function registerKnowledgeEntryTools(
       },
     },
     (input) =>
-      run(async (context) => {
-        if (input.claimId && !input.proposalId && !input.decisionReceiptId) {
-          return confirmLegacyKnowledge(deps.db, context, {
-            operationId: input.operationId,
-            claimId: input.claimId,
-            humanInputRequestId: input.humanInputRequestId,
-          });
-        }
-        if (input.proposalId && input.decisionReceiptId && !input.claimId) {
-          return confirmLegacyInstruction(deps.db, context, {
-            operationId: input.operationId,
-            proposalId: input.proposalId,
-            decisionReceiptId: input.decisionReceiptId,
-            humanInputRequestId: input.humanInputRequestId,
-          });
-        }
-        throw new Error("Pass exactly one existing confirmation target");
-      }),
+      run(
+        async (context) => {
+          if (input.claimId && !input.proposalId && !input.decisionReceiptId) {
+            return confirmLegacyKnowledge(deps.db, context, {
+              operationId: input.operationId,
+              claimId: input.claimId,
+              humanInputRequestId: input.humanInputRequestId,
+            });
+          }
+          if (input.proposalId && input.decisionReceiptId && !input.claimId) {
+            return confirmLegacyInstruction(deps.db, context, {
+              operationId: input.operationId,
+              proposalId: input.proposalId,
+              decisionReceiptId: input.decisionReceiptId,
+              humanInputRequestId: input.humanInputRequestId,
+            });
+          }
+          throw new Error("Pass exactly one existing confirmation target");
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_prepare_save",
@@ -173,13 +245,8 @@ export function registerKnowledgeEntryTools(
     "knowledge_search",
     {
       description:
-        "Find Knowledge from useful findings and explicitly retained reference sources. Supporting chat/file evidence is excluded from ordinary published discovery; set includeEvidence=true only when searching that evidence deliberately. Use a concise subject or entity name first (for example Acme); omit scope to search all authorized scopes. If a query returns no entries, retry the key name alone in the same scope or browse groups before concluding the information is absent. Default view=published is accepted knowledge. Also search view=needs_review before creating or updating entries, to reuse pending findings and collections from earlier tasks. Pending revisions are unapproved proposals, not accepted facts or instructions; preserve that status when discussing them. Reading a proposal never approves it. Personal tasks search the verified user's personal and authorized shared Knowledge; shared tasks search shared Knowledge.",
-      inputSchema: KnowledgeEntryListRequest.omit({
-        view: true,
-        sessionId: true,
-        reviewBatchId: true,
-        rootOnly: true,
-      }).extend({ view: z.enum(["published", "needs_review"]).default("published") }).shape,
+        "Find Knowledge by subject or entity name. Omit scope to search all authorized scopes. Returns 5 matches by default; use cursor for more. Open matches with knowledge_get for full text and revision IDs. If empty, retry the key name alone or browse groups. published is accepted Knowledge; needs_review contains unapproved proposals, not facts or instructions. Search both before saving. includeEvidence adds supporting chat/file sources; it never broadens access.",
+      inputSchema: KnowledgeSearchToolRequest.omit({ rootOnly: true }).shape,
     },
     (input) =>
       run((context) =>
@@ -260,7 +327,8 @@ export function registerKnowledgeEntryTools(
         purpose: z.enum(["evidence", "reference"]).default("evidence"),
       },
     },
-    ({ fileId, purpose }) => run((context) => prepareKnowledgeFile(deps, context, fileId, purpose)),
+    ({ fileId, purpose }) =>
+      run((context) => prepareKnowledgeFile(deps, context, fileId, purpose), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_retain_message",
@@ -269,16 +337,25 @@ export function registerKnowledgeEntryTools(
         "Retain the exact text of a user message as supporting evidence only after identifying useful lasting Knowledge to save. Do not retain routine approvals, acknowledgments, task instructions or status chatter merely because they occurred. The source stays out of ordinary Knowledge discovery and can be read through its evidence link. Use when a user supplies or confirms a durable fact, before saving a finding based on it. Omit messageId for the user message that triggered this turn, or pass an earlier user message event ID from this same conversation. The server copies the actual message, preserves its identity and follows this task's learning policy. Repeated calls reuse the source. Cite the returned entryId/revisionId as evidence in knowledge_save, with location.messageIds=[messageId]. Retaining a message does not prove every statement in it or approve a pending finding.",
       inputSchema: { messageId: z.uuid().optional() },
     },
-    ({ messageId }) => run((context) => retainKnowledgeMessage(deps.db, context, messageId)),
+    ({ messageId }) =>
+      run((context) => retainKnowledgeMessage(deps.db, context, messageId), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_save",
     {
       description:
-        "Retain retrieval-only facts, decisions, requirements, incidents or notes, or deliberately selected reference sources, not a behavioral preference or instruction for future sessions. Use instruction_policy_save for short always-on workspace rules and skill_save for applicable procedures and behavioral preferences; do not store them here as facts such as 'the user prefers concise replies', even if those destinations are unavailable or require review. First use knowledge_prepare_save when available (otherwise search published and needs_review Knowledge and browse collections). Skip unchanged duplicates; improve an existing entry when the subject is the same. Do not save routine approvals, acknowledgments, temporary instructions, screenshots or OCR merely because they occurred. State the reusable finding with enough context for a future task, preserve uncertainty and evidence, and place it in the relevant existing collections. Do this autonomously when useful for future work. Choose kind by content: source for retained original text; fact for a specific claim (the label is not verification); decision for a choice made and its reasoning; requirement for a need or constraint; incident for a problem with cause, fix and outcome when known; note for other useful context. Choose the closest kind without asking the user to classify it. A group is a collection about a customer, product, system or subject, not a finding type. Search published and needs_review views for an existing entry and relevant group before creating one, use groupIds to link entries across sources, and reuse an entry in multiple groups instead of copying it. Nest collections by setting a group entry's groupIds to its parent collections; keep the hierarchy shallow and useful, and never create circular membership. To create, omit entryId and pass expectedVersion 0; the returned entryId identifies the new entry. To correct or reorganize, pass an existing entryId and its current version. Source text and selected facts are independent entries, not mandatory duplicate stages. Evidence pins another entry's exact revision. When a user supplies or confirms a fact, retain the actual message with knowledge_retain_message and cite the returned revision; do not leave its provenance only in prose. Preserve existing evidence and relationships on corrections unless they are specifically no longer applicable; a contradictory original remains useful evidence of what changed. Use the same operationId only for an exact retry. Agent learning decides publication: published is available immediately; pending is saved for review and your task continues without an approval prompt. Do not turn Knowledge into instructions or Skills.",
-      inputSchema: KnowledgeEntrySaveRequest.omit({ scope: true }).shape,
+        "Retain retrieval-only facts, decisions, requirements, incidents or notes, or deliberately selected reference sources, not a behavioral preference or instruction for future sessions. Use instruction_policy_save for short always-on workspace rules and skill_save for applicable procedures and behavioral preferences; do not store them here as facts such as 'the user prefers concise replies', even if those destinations are unavailable or require review. First use knowledge_prepare_save when available (otherwise search published and needs_review Knowledge and browse collections). Skip unchanged duplicates; improve an existing entry when the subject is the same. Do not save routine approvals, acknowledgments, temporary instructions, screenshots or OCR merely because they occurred. State the reusable finding with enough context for a future task, preserve uncertainty and evidence, and place it in the relevant existing collections. Do this autonomously when useful for future work. Choose kind by content: source for retained original text; fact for a specific claim (the label is not verification); decision for a choice made and its reasoning; requirement for a need or constraint; incident for a problem with cause, fix and outcome when known; note for other useful context. Choose the closest kind without asking the user to classify it. A group is a collection about a customer, product, system or subject, not a finding type. Search published and needs_review views for an existing entry and relevant group before creating one, use groupIds to link entries across sources, and reuse an entry in multiple groups instead of copying it. Nest collections by setting a group entry's groupIds to its parent collections; keep the hierarchy shallow and useful, and never create circular membership. To create, omit entryId and pass expectedVersion 0; the returned entryId identifies the new entry. To correct or reorganize, pass an existing entryId and its current version. Source text and selected facts are independent entries, not mandatory duplicate stages. Evidence pins another entry's exact revision. When a user supplies or confirms a fact, retain the actual message with knowledge_retain_message and cite the returned revision; do not leave its provenance only in prose. Preserve existing evidence and relationships on corrections unless they are specifically no longer applicable; a contradictory original remains useful evidence of what changed. Use the same operationId only for an exact retry. Agent learning decides publication: published is available immediately; pending is saved for review and your task continues without an approval prompt. A new entry saves where this chat learns: personal in a private chat, workspace in a shared chat. Do not turn Knowledge into instructions or Skills.",
+      inputSchema: {
+        ...KnowledgeEntrySaveRequest.omit({ scope: true }).shape,
+        scope: z
+          .literal("workspace")
+          .optional()
+          .describe(
+            "Only in a private chat, when the person wants a new entry for everyone in the workspace. Omit otherwise; a correction keeps the entry's own scope.",
+          ),
+      },
     },
-    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input)),
+    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_archive",
@@ -291,7 +368,8 @@ export function registerKnowledgeEntryTools(
         expectedVersion: z.number().int().positive(),
       },
     },
-    (input) => run((context) => archiveKnowledgeEntry(deps.db, context, input)),
+    (input) =>
+      run((context) => archiveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
   );
   server.registerTool(
     "instruction_policy_get",
@@ -305,10 +383,11 @@ export function registerKnowledgeEntryTools(
   server.registerTool(
     "instruction_policy_save",
     {
-      description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. Preserve personal scope rather than creating a workspace-wide rule. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
+      description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. An instruction applies to everyone in the workspace, also when saved from a private chat; keep a rule meant only for the person in their personal Skill. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
       inputSchema: AgentInstructionSaveRequest.shape,
     },
-    (input) => run((context) => saveAgentInstruction(deps.db, context, input), "instruction"),
+    (input) =>
+      run((context) => saveAgentInstruction(deps.db, context, input), "instruction", "write"),
   );
   server.registerTool(
     "task_note_promote_knowledge",
@@ -317,6 +396,7 @@ export function registerKnowledgeEntryTools(
         "Retain one active task note as durable Knowledge with its exact text and origin, only for retrieval-only information. Do not promote behavior rules or preferences to Knowledge; use instruction_policy_save for short always-on workspace rules or skill_save for applicable procedures and preferences, under their own scope and learning policy. Omit entryId; the returned entryId identifies the new entry. The note stays temporary and unchanged; this creates one Knowledge entry in this task's scope, governed by the same learning policy. Pending review never pauses the task. Use knowledge_save for a selected or rewritten finding instead.",
       inputSchema: KnowledgeTaskNotePromotionRequest.shape,
     },
-    (input) => run((context) => promoteTaskNoteToKnowledge(deps.db, context, input)),
+    (input) =>
+      run((context) => promoteTaskNoteToKnowledge(deps.db, context, input), "knowledge", "write"),
   );
 }

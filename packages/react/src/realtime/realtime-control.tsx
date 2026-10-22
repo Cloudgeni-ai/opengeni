@@ -4,21 +4,17 @@ import {
 } from "../composer-voice-events";
 import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
-  hasStoredSessionRealtimeOwnerProof,
   projectSessionRealtimeLifecycle,
-  type SessionRealtimeClientLike,
-  type SessionRealtimeController,
   type SessionRealtimeControllerSnapshot,
-  type CreateSessionRealtimeControllerOptions,
-  type SessionRealtimeLifecycleProjection,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
-  type WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/sdk/realtime";
 import {
   AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  LanguagesIcon,
   LoaderCircleIcon,
   MicIcon,
   MicOffIcon,
@@ -45,10 +41,8 @@ import {
   PickerBackHeader,
   PickerNavRow,
 } from "../components/model-policy-picker";
-import type { EmbeddedRealtimeSessionClientLike } from "../client";
 import { cn } from "../lib/cn";
 import type { PickerBillingClass as BillingClass } from "../model-policy";
-import { useEmbeddedRealtimeSession } from "../session-context";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -60,437 +54,103 @@ import {
   DropdownMenuTrigger,
 } from "./dropdown-menu";
 import { MENU_CHECK_CLASS } from "../lib/menu-styles";
+import {
+  CODEX_LIVE_MODEL,
+  realtimeAppLanguage,
+  type RealtimeControllerClient,
+  type RealtimeModelOption,
+  type SessionRealtimeControllerFactory,
+  sessionRealtimeLifecycleIsActive,
+  useRealtimeLanguagePreference,
+  useRealtimeModelSelection,
+  useSessionRealtime,
+} from "./session-realtime";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
-export type RealtimeModelOption = {
-  id: SessionRealtimeModel;
-  label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
-  description: string;
-  available: boolean;
-  unavailableReason: string | null;
-  /** Machine-readable reason, e.g. `insufficient_credits` (same codes as voice input). */
-  unavailableCode?: string | null | undefined;
-  recommended: boolean;
-};
+export {
+  codexRealtimeAdmissionAllowed,
+  codexRealtimeAdmissionBlocker,
+  CODEX_LIVE_MODEL,
+  prestartSessionRealtime,
+  realtimeAppLanguage,
+  realtimeConversationLanguage,
+  sessionRealtimeLifecycleIsActive,
+  useRealtimeLanguagePreference,
+  useRealtimeModelSelection,
+  useSessionRealtime,
+} from "./session-realtime";
+export type { RealtimeModelOption, SessionRealtimeControllerFactory } from "./session-realtime";
 
 /** Short status label for a credit/availability refusal (shared with the model menu). */
-function realtimeRefusalLabel(code: string | null | undefined): string | null {
+function realtimeRefusalLabel(t: OpenGeniText, code: string | null | undefined): string | null {
   switch (code) {
     case "insufficient_credits":
-      return "Credits needed";
+      return t("realtime.realtimeControl.creditsNeeded");
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
-      return "Usage limit reached";
+      return t("realtime.realtimeControl.usageLimitReached");
     case "realtime_voice_unavailable":
-      return "Voice unavailable";
+      return t("realtime.realtimeControl.voiceUnavailable");
+    case "credits_disabled":
+      return t("realtime.realtimeControl.creditsOff");
     default:
       return null;
   }
 }
 
-const CODEX_LIVE_MODEL: RealtimeModelOption = {
-  id: "gpt-live-1-boulder-alpha",
-  label: "Codex Live",
-  provider: "Connected Codex",
-  description: "Deep session integration",
-  available: false,
-  unavailableReason: "Connect Codex to use this voice model",
-  recommended: false,
-};
-
+// Wire identifiers of the realtime catalog provider field; display names come from REALTIME_PROVIDER_META.
 const REALTIME_MODEL_PROVIDERS = [
   "OpenGeni",
   "Connected Codex",
   "Connected SuperGrok",
   "Your Gateway",
+  "Your ElevenLabs",
 ] as const;
 type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
-const REALTIME_PROVIDER_META: Record<
+const REALTIME_PROVIDER_META = (
+  t: OpenGeniText,
+): Record<
   RealtimeModelProvider,
-  { billingClass: BillingClass; label: string; hint: string }
-> = {
+  // `key` is unique per provider; several providers can share a billing class.
+  { key: string; billingClass: BillingClass; label: string; hint: string }
+> => ({
   // The wire value keeps its historical spelling; the product name is Opengeni.
-  OpenGeni: { billingClass: "opengeni_credits", label: "Opengeni", hint: "Uses Opengeni credits" },
+  OpenGeni: {
+    key: "opengeni",
+    billingClass: "opengeni_credits",
+    label: t("realtime.realtimeControl.opengeni"),
+    hint: t("realtime.realtimeControl.usesOpengeniCredits"),
+  },
   "Connected Codex": {
+    key: "codex",
     billingClass: "codex_subscription",
-    label: "Connected Codex",
-    hint: "ChatGPT / Codex plan",
+    label: t("realtime.realtimeControl.connectedCodex"),
+    hint: t("realtime.realtimeControl.chatgptCodexPlan"),
   },
   "Connected SuperGrok": {
+    key: "supergrok",
     billingClass: "supergrok_subscription",
-    label: "Connected SuperGrok",
-    hint: "SuperGrok / xAI plan",
+    label: t("realtime.realtimeControl.connectedSupergrok"),
+    hint: t("realtime.realtimeControl.supergrokXaiPlan"),
   },
   "Your Gateway": {
+    key: "gateway",
     billingClass: "byok",
-    label: "Your Gateway",
-    hint: "Billed to your AI Gateway",
+    label: t("realtime.realtimeControl.yourGateway"),
+    hint: t("realtime.realtimeControl.billedToYourAiGateway"),
   },
-};
+  "Your ElevenLabs": {
+    key: "elevenlabs",
+    billingClass: "byok",
+    label: t("realtime.realtimeControl.yourElevenlabs"),
+    hint: t("realtime.realtimeControl.billedToYourElevenlabs"),
+  },
+});
 /** Display name; the catalog's `provider` value stays the wire identifier. */
-function realtimeProviderLabel(provider: RealtimeModelProvider): string {
-  return provider === "OpenGeni" ? "Opengeni" : provider;
+function realtimeProviderLabel(t: OpenGeniText, provider: RealtimeModelProvider): string {
+  return REALTIME_PROVIDER_META(t)[provider].label;
 }
-const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
-const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
-const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
-
-type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike & SessionRealtimeClientLike;
-
-type RealtimeModelCatalogCacheEntry =
-  | {
-      state: "loading";
-      promise: Promise<RealtimeModelOption[]>;
-      controller: AbortController;
-      consumers: number;
-    }
-  | { state: "ready"; models: RealtimeModelOption[]; expiresAt: number };
-
-// Scope advisory availability to the exact client object and workspace. The
-// server still authorizes every realtime operation; changing principals should
-// replace the client just as it does for the rest of the SDK state.
-const realtimeModelCatalogCache = new WeakMap<
-  RealtimeControllerClient,
-  Map<string, RealtimeModelCatalogCacheEntry>
->();
-
-function realtimeModelFallback(codexConnected: boolean): RealtimeModelOption[] {
-  return [
-    {
-      ...CODEX_LIVE_MODEL,
-      available: codexConnected,
-      unavailableReason: codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
-    },
-  ];
-}
-
-function realtimeModelCatalogCacheFor(
-  client: RealtimeControllerClient,
-): Map<string, RealtimeModelCatalogCacheEntry> {
-  const existing = realtimeModelCatalogCache.get(client);
-  if (existing) return existing;
-  const created = new Map<string, RealtimeModelCatalogCacheEntry>();
-  realtimeModelCatalogCache.set(client, created);
-  return created;
-}
-
-function readCachedRealtimeModelCatalog(
-  client: RealtimeControllerClient,
-  workspaceId: string,
-  now = Date.now(),
-): RealtimeModelOption[] | null {
-  const cache = realtimeModelCatalogCache.get(client);
-  const entry = cache?.get(workspaceId);
-  if (!entry || entry.state === "loading") return null;
-  if (entry.expiresAt > now) return entry.models;
-  cache?.delete(workspaceId);
-  return null;
-}
-
-function pruneRealtimeModelCatalogCache(
-  cache: Map<string, RealtimeModelCatalogCacheEntry>,
-  now: number,
-): void {
-  for (const [workspaceId, entry] of cache) {
-    if (entry.state === "ready" && entry.expiresAt <= now) cache.delete(workspaceId);
-  }
-  while (cache.size >= REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES) {
-    const oldestWorkspaceId = cache.keys().next().value;
-    if (oldestWorkspaceId === undefined) return;
-    cache.delete(oldestWorkspaceId);
-  }
-}
-
-function loadRealtimeModelCatalog(
-  client: RealtimeControllerClient,
-  workspaceId: string,
-  signal?: AbortSignal,
-): Promise<RealtimeModelOption[]> | null {
-  const load = client.getWorkspaceRealtimeModelCatalog;
-  if (!load) return null;
-  if (signal?.aborted) {
-    return Promise.reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
-  }
-  const now = Date.now();
-  const cache = realtimeModelCatalogCacheFor(client);
-  const entry = cache.get(workspaceId);
-  if (entry?.state === "loading" && !entry.controller.signal.aborted) {
-    return consumeRealtimeModelCatalog(entry, signal);
-  }
-  if (entry?.state === "ready" && entry.expiresAt > now) return Promise.resolve(entry.models);
-  if (entry) cache.delete(workspaceId);
-  pruneRealtimeModelCatalogCache(cache, now);
-
-  const controller = new AbortController();
-  const promise = load
-    .call(client, workspaceId, { signal: controller.signal })
-    .then((response) => response.models.map(toRealtimeModelOption))
-    .then((models) => {
-      const current = cache.get(workspaceId);
-      if (current?.state === "loading" && current.promise === promise) {
-        cache.delete(workspaceId);
-        cache.set(workspaceId, {
-          state: "ready",
-          models,
-          expiresAt: Date.now() + REALTIME_MODEL_CATALOG_CACHE_TTL_MS,
-        });
-      }
-      return models;
-    })
-    .catch((error: unknown) => {
-      const current = cache.get(workspaceId);
-      if (current?.state === "loading" && current.promise === promise) cache.delete(workspaceId);
-      throw error;
-    });
-  const loading: RealtimeModelCatalogCacheEntry & { state: "loading" } = {
-    state: "loading",
-    promise,
-    controller,
-    consumers: 0,
-  };
-  cache.set(workspaceId, loading);
-  return consumeRealtimeModelCatalog(loading, signal);
-}
-
-function consumeRealtimeModelCatalog(
-  entry: RealtimeModelCatalogCacheEntry & { state: "loading" },
-  signal?: AbortSignal,
-): Promise<RealtimeModelOption[]> {
-  entry.consumers += 1;
-  return new Promise((resolve, reject) => {
-    let released = false;
-    const release = (abandoned: boolean) => {
-      if (released) return;
-      released = true;
-      entry.consumers = Math.max(0, entry.consumers - 1);
-      if (abandoned && entry.consumers === 0) {
-        entry.controller.abort(
-          signal?.reason ?? new DOMException("Request abandoned", "AbortError"),
-        );
-      }
-    };
-    const onAbort = () => {
-      release(true);
-      reject(signal?.reason ?? new DOMException("Request aborted", "AbortError"));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    void entry.promise.then(resolve, reject).finally(() => {
-      signal?.removeEventListener("abort", onAbort);
-      release(false);
-    });
-  });
-}
-
-export type SessionRealtimeControllerFactory = (
-  options: CreateSessionRealtimeControllerOptions,
-) => SessionRealtimeController;
-
-type AdmissionInput = {
-  sessionStatus: SessionStatus;
-  controlState: "active" | "paused";
-  settlement: { state: string } | null;
-  codexConnected: boolean;
-  lifecycleActive: boolean;
-};
-
-export function codexRealtimeAdmissionAllowed(input: AdmissionInput): boolean {
-  return codexRealtimeAdmissionBlocker(input) === null;
-}
-
-export function codexRealtimeAdmissionBlocker(input: AdmissionInput): string | null {
-  if (input.sessionStatus === "cancelled") return "This session was cancelled.";
-  if (input.controlState !== "active") return "Resume this session before starting voice.";
-  if (input.settlement !== null) return "Wait for the current session transition to finish.";
-  if (!input.codexConnected) return "Connect Codex to use this voice model.";
-  if (input.lifecycleActive) return "Voice is already active for this session.";
-  return null;
-}
-
-export function useSessionRealtime(options: {
-  client?: RealtimeControllerClient | undefined;
-  workspaceId?: string | undefined;
-  sessionId: string;
-  sessionStatus: SessionStatus;
-  effectiveControl: EffectiveSessionControl;
-  events: SessionEvent[];
-  eventsReady: boolean;
-  codexConnected: boolean;
-  model?: SessionRealtimeModel | undefined;
-  modelAvailable?: boolean | undefined;
-  modelUnavailableReason?: string | null | undefined;
-  /** Model-visible application context captured with each durable realtime message. */
-  getModelContext?: (() => string | undefined) | undefined;
-  /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
-  controllerFactory?: SessionRealtimeControllerFactory | undefined;
-}) {
-  const { client, workspaceId } = useEmbeddedRealtimeSession({
-    client: options.client,
-    workspaceId: options.workspaceId,
-  });
-  const model = options.model ?? CODEX_LIVE_MODEL.id;
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const controllerRef = useRef<SessionRealtimeController | null>(null);
-  const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
-  const modelContextProviderRef = useRef(options.getModelContext);
-  modelContextProviderRef.current = options.getModelContext;
-  const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
-    status: hasStoredSessionRealtimeOwnerProof({
-      workspaceId,
-      sessionId: options.sessionId,
-      model,
-    })
-      ? "recovering"
-      : "idle",
-    realtimeId: null,
-    mode: null,
-    bridge: null,
-    microphone: "inactive",
-    inputMuted: false,
-    audibleOutput: "inactive",
-    outputMuted: false,
-    connectionGeneration: 0,
-    reconnectAttempt: 0,
-    diagnostic: null,
-    error: null,
-  }));
-  const lifecycle = useMemo(
-    () => projectSessionRealtimeLifecycle(options.events),
-    [options.events],
-  );
-  const lifecycleRef = useRef(lifecycle);
-  const eventsReadyRef = useRef(options.eventsReady);
-  lifecycleRef.current = lifecycle;
-  eventsReadyRef.current = options.eventsReady;
-  const lifecycleActive = sessionRealtimeLifecycleIsActive(lifecycle);
-
-  useEffect(() => {
-    let disposed = false;
-    let controller: SessionRealtimeController | null = null;
-    let unsubscribe: (() => void) | null = null;
-    void import("@opengeni/sdk/realtime")
-      .then(({ createSessionRealtimeController }) => {
-        if (disposed) return;
-        const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
-        controller = controllerFactory({
-          client,
-          workspaceId,
-          sessionId: options.sessionId,
-          ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
-          model,
-          getModelContext: () => modelContextProviderRef.current?.(),
-        });
-        controllerRef.current = controller;
-        controllerModelRef.current = model;
-        unsubscribe = controller.subscribe(setSnapshot);
-        if (eventsReadyRef.current) {
-          void controller.observeLifecycle(lifecycleRef.current).catch(() => undefined);
-        }
-      })
-      .catch((error: unknown) => {
-        if (disposed) return;
-        setSnapshot({
-          status: "error",
-          realtimeId: null,
-          mode: null,
-          bridge: null,
-          microphone: "inactive",
-          inputMuted: false,
-          audibleOutput: "inactive",
-          outputMuted: false,
-          connectionGeneration: 0,
-          reconnectAttempt: 0,
-          diagnostic: {
-            kind: "negotiation_failure",
-            message:
-              error instanceof Error ? error.message : "Codex realtime controller failed to load",
-            recoverable: false,
-            connectionGeneration: 0,
-            attempt: 0,
-          },
-          error:
-            error instanceof Error ? error.message : "Codex realtime controller failed to load",
-        });
-      });
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-      controller?.close();
-      if (controllerRef.current === controller) {
-        controllerRef.current = null;
-        controllerModelRef.current = null;
-      }
-    };
-  }, [client, model, options.controllerFactory, options.sessionId, workspaceId]);
-
-  useEffect(() => {
-    if (!options.eventsReady) return;
-    void controllerRef.current?.observeLifecycle(lifecycle).catch(() => undefined);
-  }, [lifecycle, options.eventsReady]);
-
-  const start = useCallback(async () => {
-    const controller = controllerRef.current;
-    if (!controller || controllerModelRef.current !== model) {
-      throw new Error("The selected voice model is still preparing");
-    }
-    await controller.start();
-  }, [model]);
-  const stop = useCallback(async () => {
-    await controllerRef.current?.stop();
-  }, []);
-  const retry = useCallback(async () => {
-    await controllerRef.current?.retry();
-  }, []);
-  const retryAudibleOutput = useCallback(async () => {
-    await controllerRef.current?.retryAudibleOutput();
-  }, []);
-  const setInputMuted = useCallback((muted: boolean) => {
-    controllerRef.current?.setInputMuted(muted);
-  }, []);
-  const setOutputMuted = useCallback((muted: boolean) => {
-    controllerRef.current?.setOutputMuted(muted);
-  }, []);
-  const admissionInput = {
-    sessionStatus: options.sessionStatus,
-    controlState: options.effectiveControl.state,
-    settlement: options.effectiveControl.settlement,
-    codexConnected: options.modelAvailable ?? options.codexConnected,
-    lifecycleActive,
-  } satisfies AdmissionInput;
-  const admissionBlocker =
-    options.modelAvailable === false
-      ? (options.modelUnavailableReason ?? "This voice model is unavailable.")
-      : codexRealtimeAdmissionBlocker(admissionInput);
-  const canStart =
-    controllerRef.current !== null &&
-    controllerModelRef.current === model &&
-    ["idle", "error"].includes(snapshot.status) &&
-    admissionBlocker === null;
-
-  return {
-    snapshot,
-    lifecycleActive,
-    canStart,
-    admissionBlocker,
-    codexConnected: options.codexConnected,
-    audioRef,
-    start,
-    stop,
-    retry,
-    retryAudibleOutput,
-    setInputMuted,
-    setOutputMuted,
-  };
-}
-
-function sessionRealtimeLifecycleIsActive(
-  lifecycle: SessionRealtimeLifecycleProjection | null,
-): boolean {
-  if (lifecycle?.state !== "active") return false;
-  const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
-  return !Number.isFinite(leaseExpiresAt) || leaseExpiresAt > Date.now();
-}
-
 export function SessionRealtimeControl(props: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -515,6 +175,13 @@ export function SessionRealtimeControl(props: {
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Explicitly expose low-level controller diagnostics; disabled by default. */
   showDiagnostics?: boolean | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * over the workspace's saved settings for the selected model. A language the
+   * person picks in the voice menu takes precedence. Settings the selected
+   * model does not offer are ignored.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -532,12 +199,14 @@ export function SessionRealtimeControl(props: {
     model: selectedModel.id,
     modelAvailable: selectedModel.available,
     modelUnavailableReason: selectedModel.unavailableReason,
+    language: selection.languageFor(selectedModel.id),
+    voiceSettings: selection.voiceSettingsFor(selectedModel.id, props.voiceSettings),
   });
   const autostartModelRef = useRef(props.realtimeAutostartModel ?? null);
   const autostartStartedRef = useRef(false);
 
   const { models, selectedModel: selectedRealtimeModel, selectModel } = selection;
-  const { canStart, start } = realtime;
+  const { canStart, start, prestarted } = realtime;
   const onRealtimeAutostartConsumed = props.onRealtimeAutostartConsumed;
   const onVoiceActiveChange = props.onVoiceActiveChange;
   const voiceActive = realtime.snapshot.mode?.state === "active";
@@ -545,10 +214,22 @@ export function SessionRealtimeControl(props: {
   useEffect(() => {
     onVoiceActiveChange?.(voiceActive);
   }, [onVoiceActiveChange, voiceActive]);
+  useEffect(() => () => onVoiceActiveChange?.(false), [onVoiceActiveChange]);
 
   useEffect(() => {
     const pending = autostartModelRef.current;
-    if (!pending || autostartStartedRef.current || lifecycleActive) return;
+    if (!pending || autostartStartedRef.current) return;
+    const consume = () => {
+      autostartModelRef.current = null;
+      onRealtimeAutostartConsumed?.();
+    };
+    if (prestarted && selectedRealtimeModel.id === pending) {
+      // The host started this call before the view mounted; it is the autostart.
+      autostartStartedRef.current = true;
+      consume();
+      return;
+    }
+    if (lifecycleActive) return;
     const available = models.some((model) => model.id === pending && model.available);
     if (!available) return;
     if (selectedRealtimeModel.id !== pending) {
@@ -559,15 +240,12 @@ export function SessionRealtimeControl(props: {
     autostartStartedRef.current = true;
     // One automatic attempt. A failed start stays visible with its reason and
     // the user retries explicitly; re-arming would loop on a definitive refusal.
-    const consume = () => {
-      autostartModelRef.current = null;
-      onRealtimeAutostartConsumed?.();
-    };
     void start().then(consume, consume);
   }, [
     canStart,
     lifecycleActive,
     models,
+    prestarted,
     props.sessionId,
     props.workspaceId,
     onRealtimeAutostartConsumed,
@@ -597,108 +275,6 @@ export function SessionRealtimeControl(props: {
       onSetOutputMuted={realtime.setOutputMuted}
     />
   );
-}
-
-/**
- * First available model; otherwise the model whose blocker the user can act on
- * (for example adding credits) rather than an unrelated "connect" prompt.
- */
-function fallbackRealtimeModelId(models: readonly RealtimeModelOption[]): SessionRealtimeModel {
-  return (
-    models.find((model) => model.available)?.id ??
-    models.find((model) => model.unavailableCode)?.id ??
-    CODEX_LIVE_MODEL.id
-  );
-}
-
-export function useRealtimeModelSelection(options: {
-  client?: RealtimeControllerClient | undefined;
-  workspaceId?: string | undefined;
-  codexConnected: boolean;
-  activeModel?: SessionRealtimeModel | null | undefined;
-}) {
-  const { client, workspaceId } = useEmbeddedRealtimeSession({
-    client: options.client,
-    workspaceId: options.workspaceId,
-  });
-  const activeModel = options.activeModel;
-  const initialCachedCatalog = readCachedRealtimeModelCatalog(client, workspaceId);
-  const [catalog, setCatalog] = useState<RealtimeModelOption[]>(
-    () => initialCachedCatalog ?? realtimeModelFallback(options.codexConnected),
-  );
-  const catalogScopeRef = useRef({
-    client,
-    workspaceId,
-    source: initialCachedCatalog ? ("cache" as const) : ("fallback" as const),
-  });
-  const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
-    const preferred = readRealtimeModelPreference(workspaceId) ?? CODEX_LIVE_MODEL.id;
-    if (!initialCachedCatalog) return preferred;
-    if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
-      return preferred;
-    }
-    return fallbackRealtimeModelId(initialCachedCatalog);
-  });
-
-  useEffect(() => {
-    let disposed = false;
-    const requestAbort = new AbortController();
-    const applyCatalog = (models: RealtimeModelOption[]) => {
-      catalogScopeRef.current = { client, workspaceId, source: "cache" };
-      setCatalog(models);
-      setSelectedModelId((current) => {
-        if (models.some((model) => model.id === current && model.available)) return current;
-        return fallbackRealtimeModelId(models);
-      });
-    };
-    const cached = readCachedRealtimeModelCatalog(client, workspaceId);
-    if (cached) {
-      const scope = catalogScopeRef.current;
-      if (
-        scope.client !== client ||
-        scope.workspaceId !== workspaceId ||
-        scope.source !== "cache"
-      ) {
-        applyCatalog(cached);
-      }
-      return;
-    }
-    const loading = loadRealtimeModelCatalog(client, workspaceId, requestAbort.signal);
-    if (!loading) return;
-    void loading
-      .then((models) => {
-        if (disposed) return;
-        applyCatalog(models);
-      })
-      .catch(() => undefined);
-    return () => {
-      disposed = true;
-      requestAbort.abort();
-    };
-  }, [client, workspaceId]);
-
-  useEffect(() => {
-    if (activeModel) setSelectedModelId(activeModel);
-  }, [activeModel]);
-
-  const selectedModel =
-    catalog.find((model) => model.id === selectedModelId) ??
-    ({
-      ...CODEX_LIVE_MODEL,
-      available: options.codexConnected,
-      unavailableReason: options.codexConnected ? null : CODEX_LIVE_MODEL.unavailableReason,
-    } satisfies RealtimeModelOption);
-  const selectModel = useCallback(
-    (value: string) => {
-      const model = catalog.find((candidate) => candidate.id === value);
-      if (!model || !model.available || activeModel) return;
-      setSelectedModelId(model.id);
-      writeRealtimeModelPreference(workspaceId, model.id);
-    },
-    [activeModel, catalog, workspaceId],
-  );
-
-  return { models: catalog, selectedModel, selectModel };
 }
 
 const IDLE_REALTIME_SNAPSHOT: SessionRealtimeControllerSnapshot = {
@@ -770,6 +346,7 @@ function NewSessionRealtimeControlWithInternalSelection(props: NewSessionRealtim
 function NewSessionRealtimeControlView(
   props: NewSessionRealtimeControlProps & { selection: NewSessionRealtimeSelection },
 ) {
+  const t = useOpenGeniText();
   const selection = props.selection;
   const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
@@ -792,13 +369,13 @@ function NewSessionRealtimeControlView(
     setError(null);
     try {
       const started = await onStart(selectedModelId);
-      if (!started) setError("The voice session could not be created.");
+      if (!started) setError(t("realtime.realtimeControl.theVoiceSessionCouldNot"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setStarting(false);
     }
-  }, [canStart, onStart, selectedModelId]);
+  }, [canStart, onStart, selectedModelId, t]);
 
   return (
     <RealtimeVoiceControl
@@ -853,19 +430,20 @@ export function RealtimeVoiceControl(props: {
   onSetInputMuted: (muted: boolean) => void;
   onSetOutputMuted: (muted: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const reduceMotion = useReducedMotion();
   const selectedModel = props.selectedModel ?? {
-    ...CODEX_LIVE_MODEL,
+    ...CODEX_LIVE_MODEL(t),
     available: props.modelAvailable,
-    unavailableReason: props.modelAvailable ? null : CODEX_LIVE_MODEL.unavailableReason,
+    unavailableReason: props.modelAvailable ? null : CODEX_LIVE_MODEL(t).unavailableReason,
   };
   const models = props.models ?? [selectedModel];
   const status = statusContent(
+    t,
     props.snapshot,
     props.modelAvailable,
     props.canStart,
     props.admissionBlocker ?? null,
-    selectedModel.label,
     selectedModel.unavailableCode ?? null,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
@@ -879,23 +457,25 @@ export function RealtimeVoiceControl(props: {
   // tooltip or the model menu, until the user starts again or changes model.
   const startFailed = props.snapshot.status === "error" && !modeOwned;
   const failureText =
-    status.label === "Voice unavailable" ? status.detail : `${status.label}. ${status.detail}`;
+    status.label === t("realtime.realtimeControl.voiceUnavailable")
+      ? status.detail
+      : t("realtime.realtimeControl.labelDetail", { label: status.label, detail: status.detail });
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
     (!modeOwned && !props.canStart) ||
     (props.snapshot.status === "starting" && !modeOwned);
   const mainLabel = audioBlocked
-    ? "Resume voice audio"
+    ? t("realtime.realtimeControl.resumeVoiceAudio")
     : retryConnection
-      ? "Retry voice connection"
+      ? t("realtime.realtimeControl.retryVoiceConnection")
       : modeOwned
-        ? "End voice conversation"
+        ? t("realtime.realtimeControl.endVoiceConversation")
         : !props.canStart && status.phase === "unavailable"
           ? `${status.label}: ${status.detail}`
           : startFailed
-            ? `Try voice again with ${selectedModel.label}`
-            : `Start voice with ${selectedModel.label}`;
+            ? t("realtime.realtimeControl.tryVoiceAgain")
+            : t("realtime.realtimeControl.startVoice");
   const runMainAction = audioBlocked
     ? props.onRetryAudibleOutput
     : retryConnection
@@ -935,7 +515,7 @@ export function RealtimeVoiceControl(props: {
     <div
       ref={rootRef}
       role="group"
-      aria-label="Realtime voice"
+      aria-label={t("realtime.realtimeControl.realtimeVoice")}
       data-picker-side={props.menuSide ?? "top"}
       data-model-menu={modelMenu}
       className="og-realtime-control inline-flex shrink-0 items-center"
@@ -1020,8 +600,8 @@ export function RealtimeVoiceControl(props: {
           type="button"
           data-realtime-attention=""
           data-testid="realtime-failure-reason"
-          title="Dismiss"
-          aria-label={`Dismiss: ${failureText}`}
+          title={t("realtime.realtimeControl.dismiss")}
+          aria-label={t("realtime.realtimeControl.dismissFailuretext", { failureText })}
           onClick={() => setFailureDismissed(true)}
           className="og-realtime-failure mr-1.5 inline-flex min-w-0 items-center gap-1 rounded-og-sm text-right text-og-xs leading-tight text-og-status-failed outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45"
         >
@@ -1068,8 +648,10 @@ export function RealtimeVoiceControl(props: {
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                aria-label="Choose voice model and options"
-                title={`Voice model: ${selectedModel.label}`}
+                aria-label={t("realtime.realtimeControl.chooseVoiceModelAndOptions")}
+                title={t("realtime.realtimeControl.voiceModelLabel", {
+                  label: selectedModel.label,
+                })}
                 disabled={props.selectionDisabled}
                 className={cn(
                   // Keep the split trigger compact on desktop while preserving a
@@ -1139,13 +721,13 @@ export function RealtimeVoiceControl(props: {
                   onSelect={() => void props.onRetryAudibleOutput().catch(() => undefined)}
                 >
                   <Volume2Icon />
-                  Resume audio
+                  {t("realtime.realtimeControl.resumeAudio")}
                 </DropdownMenuItem>
               ) : null}
               {retryConnection ? (
                 <DropdownMenuItem onSelect={() => void props.onRetry().catch(() => undefined)}>
                   <RotateCcwIcon />
-                  Retry connection
+                  {t("realtime.realtimeControl.retryConnection")}
                 </DropdownMenuItem>
               ) : null}
               {modeOwned && props.snapshot.status !== "lost_owner" ? (
@@ -1155,7 +737,7 @@ export function RealtimeVoiceControl(props: {
                   onSelect={() => void props.onStop().catch(() => undefined)}
                 >
                   <SquareIcon />
-                  End voice conversation
+                  {t("realtime.realtimeControl.endVoiceConversation")}
                 </DropdownMenuItem>
               ) : null}
 
@@ -1185,6 +767,7 @@ export function RealtimeVoiceModelPanel(props: {
   leading?: ReactNode | undefined;
   onSelect: (modelId: SessionRealtimeModel) => void;
 }) {
+  const t = useOpenGeniText();
   const [provider, setProvider] = useState<RealtimeModelProvider | null>(null);
   const [direction, setDirection] = useState<1 | -1>(1);
 
@@ -1192,11 +775,13 @@ export function RealtimeVoiceModelPanel(props: {
     <div className="flex min-h-0 flex-1 flex-col" data-testid="realtime-voice-model-panel">
       <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 pb-2">
         {props.leading}
-        <div className="min-w-0 flex-1 text-og-menu font-medium text-og-fg">Voice model</div>
+        <div className="min-w-0 flex-1 text-og-menu font-medium text-og-fg">
+          {t("realtime.realtimeControl.voiceModel")}
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
         <p className="mb-3 text-og-control text-og-fg-muted">
-          Used when you start a voice conversation.
+          {t("realtime.realtimeControl.usedWhenYouStartA")}
         </p>
         <RealtimeModelPickerMenu
           models={props.models}
@@ -1222,14 +807,15 @@ function RealtimeMuteButton(props: {
   enterDelay?: number | undefined;
   onToggle(): void;
 }) {
+  const t = useOpenGeniText();
   const microphone = props.kind === "microphone";
   const label = microphone
     ? props.muted
-      ? "Unmute microphone"
-      : "Mute microphone"
+      ? t("realtime.realtimeControl.unmuteMicrophone")
+      : t("realtime.realtimeControl.muteMicrophone")
     : props.muted
-      ? "Unmute voice audio"
-      : "Mute voice audio";
+      ? t("realtime.realtimeControl.unmuteVoiceAudio")
+      : t("realtime.realtimeControl.muteVoiceAudio");
   const Icon = microphone
     ? props.muted
       ? MicOffIcon
@@ -1278,99 +864,262 @@ export function RealtimeModelPickerMenu(props: {
   onProviderChange: (provider: RealtimeModelProvider | null, direction: 1 | -1) => void;
   onSelect: (modelId: SessionRealtimeModel) => void;
 }) {
+  const t = useOpenGeniText();
+  const { language: languagePreference, setLanguage } = useRealtimeLanguagePreference();
+  // The language page is local to the menu; leaving a provider closes it.
+  const [languagePage, setLanguagePage] = useState<{
+    provider: RealtimeModelProvider;
+    open: boolean;
+  } | null>(null);
+  const changeProvider = (provider: RealtimeModelProvider | null, direction: 1 | -1) => {
+    setLanguagePage(null);
+    props.onProviderChange(provider, direction);
+  };
   const providers = REALTIME_MODEL_PROVIDERS.filter((provider) =>
     props.models.some((model) => model.provider === provider),
   );
-  const pageKey = props.provider ? `voice-models:${props.provider}` : "voice-providers";
-  const body = props.provider ? (
-    <div data-testid="realtime-model-picker-models">
-      <PickerBackHeader
-        label={realtimeProviderLabel(props.provider)}
-        icon={
-          <BillingClassMark
-            billingClass={REALTIME_PROVIDER_META[props.provider].billingClass}
-            aria-label=""
+  const providerLanguages = props.provider
+    ? props.models.find((model) => model.provider === props.provider && model.languages?.length)
+        ?.languages
+    : undefined;
+  const languagePageOpen =
+    providerLanguages !== undefined &&
+    languagePage?.provider === props.provider &&
+    languagePage.open;
+  const direction =
+    languagePage?.provider === props.provider ? (languagePage.open ? 1 : -1) : props.direction;
+  const pageKey = languagePageOpen
+    ? `voice-languages:${props.provider}`
+    : props.provider
+      ? `voice-models:${props.provider}`
+      : "voice-providers";
+  const appLanguage = realtimeAppLanguage(t.locale);
+  const appLanguageName = appLanguage
+    ? languageDisplayName(baseLanguage(appLanguage), t.locale)
+    : null;
+  // Without a pick of their own, the person talks in the workspace's language
+  // for this provider's voice, else their app language.
+  const workspaceLanguage = props.provider
+    ? props.models.find(
+        (model) => model.provider === props.provider && model.workspaceVoiceSettings?.language,
+      )?.workspaceVoiceSettings?.language
+    : undefined;
+  const workspaceLanguageName = workspaceLanguage
+    ? languageDisplayName(baseLanguage(workspaceLanguage), t.locale)
+    : null;
+  const automaticLanguageName = workspaceLanguageName ?? appLanguageName;
+  const body =
+    languagePageOpen && props.provider ? (
+      <div data-testid="realtime-language-picker">
+        <PickerBackHeader
+          label={t("realtime.realtimeControl.voiceLanguage")}
+          icon={<LanguagesIcon className="size-4 text-og-fg-muted" aria-hidden />}
+          onBack={() => setLanguagePage({ provider: props.provider!, open: false })}
+        />
+        <p className="px-2.5 pb-1.5 text-og-sm text-og-fg-muted">
+          {t("realtime.realtimeControl.voiceLanguageDescription")}
+        </p>
+        <div className="flex flex-col gap-0.5">
+          <PickerNavRow
+            label={t("realtime.realtimeControl.voiceLanguageAutomatic")}
+            hint={
+              workspaceLanguageName
+                ? t("realtime.realtimeControl.voiceLanguageWorkspaceLanguage", {
+                    language: workspaceLanguageName,
+                  })
+                : appLanguageName
+                  ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
+                      language: appLanguageName,
+                    })
+                  : undefined
+            }
+            disabled={props.disabled}
+            active={languagePreference === null}
+            showChevron={false}
+            trailing={
+              languagePreference === null ? (
+                <CheckIcon className={MENU_CHECK_CLASS} aria-hidden />
+              ) : undefined
+            }
+            testId="realtime-language-choice-automatic"
+            onClick={() => setLanguage(null)}
           />
-        }
-        onBack={() => props.onProviderChange(null, -1)}
-      />
-      <div className="flex flex-col gap-0.5">
-        {props.models
-          .filter((model) => model.provider === props.provider)
-          .map((model) => {
-            const selected = model.id === props.selectedModel.id;
+          {sortedLanguages(providerLanguages ?? [], t.locale).map(({ code, name, nativeName }) => {
+            const selected = languagePreference === code;
             return (
               <PickerNavRow
-                key={model.id}
-                label={model.label}
-                hint={
-                  model.unavailableReason ??
-                  (model.recommended ? `Recommended · ${model.description}` : model.description)
-                }
-                disabled={props.disabled || !model.available}
-                title={model.unavailableReason ?? model.description}
+                key={code}
+                label={name}
+                hint={nativeName !== name ? nativeName : undefined}
+                disabled={props.disabled}
                 active={selected}
                 showChevron={false}
                 trailing={
                   selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : undefined
                 }
-                testId={`realtime-model-choice-${model.id}`}
-                onClick={() => props.onSelect(model.id)}
+                testId={`realtime-language-choice-${code}`}
+                onClick={() => setLanguage(code)}
               />
             );
           })}
+        </div>
       </div>
-    </div>
-  ) : (
-    <div className="flex flex-col gap-0.5" data-testid="realtime-model-picker-providers">
-      {providers.map((provider) => {
-        const meta = REALTIME_PROVIDER_META[provider];
-        return (
-          <PickerNavRow
-            key={provider}
-            label={realtimeProviderLabel(provider)}
-            hint={meta.hint}
-            icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
-            active={props.selectedModel.provider === provider}
-            testId={`realtime-model-provider-${meta.billingClass}`}
-            onClick={() => props.onProviderChange(provider, 1)}
-          />
-        );
-      })}
-    </div>
-  );
+    ) : props.provider ? (
+      <div data-testid="realtime-model-picker-models">
+        <PickerBackHeader
+          label={realtimeProviderLabel(t, props.provider)}
+          icon={
+            <BillingClassMark
+              billingClass={REALTIME_PROVIDER_META(t)[props.provider].billingClass}
+              aria-label=""
+            />
+          }
+          onBack={() => changeProvider(null, -1)}
+        />
+        <div className="flex flex-col gap-0.5">
+          {props.models
+            .filter((model) => model.provider === props.provider)
+            .map((model) => {
+              const selected = model.id === props.selectedModel.id;
+              return (
+                <PickerNavRow
+                  key={model.id}
+                  label={model.label}
+                  hint={
+                    model.unavailableReason ??
+                    (model.recommended
+                      ? t("realtime.realtimeControl.recommendedDescription", {
+                          description: model.description,
+                        })
+                      : model.description)
+                  }
+                  disabled={props.disabled || !model.available}
+                  title={model.unavailableReason ?? model.description}
+                  active={selected}
+                  showChevron={false}
+                  trailing={
+                    selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : undefined
+                  }
+                  testId={`realtime-model-choice-${model.id}`}
+                  onClick={() => props.onSelect(model.id)}
+                />
+              );
+            })}
+        </div>
+        {providerLanguages ? (
+          <div className="mt-1.5 border-t border-og-border pt-1.5">
+            <PickerNavRow
+              label={t("realtime.realtimeControl.voiceLanguage")}
+              hint={
+                languagePreference !== null
+                  ? languageDisplayName(languagePreference, t.locale)
+                  : automaticLanguageName
+                    ? t("realtime.realtimeControl.voiceLanguageAutomaticValue", {
+                        language: automaticLanguageName,
+                      })
+                    : t("realtime.realtimeControl.voiceLanguageAutomatic")
+              }
+              icon={<LanguagesIcon className="size-4 shrink-0 text-og-fg-muted" aria-hidden />}
+              disabled={props.disabled}
+              testId="realtime-language-row"
+              onClick={() => setLanguagePage({ provider: props.provider!, open: true })}
+            />
+          </div>
+        ) : null}
+      </div>
+    ) : (
+      <div className="flex flex-col gap-0.5" data-testid="realtime-model-picker-providers">
+        {providers.map((provider) => {
+          const meta = REALTIME_PROVIDER_META(t)[provider];
+          return (
+            <PickerNavRow
+              key={provider}
+              label={realtimeProviderLabel(t, provider)}
+              hint={meta.hint}
+              icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
+              active={props.selectedModel.provider === provider}
+              testId={`realtime-model-provider-${meta.key}`}
+              onClick={() => changeProvider(provider, 1)}
+            />
+          );
+        })}
+      </div>
+    );
 
   return (
     <div className="relative overflow-hidden" data-testid="realtime-model-picker-menu">
-      <PickerAnimatedPage pageKey={pageKey} direction={props.direction}>
+      <PickerAnimatedPage pageKey={pageKey} direction={direction}>
         {body}
       </PickerAnimatedPage>
     </div>
   );
 }
 
+function baseLanguage(tag: string): string {
+  return tag.split(/[-_]/)[0] ?? tag;
+}
+
+function languageDisplayName(code: string, locale: string | undefined): string {
+  try {
+    return (
+      new Intl.DisplayNames(locale ? [locale] : undefined, { type: "language" }).of(code) ?? code
+    );
+  } catch {
+    return code;
+  }
+}
+
+function sortedLanguages(
+  codes: readonly string[],
+  locale: string | undefined,
+): { code: string; name: string; nativeName: string }[] {
+  return codes
+    .map((code) => ({
+      code,
+      name: languageDisplayName(code, locale),
+      nativeName: languageDisplayName(code, code),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name, locale));
+}
+
 function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeControllerSnapshot }) {
+  const t = useOpenGeniText();
   const bridge = snapshot.bridge;
   const rows = [
     ["controller", snapshot.status],
     ["microphone", snapshot.microphone],
-    ["microphone muted", String(snapshot.inputMuted)],
+    [t("realtime.realtimeControl.microphoneMuted"), String(snapshot.inputMuted)],
     ["audio", snapshot.audibleOutput],
-    ["audio muted", String(snapshot.outputMuted)],
+    [t("realtime.realtimeControl.audioMuted"), String(snapshot.outputMuted)],
     ["generation", String(snapshot.connectionGeneration)],
-    ["reconnect attempt", String(snapshot.reconnectAttempt)],
+    [t("realtime.realtimeControl.reconnectAttempt"), String(snapshot.reconnectAttempt)],
     ["mode", snapshot.mode?.state ?? "none"],
-    ["mode version", snapshot.mode ? String(snapshot.mode.version) : "—"],
-    ["connection epoch", snapshot.mode ? String(snapshot.mode.connectionEpoch) : "—"],
-    ["provider started", bridge ? String(bridge.providerStarted) : "false"],
-    ["provider speaking", bridge ? String(bridge.speaking) : "false"],
+    [
+      t("realtime.realtimeControl.modeVersion"),
+      snapshot.mode ? String(snapshot.mode.version) : "—",
+    ],
+    [
+      t("realtime.realtimeControl.connectionEpoch"),
+      snapshot.mode ? String(snapshot.mode.connectionEpoch) : "—",
+    ],
+    [
+      t("realtime.realtimeControl.providerStarted"),
+      bridge ? String(bridge.providerStarted) : "false",
+    ],
+    [t("realtime.realtimeControl.providerSpeaking"), bridge ? String(bridge.speaking) : "false"],
     ["delegation", bridge?.activeDelegationId ? "active" : "none"],
-    ["pending durable events", bridge ? String(bridge.pendingInbound) : "0"],
-    ["pending bytes", bridge ? String(bridge.pendingInboundBytes) : "0"],
-    ["client ack", bridge?.clientAckThroughSequence?.toString() ?? "—"],
-    ["ignored provider events", bridge ? String(bridge.ignoredEventCount) : "0"],
-    ["last ignored event", bridge?.lastIgnoredEventType ?? "none"],
-    ["bridge error", bridge?.lastError ?? "none"],
+    [
+      t("realtime.realtimeControl.pendingDurableEvents"),
+      bridge ? String(bridge.pendingInbound) : "0",
+    ],
+    [t("realtime.realtimeControl.pendingBytes"), bridge ? String(bridge.pendingInboundBytes) : "0"],
+    [t("realtime.realtimeControl.clientAck"), bridge?.clientAckThroughSequence?.toString() ?? "—"],
+    [
+      t("realtime.realtimeControl.ignoredProviderEvents"),
+      bridge ? String(bridge.ignoredEventCount) : "0",
+    ],
+    [t("realtime.realtimeControl.lastIgnoredEvent"), bridge?.lastIgnoredEventType ?? "none"],
+    [t("realtime.realtimeControl.bridgeError"), bridge?.lastError ?? "none"],
     ["diagnostic", snapshot.diagnostic?.kind ?? "none"],
   ] as const;
 
@@ -1379,7 +1128,7 @@ function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeContro
       <DropdownMenuSeparator />
       <DropdownMenuSub>
         <DropdownMenuSubTrigger className="text-og-fg-muted">
-          Realtime diagnostics
+          {t("realtime.realtimeControl.realtimeDiagnostics")}
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent className="max-h-80 w-72 overflow-y-auto">
           {rows.map(([label, value]) => (
@@ -1411,89 +1160,94 @@ type RealtimeVisualPhase =
   | "stopping";
 
 function statusContent(
+  t: OpenGeniText,
   snapshot: SessionRealtimeControllerSnapshot,
   modelAvailable: boolean,
   canStart: boolean,
   admissionBlocker: string | null,
-  modelLabel: string,
   unavailableCode: string | null = null,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
       phase: "blocked",
-      label: "Audio output blocked",
-      detail: "Resume audio to hear the existing voice connection.",
+      label: t("realtime.realtimeControl.audioOutputBlocked"),
+      detail: t("realtime.realtimeControl.resumeAudioToHearThe"),
     };
   }
   switch (snapshot.status) {
     case "starting":
       return {
         phase: "connecting",
-        label: "Connecting…",
-        detail: "Preparing your microphone and live voice.",
+        label: t("realtime.realtimeControl.connecting"),
+        detail: t("realtime.realtimeControl.preparingYourMicrophoneAndLive"),
       };
     case "active":
       return snapshot.bridge?.speaking
         ? {
             phase: "speaking",
-            label: "Speaking",
-            detail: "Interrupt naturally whenever you want.",
+            label: t("realtime.realtimeControl.speaking"),
+            detail: t("realtime.realtimeControl.interruptNaturallyWheneverYouWant"),
           }
         : {
             phase: "listening",
-            label: "Listening",
-            detail: "Voice and typed messages share this session.",
+            label: t("realtime.realtimeControl.listening"),
+            detail: t("realtime.realtimeControl.voiceAndTypedMessagesShare"),
           };
     case "stopping":
       return {
         phase: "stopping",
-        label: "Ending voice…",
-        detail: "Saving the remaining conversation context.",
+        label: t("realtime.realtimeControl.endingVoice"),
+        detail: t("realtime.realtimeControl.savingTheRemainingConversationContext"),
       };
     case "recovering":
       return {
         phase: "reconnecting",
-        label: "Reconnecting…",
-        detail: snapshot.error ?? "Keeping this voice conversation connected.",
+        label: t("realtime.realtimeControl.reconnecting"),
+        detail:
+          snapshot.error ?? t("realtime.realtimeControl.keepingThisVoiceConversationConnected"),
       };
     case "lost_owner":
       return {
         phase: "elsewhere",
-        label: "Voice active elsewhere",
-        detail: "Return to the browser that started it, or wait for that connection to expire.",
+        label: t("realtime.realtimeControl.voiceActiveElsewhere"),
+        detail: t("realtime.realtimeControl.returnToTheBrowserThat"),
       };
     case "error":
       if (snapshot.refusal) {
         return {
           phase: "unavailable",
-          label: realtimeRefusalLabel(snapshot.refusal.code) ?? "Voice unavailable",
+          label:
+            realtimeRefusalLabel(t, snapshot.refusal.code) ??
+            t("realtime.realtimeControl.voiceUnavailable"),
           detail: snapshot.refusal.message,
         };
       }
       return {
         phase: "error",
-        label: "Voice unavailable",
-        detail: snapshot.error ?? "The connection could not be started.",
+        label: t("realtime.realtimeControl.voiceUnavailable"),
+        detail: snapshot.error ?? t("realtime.realtimeControl.theConnectionCouldNotBe"),
       };
     case "idle":
       if (!modelAvailable) {
         return {
           phase: "unavailable",
-          label: realtimeRefusalLabel(unavailableCode) ?? "Voice model unavailable",
-          detail: admissionBlocker ?? "Choose another voice model.",
+          label:
+            realtimeRefusalLabel(t, unavailableCode) ??
+            t("realtime.realtimeControl.voiceModelUnavailable"),
+          detail: admissionBlocker ?? t("realtime.realtimeControl.chooseAnotherVoiceModel"),
         };
       }
       if (!canStart && admissionBlocker) {
         return {
           phase: "unavailable",
-          label: "Voice unavailable",
+          label: t("realtime.realtimeControl.voiceUnavailable"),
           detail: admissionBlocker,
         };
       }
       return {
         phase: "idle",
-        label: "Start voice",
-        detail: `Talk live with ${modelLabel}.`,
+        label: t("realtime.realtimeControl.startVoice"),
+        detail: t("realtime.realtimeControl.talkLiveWithTheAgent"),
       };
   }
 }
@@ -1644,43 +1398,6 @@ function voiceChevronTone(phase: RealtimeVisualPhase): string {
     return "border border-l-0 border-og-accent/35 bg-og-accent-soft text-og-accent";
   }
   return "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg";
-}
-
-function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {
-  return { ...model };
-}
-
-function readRealtimeModelPreference(workspaceId: string): SessionRealtimeModel | null {
-  if (typeof localStorage === "undefined") return null;
-  try {
-    const value = localStorage.getItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`);
-    return isRealtimeModel(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtimeModel): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`, model);
-  } catch {
-    // Voice selection still works when browser storage is unavailable.
-  }
-}
-
-function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
-  return (
-    value === "opengeni-azure/gpt-live-1" ||
-    value === "gpt-live-1-boulder-alpha" ||
-    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
-    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
-    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
-    value === "supergrok/grok-voice-think-fast-2.0" ||
-    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
-    value === "workspace-gateway/openai/gpt-realtime-mini" ||
-    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
-  );
 }
 
 /** @deprecated Use the provider-neutral realtime names. */

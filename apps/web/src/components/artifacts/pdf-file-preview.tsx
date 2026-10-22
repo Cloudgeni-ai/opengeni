@@ -3,7 +3,7 @@ import { getDocument, GlobalWorkerOptions, type PDFDocumentProxy } from "pdfjs-d
 // Vite's ?url asset transform supplies the default URL export.
 // oxlint-disable-next-line import/default
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 

@@ -11,7 +11,7 @@ import { createRoot } from "react-dom/client";
 // directly is equivalent to Radix invoking it on an outside click, including
 // while a connect is in flight.
 let capturedOnOpenChange: ((open: boolean) => void) | null = null;
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({
     open,
     onOpenChange,
@@ -201,7 +201,7 @@ describe("QuickConnectDialog", () => {
       fieldLabel: "API key",
       onConnect: async () => {
         throw Object.assign(
-          new Error("OpenGeni API 403: missing permission: secret:write Reference: req-quick."),
+          new Error("Opengeni API 403: missing permission: secret:write Reference: req-quick."),
           { status: 403 },
         );
       },
@@ -217,7 +217,7 @@ describe("QuickConnectDialog", () => {
       expect(rendered.container.textContent).toContain(
         "You don't have permission to do this. Ask an admin for access.",
       );
-      expect(rendered.container.textContent).not.toContain("OpenGeni API");
+      expect(rendered.container.textContent).not.toContain("Opengeni API");
     } finally {
       await rendered.unmount();
     }

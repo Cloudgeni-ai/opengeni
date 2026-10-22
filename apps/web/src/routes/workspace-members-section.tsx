@@ -1,49 +1,50 @@
 // Settings > Access: who can use this workspace, with one role each. The same
 // AccessList rows and verbs as every other place access is edited.
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { SearchIcon, UserPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   RoleSelect,
   roleLabel,
   type RoleOption,
   type RoleValue,
-} from "@/components/ui/role-select";
-import { Section, SectionStack } from "@/components/ui/section";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/role-select";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
-import { orgLabel } from "@/lib/org";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   workspaceAccessLevels,
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-} from "@/types";
-import { FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/app/types";
+import { FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Roles and rows, shared with the organization-managed Access page.
@@ -179,6 +180,32 @@ export interface AddCandidate {
   /** One quiet line: email and organization role. */
   description: string;
   searchText: string;
+}
+
+/**
+ * Candidate lists the server refused, per client identity. A refusal is stable
+ * for that access generation, so remounting the Add people page (a route or
+ * app remount) shows the same notice without asking again. A new client (any
+ * access revalidation) starts clean, and an explicit retry clears the entry.
+ */
+const refusedCandidateLists = new WeakMap<object, Map<string, Error>>();
+
+export function refusedMemberCandidates(client: object, workspaceId: string): Error | null {
+  return refusedCandidateLists.get(client)?.get(workspaceId) ?? null;
+}
+
+export function rememberMemberCandidatesOutcome(
+  client: object,
+  workspaceId: string,
+  error: Error | null,
+): void {
+  let refused = refusedCandidateLists.get(client);
+  if (error && isPermissionDenied(error)) {
+    if (!refused) refusedCandidateLists.set(client, (refused = new Map()));
+    refused.set(workspaceId, error);
+  } else {
+    refused?.delete(workspaceId);
+  }
 }
 
 /** Show a search field once the list is long enough to need one. */
@@ -574,7 +601,7 @@ function MembersSectionContent({
   const activeWorkspace = context.workspaces?.find((workspace) => workspace.id === workspaceId);
   const workspaceName = activeWorkspace?.name ?? "this workspace";
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants ?? [])
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants ?? [])
     : "your organization";
   // A local install has one person: nobody else to add, and no People page.
   const singleUser = context.clientConfig?.productAccessMode === "local";
@@ -669,20 +696,32 @@ function MembersSectionContent({
     };
   }, [refresh]);
 
-  const loadMemberCandidates = useCallback(async () => {
-    const generation = ++candidateRefreshGenerationRef.current;
-    setMemberCandidates(null);
-    setMemberCandidatesError(null);
-    try {
-      const candidates = await client.listWorkspaceMemberCandidates(workspaceId);
-      if (candidateRefreshGenerationRef.current !== generation) return;
-      setMemberCandidates(candidates);
-    } catch (caught) {
-      if (candidateRefreshGenerationRef.current !== generation) return;
-      setMemberCandidates([]);
-      setMemberCandidatesError(caught instanceof Error ? caught : new Error(String(caught)));
-    }
-  }, [client, workspaceId]);
+  const loadMemberCandidates = useCallback(
+    async (options?: { retry?: boolean }) => {
+      const generation = ++candidateRefreshGenerationRef.current;
+      const refused = options?.retry ? null : refusedMemberCandidates(client, workspaceId);
+      if (refused) {
+        setMemberCandidates([]);
+        setMemberCandidatesError(refused);
+        return;
+      }
+      setMemberCandidates(null);
+      setMemberCandidatesError(null);
+      try {
+        const candidates = await client.listWorkspaceMemberCandidates(workspaceId);
+        rememberMemberCandidatesOutcome(client, workspaceId, null);
+        if (candidateRefreshGenerationRef.current !== generation) return;
+        setMemberCandidates(candidates);
+      } catch (caught) {
+        const error = caught instanceof Error ? caught : new Error(String(caught));
+        rememberMemberCandidatesOutcome(client, workspaceId, error);
+        if (candidateRefreshGenerationRef.current !== generation) return;
+        setMemberCandidates([]);
+        setMemberCandidatesError(error);
+      }
+    },
+    [client, workspaceId],
+  );
 
   useEffect(
     () => () => {
@@ -843,7 +882,7 @@ function MembersSectionContent({
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId }}
       search={{ section: "people" }}
-      className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+      className="rounded-sm font-medium og-link"
     >
       {children}
     </Link>
@@ -875,7 +914,7 @@ function MembersSectionContent({
           }) ?? null
         }
         loadError={memberCandidatesError}
-        onRetry={() => void loadMemberCandidates()}
+        onRetry={() => void loadMemberCandidates({ retry: true })}
         roles={ASSIGNABLE_WORKSPACE_ROLES as RoleOption<WorkspaceAccessLevel>[]}
         inviteLink={organizationPeopleLink("Invite people")}
         onSubmit={addMembers}
@@ -1021,7 +1060,7 @@ function MembersSectionContent({
                   <button
                     type="button"
                     onClick={() => setView({ kind: "add" })}
-                    className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+                    className="rounded-sm font-medium og-link"
                   >
                     Add people from {organizationName}
                   </button>{" "}

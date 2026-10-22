@@ -1,20 +1,20 @@
 /**
- * "Create with OpenGeni": say what should happen and how often, and a chat
- * researches the rest (repositories, variable sets, integrations) and creates
+ * "Create with Opengeni": say what should happen and how often, and a chat
+ * researches the rest (repositories, secrets, integrations) and creates
  * the schedule with its scheduling tools. Starts the chat the same way
- * Knowledge's "Ask OpenGeni" does: context.startSession on the workspace's
+ * Knowledge's "Ask Opengeni" does: context.startSession on the workspace's
  * model, then navigate to the new chat.
  */
 import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Field, TextArea } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { useAppContext } from "@/context";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
 
 import { scheduleAgentOpeningMessage } from "./schedule-model";
@@ -97,7 +97,7 @@ function CreateWithOpenGeniDialog({
       }}
       size="sm"
       title="Create a schedule with Opengeni"
-      description="It starts a chat, finds the repositories, variable sets and integrations the schedule needs, and creates it. It asks you only for what it can't find."
+      description="It starts a chat, finds the repositories, secrets and integrations the schedule needs, and creates it. It asks you only for what it can't find."
       submitLabel="Start chat"
       pendingLabel="Starting…"
       submitDisabled={catalog.loading || model === null || context.busy}

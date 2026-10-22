@@ -1,12 +1,12 @@
-# OpenGeni Deployment And Infrastructure
+# Opengeni Deployment And Infrastructure
 
-Use this reference to orient source discovery for OpenGeni deployment work. It is not a frozen operator manual; inspect the current repo before making exact claims.
+Use this reference to orient source discovery for Opengeni deployment work. It is not a frozen operator manual; inspect the current repo before making exact claims.
 
 ## Source Map
 
 - Deployment contract and profile renderer: `packages/deployment`.
 - Operator guide and commands: `docs/deployment.md`.
-- OpenGeni application chart: `deploy/helm/opengeni`.
+- Opengeni application chart: `deploy/helm/opengeni`.
 - Provider substrate examples: `deploy/terraform/azure`, `deploy/terraform/aws`, and `deploy/terraform/gcp`.
 - Optional stack wrappers for upstream platform charts: `deploy/stacks`.
 - Validation scripts: `scripts/deployment-preflight.ts`, `scripts/deployment-stack.ts`, `scripts/deployment-runtime-artifacts.ts`, `scripts/deployment-temporal-values.ts`, and `scripts/deployment-conformance.ts`.
@@ -27,11 +27,11 @@ commands, verification commands, and destroy commands.
 
 ## Durable Model
 
-OpenGeni should deploy as a provider-neutral application layer plus provider-specific substrate wiring:
+Opengeni should deploy as a provider-neutral application layer plus provider-specific substrate wiring:
 
-- The OpenGeni Helm chart owns API, web, worker, migrations, runtime config, app service accounts, app NetworkPolicies, and integration resources.
+- The Opengeni Helm chart owns API, web, worker, migrations, runtime config, app service accounts, app NetworkPolicies, and integration resources.
 - Managed or existing platform services provide durable Postgres, object storage, secrets, ingress/TLS, and observability.
-- NATS and Temporal are outside the OpenGeni app chart in production. They can be existing endpoints, managed services where available, or official upstream Helm charts installed by stack-wrapper commands.
+- NATS and Temporal are outside the Opengeni app chart in production. They can be existing endpoints, managed services where available, or official upstream Helm charts installed by stack-wrapper commands.
 - Built-in Postgres, Temporal, NATS, and MinIO chart templates are disposable fixtures for local development, CI, previews, and smoke/conformance use; do not present them as production substitutes.
 - Runtime artifacts generated from Terraform outputs split non-secret Helm values from private runtime env files. Generated artifacts belong in ignored local paths and must not be committed.
 
@@ -80,7 +80,7 @@ When planning a deployment, make these choices explicitly from current source:
 
 "Self-hosted" is overloaded in this repo — keep the two meanings distinct:
 
-- **Self-hosted DEPLOYMENT**: an operator runs the whole OpenGeni product
+- **Self-hosted DEPLOYMENT**: an operator runs the whole Opengeni product
   (API/web/worker + Postgres/NATS/Temporal/object storage) on their own
   infrastructure. This is what every profile above and `docs/deployment.md`
   describe.

@@ -1,4 +1,10 @@
-import type { LatencyMode, ReasoningEffort, SessionEvent, SessionTurn } from "@opengeni/sdk";
+import type {
+  LatencyMode,
+  ReasoningEffort,
+  SessionEvent,
+  SessionTurn,
+  SessionModelAccountChoiceResponse,
+} from "@opengeni/sdk";
 import { useCallback, useEffect } from "react";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { usePolledValue, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
@@ -18,6 +24,8 @@ export type LastStartedTurnPolicy = {
 export type UseLastStartedTurnPolicyOptions = ClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
+    /** Project the last lease-backed serving model without changing the accepted policy. */
+    includeServingModel?: boolean | undefined;
   };
 
 export type UseLastStartedTurnPolicyResult = {
@@ -38,6 +46,20 @@ function policyFromTurn(turn: SessionTurn | null | undefined): LastStartedTurnPo
   };
 }
 
+/** Never project an earlier turn's selection onto newly admitted work. */
+export function withServingModel(
+  policy: LastStartedTurnPolicy | null,
+  serving: SessionModelAccountChoiceResponse["serving"],
+): LastStartedTurnPolicy | null {
+  if (!policy || !serving || serving.turnId !== policy.turnId) return policy;
+  return {
+    turnId: policy.turnId,
+    model: serving.modelId,
+    reasoningEffort: serving.reasoningEffort,
+    latencyMode: serving.latencyMode,
+  };
+}
+
 /**
  * Model·effort·latency of the newest admitted turn (`turn.started`). This is
  * historical runtime truth for the session header — not the composer next-turn
@@ -49,6 +71,7 @@ export function useLastStartedTurnPolicy(
 ): UseLastStartedTurnPolicyResult {
   const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const includeServingModel = options.includeServingModel === true;
 
   const load = useCallback(
     async (signal?: AbortSignal): Promise<LastStartedTurnPolicy | null> => {
@@ -57,9 +80,12 @@ export function useLastStartedTurnPolicy(
         latestStarted: true,
         signal,
       });
-      return policyFromTurn(turns[0]);
+      const policy = policyFromTurn(turns[0]);
+      if (!includeServingModel || !policy || !client.getSessionModelAccount) return policy;
+      const choice = await client.getSessionModelAccount(workspaceId, sessionId);
+      return withServingModel(policy, choice.serving);
     },
-    [client, workspaceId, sessionId],
+    [client, workspaceId, sessionId, includeServingModel],
   );
 
   const { data, loading, error, refresh } = usePolledValue(load, {
@@ -80,7 +106,11 @@ export function useLastStartedTurnPolicy(
     client,
     workspaceId,
     sessionId,
-    isLastStartedTurnPolicyEvent,
+    (event) =>
+      isLastStartedTurnPolicyEvent(event) ||
+      (includeServingModel &&
+        (event.type === "subscription.account.selected" ||
+          event.type === "subscription.account.switched")),
     () => void refresh(),
     {
       events: options.events,

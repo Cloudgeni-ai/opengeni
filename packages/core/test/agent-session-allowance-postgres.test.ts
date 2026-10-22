@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { resolveModelProviderForTurn } from "@opengeni/config";
+import {
+  resolveModelProviderForTurn,
+  withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
+} from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import {
   applyCreditDebitAfterUse,
@@ -18,12 +22,9 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type SessionCommandActor,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   sendAgentSessionMessage,
   steerAgentSession,
@@ -315,6 +316,18 @@ describe("fresh delegated Agent Send and Steer allowance admission", () => {
         usageLimitsMode: "none",
         sandboxBackend: "none",
         modelCostPolicyJson: '{"scripted-model":"free"}',
+      });
+      expect((await command(scope, action)).replay).toBe(false);
+    }, 60_000);
+    test(`${action} admits with the request's workspace-resolved settings`, async () => {
+      // The tool gateway passes settings already resolved for the caller's
+      // workspace, with subscription providers overlaid, plus the unoverlaid
+      // source. The allowance check must resolve from the source.
+      const scope = await fixture();
+      const source = scope.deps.settings;
+      Object.assign(scope.deps, {
+        catalogSourceSettings: source,
+        settings: withCodexCatalogProvider(withXaiSubscriptionCatalogProvider(source)),
       });
       expect((await command(scope, action)).replay).toBe(false);
     }, 60_000);

@@ -38,12 +38,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { registerApiKeyRoutes } from "../src/routes/api-keys";
@@ -815,6 +812,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilitiesDefault.json()).toEqual({
       activated: true,
       canCreatePrivate: true,
+      defaultVisibility: "workspace",
       reason: "available",
     });
     const createdResponse = await owner.app.request(endpoint, {
@@ -849,6 +847,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilitiesDisabled.json()).toEqual({
       activated: false,
       canCreatePrivate: false,
+      defaultVisibility: "workspace",
       reason: "not_activated",
     });
     const replayResponse = await owner.app.request(endpoint, {
@@ -906,6 +905,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     expect(await capabilities.json()).toEqual({
       activated: true,
       canCreatePrivate: true,
+      defaultVisibility: "workspace",
       reason: "available",
     });
     const created = await human.app.request(

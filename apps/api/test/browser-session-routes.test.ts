@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CreateBrowserSessionRequest, type AccessGrant, type FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
@@ -16,13 +16,56 @@ import {
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
   browserScreenshotError,
+  browserTabDiagnosisError,
   browserCreateInput,
+  withInitialView,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
+
+test("a create returns the launch view only for the launch it activated in this request", () => {
+  const browserSessionId = "44444444-4444-4444-8444-444444444444";
+  const launched = {
+    browserSessionId,
+    controllerGeneration: "generation-1",
+    observation: { target: { id: "tab-1" } },
+    targets: [{ id: "tab-1" }],
+  } as unknown as Parameters<typeof withInitialView>[1];
+  const response = (
+    change: { lifecycle?: string; generation?: string; state?: string; replayed?: boolean } = {},
+  ) => ({
+    session: {
+      id: browserSessionId,
+      lifecycle: change.lifecycle ?? "active",
+      controller: { controllerGeneration: change.generation ?? "generation-1" },
+    },
+    operation: { state: change.state ?? "completed", replayed: change.replayed ?? false },
+  });
+  expect(withInitialView(response(), launched)).toEqual({
+    ...response(),
+    initialView: { targets: launched!.targets, observation: launched!.observation },
+  });
+  for (const other of [
+    { replayed: true },
+    { state: "failed" },
+    { lifecycle: "failed" },
+    { generation: "generation-2" },
+  ]) {
+    expect(withInitialView(response(other), launched)).toEqual(response(other));
+  }
+  // An older controller that did not report its tabs, or no launch at all.
+  expect(withInitialView(response(), { ...launched!, targets: undefined })).toEqual(response());
+  expect(withInitialView(response(), null)).toEqual(response());
+  // A controller's launch notice rides along with the view it belongs to.
+  const notice = "This browser uses the machine's network directly.";
+  expect(withInitialView(response(), { ...launched!, notice })).toEqual({
+    ...response(),
+    initialView: { targets: launched!.targets, observation: launched!.observation, notice },
+  });
+});
 
 test("automatic managed directory recovery preserves current authority and refused outcomes", async () => {
   const directory = await mkdtemp("/tmp/og-api-working-recovery-");
@@ -131,7 +174,114 @@ test("automatic managed directory recovery preserves current authority and refus
   }
 }, 30_000);
 
+test("metadata-only open uses control authority, refuses stale bindings and preserves unknown outcomes", async () => {
+  const directory = await mkdtemp("/tmp/og-api-target-inventory-");
+  const script = join(directory, "synthetic-route.ts");
+  await writeFile(script, `(${automaticBrowserRecoveryFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href, "inventory"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual([
+      {
+        scenario: "inventory",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "default",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: true,
+      },
+      ...["wrong-session", "wrong-controller", "wrong-target"].map((scenario) => ({
+        scenario,
+        status: 502,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      })),
+      {
+        scenario: "unknown",
+        status: 409,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "permission-denied",
+        status: 403,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 0,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "access-revoked",
+        status: 404,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "holder-lost",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "machine-moved",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 async function automaticBrowserRecoveryFixture() {
+  const inventoryOnly = process.argv[3] === "inventory";
+  let opens = 0;
   const routeHref = process.argv[2]!;
   const apiDirectory = new URL("..", routeHref).pathname;
   const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
@@ -211,11 +361,13 @@ async function automaticBrowserRecoveryFixture() {
       id: sourceSessionId,
       workspaceId,
       activeSandboxId:
-        state.missing && state.scenario === "machine-moved" ? randomUUID() : machineId,
+        (state.missing || inventoryOnly) && state.scenario === "machine-moved"
+          ? randomUUID()
+          : machineId,
     }),
     touchBrowserSessionController: async () => {
       state.touches++;
-      return !(state.missing && state.scenario === "holder-lost");
+      return !((state.missing || inventoryOnly) && state.scenario === "holder-lost");
     },
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     markEphemeralBrowserSessionLost: async () => {
@@ -225,10 +377,27 @@ async function automaticBrowserRecoveryFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
-    requireAccessGrant: async () => grant,
-    requireSessionAuthorization: async () => {
+    requireAccessGrant: async (
+      _context: unknown,
+      _deps: unknown,
+      _workspace: string,
+      permission: string,
+    ) => {
+      if (inventoryOnly && permission !== "sessions:control")
+        throw new Error("synthetic permission mismatch");
+      if (inventoryOnly && state.scenario === "permission-denied")
+        throw new FixtureHTTPException(403);
+      return grant;
+    },
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
       state.sourceChecks++;
-      if (state.missing && state.scenario === "access-revoked")
+      if (inventoryOnly && input.operation !== "session.control")
+        throw new Error("synthetic source operation mismatch");
+      if ((state.missing || inventoryOnly) && state.scenario === "access-revoked")
         throw new core.SessionAuthorizationDeniedError("revoked");
       return {};
     },
@@ -296,6 +465,32 @@ async function automaticBrowserRecoveryFixture() {
     hostname: "127.0.0.1",
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      if (
+        inventoryOnly &&
+        request.method === "POST" &&
+        (path.endsWith("/open-with-inventory") || path.endsWith("/targets"))
+      ) {
+        opens++;
+        if (request.headers.get("authorization") !== `Bearer ${expectedTokens.controlToken}`)
+          throw new Error("synthetic control authority mismatch");
+        const body = await request.json();
+        if (JSON.stringify(body) !== JSON.stringify({ url: "https://new.example.test/" }))
+          throw new Error("synthetic open request mismatch");
+        if (state.scenario === "unknown") return failure(409, "outcome_unknown");
+        if (state.scenario === "default") return success(observation);
+        return success({
+          browserSessionId: state.scenario === "wrong-session" ? randomUUID() : browserSessionId,
+          controllerGeneration:
+            state.scenario === "wrong-controller" ? randomUUID() : controllerGeneration,
+          targets: [
+            {
+              ...observation.target,
+              controllerGeneration:
+                state.scenario === "wrong-target" ? randomUUID() : controllerGeneration,
+            },
+          ],
+        });
+      }
       if (request.method === "GET" && path.endsWith("/targets")) {
         state.reads++;
         if (request.headers.get("authorization") !== `Bearer ${expectedTokens.viewToken}`)
@@ -338,8 +533,19 @@ async function automaticBrowserRecoveryFixture() {
       _services: unknown,
       _context: unknown,
       callback: (handle: unknown) => Promise<unknown>,
-    ) =>
-      await callback({
+    ) => {
+      if (
+        inventoryOnly &&
+        (_context as { operation: string; retryControllerTransport: boolean }).operation !==
+          "browser.control"
+      )
+        throw new Error("synthetic channel operation mismatch");
+      if (
+        inventoryOnly &&
+        (_context as { retryControllerTransport: boolean }).retryControllerTransport !== false
+      )
+        throw new Error("synthetic mutation replay posture mismatch");
+      return await callback({
         routingSession: {
           prime: async () => ({
             kind: "selfhosted",
@@ -354,7 +560,8 @@ async function automaticBrowserRecoveryFixture() {
             },
           }),
         },
-      }),
+      });
+    },
     withChannelA: async () => {
       throw new Error("unexpected synthetic lifecycle operation");
     },
@@ -380,6 +587,53 @@ async function automaticBrowserRecoveryFixture() {
   };
   try {
     const results = [];
+    if (inventoryOnly) {
+      for (const scenario of [
+        "inventory",
+        "default",
+        "wrong-session",
+        "wrong-controller",
+        "wrong-target",
+        "unknown",
+        "permission-denied",
+        "access-revoked",
+        "holder-lost",
+        "machine-moved",
+      ]) {
+        state = {
+          scenario,
+          missing: false,
+          recovered: true,
+          reads: 0,
+          creates: [],
+          sourceChecks: 0,
+          touches: 0,
+          lost: 0,
+        };
+        opens = 0;
+        const response = await app.request(
+          `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets${scenario === "default" ? "" : "/open-with-inventory"}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: "https://new.example.test/" }),
+          },
+        );
+        const body = (await response.json()) as Record<string, unknown>;
+        results.push({
+          scenario,
+          status: response.status,
+          opens,
+          reads: state.reads,
+          creates: state.creates.length,
+          sourceChecks: state.sourceChecks,
+          touches: state.touches,
+          content: "semantic" in body,
+        });
+      }
+      console.log(JSON.stringify(results));
+      return;
+    }
     for (const scenario of [
       "recovered",
       "unknown",
@@ -453,6 +707,86 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const internal = new BrowserControlRequestError(409, {
+      code: "tab_not_responding",
+      message: "This tab is not responding. Reload or close it.",
+      retryable: false,
+    });
+    app.on(["GET", "POST"], "/v1/test/tab-not-responding", () => {
+      throw browserTabDiagnosisError(internal);
+    });
+    for (const method of ["GET", "POST"] as const) {
+      const response = await app.request("http://localhost/v1/test/tab-not-responding", {
+        method,
+        headers: { "x-opengeni-correlation-id": "hung-tab-request" },
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: {
+          status: 409,
+          code: "tab_not_responding",
+          message: internal.error.message,
+          retryable: false,
+          requestId: "hung-tab-request",
+        },
+      });
+    }
+    const uncertain = new BrowserControlRequestError(409, {
+      code: "outcome_unknown",
+      message: "input sent",
+      retryable: false,
+    });
+    expect(browserTabDiagnosisError(uncertain)).toBe(uncertain);
+  });
+
+  test("publishes a crashed tab as its own definite diagnosis, not a retryable outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const crashed = new BrowserControlRequestError(409, {
+      code: "tab_crashed",
+      message:
+        "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
+      retryable: false,
+    });
+    app.get("/v1/test/tab-crashed", () => {
+      throw browserTabDiagnosisError(crashed);
+    });
+    const response = await app.request("http://localhost/v1/test/tab-crashed", {
+      headers: { "x-opengeni-correlation-id": "crashed-tab-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "tab_crashed",
+        message: crashed.error.message,
+        retryable: false,
+        requestId: "crashed-tab-request",
+      },
+    });
+    // Any other unavailable verdict keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "PRIVATE /home/user/profile detail",
+      retryable: true,
+    });
+    expect(browserTabDiagnosisError(other)).toBe(other);
+  });
+
   test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {
     const app = createApp({
       settings: testSettings(),
@@ -494,7 +828,7 @@ describe("BrowserSession route discipline", () => {
       new Error("unexpected"),
       new BrowserControlRequestError(403, {
         code: "permission_denied",
-        message: "protected authentication",
+        message: "browser action denied",
         retryable: false,
       }),
       new BrowserControlRequestError(409, {
@@ -504,6 +838,26 @@ describe("BrowserSession route discipline", () => {
       }),
     ])
       expect(browserScreenshotError(error)).toBe(error);
+  });
+
+  test("names an open JavaScript dialog as the reason a tab cannot be captured, without page text", async () => {
+    const internal = new BrowserControlRequestError(409, {
+      code: "invalid_action",
+      message: 'A JavaScript confirm dialog is open in this tab: "PRIVATE page text".',
+      retryable: false,
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as HTTPException).status).toBe(409);
+    expect((projected as Error).cause).toBe(internal);
+    expect((projected as Error).message).toContain("handle_dialog");
+    expect((projected as Error).message).not.toContain("PRIVATE");
+    const other = new BrowserControlRequestError(400, {
+      code: "invalid_action",
+      message: "screenshot quality is out of range",
+      retryable: false,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
   });
 
   test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
@@ -632,7 +986,6 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
@@ -648,7 +1001,7 @@ describe("BrowserSession route discipline", () => {
       expect(source).toContain(route);
     }
     expect(await readFile(appUrl, "utf8")).toContain(
-      "registerBrowserSessionRoutes(app, routeDeps)",
+      "registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets })",
     );
   });
 
@@ -736,28 +1089,32 @@ describe("BrowserSession route discipline", () => {
     );
   });
 
-  test("brokers protected auth outside model-visible browser actions", async () => {
+  test("shares attempt reads only until the controller call, and lets a denial win", async () => {
     const source = await readFile(routeUrl, "utf8");
-    const start = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+    const active = source.slice(
+      source.indexOf("async function withActiveBrowserController"),
+      source.indexOf("async function throwBrowserSourcePlacementChanged"),
     );
-    const end = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
-      start,
+    // The source-session check and Channel-A's machine-route check prove the
+    // same live attempt back to back; the controller call and anything after
+    // it read fresh.
+    expect(active).toContain("withSessionAuthorizationReadReuse(");
+    const run = active.slice(active.indexOf("const run = async ("));
+    expect(run.indexOf("authorizationReads.handOffToToolDispatch()")).toBeGreaterThan(-1);
+    expect(run.indexOf("authorizationReads.handOffToToolDispatch()")).toBeLessThan(
+      run.indexOf("await callback(controller)"),
     );
-    const route = source.slice(start, end);
-    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
-      route.indexOf("withActiveBrowserController"),
+    // The source session is read alongside authorization; a denial is
+    // surfaced first and the session is used only once authorized.
+    expect(active.indexOf('if (authorized.status === "rejected")')).toBeLessThan(
+      active.indexOf('if (sourceRead.status === "rejected")'),
     );
-    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
-      route.indexOf("loadBoundBrowserCredential"),
-    );
-    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
-      route.indexOf("sessionClient.protectedAuthFill"),
-    );
-    expect(route).toContain("resolveProtectedAuthFieldValues");
-    expect(route).toContain("protectedAuthReceipt");
-    expect(route).not.toContain("BrowserActionCommand.parse");
+  });
+
+  test("serves no brokered credential fill route; logins use secret references in actions", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    expect(source).not.toContain("/protected-fill");
+    expect(source).not.toContain("protectedAuth");
   });
 
   test("keeps provider auth durable while gating its hosted flow to humans", async () => {
@@ -818,9 +1175,47 @@ describe("BrowserSession route discipline", () => {
       route.indexOf("sessionClient.stageWorkspaceFiles"),
     );
     expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
-      route.indexOf("sessionClient.action(command)"),
+      route.indexOf("sessionClient.action("),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("resolves agent secret references last, right before the canonical action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    // The public command is validated before any reference is resolved.
+    expect(route.indexOf("BrowserActionCommand.parse(commandFields)")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("resolveInteractionSecretValues")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    expect(route).toContain("texts: browserActionSecretTexts(request.action)");
+    expect(route).toContain('surface: "browser"');
+    // Passkeys sync before (taking over the principal's lease, settled before
+    // dispatch) and after the action, never instead of it.
+    expect(route.match(/passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("const passkeyTakeover = passkeySync(true)")).toBeLessThan(
+      route.indexOf("await passkeyTakeover"),
+    );
+    expect(route.indexOf("await passkeyTakeover")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    expect(route.indexOf("sessionClient.action(")).toBeLessThan(
+      route.indexOf("void passkeySync(false)"),
+    );
+    // The response is the controller receipt; the side map is never echoed.
+    expect(route).not.toContain("secretValues: request");
   });
 
   test("binds agent uploads to the frozen initiating human, not the worker subject", () => {
@@ -902,6 +1297,14 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
+    expect(route).toContain("createParents: true");
+    // A download kept as a workspace file is saved from that file first, so
+    // it needs no running browser.
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeGreaterThanOrEqual(0);
+    expect(route.indexOf("getRetainedBrowserDownload")).toBeLessThan(
+      route.indexOf("sessionClient.download(downloadId)"),
+    );
+    expect(route).toContain("retained: { fileId: kept.fileId, uploadId: kept.uploadId }");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
@@ -956,7 +1359,7 @@ describe("BrowserSession route discipline", () => {
     ).toBe(false);
 
     const source = await readFile(routeUrl, "utf8");
-    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(3);
+    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(4);
     expect(source).toContain(
       'nativeBrowserControl: typeof session.ensureBrowserControl === "function"',
     );
@@ -988,6 +1391,76 @@ describe("BrowserSession route discipline", () => {
     expect(route).toContain("rootKey.fill(0)");
   });
 
+  test("ends a browser whose controller is gone in the control plane, fenced by its generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    const gone = route.indexOf(
+      "browserControllerGone(grant, workspaceId, record.session.placement)",
+    );
+    expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
+    // The gone check runs before any controller dispatch, and the server-side
+    // completion keeps the bound generation so that controller stays fenced.
+    expect(gone).toBeLessThan(route.indexOf("dispatchBrowserSessionOperation"));
+    expect(gone).toBeLessThan(route.indexOf("withBrowserPlacement("));
+    const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
+    expect(completion).toContain(
+      "expectedControllerGeneration: binding?.controllerGeneration ?? null",
+    );
+    expect(completion).toContain("releaseInteractionHolder");
+    expect(completion).toContain("releaseBrowserPasskeys");
+    const helper = source.slice(source.indexOf("async function browserControllerGone"));
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("interactionControllerGone(");
+  });
+
+  test("only the person's explicit end may discard a lost browser's preserved runtime", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    expect(route).toContain("endBrowserDiscardingLostRuntime(client");
+    // Cleanup after a failed or expired resume keeps a possibly accepted
+    // launch preserved for recovery.
+    expect(source.split("endBrowserDiscardingLostRuntime(").length - 1).toBe(1);
+    expect(source).not.toContain("discardWorkingRuntime");
+  });
+
+  test("adopts a preserved working copy only under existing control authority, attributed before any effect", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    for (const route of [
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId"',
+    ]) {
+      expect(source).toContain(route);
+    }
+    const helperStart = source.indexOf("async function withPreservedWorkingCopy");
+    const helper = source.slice(helperStart, source.indexOf("app.post(", helperStart));
+    // The same session.control + placement authority as any browser control;
+    // no extra role gate, and a missing controller session is never relaunched.
+    expect(helper).toContain('"sessions:control"');
+    expect(helper).toContain('"session.control"');
+    expect(helper).toContain('"browser.control"');
+    expect(helper).toMatch(/\/\/ A missing controller session[\s\S]*false,\n {4}\);/u);
+    expect(helper).toContain('browserSessionStorageMode(record.session) !== "private_profile"');
+    const adoptStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",',
+    );
+    const adopt = source.slice(adoptStart, source.indexOf("app.get(", adoptStart));
+    expect(adopt.indexOf("parseJsonBody(context, BrowserWorkingCopyAdoptionRequest)")).toBeLessThan(
+      adopt.indexOf("withPreservedWorkingCopy("),
+    );
+    expect(adopt.indexOf('"browserSession.working_copy.adoption_requested"')).toBeLessThan(
+      adopt.indexOf("client.adoptWorkingCopy("),
+    );
+    expect(adopt.split("client.adoptWorkingCopy(").length - 1).toBe(1);
+    // Freshness is reported as unknown, never inferred.
+    expect(source).toContain('freshness: { status: "unknown"');
+  });
+
   test("suspends only after encrypted capture and resumes only from durable authority", async () => {
     const source = await readFile(routeUrl, "utf8");
     const suspendStart = source.indexOf(
@@ -1001,15 +1474,63 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
       resumeStart,
     );
-    const suspend = source.slice(suspendStart, resumeStart);
+    const suspendRoute = source.slice(suspendStart, resumeStart);
+    const checkpointStart = source.indexOf("async function suspendBrowserSessionCheckpoint(");
+    const suspend = source.slice(
+      checkpointStart,
+      source.indexOf("async function withBrowserPlacement<T>(", checkpointStart),
+    );
     const resume = source.slice(resumeStart, endStart);
+    // The route authorizes the browser's own chat, then saves through the
+    // shared checkpoint with controller recovery.
+    expect(
+      suspendRoute.indexOf(
+        'authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control")',
+      ),
+    ).toBeLessThan(suspendRoute.indexOf("suspendBrowserSessionCheckpoint("));
+    expect(suspendRoute).toContain("{ before, recoverController: true }");
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
+    // A controller that restarted is recovered from the browser's working copy
+    // before the suspension is prepared, so the capture saves the intact
+    // profile instead of recording the browser as lost.
+    expect(suspend.indexOf("if (checkpoint.recoverController)")).toBeLessThan(
+      suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend("),
+    );
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeGreaterThan(0);
+    expect(suspend.indexOf("recoverRestartedBrowserControllerBeforeSuspend(")).toBeLessThan(
+      suspend.indexOf("prepareBrowserSessionSuspend("),
+    );
+    const recoveryStart = source.indexOf(
+      "async function recoverRestartedBrowserControllerBeforeSuspend(",
+    );
+    const recovery = source.slice(
+      recoveryStart,
+      source.indexOf("async function recoverActiveBrowserController(", recoveryStart),
+    );
+    expect(recovery).toContain('browserSessionStorageMode(before.session) !== "private_profile"');
+    expect(recovery).toContain("await withActiveBrowserController(");
+    expect(recovery).toContain("await sessionClient.listTargets();");
+    // Recovery that fails leaves suspension to record the loss as before.
+    expect(recovery).toContain('console.warn("browser.suspend_controller_recovery_failed"');
+    // Signing the upload and reaching the controller can fail, so both happen
+    // while the operation is only prepared: a failure restores the browser to
+    // active instead of stranding it mid-suspension.
+    expect(suspend.indexOf("createPutUrl")).toBeGreaterThan(0);
+    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("provisionController("));
+    expect(suspend.indexOf("provisionController(")).toBeLessThan(
+      suspend.indexOf("dispatchBrowserSessionOperation"),
+    );
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
       suspend.indexOf("stateUpload"),
     );
-    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
-    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
+    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("client.captureState"));
+    // Suspension removes the working directory: completed downloads are kept
+    // as files before the capture stops the browser.
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeGreaterThanOrEqual(0);
+    expect(suspend.indexOf("retainBrowserDownloads(")).toBeLessThan(
+      suspend.indexOf("client.captureState"),
+    );
     expect(suspend).toContain('afterCapture: "stop"');
     expect(suspend.indexOf("client.captureState")).toBeLessThan(
       suspend.indexOf("commitBrowserSessionSuspension"),
@@ -1030,6 +1551,207 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("client.createSession"),
     );
     expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
+    // Any failure between preparation and dispatch (restore preparation, an
+    // offline or moved placement) settles the prepared resume back to
+    // suspended instead of leaving the browser restoring forever.
+    expect(resume.indexOf("preparedForDispatch = true")).toBeGreaterThan(
+      resume.indexOf("if (isTerminalOperation(prepared.operation.state))"),
+    );
+    expect(resume.indexOf("preparedForDispatch = true")).toBeLessThan(
+      resume.indexOf("prepareBrowserPrivateCheckpointRestore"),
+    );
+    expect(resume.lastIndexOf("failBrowserSessionResumePreparation")).toBeGreaterThan(
+      resume.indexOf("withBrowserPlacement"),
+    );
+  });
+
+  test("a full controller saves its least recently used idle browser once, then retries the create", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const createStart = source.indexOf('"browser.create",');
+    const create = source.slice(
+      source.lastIndexOf("let capacitySuspendAllowed = true;", createStart),
+      source.indexOf("withInitialView(response, launch.result)", createStart),
+    );
+    // Only a capacity error, and only once, turns into a save-and-retry; any
+    // other failure, or a second full controller, fails the create as before.
+    expect(
+      create.indexOf("capacitySuspendAllowed && browserControllerCapacityExhausted(error)"),
+    ).toBeLessThan(create.indexOf("failBrowserSessionOperation("));
+    expect(create).toContain("capacitySuspendAllowed = false;");
+    expect(create).toContain("if (!(error instanceof BrowserControllerFull)) throw error;");
+    expect(create.indexOf("await suspendLeastRecentlyUsedBrowser(")).toBeLessThan(
+      create.lastIndexOf("response = await createOnPlacement();"),
+    );
+    const helperStart = source.indexOf("async function suspendLeastRecentlyUsedBrowser(");
+    const helper = source.slice(
+      helperStart,
+      source.indexOf("async function suspendBrowserSessionCheckpoint(", helperStart),
+    );
+    // Candidates come from the same controller instance, least recently used
+    // first, and are claimed atomically as still idle on that controller
+    // before being saved through the ordinary private checkpoint routed via
+    // the creating chat on that same placement.
+    expect(helper).toContain("placementInstanceId: full.placementInstanceId");
+    expect(helper).toContain("excludeBrowserSessionId: creatingBrowserSessionId");
+    expect(helper).toContain("Date.parse(before.session.lastUsedAt) >= idleBefore");
+    expect(helper).toContain("recoverController: false");
+    expect(helper).toContain(
+      "controllerGeneration: before.session.controller.controllerGeneration",
+    );
+    // A candidate that no longer qualifies is skipped; a save that failed in
+    // an uncertain state ends the search, so one outage strands at most one.
+    expect(helper).toContain(
+      "if (error instanceof BrowserCapacitySuspendClaimRejectedError) continue;",
+    );
+    expect(helper).toContain('if (after?.session.lifecycle !== "active") return false;');
+    expect(helper).toContain('console.warn("browser.capacity_suspend_failed"');
+    // The waiting create or resume stays dispatched while room is made, so a
+    // slow save does not let the transition reaper settle it as lost.
+    const heartbeat = helper.indexOf("await withInteractionHolderHeartbeat(");
+    expect(heartbeat).toBeGreaterThan(-1);
+    const heartbeatInput = helper.slice(heartbeat, helper.indexOf("async () =>", heartbeat));
+    expect(heartbeatInput).toContain("operationId: full.waiting.operationId");
+    expect(heartbeatInput).toContain("resourceId: full.waiting.browserSessionId");
+    expect(heartbeatInput).toContain("controllerGeneration: full.waiting.controllerGeneration");
+    expect(heartbeatInput).toContain("sandboxGroupId: full.waiting.sandboxGroupId");
+    expect(helper.indexOf("await saveLeastRecentlyUsedBrowser(")).toBeGreaterThan(heartbeat);
+  });
+
+  test("a resume that reaches a full controller saves its least recently used idle browser once, then retries", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Only a capacity error, and only once, turns into a save-and-retry before
+    // the resume is failed; the browser being resumed is never the one saved.
+    expect(resume).toContain("let capacitySuspendAllowed = true;");
+    expect(
+      resume.indexOf("capacitySuspendAllowed && browserControllerCapacityExhausted(error)"),
+    ).toBeLessThan(resume.indexOf("failBrowserSessionResume(deps.db"));
+    expect(resume).toContain("capacitySuspendAllowed = false;");
+    expect(resume).toContain("if (!(error instanceof BrowserControllerFull)) throw error;");
+    const save = resume.indexOf("await suspendLeastRecentlyUsedBrowser(");
+    expect(save).toBeGreaterThan(-1);
+    expect(resume.slice(save, resume.indexOf(");", save))).toContain("browserSessionId");
+    expect(save).toBeLessThan(resume.lastIndexOf("response = await resumeOnPlacement();"));
+    // Its restore download is signed for minutes, so the retry signs it anew
+    // after the save instead of reusing a grant that may have expired.
+    const reprepare = resume.indexOf("await prepareRestore();", save);
+    expect(reprepare).toBeGreaterThan(save);
+    expect(reprepare).toBeLessThan(resume.lastIndexOf("response = await resumeOnPlacement();"));
+  });
+
+  test("resumes an expired resume only after ending its retained controller generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_transition_expired"');
+    expect(resume.indexOf("settleExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("prepareBrowserSessionResume(deps.db"),
+    );
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // Ineligible losses (create, suspend, end) never reach a controller call.
+    expect(settle.indexOf("if (!expired) return;")).toBeGreaterThan(
+      settle.indexOf("getExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle.indexOf("if (!expired) return;")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
+    );
+    expect(settle).toContain("binding.placementInstanceId");
+    // An interrupted launch is set aside intact, never discarded.
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeGreaterThan(-1);
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeLessThan(
+      settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle).not.toContain("discardWorkingRuntime");
+    expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
+  });
+
+  test("continues an expired resume on its retained working copy before restoring over it", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Continuation is tried first; only a refusal falls back to settle + restore.
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeGreaterThan(-1);
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    expect(resume.indexOf("if (continued)")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    expect(continuation).toContain(
+      "if (!expired?.controllerGeneration) return { unavailable: null };",
+    );
+    expect(continuation).toContain(
+      'browserSessionStorageMode(record.session) !== "private_profile"',
+    );
+    // The same generation is re-adopted from its own working directory on the
+    // controller instance that holds it; nothing is restored or discarded.
+    expect(continuation).toContain("retained?.placementInstanceId ?? null");
+    expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
+    expect(continuation).toContain("recoverExistingWorkingDirectory: true");
+    // Its operation is recorded only after adoption, so the heartbeat holds the
+    // expired resume itself rather than a not-yet-recorded operation.
+    expect(continuation).toContain("continuesExpiredBrowserResume: true");
+    expect(continuation).not.toContain("restore:");
+    expect(continuation).not.toContain("endSession");
+    expect(continuation).not.toContain("removeState");
+    expect(continuation).toContain('error.error.code === "resource_unavailable"');
+    expect(continuation.indexOf("client.createSession(")).toBeLessThan(
+      continuation.indexOf("continueExpiredBrowserSessionResume(deps.db"),
+    );
+  });
+
+  test("continues a browser lost to a restarted controller only from its working copy", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resume = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"'),
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_resource_missing"');
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    // Its cleared binding is rebuilt for the failed suspension's generation on
+    // the placement instance that now hosts the controller.
+    expect(continuation).toContain("const binding = retained ?? {");
+    expect(continuation).toContain("placementInstanceId: placement.placementInstanceId,");
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // It ran past its checkpoint, so it is never settled back to it.
+    expect(settle.indexOf("if (!expired.settleable)")).toBeGreaterThan(-1);
+    expect(settle.indexOf("if (!expired.settleable)")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
+    );
+    // The refusal says why the copy could not be continued: the controller's
+    // own explanation, or which precondition it failed.
+    expect(continuation).toContain("return { unavailable: error.error.message };");
+    expect(resume).toContain("continued.unavailable,");
+    expect(settle).toContain("could not be recovered. ${unavailable}");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {
@@ -1093,3 +1815,450 @@ describe("BrowserSession route discipline", () => {
     );
   });
 });
+
+test("working copy routes carry the browser record's exact authority, and only adoption changes anything", async () => {
+  const directory = await mkdtemp("/tmp/og-api-working-copy-");
+  const script = join(directory, "synthetic-working-copy-route.ts");
+  await writeFile(script, `(${workingCopyRoutesFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual([
+      {
+        scenario: "inspect",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+      },
+      {
+        scenario: "status",
+        status: 200,
+        calls: ["GET /working-copy/adoptions/:operationId"],
+        exactAuthority: true,
+        audits: [],
+        phase: "receipt",
+      },
+      {
+        scenario: "adopt",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+      },
+      {
+        scenario: "adopt-token-rotated",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+      },
+      {
+        scenario: "revert",
+        status: 200,
+        calls: ["POST /working-copy/adoptions/:operationId/revert"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.revert_requested",
+          "controller",
+          "browserSession.working_copy.revert_settled",
+        ],
+        phase: "reverted",
+      },
+      ...["holder-lost", "machine-moved", "access-revoked"].map((scenario) => ({
+        scenario,
+        // A revoked source session hides the browser instead of refusing it.
+        status: scenario === "access-revoked" ? 404 : 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+      })),
+      // A lost browser has no active binding. Its working copy is reached
+      // through the generation its last launch retained, as resume reaches it,
+      // with the same exact authority; a loss with no retained copy refuses.
+      {
+        scenario: "lost-inspect",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-adopt",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+        provisioned: 1,
+      },
+      {
+        scenario: "lost-no-copy",
+        status: 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+        message:
+          "This browser was lost without a working copy that its controller still keeps, so there is nothing to inspect or adopt. Resume it to restore its last saved state.",
+        provisioned: 0,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+/** Drives the three working copy routes in a separate process against a fake
+ * controller, recording every controller request and audit write. */
+async function workingCopyRoutesFixture() {
+  const routeHref = process.argv[2]!;
+  const apiDirectory = new URL("..", routeHref).pathname;
+  const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
+  const { mock } = await import("bun:test");
+  const { randomUUID } = await import("node:crypto");
+  const { Hono } = (await import(resolveFromApi("hono"))) as typeof import("hono");
+  const { HTTPException: FixtureHTTPException } = (await import(
+    resolveFromApi("hono/http-exception")
+  )) as typeof import("hono/http-exception");
+  const db = (await import(resolveFromApi("@opengeni/db"))) as typeof import("@opengeni/db");
+  const core = (await import(resolveFromApi("@opengeni/core"))) as typeof import("@opengeni/core");
+  const { testSettings: fixtureSettings } = (await import(
+    resolveFromApi("@opengeni/testing")
+  )) as typeof import("@opengeni/testing");
+  const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
+  const accountId = randomUUID(),
+    workspaceId = randomUUID(),
+    browserSessionId = randomUUID(),
+    sourceSessionId = randomUUID(),
+    machineId = randomUUID(),
+    instanceId = randomUUID(),
+    controllerGeneration = randomUUID(),
+    operationId = randomUUID(),
+    rootSecret = "synthetic-controller-authority",
+    digest = "d".repeat(64);
+  const grant = {
+    accountId,
+    workspaceId,
+    subjectId: "synthetic-user",
+    permissions: ["sessions:control"],
+  };
+  const placement = { kind: "connected_machine", sandboxId: machineId };
+  let scenario = "inspect";
+  let calls: string[] = [];
+  let audits: string[] = [];
+  let exactAuthority = true;
+  let provisioned = 0;
+  const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
+  mock.module(resolveFromApi("@opengeni/db"), () => ({
+    ...db,
+    getBrowserSessionControlRecord: async () => ({
+      sourceSessionId,
+      tokenGeneration: tokenGeneration(),
+      controllerHostSandboxGroupId: null,
+      networkRouteAuthority: null,
+      session: {
+        id: browserSessionId,
+        workspaceId,
+        lifecycle: scenario.startsWith("lost") ? "lost" : "active",
+        placement,
+        // A lost browser keeps no active binding; its last launch's
+        // generation is retained by the expired resume instead.
+        controller: scenario.startsWith("lost")
+          ? null
+          : {
+              controllerId: "opengeni-browserd",
+              controllerGeneration,
+              placementInstanceId: instanceId,
+            },
+        driverId: "opengeni.cdp.v1",
+        engine: "chromium",
+        headless: true,
+        linkedComputerSessionId: null,
+        networkRouteId: null,
+      },
+    }),
+    getSession: async () => ({
+      id: sourceSessionId,
+      workspaceId,
+      activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
+    }),
+    touchBrowserSessionController: async () => scenario !== "holder-lost",
+    getExpiredBrowserSessionResume: async () =>
+      scenario === "lost-no-copy" ? null : { controllerGeneration, settleable: false },
+    terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
+    getBrowserPrivateCheckpointAuthority: async () => null,
+    recordAuditEvent: async (_db: unknown, event: { action: string }) => {
+      audits.push(event.action);
+    },
+  }));
+  mock.module(resolveFromApi("@opengeni/core"), () => ({
+    ...core,
+    requireAccessGrant: async () => grant,
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
+      if (input.operation !== "session.control") throw new Error("synthetic operation mismatch");
+      if (scenario === "access-revoked") throw new core.SessionAuthorizationDeniedError("revoked");
+      return {};
+    },
+  }));
+  const success = (data: unknown) => Response.json({ protocolVersion: 1, ok: true, data });
+  const expectedAdmin = authority.deriveBrowserControllerAdminToken({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement,
+    placementInstanceId: instanceId,
+  });
+  const adoption = (phase: string) => ({
+    operationId,
+    browserSessionId,
+    controllerGeneration,
+    manifestDigest: digest,
+    phase,
+    failureCode: null,
+    retainedDirectories: [],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      const prefix = `/v1/browser-sessions/${browserSessionId}`;
+      const route = path.startsWith(prefix)
+        ? path.slice(prefix.length).replace(operationId, ":operationId")
+        : path;
+      calls.push(`${request.method} ${route}`);
+      audits.push("controller");
+      if (request.headers.get("authorization") !== `Bearer ${expectedAdmin}`)
+        exactAuthority = false;
+      if (request.method === "POST") {
+        const tokens = authority.deriveBrowserSessionControllerTokens({
+          rootSecret,
+          accountId,
+          workspaceId,
+          placement,
+          placementInstanceId: instanceId,
+          browserSessionId,
+          controllerGeneration,
+          tokenGeneration: tokenGeneration(),
+        });
+        const body = (await request.json()) as Record<string, unknown>;
+        const { operationId: requestedOperation, manifestDigest, ...authorityBody } = body;
+        if (
+          JSON.stringify(authorityBody) !==
+          JSON.stringify({
+            controllerGeneration,
+            tokenGeneration: tokenGeneration(),
+            controlToken: tokens.controlToken,
+            viewToken: tokens.viewToken,
+          })
+        )
+          exactAuthority = false;
+        if (route === "/working-copy/adoptions") {
+          if (requestedOperation !== operationId || manifestDigest !== digest)
+            exactAuthority = false;
+          return success(adoption("adopted"));
+        }
+        if (route === "/working-copy/adoptions/:operationId/revert") {
+          if (requestedOperation !== undefined || manifestDigest !== undefined)
+            exactAuthority = false;
+          return success({ inFlight: false, adoption: adoption("reverted") });
+        }
+        return success({
+          browserSessionId,
+          controllerGeneration,
+          platformSupported: true,
+          manifest: {
+            digest,
+            entries: 12,
+            bytes: 4096,
+            excluded: ["chrome-launch", "working-runtime.sqlite-shm"],
+          },
+          currentProfile: { device: 1, inode: 2 },
+          receipt: {
+            operationId: randomUUID(),
+            intent: "launch",
+            state: "completed",
+            recordedProfile: { device: 1, inode: 3 },
+            restoreAuthorityDigest: "e".repeat(64),
+            directoryLaunchAllowed: true,
+            authorityMatches: true,
+            adoption: null,
+          },
+          profileIdentityMatches: false,
+          profileInUse: false,
+          activeAdoption: null,
+          refusal: null,
+        });
+      }
+      return success({ inFlight: false, adoption: adoption("receipt") });
+    },
+  });
+  const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
+  const channel = await import(channelHref);
+  const routed = async (
+    _services: unknown,
+    _context: unknown,
+    callback: (handle: unknown) => Promise<unknown>,
+  ) =>
+    await callback({
+      routingSession: {
+        prime: async () => ({
+          kind: "selfhosted",
+          sandboxId: machineId,
+          providerInstanceId: instanceId,
+          session: {
+            resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+          },
+        }),
+      },
+    });
+  mock.module(channelHref, () => ({ ...channel, withChannelARead: routed, withChannelA: routed }));
+  // A lost browser's controller is ensured on its machine first, as for
+  // resume; the ensured controller is the same fake controller.
+  const sandboxRuntime = (await import(
+    resolveFromApi("@opengeni/runtime/sandbox")
+  )) as typeof import("@opengeni/runtime/sandbox");
+  mock.module(resolveFromApi("@opengeni/runtime/sandbox"), () => ({
+    ...sandboxRuntime,
+    provisionBrowserControlClient: async (
+      session: never,
+      input: { adminToken: string; nativeAuthority?: never },
+    ) => {
+      provisioned += 1;
+      return {
+        client: new sandboxRuntime.BrowserControlClient(session, {
+          adminToken: input.adminToken,
+          ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
+        }),
+        server: { port: server.port, marker: "synthetic" },
+      };
+    },
+  }));
+  const { registerBrowserSessionRoutes } = await import(routeHref);
+  const app = new Hono();
+  app.onError((error, context) =>
+    context.json(
+      { message: error.message },
+      (error instanceof FixtureHTTPException
+        ? error.status
+        : ((error as { status?: number }).status ?? 500)) as never,
+    ),
+  );
+  registerBrowserSessionRoutes(app, {
+    settings: fixtureSettings({ delegationSecret: rootSecret }),
+    db: {},
+    bus: {},
+  } as never);
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const base = `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/working-copy`;
+    const results = [];
+    for (const next of [
+      "inspect",
+      "status",
+      "adopt",
+      "adopt-token-rotated",
+      "revert",
+      "holder-lost",
+      "machine-moved",
+      "access-revoked",
+      "lost-inspect",
+      "lost-adopt",
+      "lost-no-copy",
+    ]) {
+      scenario = next;
+      calls = [];
+      audits = [];
+      exactAuthority = true;
+      provisioned = 0;
+      const response =
+        next === "inspect" || next === "lost-inspect" || next === "lost-no-copy"
+          ? await app.request(`${base}/inspection`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{}",
+            })
+          : next === "status"
+            ? await app.request(`${base}/adoptions/${operationId}`)
+            : next === "revert"
+              ? await app.request(`${base}/adoptions/${operationId}/revert`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: "{}",
+                })
+              : await app.request(`${base}/adoptions`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ operationId, manifestDigest: digest }),
+                });
+      const body = (await response.json()) as Record<string, any>;
+      const result: Record<string, unknown> = {
+        scenario: next,
+        status: response.status,
+        calls,
+        exactAuthority,
+        audits: audits.filter(
+          (entry) =>
+            entry !== "controller" ||
+            next.startsWith("adopt") ||
+            next === "revert" ||
+            next === "lost-adopt",
+        ),
+      };
+      if (response.status === 200 && (next === "inspect" || next === "lost-inspect")) {
+        result.adoptable = body.adoptable;
+        result.explainsExclusions = String(body.explanation).includes(
+          "chrome-launch, working-runtime.sqlite-shm",
+        );
+      } else if (response.status === 200) {
+        result.phase = body.adoption?.phase;
+      }
+      if (next.startsWith("lost")) {
+        result.provisioned = provisioned;
+        if (response.status !== 200) result.message = body.message;
+      }
+      results.push(result);
+    }
+    console.log(JSON.stringify(results));
+  } finally {
+    console.error = originalError;
+    await server.stop(true);
+  }
+}

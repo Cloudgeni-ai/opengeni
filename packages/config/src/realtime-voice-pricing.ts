@@ -67,12 +67,16 @@ export function parseRealtimeVoicePricingTableJson(
 }
 
 /** Credit price of one started minute, after margin, rounded up to whole micros. */
-export function realtimeVoiceMinuteCreditMicros(pricing: RealtimeVoicePricing): {
+export function realtimeVoiceMinuteCreditMicros(
+  pricing: RealtimeVoicePricing,
+  marginBpsOverride?: number,
+): {
   providerCostMicros: number;
   creditCostMicros: number;
 } {
   const provider = BigInt(pricing.microsPerMinute);
-  const credit = (provider * BigInt(10_000 + (pricing.marginBps ?? 0)) + 9_999n) / 10_000n;
+  const credit =
+    (provider * BigInt(10_000 + (marginBpsOverride ?? pricing.marginBps ?? 0)) + 9_999n) / 10_000n;
   return { providerCostMicros: Number(provider), creditCostMicros: Number(credit) };
 }
 

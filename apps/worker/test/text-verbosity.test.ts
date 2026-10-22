@@ -23,7 +23,8 @@ import {
   normalizeSdkEvent,
 } from "@opengeni/runtime";
 import { requestBodyText } from "../../../packages/runtime/src/replayable-json-body";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import {
   reasoningSummaryForTurn,
@@ -34,6 +35,7 @@ import { createRuntimeBatcher } from "../src/activities/streaming";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 import { streamSessionEvents, type SessionEvent } from "@opengeni/sdk";
 import { buildTimeline } from "../../../packages/react/src/timeline/projection";
+import { createOpenGeniText } from "../../../packages/react/src/messages/runtime";
 
 function builtinSettings(overrides: Parameters<typeof testSettings>[0] = {}): Settings {
   return testSettings({
@@ -296,7 +298,7 @@ async function sseTimeline(events: SessionEvent[]) {
     { reconnect: false },
   ))
     delivered.push(event);
-  return buildTimeline(delivered);
+  return buildTimeline(createOpenGeniText(), delivered);
 }
 
 test("only provider summary text maps to visible reasoning, not private or encrypted reasoning", () => {
@@ -377,6 +379,7 @@ async function buildWorkerAgent(settings: Settings, modelId: string, modelOverri
       resolvedModel,
       turnExecutionPolicy: {
         providerId: resolvedModel.provider.id,
+        reasoningEffort: "medium",
         latencyMode: "standard",
         upstreamModelId: resolvedModel.configured.upstreamModelId,
       } as BuildTurnAgentDeps["turnExecutionPolicy"],

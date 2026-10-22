@@ -9,17 +9,17 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { Field, TextArea } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
-import { Section, SectionStack } from "@/components/ui/section";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { HelpLink, InlineHelp } from "@opengeni/react/ui/inline-help";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { defaultModel, KIT_NOW, KIT_TIME_ZONE, organizationIdentity } from "../../fixtures";
 import { KNOWLEDGE_WORKSPACE } from "./knowledge-data";
@@ -28,7 +28,7 @@ import type { PagePicks } from "./picks";
 /* ----------------------------------------------------------------------------
    Instructions tab: what is always in the prompt. Organization identity
    (read-only here) and the workspace instructions, rendered as they read, with
-   Edit, Ask OpenGeni and History.
+   Edit, Ask Opengeni and History.
    -------------------------------------------------------------------------- */
 
 /** Headings, bullets and paragraphs, as they read. Enough for instructions. */

@@ -299,9 +299,20 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(sourceUsesWallClockPerformanceAssertion("const now = Date.now();")).toBe(false);
     expect(sourceUsesWallClockPerformanceAssertion("expect(rows).toBeLessThan(100);")).toBe(false);
+    expect(
+      sourceUsesWallClockPerformanceAssertion(
+        "// opengeni:test-wall-clock-sensitive\nexpect(block.durationMs).toBeGreaterThanOrEqual(200);",
+      ),
+    ).toBe(true);
+    expect(sourceUsesWallClockPerformanceAssertion("// wall clock sensitive")).toBe(false);
   });
 
   test("recognizes only shared-container cluster-role mutations", () => {
+    expect(
+      sourceMutatesSharedPostgresRole(
+        "const owner = await acquireOwnerMigratedTestDatabase('x'); await owner.release();",
+      ),
+    ).toBe(true);
     expect(
       sourceMutatesSharedPostgresRole(
         "await sql.unsafe(`alter role opengeni_app with password 'test'`);",
@@ -352,13 +363,27 @@ describe("unit process planning", () => {
       "apps/worker/test/editable-artifact-outbox-posture-postgres.test.ts",
       "packages/db/test/editable-artifact-materialization-postgres.test.ts",
       "packages/db/test/editable-artifacts-postgres.test.ts",
-      "packages/db/test/session-activity-commit-gate.test.ts",
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
       "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",
+      "packages/db/test/migration-0305-personal-resource-grant-management.test.ts",
+      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
+  });
+
+  test("serializes owner-migrated role fixtures and their migration readers", () => {
+    const root = join(import.meta.dir, "../..");
+    const owner = "packages/db/test/migration-0305-personal-resource-grant-management.test.ts";
+    const reader =
+      "packages/db/test/migration-0344-private-session-visibility-transition-gate.test.ts";
+    const plan = planUnitTestProcesses(root, [], [owner, reader], 1);
+    expect(plan.parallel).toEqual([]);
+    expect(plan.clusterRoleSensitive).toEqual([
+      { files: [owner], isolated: true },
+      { files: [reader], isolated: true },
+    ]);
   });
 
   test("keeps explicit concurrency, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {

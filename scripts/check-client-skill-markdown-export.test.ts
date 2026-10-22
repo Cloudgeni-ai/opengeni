@@ -9,7 +9,7 @@ import { renderClientSkillDocsPage } from "./sync-client-skill";
 const skill = new Map([
   ["SKILL.md", "# Skill\n\n```ts\nconst text = `nested`;\n```\n"],
   ["references/guide.md", "# Guide\n\n````markdown\n```js\nmodule.exports = {};\n```\n````\n"],
-  ["agents/openai.yaml", "interface:\n  display_name: OpenGeni client\n"],
+  ["agents/openai.yaml", "interface:\n  display_name: Opengeni client\n"],
 ]);
 const mirror = renderClientSkillDocsPage(skill);
 const expected = parseClientSkillSections(mirror);

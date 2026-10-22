@@ -1,5 +1,6 @@
 import {
   BlocksIcon,
+  BotIcon,
   ChartColumnIcon,
   CodeIcon,
   CreditCardIcon,
@@ -12,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { OrganizationAdminSection } from "@/lib/organization-admin";
+import type { OrganizationAdminSection } from "@opengeni/react/app/lib/organization-admin";
 
 type OrganizationSettingsItem = {
   id: OrganizationAdminSection;
@@ -33,6 +34,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
+  { id: "agents", label: "Connected agents", icon: BotIcon },
   { id: "insights", label: "Insights", icon: ChartColumnIcon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
@@ -45,7 +47,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "insights", "billing", "developer", "security"],
+  ["models", "integrations", "agents", "insights", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -66,10 +68,12 @@ export function organizationSettingsDescription(
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
     case "models":
-      return `What pays for models in ${organizationName}, and what each workspace starts with and allows.`;
+      return `The models people in ${organizationName} can use, and the subscriptions and keys that pay for them.`;
     case "integrations":
       // "Allowed integrations" and its one row say it all.
       return undefined;
+    case "agents":
+      return `Use ${organizationName} from Claude Code, Cursor, Codex or any MCP client. Each agent acts as you, with the access you choose when it signs in.`;
     case "identity":
       return "Who the organization is and what it does, for every agent.";
     case "insights":

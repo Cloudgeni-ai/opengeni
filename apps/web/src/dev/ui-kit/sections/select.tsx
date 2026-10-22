@@ -1,13 +1,13 @@
 import { useId, useState, type ReactNode } from "react";
 
-import { Field } from "@/components/ui/field";
+import { Field } from "@opengeni/react/ui/field";
 import {
   ComboboxPanelPreview,
   SelectMenu,
   SelectMenuPanel,
   type SelectMenuVariant,
   type SelectOption,
-} from "@/components/ui/select-menu";
+} from "@opengeni/react/ui/select-menu";
 import {
   currentWorkspace,
   defaultModel,

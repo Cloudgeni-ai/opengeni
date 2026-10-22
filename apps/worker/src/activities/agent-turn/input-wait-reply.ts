@@ -36,7 +36,7 @@ function isWorkerTaskProducer(initiator: TurnInitiator): boolean {
  * source alone is not enough: every session's first turn is `user`, including
  * a child an agent spawned and a session a scheduled task created.
  */
-function turnAnswersMessage(turn: ReplyTurn): boolean {
+export function turnAnswersMessage(turn: ReplyTurn): boolean {
   if (turn.source !== "user" && turn.source !== "api") return false;
   if (
     DERIVED_PROVENANCE_KEYS.some((key) =>
@@ -100,4 +100,40 @@ export async function latestDurableTurnMessageText(
     return typeof text === "string" ? text : null;
   }
   return null;
+}
+
+/**
+ * Tool error the model receives when it waits before answering a person.
+ *
+ * Models with extended thinking often draft the reply inside their thinking
+ * and believe it was sent, then retry the wait unchanged and conclude that a
+ * wait cannot be armed at all. The text therefore names thinking explicitly and
+ * says the reply may share the wait call's response.
+ */
+export const INPUT_WAIT_REPLY_REFUSAL =
+  "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them: text inside a thinking or reasoning block does not count, even when it is written as an answer. Write your answer to their message as a normal assistant text block (it may be in the same response, before the wait_for_input call), then call wait_for_input again. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
+
+/**
+ * Refusals per turn attempt (one worker activity); a resumed or retried
+ * attempt starts again. After that the wait proceeds rather than looping.
+ */
+export const MAX_INPUT_WAIT_REPLY_REFUSALS = 2;
+
+/**
+ * Why `wait_for_input` must not end this turn yet, or null.
+ *
+ * A wait ends the turn at the tool boundary, so no message can follow it. When
+ * the turn answers a person's message and has no visible assistant text, the
+ * person would get no answer at all (the model may have drafted one only in its
+ * reasoning). Refusing the wait as a tool error gives the model one more step
+ * to write the reply; the wait is registered on its next call.
+ */
+export async function inputWaitReplyRefusal(input: {
+  turn: ReplyTurn;
+  refusalsSoFar: number;
+  hasVisibleReply: () => Promise<boolean>;
+}): Promise<string | null> {
+  if (input.refusalsSoFar >= MAX_INPUT_WAIT_REPLY_REFUSALS) return null;
+  if (!turnAnswersMessage(input.turn)) return null;
+  return (await input.hasVisibleReply()) ? null : INPUT_WAIT_REPLY_REFUSAL;
 }

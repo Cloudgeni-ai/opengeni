@@ -1,6 +1,6 @@
 import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
 import { sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
-import type { Settings } from "@opengeni/config";
+import { sandboxManifestEnvironmentNamePredicate, type Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
 import { compactGeneratedImageHistory } from "../generated-images";
@@ -51,6 +51,10 @@ export type TurnHistorySinkDeps = {
 export class TurnHistorySink {
   private readonly prefix = new HistoryPrefixGuard();
   private checkpointTail: Promise<void> = Promise.resolve();
+  // Serialized form of the envelope this sink last made durable. This sink is
+  // the envelope's only writer, and reconcile runs at every model-call and
+  // turn boundary, so an unchanged envelope needs no further write.
+  private persistedEnvelope: string | null = null;
 
   seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
     const items =
@@ -78,7 +82,11 @@ export class TurnHistorySink {
   constructor(private readonly deps: TurnHistorySinkDeps) {}
 
   reconcileConversationTruth = (
-    options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
+    options: {
+      skipInputOnlyRows?: boolean;
+      requireDurable?: boolean;
+      completedToolCallIds?: string[];
+    } = {},
   ): Promise<void> => {
     // The provider loop and the stream consumer checkpoint independently.
     // Serialize the complete read/write/acknowledgment boundary, not just the
@@ -92,6 +100,7 @@ export class TurnHistorySink {
   private reconcile = async (options: {
     skipInputOnlyRows?: boolean;
     requireDurable?: boolean;
+    completedToolCallIds?: string[];
   }) => {
     const { media } = this.deps;
     const stream = this.deps.getStream();
@@ -124,7 +133,7 @@ export class TurnHistorySink {
         );
         const shouldAppendRows =
           rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-        if (shouldAppendRows) {
+        if (shouldAppendRows || options.completedToolCallIds?.length) {
           await runMandatoryHistoryPersistenceStep("history_append", async () => {
             const appended = await appendSessionHistoryItems(this.deps.db, {
               accountId: this.deps.accountId,
@@ -135,7 +144,10 @@ export class TurnHistorySink {
               expectedAttemptId: this.deps.attemptId,
               modelToolOutputTruncationTokens:
                 this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
-              items: rows,
+              items: shouldAppendRows ? rows : [],
+              ...(options.completedToolCallIds
+                ? { completedToolCallIds: options.completedToolCallIds }
+                : {}),
             });
             if (!appended) {
               throw new TurnAttemptFencedError(
@@ -154,16 +166,28 @@ export class TurnHistorySink {
           "SDK conversation history is unavailable at a mandatory persistence boundary",
         );
       }
-      const envelope = sandboxStateEntryFromRunState(stream.state);
+      // W1 defensive strip: persist deployment-constant env names only. Built
+      // lazily: only an envelope that carries env needs the settings lookup.
+      let keepEnvironmentName: ((name: string) => boolean) | undefined;
+      const envelope = sandboxStateEntryFromRunState(stream.state, {
+        keepEnvironmentName: (name) =>
+          (keepEnvironmentName ??= sandboxManifestEnvironmentNamePredicate(
+            this.deps.getModelRunSettings(),
+          ))(name),
+      });
       if (envelope) {
-        await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
-          upsertSandboxSessionEnvelope(this.deps.db, {
-            accountId: this.deps.accountId,
-            workspaceId: this.deps.workspaceId,
-            sessionId: this.deps.sessionId,
-            envelope,
-          }),
-        );
+        const serialized = JSON.stringify(envelope);
+        if (serialized !== this.persistedEnvelope) {
+          await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
+            upsertSandboxSessionEnvelope(this.deps.db, {
+              accountId: this.deps.accountId,
+              workspaceId: this.deps.workspaceId,
+              sessionId: this.deps.sessionId,
+              envelope,
+            }),
+          );
+          this.persistedEnvelope = serialized;
+        }
       }
     } catch (persistError) {
       console.error("session history persistence failed", safeErrorDiagnostic(persistError));

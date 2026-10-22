@@ -36,6 +36,8 @@ export {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
@@ -51,4 +53,6 @@ export type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "./types";

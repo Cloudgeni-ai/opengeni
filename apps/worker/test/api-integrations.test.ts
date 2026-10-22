@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@opengeni/db";
 import { prepareAgentTools } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
   expandApiIntegrationAccountRoutes,

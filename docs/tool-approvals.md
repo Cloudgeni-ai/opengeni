@@ -20,7 +20,13 @@ missing access. There is no additional host, embedder or organization policy flo
 
 Saved preferences activate when work next starts or resumes. A prepared action
 keeps its original decision and immutable content. Live access checks remain in
-force. Reset is an explicit null preference; UI saves include the observed
+force. Targeted current-human HTTP calls additionally fence the selected live
+policy at their physical provider boundary: Allow becoming Ask or Block before
+dispatch prevents that request. Their v2 approval provenance binds executable
+effect and Site tuple, separately from optional full-public-definition pins, so
+Ask becoming Allow can settle the same pending operation without weakening its
+private-authority or consumed-operation fences. Frozen worker/Codemode decisions
+are unchanged. Reset is an explicit null preference; UI saves include the observed
 revision and refuse concurrent overwrites. Groups change only the tools shown;
 the connector default also governs newly discovered tools.
 

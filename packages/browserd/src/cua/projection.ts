@@ -30,50 +30,213 @@ const roles: Record<string, string> = {
   Hyperlink: "link",
 };
 
+const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
+const QUOTED = String.raw`"((?:[^"\\]|\\.)*)"`;
+const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
+const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");
+const MAX_ROW_TEXTS = 64;
+
+type Platform = "macos" | "windows" | "linux";
+
+/**
+ * Why an element's value must never reach the model, or null. Windows Edit
+ * values are protected by policy because the SDK does not publish UIA
+ * IsPassword, so a password box cannot be told apart from its visible name.
+ */
+function protectionFor(role: string, platform: Platform): "password" | "policy" | null {
+  if (/secure|password/i.test(role)) return "password";
+  if (platform === "windows" && role === "Edit") return "policy";
+  return null;
+}
+
+function unquote(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Text that CUA's element list leaves out. Its structured `elements` carry
+ * only addressable elements, so the static text inside a table row, list item
+ * or cell exists only in the Markdown tree as unindexed rows. Collect that
+ * text under the nearest indexed ancestor, so a row reads as its cells
+ * instead of an empty AXRow. Keyed by element_index. Rows that are, or sit
+ * inside, a protected field (indexed or not) contribute nothing: their label
+ * can be the field's value and their value is the protected text itself.
+ *
+ * Not used on Windows. CUA writes names and values into this Markdown without
+ * escaping newlines, so a multi-line Edit value can contain lines shaped like
+ * rows. Every Windows Edit value is protected, and its fake rows would escape
+ * the protected field's indentation, so the tree cannot be read safely there.
+ */
+export function unindexedTextByElement(
+  markdown: string | undefined,
+  platform: Platform = "macos",
+): Map<number, string[]> {
+  const texts = new Map<number, string[]>();
+  if (!markdown || platform === "windows") return texts;
+  const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
+  for (const line of markdown.split("\n")) {
+    const row = MARKDOWN_ROW.exec(line);
+    if (!row) continue;
+    const indent = row[1]!.length;
+    while (ancestors.length > 0 && ancestors.at(-1)!.indent >= indent) ancestors.pop();
+    const index = row[2] === undefined ? null : Number(row[2]);
+    const isProtected =
+      protectionFor(row[3]!, platform) !== null || (ancestors.at(-1)?.protected ?? false);
+    ancestors.push({ indent, index, protected: isProtected });
+    if (index !== null || isProtected) continue;
+    const rest = row[4] ?? "";
+    const label = MARKDOWN_LABEL.exec(rest);
+    const value = MARKDOWN_VALUE.exec(label ? rest.slice(label[0].length) : rest);
+    const text = (
+      value
+        ? value[1] !== undefined
+          ? unquote(value[1])
+          : (value[2] ?? "")
+        : label
+          ? unquote(label[1]!)
+          : ""
+    ).trim();
+    if (!text) continue;
+    const owner = ancestors
+      .slice(0, -1)
+      .reverse()
+      .find((ancestor) => ancestor.index !== null);
+    if (!owner) continue;
+    const list = texts.get(owner.index!) ?? [];
+    if (list.length < MAX_ROW_TEXTS) list.push(text);
+    texts.set(owner.index!, list);
+  }
+  return texts;
+}
+
+type CuaElement = z.infer<typeof Element>;
+
+/**
+ * The macOS elements that belong to web content, by element_index: an
+ * AXWebArea and everything CUA lists under it. WebKit and Chromium report
+ * AXShowMenu on every element of a page; it opens the page's context menu,
+ * not a menu of the control, so offering it there names an action on every
+ * line and makes a page's plain text look operable.
+ */
+function webContentIndexes(elements: readonly CuaElement[]): Set<number> {
+  const byIndex = new Map(elements.map((element) => [element.element_index, element]));
+  const known = new Map<number, boolean>();
+  const inWeb = (start: CuaElement): boolean => {
+    const path: number[] = [];
+    let current: CuaElement | undefined = start;
+    let result = false;
+    while (current && path.length <= elements.length) {
+      const cached = known.get(current.element_index);
+      if (cached !== undefined) {
+        result = cached;
+        break;
+      }
+      path.push(current.element_index);
+      if (current.role === "AXWebArea") {
+        result = true;
+        break;
+      }
+      current = current.parent_index === undefined ? undefined : byIndex.get(current.parent_index);
+    }
+    for (const index of path) known.set(index, result);
+    return result;
+  };
+  return new Set(elements.filter(inWeb).map((element) => element.element_index));
+}
+
+/**
+ * Static text that only repeats the label of the element it sits in (a
+ * link's or button's own text). The label already reads it, and the second
+ * copy doubles every link of a page.
+ */
+function repeatsParentLabel(
+  element: CuaElement,
+  byIndex: ReadonlyMap<number, CuaElement>,
+): boolean {
+  if (element.role !== "AXStaticText" || element.focused || element.actions.includes("AXPress"))
+    return false;
+  const text = (element.label ?? (typeof element.value === "string" ? element.value : "")).trim();
+  if (!text || element.parent_index === undefined) return false;
+  return byIndex.get(element.parent_index)?.label?.trim() === text;
+}
+
 export function projectElements(
-  elements: z.infer<typeof Element>[],
-  platform: "macos" | "windows" = "macos",
+  allElements: CuaElement[],
+  platform: Platform = "macos",
+  childTexts: ReadonlyMap<number, readonly string[]> = new Map(),
 ): InteractionSemanticNodeValue[] {
+  const byIndex = new Map(allElements.map((element) => [element.element_index, element]));
+  const elements =
+    platform === "macos"
+      ? allElements.filter((element) => !repeatsParentLabel(element, byIndex))
+      : allElements;
+  const webContent = platform === "macos" ? webContentIndexes(allElements) : new Set<number>();
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
-    // SDK 0.30.4 does not publish UIA IsPassword. Treat Windows Edit values
-    // as protected by policy instead of guessing from their visible names.
-    const opaqueWindowsEdit = platform === "windows" && element.role === "Edit";
-    const protectedReason = /secure|password/i.test(element.role)
-      ? ("password" as const)
-      : opaqueWindowsEdit
-        ? ("policy" as const)
-        : null;
+    const protectedReason = protectionFor(element.role, platform);
+    const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
       opaqueWindowsEdit && element.value !== undefined && element.label === String(element.value);
     const actions: string[] = [];
     if (element.element_token) {
-      if (element.actions.includes(platform === "windows" ? "invoke" : "AXPress"))
-        actions.push("invoke");
-      if (platform === "macos" && element.actions.includes("AXShowMenu")) actions.push("show_menu");
       if (
-        platform === "windows"
-          ? element.actions.includes("set_value")
-          : [
-              "AXTextField",
-              "AXTextArea",
-              "AXSecureTextField",
-              "AXSlider",
-              "AXPopUpButton",
-            ].includes(element.role)
+        platform === "linux"
+          ? element.actions.some((action) => ["click", "press", "activate"].includes(action))
+          : element.actions.includes(platform === "windows" ? "invoke" : "AXPress")
+      )
+        actions.push("invoke");
+      if (
+        platform === "macos" &&
+        element.actions.includes("AXShowMenu") &&
+        !webContent.has(element.element_index)
+      )
+        actions.push("show_menu");
+      if (
+        platform === "linux"
+          ? ["text", "entry", "password text", "combo box", "slider"].includes(element.role)
+          : platform === "windows"
+            ? element.actions.includes("set_value")
+            : [
+                "AXTextField",
+                "AXTextArea",
+                "AXSecureTextField",
+                "AXSlider",
+                "AXPopUpButton",
+              ].includes(element.role)
       )
         actions.push("set_value");
+      // A control a person can operate can take the keyboard focus, so keys
+      // can be sent to it (a field in a popover, a list to arrow through).
+      // Only macOS's driver focuses an element on its own.
+      if (platform === "macos" && actions.length > 0) actions.push("focus");
     }
+    const label = element.label && !valueLabel ? element.label : undefined;
+    const contained = (childTexts.get(element.element_index) ?? []).filter(
+      (text) => text !== label && text !== String(element.value ?? ""),
+    );
+    const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
-      role: roles[element.role] ?? element.role,
-      ...(element.label && !valueLabel ? { name: element.label } : {}),
+      // Desktop labels and values can be whole documents (an editor's text
+      // area). Clip to the semantic-node contract so one element cannot make
+      // the entire observation invalid.
+      role: (roles[element.role] ?? element.role).slice(0, 256),
+      ...(label
+        ? { name: label.slice(0, 8_192) }
+        : containedText && !protectedReason
+          ? { name: containedText }
+          : {}),
+      ...(label && containedText && !protectedReason ? { description: containedText } : {}),
       ...(protectedReason
         ? { value: { redacted: true as const, reason: protectedReason } }
         : element.value !== undefined
-          ? { value: String(element.value) }
+          ? { value: String(element.value).slice(0, 32_768) }
           : {}),
       states: [
         ...(element.enabled === false ? ["disabled"] : []),

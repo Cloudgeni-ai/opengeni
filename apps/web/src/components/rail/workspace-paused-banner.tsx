@@ -3,10 +3,10 @@ import { PauseIcon, PlayIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { useAppContext } from "@/context";
-import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import { useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 /**
@@ -68,7 +68,7 @@ function PausedBanner({ workspaceId }: { workspaceId: string }) {
             to="/workspaces/$workspaceId/settings"
             params={{ workspaceId }}
             search={{ section: "general" }}
-            className="inline-flex h-8 items-center text-xs font-medium text-brand underline-offset-2 hover:underline"
+            className="inline-flex h-8 items-center text-xs font-medium og-link"
           >
             Agent activity
           </Link>

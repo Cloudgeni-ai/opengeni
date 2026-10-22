@@ -3,7 +3,7 @@ name = "opengeni-artifact-kernel-napi"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Node-API byte adapter for the OpenGeni artifact kernel"
+description = "Node-API byte adapter for the Opengeni artifact kernel"
 publish = false
 
 [lib]

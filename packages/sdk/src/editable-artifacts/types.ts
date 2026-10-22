@@ -176,17 +176,27 @@ export type EditableSpreadsheetProjectedCell = Readonly<{
  * Immutable projection of one exact speculative kernel revision. Cells are
  * sparse, strictly row-major, unique, and all inside the requested rectangle.
  */
-export type EditableSpreadsheetViewportProjection = Readonly<{
-  revision: bigint;
-  sheetId: string;
-  /** Creation operation that pins the live CRDT generation, if collaborative. */
-  generationId: string | null;
-  startRow: number;
-  startColumn: number;
-  rowCount: number;
-  columnCount: number;
-  cells: readonly EditableSpreadsheetProjectedCell[];
+export type EditableSpreadsheetDimensions = Readonly<{
+  /** Integer CSS pixels. Present when the kernel models dimensions. */
+  defaultRowHeight?: number;
+  defaultColumnWidth?: number;
+  /** Sorted sparse absolute zero-based indices and non-default pixel sizes. */
+  rowHeights?: readonly (readonly [number, number])[];
+  columnWidths?: readonly (readonly [number, number])[];
 }>;
+
+export type EditableSpreadsheetViewportProjection = EditableSpreadsheetDimensions &
+  Readonly<{
+    revision: bigint;
+    sheetId: string;
+    /** Creation operation that pins the live CRDT generation, if collaborative. */
+    generationId: string | null;
+    startRow: number;
+    startColumn: number;
+    rowCount: number;
+    columnCount: number;
+    cells: readonly EditableSpreadsheetProjectedCell[];
+  }>;
 
 export type EditableSpreadsheetUsedBounds = Readonly<{
   startRow: number;
@@ -197,12 +207,13 @@ export type EditableSpreadsheetUsedBounds = Readonly<{
   endColumn: number;
 }>;
 
-export type EditableSpreadsheetSheetMetadata = Readonly<{
-  sheetId: string;
-  generationId: string | null;
-  name: string;
-  usedBounds: EditableSpreadsheetUsedBounds | null;
-}>;
+export type EditableSpreadsheetSheetMetadata = EditableSpreadsheetDimensions &
+  Readonly<{
+    sheetId: string;
+    generationId: string | null;
+    name: string;
+    usedBounds: EditableSpreadsheetUsedBounds | null;
+  }>;
 
 /**
  * Bounded workbook catalog from the Worker-owned kernel. False feature flags

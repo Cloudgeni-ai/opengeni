@@ -7,6 +7,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
@@ -30,9 +31,25 @@ export type ArtifactSandboxProps = {
   editDisabled?: boolean | undefined;
   onEdit?: (() => void) | undefined;
   toolBridge?: PublishedHtmlArtifactToolBridge | undefined;
+  /** Who is viewing, answered to the Site's `site.viewer` over the bridge. */
+  viewer?: SiteViewer | undefined;
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
+  /**
+   * Control full screen from the host (for example from its URL). Omit to let
+   * the frame's own expand and back buttons manage it.
+   */
+  fullScreen?: boolean | undefined;
+  /** Called when the person expands the frame or leaves full screen. */
+  onFullScreenChange?: ((fullScreen: boolean) => void) | undefined;
+  /**
+   * Hide the frame's toolbar when the host draws its own reload and full
+   * screen controls. Full screen always shows it, for its Back button.
+   */
+  showToolbar?: boolean | undefined;
+  /** Reload the Site whenever this changes, from a host-drawn reload control. */
+  reloadToken?: number | undefined;
 };
 
 /**
@@ -43,7 +60,12 @@ export type ArtifactSandboxProps = {
 export function ArtifactSandbox(props: ArtifactSandboxProps) {
   const labels = useArtifactLabels();
   const [reloadKey, setReloadKey] = useState(0);
-  const [focused, setFocused] = useState(false);
+  const [ownFocused, setOwnFocused] = useState(false);
+  const focused = props.fullScreen ?? ownFocused;
+  const setFocused = (next: boolean) => {
+    if (props.fullScreen === undefined) setOwnFocused(next);
+    props.onFullScreenChange?.(next);
+  };
   const frameRef = useRef<HTMLDialogElement>(null);
   const modalRef = useRef(false);
   useLayoutEffect(() => {
@@ -70,6 +92,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       ref={frameRef}
       open
       aria-label={props.title}
+      data-artifact-fullscreen={focused || undefined}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
@@ -82,7 +105,14 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           "fixed inset-0 z-50 flex h-dvh w-dvw flex-col rounded-none border-0 bg-surface shadow-none",
       )}
     >
-      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
+      <div
+        data-window-drag={focused || undefined}
+        hidden={props.showToolbar === false && !focused}
+        className={cn(
+          "flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4",
+          props.showToolbar === false && !focused && "hidden",
+        )}
+      >
         <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
             <ArtifactButton
@@ -167,13 +197,14 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         </div>
       </div>
       <PublishedHtmlArtifactFrame
-        key={reloadKey}
+        key={`${reloadKey}:${props.reloadToken ?? 0}`}
         title={props.title}
         html={props.html}
         autoHeight={Boolean(props.autoHeight && !focused)}
         {...(props.theme ? { theme: props.theme } : {})}
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
+        {...(props.viewer ? { viewer: props.viewer } : {})}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",

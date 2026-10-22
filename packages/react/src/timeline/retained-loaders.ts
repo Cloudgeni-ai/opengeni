@@ -1,5 +1,6 @@
 import type { OpenGeniClient, RetainedArtifactReference } from "@opengeni/sdk";
 import type {
+  RetainedArtifactLoadOptions,
   RetainedArtifactLoader,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
@@ -21,21 +22,25 @@ export type RetainedVideoLoaderClient = Pick<OpenGeniClient, "createVideoArtifac
  * Bind permanent retained-artifact retrieval (generated images, published
  * files) to one authenticated workspace, for `MessageTimeline`'s
  * `loadRetainedArtifact`. Images get a short-lived URL; files are assembled
- * from verified byte ranges.
+ * from verified byte ranges unless the caller asks for a URL.
  */
 export function createWorkspaceRetainedArtifactLoader(
   client: RetainedArtifactLoaderClient,
   workspaceId: string,
 ): RetainedArtifactLoader {
-  return async (artifact: RetainedArtifactReference, signal: AbortSignal) => {
-    if (artifact.kind === "file") {
+  return async (
+    artifact: RetainedArtifactReference,
+    signal: AbortSignal,
+    options?: RetainedArtifactLoadOptions,
+  ) => {
+    if (artifact.kind === "file" && options?.prefer !== "url") {
       const download = await client.downloadRetainedArtifact(workspaceId, artifact, { signal });
       return download.bytes;
     }
     const download = await client.createRetainedArtifactDownloadUrl(workspaceId, artifact, {
       signal,
     });
-    return { url: download.url };
+    return { url: download.url, expiresAt: download.expiresAt };
   };
 }
 

@@ -1,6 +1,6 @@
 import type { ConnectionCatalogService } from "@opengeni/react/connect";
-import { capabilityCuration } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { capabilityCuration } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /** Partition already-grouped services in the same order shown on the page. */
 export function partitionConnectionServices(
@@ -22,6 +22,7 @@ export function partitionConnectionServices(
               (item) =>
                 capabilityCuration(item).curated ||
                 item.id === "api:fiken" ||
+                item.id === "api:1password" ||
                 ["dropbox.com", "front.com"].includes(item.providerDomain ?? ""),
             )
             .map((item) => catalogServiceIdentity(item.id, item.name, item.providerDomain).id),

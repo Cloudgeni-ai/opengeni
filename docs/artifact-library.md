@@ -69,6 +69,12 @@ authoritative. Source-session links are exposed only when that session is
 readable. Content is loaded through the existing authenticated artifact APIs;
 catalog results contain no storage credentials or temporary download URLs.
 
+Editable catalog projection uses the optional application `readArtifacts` seam
+in windows of eight. Core still authorizes each item, then the PostgreSQL store
+reads their metadata in one tenant-scoped statement and checks each authorization
+revision. Stale items reauthorize through the ordinary single-read retry path.
+Embedding applications or stores without the batch seam retain single reads.
+
 Images and other files need `files:read`; Sites, documents, spreadsheets, and
 presentations need `artifacts:read`. A viewer holding only one of the two gets
 the other kinds silently omitted from the catalog, so the console names the
@@ -85,6 +91,45 @@ caller's own, and are reversible: archive keeps the source and full version
 history, restore republishes an archived Site, and rollback restores an earlier
 version without discarding the current one.
 
+Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
+who can see a Site manages it like its owner: Site Data and Site SQL,
+publication settings, abuse reports, and taking it down or restoring it. Only an
+administrator lifts an administrator's takedown, raises resource limits, or
+grants a Site assistant extra workspace tools, and only the owner changes who
+can see an "Only me" Site.
+
+## Who can open a file
+
+Files have the same two audiences as Sites and chats: **Only me**
+(`visibility: "private"`, only its owner can open it) or **Workspace**
+(`"workspace"`). A new file follows the chat it comes from, on every path an
+agent makes files through (`sandbox_file_publish`, uploads, browser downloads,
+generated images and videos): Only me in an Only me chat, otherwise the
+workspace. A person's own upload is shared unless they choose Only me. An
+explicit choice wins on the owner's behalf: `visibility` on
+`sandbox_file_publish`, or `scope` on `POST /files/uploads`. A personal
+workspace keeps every file private.
+
+The owner changes one finished file with
+`PUT /v1/workspaces/:workspaceId/files/:fileId/visibility` and
+`{ visibility }` (`client.updateFileVisibility`), from the file's page or its
+Artifacts menu, or through their agent with `sandbox_file_publish` and an
+`artifactId`. Only a private owner can share a file, only its owner
+(`FileAsset.ownerSubjectId`) can limit it again, and the `files` trigger
+enforces exactly these two transitions. Each change records a
+`file.visibility.changed` audit event. Session screenshots and saved tool
+output keep their chat's audience. Existing private files stay private.
+
+Publish and upload results include `access: { visibility, whoCanOpen }`, one
+plain sentence telling the agent who can open the file before it shares a
+link. `ArtifactCatalogItem.visibility` and `ownedByViewer` drive the Only me
+marker and the owner's share action in the library.
+
+A person who opens someone else's Only me file gets `403` with
+`{ available: false, reason: "private" }` and is asked to have its owner share
+it; nothing about the file's name or owner is returned. A file that does not
+exist is still `404`. Migration `0854_file_visibility.sql` is rolling.
+
 ## Presentation and version semantics
 
 The workspace library opens as a preview gallery: cards with a thumbnail, the
@@ -99,6 +144,20 @@ switches to flat rows and is remembered in the browser
 search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
+
+Workspace-library tabs, search, sorting and archive filters travel in the URL
+when opening a viewer. The Artifacts back link and browser Back return to that
+same query, with the library's scroll position and loaded pages restored in the
+current browser app session. Gallery/List remains the remembered browser choice.
+Previous/Next and Left/Right browse that filtered catalog order without wrapping;
+Next loads another catalog page when needed. Sibling navigation replaces the
+viewer history entry, so browser Back still returns directly to the library.
+Cold-cache viewers load cursor pages until the current artifact is found or the
+catalog ends. Returning libraries wait for retained pages and successful loads
+before restoring their saved scroll position.
+Shortcuts leave editors, dialogs, menus and embedded content alone. Direct links
+without library context and embedded session viewers do not acquire a workspace
+browsing sequence. A full reload preserves URL filters, not in-memory positions.
 
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.

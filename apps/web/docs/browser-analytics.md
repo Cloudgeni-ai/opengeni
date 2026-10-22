@@ -54,7 +54,8 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, `files`, and `playground`; a session page also carries `session_id`.
+`organization`, `files`, `playground`, `read-only-chats`, and `inbox`; a session page also carries
+`session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
@@ -85,7 +86,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |
 | `connect_model` | Connect a model links |
-| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter` | Provider connect controls in settings and onboarding |
+| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter`, `connect_opper` | Provider connect controls in settings and onboarding |
 
 Clicks are the only signal: pressing Enter to send or Cmd/Ctrl+Enter to steer
 is not a click. Use `session_command_attempted` for message volume.
@@ -120,7 +121,7 @@ vocabulary and UUIDs.
   `bitbucket`, `google`, `microsoft`, `linear`, `atlassian`, `notion`,
   `supabase`, `datadog`, `posthog`, `openai`, `x`, `other`, and the model classes
   `codex`, `supergrok`, `vercel_gateway`, `openrouter`, `anthropic`,
-  `claude_subscription`. Domains and MCP hosts map like the server function
+  `claude_subscription`, `opper`, `azure_openai`. Domains and MCP hosts map like the server function
   (`mcp.linear.app` is `linear`); custom MCP servers, custom APIs, Fiken and
   Reddit are `other`.
 - `method`: `oauth`, `api_key`, `device_code`, `app_install`, `custom`.
@@ -135,8 +136,9 @@ catalog OAuth, API-key, X/Reddit and Fiken actions (`performCapabilityAction`,
 used by the Plugins page and the in-chat capability card), the Plugins page MCP
 OAuth dialog, custom MCP servers and custom APIs, in-chat reconnect redirects,
 personal GitHub sign-in, Codex and SuperGrok (workspace and organization),
-Vercel AI Gateway, OpenRouter, Anthropic and Claude-subscription keys, Claude
-subscription sign-in, organization model providers, and the onboarding model
+Vercel AI Gateway, OpenRouter, Opper, Anthropic and Claude-subscription keys, Claude
+subscription sign-in, organization model providers (including organization
+Azure OpenAI), and the onboarding model
 step. The inline OAuth card in a session (`SessionMcpCapabilityCard`) is not
 covered because it lives in `@opengeni/react`.
 
@@ -282,22 +284,47 @@ Route render failures, uncaught window errors, unhandled promise rejections and
 stale lazy-chunk loads are reported to `POST /v1/client-errors`
 (`src/lib/client-error-reporting.ts`), which increments
 `opengeni_client_errors_total{kind="route_error|unhandled_rejection|window_error|chunk_load"}`.
-This is operational telemetry, separate from the consent-controlled providers
-above: the body is only the closed `kind`, the matched route pattern (for example
-`/workspaces/$workspaceId/sessions/$sessionId`, or `unknown`), and the bundle
-revision. It never carries an error message, stack, concrete URL, identifier,
-cookie or user content; the request uses `credentials: "omit"`, and the API
-rejects any other field. The route is public so failures before sign-in are
-counted too.
+This is error diagnostics, separate from the consent-controlled analytics
+providers above: collecting product analytics needs consent, while finding out
+why the app crashed for someone does not. The body is the closed `kind`, the
+matched route pattern (for example `/workspaces/$workspaceId/sessions/$sessionId`,
+or `unknown`, never the page URL), the bundle revision, and an optional `error`
+object with what went wrong:
 
-The browser suppresses a repeated kind and route for one minute and sends at
-most ten reports per ten minutes; the API additionally bounds admission per kind
-and per process. ResizeObserver loop notices, opaque cross-origin
+- `name` and `message` of the thrown value (`NonError` and a short rendering of
+  the value when something other than an `Error` was thrown or rejected;
+  `ErrorEvent` and the event message for an uncaught error without an error
+  object);
+- `stack`, the browser's stack trace (or the event's `file:line:column`);
+- `componentStack`, React's component stack, for a failure caught by a route
+  error boundary.
+
+Error text is not user content by design, but a message can quote a value the
+app was handling (a file name, a field value), so occasionally a fragment of
+user content is included. Before the report leaves the browser, the shared
+projection in `@opengeni/contracts/client-error-report` scrubs each field:
+query strings and fragments are removed from URLs (React's error-decoder links
+keep theirs, which hold only the error's arguments); authorization values, JWTs,
+well-known API token formats, the values of `token=`/`password:`-style
+assignments and long opaque letter-and-digit strings become `[redacted]`; and
+control characters are removed. Each field is then cut to a fixed size (name
+128 bytes, message 1 KiB, stack and component stack 4 KiB each), keeping the
+start. The API applies the same projection again to whatever it receives and
+rejects any other field, and the request uses `credentials: "omit"`, so no
+cookie is sent. The route is public so failures before sign-in are counted
+too.
+
+The browser suppresses a repeat of the same kind, route and error (its name and
+first message line) for one minute and sends at most ten reports per ten
+minutes; the API additionally bounds admission per kind and per process.
+ResizeObserver loop notices, opaque cross-origin
 `Script error.` events and `AbortError` rejections are not reported. Treat the
 counter as a lower bound: blocked requests, closed tabs and both rate limits
-drop reports. It is not exception capture; use the route pattern and revision in
-the API's `Web client error reported` log line to locate a failing page and
-release.
+drop reports. The API's `Web client error reported` log line carries the route
+pattern and revision (which page and which release) and the scrubbed error as
+`clientErrorName`, `clientErrorMessage`, `clientErrorStack` and
+`clientComponentStack`. Stack frames point into the minified bundle of that
+revision.
 
 The same beacon carries closed failure and health signals
 (`src/lib/client-signals.ts`, metrics in `docs/application-observability.md`):
@@ -354,4 +381,4 @@ so a failing page keeps the workspace rail and offers Reload and Go home. Once a
 document has observed a chunk-load failure, any route failure it shows is
 presented as an update with Reload first, including the brief follow-on failure
 while the recovery reload is in flight. The raw error text is shown only in
-development builds.
+development builds; every build reports it, scrubbed, through the beacon above.

@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -8,7 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { ArtifactSessionPage } from "./artifact-session-page";
+import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
 
 beforeAll(() => {
   GlobalRegistrator.register();

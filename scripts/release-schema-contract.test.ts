@@ -37,10 +37,230 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
+    const contract = await buildCompleteSchemaContract();
+    for (const path of [
+      "0890_model_fact_reconciliation_progress.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0892_model_fact_event_pages.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+    ]) {
+      expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
+        path,
+        deploymentMode: "rolling",
+      });
+    }
+  });
+  test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0642_shared_subscription_core.sql",
+      ),
+    ).toMatchObject({
+      path: "0642_shared_subscription_core.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the subscription inference-source settings migration as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0644_subscription_inference_source_settings.sql",
+      ),
+    ).toMatchObject({
+      path: "0644_subscription_inference_source_settings.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers provider-neutral subscription runtime storage as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0645_subscription_core_runtime.sql",
+      ),
+    ).toMatchObject({
+      path: "0645_subscription_core_runtime.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers request-level Codex disconnect as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
+  test("registers the dormant Codex core writers as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0688_subscription_core_codex_writers.sql",
+      ),
+    ).toMatchObject({
+      path: "0688_subscription_core_codex_writers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the drained Codex subscription-core cutover as maintenance-only", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
+      ),
+    ).toMatchObject({
+      path: "0689_subscription_core_codex_cutover.sql",
+      deploymentMode: "maintenance",
+    });
+  });
+
+  test("registers the subscription people-assignment read policy fix as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0646_subscription_core_people_assignment_read.sql",
+      ),
+    ).toMatchObject({
+      path: "0646_subscription_core_people_assignment_read.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers stranded tool receipt tenancy quiescence as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) =>
+          migration.path === "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      ),
+    ).toMatchObject({
+      path: "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers owner pending update tenancy quiescence as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) =>
+          migration.path === "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      ),
+    ).toMatchObject({
+      path: "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers private visibility that never blocks as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0769_private_visibility_never_blocks.sql",
+      ),
+    ).toMatchObject({
+      path: "0769_private_visibility_never_blocks.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers private visibility leftover settlement as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0768_private_visibility_ignores_leftovers.sql",
+      ),
+    ).toMatchObject({
+      path: "0768_private_visibility_ignores_leftovers.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the in-place connected machine audience switch as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0765_connected_machine_audience_switch.sql",
+      ),
+    ).toMatchObject({
+      path: "0765_connected_machine_audience_switch.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers private sessions on shared sandboxes as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0738_private_sessions_share_sandboxes.sql",
+      ),
+    ).toMatchObject({
+      path: "0738_private_sessions_share_sandboxes.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers proven built-in default intent as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0662_session_first_party_default_intent.sql",
+      ),
+    ).toMatchObject({
+      path: "0662_session_first_party_default_intent.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the stranded completed-turn tool receipt cleanup as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      ),
+    ).toMatchObject({
+      path: "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the local install inbox recipient as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0677_local_human_inbox_recipient.sql",
+      ),
+    ).toMatchObject({
+      path: "0677_local_human_inbox_recipient.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
+  test("registers the idle sandbox checkpoint inventory as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0680_sandbox_idle_checkpoint.sql",
+      ),
+    ).toMatchObject({
+      path: "0680_sandbox_idle_checkpoint.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("checks complete ledger metadata against migration files", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const sourceMigrationPaths = (
-      await readdir(join(import.meta.dir, "../packages/db/drizzle"), { withFileTypes: true })
+      await readdir(join(import.meta.dir, "../packages/db/drizzle"), {
+        withFileTypes: true,
+      })
     )
       .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
       .map((entry) => entry.name)
@@ -160,9 +380,57 @@ describe("release schema contract", () => {
     const failedSessionVariableSetAttach = sourceContract.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
+    const subscriptionAuthorityRefreshContract = sourceContract.migrations.find(
+      (migration) => migration.path === "0667_subscription_authority_refresh_contract.sql",
+    );
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(sourceContract.migrations.at(-1)?.path ?? null);
       expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
+    }
+    if (subscriptionAuthorityRefreshContract) {
+      expect(subscriptionAuthorityRefreshContract.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexChatAuthority = sourceContract.migrations.find(
+      (migration) => migration.path === "0668_subscription_core_codex_chat_authority.sql",
+    );
+    if (subscriptionCoreCodexChatAuthority) {
+      expect(subscriptionCoreCodexChatAuthority.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexWaits = sourceContract.migrations.find(
+      (migration) => migration.path === "0669_subscription_core_codex_waits.sql",
+    );
+    if (subscriptionCoreCodexWaits) {
+      expect(subscriptionCoreCodexWaits.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexApps = sourceContract.migrations.find(
+      (migration) => migration.path === "0670_subscription_core_codex_apps.sql",
+    );
+    if (subscriptionCoreCodexApps) {
+      expect(subscriptionCoreCodexApps.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexOperations = sourceContract.migrations.find(
+      (migration) => migration.path === "0671_subscription_core_codex_operations.sql",
+    );
+    if (subscriptionCoreCodexOperations) {
+      expect(subscriptionCoreCodexOperations.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexWriters = sourceContract.migrations.find(
+      (migration) => migration.path === "0688_subscription_core_codex_writers.sql",
+    );
+    if (subscriptionCoreCodexWriters) {
+      expect(subscriptionCoreCodexWriters.deploymentMode).toBe("rolling");
+    }
+    const subscriptionCoreCodexCutover = sourceContract.migrations.find(
+      (migration) => migration.path === "0689_subscription_core_codex_cutover.sql",
+    );
+    if (subscriptionCoreCodexCutover) {
+      expect(subscriptionCoreCodexCutover.deploymentMode).toBe("maintenance");
+    }
+    const subscriptionCoreCodexDisconnect = sourceContract.migrations.find(
+      (migration) => migration.path === "0691_subscription_core_codex_disconnect.sql",
+    );
+    if (subscriptionCoreCodexDisconnect) {
+      expect(subscriptionCoreCodexDisconnect.deploymentMode).toBe("maintenance");
     }
     // Keep the published-history assertions below scoped to their existing
     // migration range; the new forward migration is checked explicitly above.
@@ -2072,6 +2340,193 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0903_organization_default_voice_model.sql",
+      "0902_batched_knowledge_visibility.sql",
+      "0901_session_personal_state_probes.sql",
+      "0900_workspace_admin_predicate_privileges.sql",
+      "0899_ordered_turn_history_pages.sql",
+      "0898_organization_direct_openai_model_providers.sql",
+      "0897_workspace_owner_administers_subscriptions.sql",
+      "0896_shared_child_turn_context_authority.sql",
+      "0895_organization_voice_defaults.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0892_model_fact_event_pages.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0890_model_fact_reconciliation_progress.sql",
+      "0889_session_events_tool_name.sql",
+      "0888_session_list_invalidation.sql",
+      "0887_session_events_attempt_reference_index.sql",
+      "0886_remove_duplicate_session_identity_indexes.sql",
+      "0885_checkpoint_gc_reference_sets.sql",
+      "0884_subscription_core_personal_quarantine_expiry.sql",
+      "0883_retired_instance_interactions.sql",
+      "0882_continuable_core_capacity_waits.sql",
+      "0881_knowledge_scope_expression.sql",
+      "0880_quiescence_repair_skips_parked_waits.sql",
+      "0879_unsettled_admissions_session_index.sql",
+      "0878_keyed_knowledge_visibility.sql",
+      "0877_single_semantic_event_projection.sql",
+      "0876_connection_validation_shared_locks.sql",
+      "0875_realtime_history_reference_index.sql",
+      "0874_elevenlabs_realtime_models.sql",
+      "0873_mcp_binding_delegation_revocation.sql",
+      "0872_agent_update_blockers.sql",
+      "0867_member_teammate_permissions_backfill.sql",
+      "0866_member_teammate_permissions_backfill_index.sql",
+      "0865_member_teammate_permissions.sql",
+      "0871_subscription_usage_history.sql",
+      "0872_subscription_usage_call_history_seed.sql",
+      "0864_scheduled_bot_capability.sql",
+      "0863_classify_connected_command_ops.sql",
+      "0862_compute_stale_sandbox_enrollments.sql",
+      "0861_compute_lease_group_end_and_sleep.sql",
+      "0860_compute_commands_settle_by_push.sql",
+      "0859_compute_leases_skip_idle_drain.sql",
+      "0858_sandbox_enrollments.sql",
+      "0838_reclaim_exited_backend_runtime_capabilities.sql",
+      "0841_session_machine_access_explanation.sql",
+      "0837_hot_session_tables_analyze_cadence.sql",
+      "0836_cheaper_session_write_fences.sql",
+      "0832_schedule_defaults_and_turn_notifications.sql",
+      "0835_sessions_workspace_activity_xid_index.sql",
+      "0834_session_activity_xid.sql",
+      "0829_retained_screenshot_evict_oldest.sql",
+      "0828_retained_screenshot_maintenance_fresh_claims_first.sql",
+      "0827_session_visibility_probe_per_row.sql",
+      "0824_explicit_learning_destination_symmetry.sql",
+      "0822_session_pin_owner_short_circuit.sql",
+      "0821_session_history_owner_backfill_repair.sql",
+      "0820_browser_retained_downloads.sql",
+      "0819_explicit_workspace_learning_destination.sql",
+      "0818_insights_usage_hourly_reader.sql",
+      "0817_insights_usage_hourly_backfill.sql",
+      "0816_insights_usage_hourly_queue.sql",
+      "0815_insights_usage_hourly.sql",
+      "0823_live_personal_machine_consent.sql",
+      "0831_connected_machine_audience_rls.sql",
+      "0813_preserve_accepted_learning_scope.sql",
+      "0812_session_events_usage_source_key_index.sql",
+      "0811_session_events_usage_source_key_backfill.sql",
+      "0810_session_events_usage_source_key.sql",
+      "0809_session_open_settlement_index.sql",
+      "0808_connected_command_exit_locator.sql",
+      "0830_connected_command_child_cleanup.sql",
+      "0807_subscription_rls_admin_once_per_statement.sql",
+      "0806_session_history_tool_router_index.sql",
+      "0805_session_visibility_rls_cost.sql",
+      "0804_timeline_annotations_validate.sql",
+      "0803_timeline_annotations_uncapped_count.sql",
+      "0802_model_call_facts_timing.sql",
+      "0801_subscription_plan_legacy_prices.sql",
+      "0800_session_tenancy_fence_registry_schema_name.sql",
+      "0796_billing_subscription_operations.sql",
+      "0799_session_turns_human_prompt_subject_index.sql",
+      "0798_subscription_plan_maintenance.sql",
+      "0797_subscription_plan_foundation.sql",
+      "0792_scheduled_task_blocker_reviews.sql",
+      "0791_site_limit_profiles_new_defaults.sql",
+      "0790_site_limits_and_platform_usage.sql",
+      "0788_session_events_command_output_client_index.sql",
+      "0787_session_system_updates_delivered_turn_index.sql",
+      "0786_session_turns_finished_order_index.sql",
+      "0785_editable_spreadsheet_ordered_operation_ids.sql",
+      "0784_message_fork_as_of_history.sql",
+      "0783_site_sql.sql",
+      "0782_published_sites.sql",
+      "0781_session_usage_limit_statement_seed.sql",
+      "0780_only_me_vault_availability.sql",
+      "0779_provider_connection_home_workspace.sql",
+      "0777_workspace_admin_subscription_connections.sql",
+      "0776_site_data.sql",
+      "0772_sandbox_ended_epoch_setup_uncertainties.sql",
+      "0771_session_turn_setup_uncertainty_index.sql",
+      "0770_attached_browser_connection_history.sql",
+      "0769_private_visibility_never_blocks.sql",
+      "0768_private_visibility_ignores_leftovers.sql",
+      "0765_connected_machine_audience_switch.sql",
+      "0764_interrupted_turn_recovery.sql",
+      "0763_queue_steer_admission_recheck_repair.sql",
+      "0761_exhausted_scheduled_tasks.sql",
+      "0760_terminal_turn_run_state_cleanup.sql",
+      "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+      "0758_connection_account_intent_grants.sql",
+      "0757_subscription_people_picker_reads.sql",
+      "0756_turn_connection_account_intent_schema.sql",
+      "0755_turn_connection_account_intent.sql",
+      "0754_schedule_connectors_follow_workspace_defaults.sql",
+      "0753_schedule_live_connector_accounts.sql",
+      "0752_subscription_personal_sharing.sql",
+      "0734_connected_output_reachable_due.sql",
+      "0746_subscription_failover_readiness_and_request_fence.sql",
+      "0749_subscription_shared_personal_choice.sql",
+      "0750_subscription_waiter_candidates.sql",
+      "0738_private_sessions_share_sandboxes.sql",
+      "0737_site_audience.sql",
+      "0734_connected_output_reachable_due.sql",
+      "0733_subscription_session_bindings_per_provider.sql",
+      "0732_sandbox_maintenance_work_probes.sql",
+      "0731_published_site_versions_workspace_visible.sql",
+      "0730_maintenance_work_probes.sql",
+      "0735_subscription_core_owned_connection_usage.sql",
+      "0730_subscription_core_personal_connection_versions.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
+      "0729_subscription_person_preferences_owner.sql",
+      "0728_subscription_core_personal_connect_format.sql",
+      "0727_subscription_core_ownerless_video_operations.sql",
+      "0726_subscription_personal_acceptance_reads.sql",
+      "0725_organization_privacy_preferences.sql",
+      "0724_subscription_settings_locks.sql",
+      "0723_subscription_binding_cache_clock.sql",
+      "0722_personal_api_keys.sql",
+      "0721_private_scheduled_task_summaries.sql",
+      "0720_scheduled_task_audience.sql",
+      "0719_session_admin_access_time_limit.sql",
+      "0718_inbox_time_sensitive_needs_you.sql",
+      "0717_subscription_authority_fences.sql",
+      "0716_subscription_authority_compat.sql",
+      "0715_subscription_core_api_key_connections.sql",
+      "0714_subscription_workspace_managed_organization_accounts.sql",
+      "0713_subscription_core_provider_keyed_reach.sql",
+      "0712_subscription_core_generic_precursor.sql",
+      "0711_subscription_codex_completion_operations.sql",
+      "0710_drop_discarded_session_create_key_release.sql",
+      "0709_release_discarded_session_create_key.sql",
+      "0708_inbox_member_notifications.sql",
+      "0707_subscription_core_neutral_routines.sql",
+      "0706_organization_claude_models_in_personal_workspaces.sql",
+      "0705_idle_interaction_release.sql",
+      "0704_inactive_inherited_personal_connections.sql",
+      "0703_machine_removal_detaches_waiting_turns.sql",
+      "0702_subscription_codex_access_editor.sql",
+      "0701_quiescence_receipt_wake_repair.sql",
+      "0700_codex_ownerless_person_refresh.sql",
+      "0699_codex_recovery_after_interrupted_attempt.sql",
+      "0698_codex_ownerless_person_turns.sql",
+      "0697_codex_retry_after_unknown_outcome.sql",
+      "0696_enrollment_token_redemptions.sql",
+      "0695_subscription_model_catalog_observations.sql",
+      "0694_inbox_skip_live_call_replies.sql",
+      "0693_inbox_full_agent_access.sql",
+      "0692_session_admin_access.sql",
+      "0690_organization_model_defaults.sql",
+      "0686_target_tool_approval_bindings.sql",
+      "0689_subscription_core_codex_cutover.sql",
+      "0691_subscription_core_codex_disconnect.sql",
+      "0671_subscription_core_codex_operations.sql",
+      "0688_subscription_core_codex_writers.sql",
+      "0670_subscription_core_codex_apps.sql",
+      "0669_subscription_core_codex_waits.sql",
+      "0668_subscription_core_codex_chat_authority.sql",
+      "0667_subscription_authority_refresh_contract.sql",
+      "0647_slack_bot_branding.sql",
+      // Exclusion membership is unordered; keep this addition away from the shared tail.
+      "0640_knowledge_entry_created_since.sql",
+      "0641_subscription_authority_identity_index.sql",
+      "0642_shared_subscription_core.sql",
+      "0643_model_call_facts_subscription_connection_index.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2402,6 +2857,81 @@ describe("release schema contract", () => {
       "0624_azure_live_realtime_model.sql",
       "0625_transcription_billing_refusal_codes.sql",
       "0632_modal_native_live_origin.sql",
+      "0633_session_recovery_overdue_age.sql",
+      "0634_organization_admin_self_workspace_removal.sql",
+      "0635_organization_admin_workspace_member_management.sql",
+      "0636_opper_model_providers.sql",
+      "0637_retained_process_background_owner_inventory.sql",
+      "0638_allowance_unbilled_usage_metering.sql",
+      "0639_native_app_push.sql",
+      "0644_subscription_inference_source_settings.sql",
+      "0645_subscription_core_runtime.sql",
+      "0646_subscription_core_people_assignment_read.sql",
+      "0648_session_content_blobs.sql",
+      "0649_session_content_archive.sql",
+      "0650_session_archive_activity.sql",
+      "0651_session_event_delta_folding.sql",
+      "0652_session_archive_guard_search_path.sql",
+      "0653_session_archive_tenancy_fence.sql",
+      "0654_private_child_causal_initiator.sql",
+      "0655_inbox.sql",
+      "0656_inbox_owner_recipient.sql",
+      "0657_session_archive_purge_retained_evidence.sql",
+      "0658_tenancy_quiescence_ignores_stranded_tool_receipts.sql",
+      "0659_sandbox_capture_concurrent_commands.sql",
+      "0660_session_archive_preference_snapshot_export.sql",
+      "0661_inbox_subagent_goals_and_schedules.sql",
+      "0662_session_first_party_default_intent.sql",
+      "0663_inbox_paused_goal_setting.sql",
+      "0664_inbox_rich_notifications.sql",
+      "0665_inbox_replies.sql",
+      "0666_inbox_reply_current_turn.sql",
+      "0672_sandbox_checkpoint_staleness.sql",
+      "0682_sandbox_admission_settled_index.sql",
+      "0683_sandbox_checkpoint_staleness_any_settled.sql",
+      "0673_delete_stranded_completed_turn_tool_receipts.sql",
+      "0674_inbox_reply_hands_back.sql",
+      "0675_inbox_subagent_turn_push.sql",
+      "0676_sandbox_deadline_forced_capture.sql",
+      "0677_local_human_inbox_recipient.sql",
+      "0678_inbox_mute_session_replies.sql",
+      "0679_codex_extra_credit_consent.sql",
+      "0680_sandbox_idle_checkpoint.sql",
+      "0681_sandbox_ended_epoch_blockers.sql",
+      "0684_claude_haiku_5_5_default_model.sql",
+      "0685_sandbox_capture_around_supervised_commands.sql",
+      "0687_human_wait_command_containment.sql",
+      "0736_notification_webhook_content.sql",
+      "0739_vaults.sql",
+      "0773_session_usage_limits.sql",
+      "0774_session_usage_limit_attention_index.sql",
+      "0775_session_usage_limit_attention_cursor.sql",
+      "0789_external_vault_sources.sql",
+      "0793_private_site_sessions.sql",
+      "0794_site_ai_insights.sql",
+      "0795_site_lifecycle_cancellation.sql",
+      "0839_docker_local_command_containment.sql",
+      "0840_retained_process_reconciler_version.sql",
+      "0842_site_session_access.sql",
+      "0843_indexed_inbox_lineage.sql",
+      "0844_free_plan_credit_scope.sql",
+      "0845_signup_eligibility_without_bonus.sql",
+      "0846_independent_session_titles.sql",
+      "0847_read_only_runtime_probes.sql",
+      "0848_strict_owner_maintenance_probes.sql",
+      "0849_strict_owner_maintenance_claims.sql",
+      "0851_personal_machine_session_tree.sql",
+      "0852_maintenance_predicate_privileges.sql",
+      "0853_connected_machine_root_working_dirs.sql",
+      "0854_file_visibility.sql",
+      "0855_session_fork_agent_parity.sql",
+      "0856_session_fork_workflow_identity.sql",
+      "0857_connection_origin_workspace_cascade.sql",
+      "0868_humanless_personal_workspace_learning.sql",
+      "0869_personal_workspace_editable_artifacts.sql",
+      "0870_invitation_binding_seat_scope.sql",
+      "0871_explicit_workspace_recovery.sql",
+      "0872_file_app_shot.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

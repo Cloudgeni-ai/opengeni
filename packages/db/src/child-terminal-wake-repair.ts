@@ -1,8 +1,12 @@
 import { SessionSystemUpdatePayload } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
+import { compactionFailureHoldSequenceTx } from "./compaction-failure-hold";
 import { fromPostgresLosslessJson } from "./lossless-json";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+} from "./session-attempt-writers";
 import {
   evaluateSessionControl,
   lockSessionEventWriteRows,
@@ -82,11 +86,20 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
                     and interruption.attempt_id = attempt.id
                     and interruption.state in ('pending', 'delivered', 'acknowledged', 'settled', 'rejected_stale'))
               ))
-              or ${sessionAttemptPendingWritersSql(sql`attempt`, "physical")}
-              or ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")})
+              or (attempt.id in ${sessionPendingWriterAttemptIdsSql(candidate)}
+                and (${sessionAttemptPendingWritersSql(sql`attempt`, "physical")}
+                  or ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")})))
         ) as pending`,
       );
       if (blocked?.pending) return false;
+      // A terminal compaction failure holds the input that was already pending;
+      // re-registering a wake for it would only re-signal a workflow with
+      // nothing admissible. Newer results still repair normally.
+      const holdSequence = await compactionFailureHoldSequenceTx(
+        tx as unknown as Database,
+        candidate.workspaceId,
+        candidate.sessionId,
+      );
       const pending = await rawRows<{
         source_id: string;
         child_id: string;
@@ -115,6 +128,14 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
           and input.kind = 'child_terminal_result'
           and input.payload ->> 'childSessionId' = input.source_id
           and input.lineage ->> 'parentSessionId' = input.session_id::text
+          and (${holdSequence}::bigint is null or exists (
+            select 1 from session_events pending_event
+            where pending_event.workspace_id = input.workspace_id
+              and pending_event.session_id = input.session_id
+              and pending_event.type = 'system.update.pending'
+              and pending_event.sequence > ${holdSequence}::bigint
+              and pending_event.payload ->> 'updateId' = input.id::text
+          ))
         limit 100`,
       );
       if (

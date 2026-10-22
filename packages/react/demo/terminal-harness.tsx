@@ -7,6 +7,7 @@ import {
 } from "@opengeni/react";
 import "./styles.css";
 import { enableWorkbenchDemoPeers } from "./workbench-peers";
+import { installTerminalReadinessFixture } from "./terminal-readiness-fixture";
 
 enableWorkbenchDemoPeers();
 
@@ -77,6 +78,19 @@ const params = new URLSearchParams(window.location.search);
 const view = params.get("view") ?? "idle";
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const fail = params.get("fail");
+const readinessView = view === "readiness";
+const coldAcquisition = readinessView && params.get("cold") === "1";
+const readinessMode = params.get("mode");
+const fixtureMode =
+  readinessMode === "silent" || readinessMode === "manual" || readinessMode === "legacy"
+    ? readinessMode
+    : "ready";
+// A local-only endpoint permits actual ttyd/native-addon browser verification;
+// the ordinary checked-in demo uses only synthetic fixture data.
+const localPty = params.get("pty");
+const livePty = localPty && /^ws:\/\/127\.0\.0\.1:\d+$/.test(localPty) ? localPty : null;
+const readinessFixture =
+  readinessView && !livePty ? installTerminalReadinessFixture(fixtureMode) : null;
 
 // Force the renderer fallback ladder BEFORE the component mounts (E1 proof).
 if (fail) (globalThis as { __OG_FORCE_RENDERER_FAIL__?: string }).__OG_FORCE_RENDERER_FAIL__ = fail;
@@ -90,6 +104,7 @@ if (fail) (globalThis as { __OG_FORCE_RENDERER_FAIL__?: string }).__OG_FORCE_REN
 };
 
 function App() {
+  const [grantReady, setGrantReady] = useState(!coldAcquisition);
   // For the handoff view we start read-only (firehose) then flip to interactive
   // (write fn) WITHOUT remounting — proving screen preservation (E5). Toggled by
   // the evidence script via `window.__ogFlipInteractive()`.
@@ -129,8 +144,45 @@ function App() {
       data-og-theme={theme === "light" ? "light" : undefined}
     >
       <div className="mx-auto flex h-full max-w-4xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-bg shadow-og-md">
+        {readinessFixture && coldAcquisition && !grantReady && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => setGrantReady(true)}
+          >
+            Grant synthetic PTY
+          </button>
+        )}
+        {readinessFixture && grantReady && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => readinessFixture.reconnect()}
+          >
+            Reconnect synthetic transport
+          </button>
+        )}
+        {readinessFixture && fixtureMode !== "legacy" && fixtureMode !== "manual" && (
+          <button
+            className="border-b border-og-border px-3 py-2 text-og-sm text-og-fg"
+            onClick={() => readinessFixture.ready()}
+          >
+            Finish synthetic shell startup
+          </button>
+        )}
         <SandboxTerminal
-          result={result}
+          result={readinessView ? makeResult({ running: false }) : result}
+          terminalCapability={
+            readinessView
+              ? {
+                  transport: grantReady ? "pty-ws" : "sse-events",
+                  ptyCapable: true,
+                  shell: "/bin/bash",
+                  url: grantReady ? (livePty ?? "https://terminal.example") : null,
+                  token: null,
+                  expiresAt: null,
+                  reason: grantReady ? null : "lease_cold",
+                }
+              : undefined
+          }
           liveness={liveness}
           showHeader
           shell="/bin/bash"

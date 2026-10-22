@@ -7,6 +7,20 @@ import {
 } from "../src/domain/sessions";
 
 describe("first-party MCP tool selection at session creation", () => {
+  test("explicit deployment refusals name every disabled tool and the allowed set", () => {
+    const policy = { default: ["session_get"] as const, allowed: ["session_get"] as const };
+    for (const parent of [undefined, ["command_wait", "browser_read"]] as const) {
+      expect(() =>
+        resolveFirstPartyMcpToolsForCreate(
+          ["command_wait", "browser_read"],
+          parent === undefined ? undefined : [...parent],
+          policy,
+        ),
+      ).toThrow(
+        "first-party MCP tools are disabled by deployment policy: command_wait, browser_read. Allowed tools: session_get. Omit firstPartyMcpTools to inherit the effective selection.",
+      );
+    }
+  });
   test("top-level omission snapshots the complete default catalog", () => {
     expect(resolveFirstPartyMcpToolsForCreate(undefined, undefined)).toEqual([
       ...DEFAULT_FIRST_PARTY_MCP_TOOLS,

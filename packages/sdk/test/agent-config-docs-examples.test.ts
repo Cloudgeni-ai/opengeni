@@ -5,7 +5,7 @@
 // in step with this file: if it stops type-checking, the docs are wrong.
 import { describe, expect, test } from "bun:test";
 
-import { OpenGeni, createChatHandler } from "../src/chat";
+import { Opengeni, createChatHandler } from "../src/chat";
 import { OpenGeniClient } from "../src/index";
 import { OpenGeniSetupError } from "../src/errors";
 import { createSessionProxyHandler } from "../src/session-proxy";
@@ -35,7 +35,7 @@ async function inspect(og: OpenGeniClient, workspaceId: string, sessionId: strin
     .filter((capability) => capability.available)
     .map((capability) => capability.id);
   const workspace = await og.getWorkspace(workspaceId);
-  const defaults = workspace.settings.sessionAgentDefaults; // null/undefined: OpenGeni's defaults
+  const defaults = workspace.settings.sessionAgentDefaults; // null/undefined: Opengeni's defaults
   const session = await og.getSession(workspaceId, sessionId);
   // session.agent: the frozen configuration (null for sessions created before it).
   // session.effectiveTools: the tools it can use, with upfront or on-demand visibility.
@@ -102,7 +102,7 @@ const proxy = createSessionProxyHandler(og, {
 });
 
 // 4. Isolated chats: a workspace per tenant user, through the facade.
-const facade = new OpenGeni({
+const facade = new Opengeni({
   apiKey: process.env.OPENGENI_API_KEY!,
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
   baseUrl: process.env.OPENGENI_API_BASE_URL!,

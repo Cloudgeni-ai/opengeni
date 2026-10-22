@@ -5,7 +5,8 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   type ConnectorToolPermissionsResponse,
@@ -645,6 +646,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         body: JSON.stringify(body),
       });
 
+    if (url.pathname === "/v1/inbox" && request.method() === "GET") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "capabilities-browser",

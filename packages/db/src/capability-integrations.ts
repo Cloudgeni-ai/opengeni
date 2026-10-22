@@ -857,19 +857,33 @@ export async function listInstalledApiIntegrations(
   db: Database,
   workspaceId: string,
   subjectId?: string,
+  /** Only bindings with these runtime server ids (a live target fence). */
+  serverIds?: readonly string[],
 ): Promise<ApiIntegrationRuntime[]> {
+  if (serverIds && serverIds.length === 0) return [];
   return subjectId
     ? await withWorkspaceSubjectRls(
         db,
         workspaceId,
         subjectId,
         async (scopedDb) =>
-          await listInstalledApiIntegrationsInRlsContext(scopedDb, workspaceId, subjectId),
+          await listInstalledApiIntegrationsInRlsContext(
+            scopedDb,
+            workspaceId,
+            subjectId,
+            serverIds,
+          ),
       )
     : await withWorkspaceRls(
         db,
         workspaceId,
-        async (scopedDb) => await listInstalledApiIntegrationsInRlsContext(scopedDb, workspaceId),
+        async (scopedDb) =>
+          await listInstalledApiIntegrationsInRlsContext(
+            scopedDb,
+            workspaceId,
+            undefined,
+            serverIds,
+          ),
       );
 }
 
@@ -1047,7 +1061,9 @@ export async function listInstalledApiIntegrationsInRlsContext(
   scopedDb: Database,
   workspaceId: string,
   subjectId?: string,
+  serverIds?: readonly string[],
 ): Promise<ApiIntegrationRuntime[]> {
+  if (serverIds && serverIds.length === 0) return [];
   const rows = await scopedDb
     .select({
       pluginKey: schema.capabilityPlugins.pluginKey,
@@ -1130,6 +1146,7 @@ export async function listInstalledApiIntegrationsInRlsContext(
         eq(schema.integrationFacetDefinitions.kind, "tools"),
         eq(schema.integrationFacetBindings.status, "active"),
         sql`${schema.integrationFacetBindings.runtimeKey} is not null`,
+        serverIds ? inArray(schema.integrationFacetBindings.runtimeKey, [...serverIds]) : undefined,
         sql`exists (
             select 1 from ${schema.capabilityComponentOwners} owner
             where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}

@@ -8,6 +8,19 @@ export type {
   HumanInputFormProps,
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
+export { SecretsUiProvider } from "./secrets-ui";
 export { ApprovalSurface } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
 export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
@@ -19,12 +32,16 @@ export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-ro
 export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
@@ -67,7 +84,25 @@ export type {
   ToolRenderer,
   ToolRendererProps,
 } from "./timeline";
-export { SessionConversation } from "./components/session-conversation";
+export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export { NewConversation, NewConversationView } from "./components/new-conversation";
+export type {
+  NewConversationProps,
+  NewConversationViewProps,
+  NewConversationLabels,
+} from "./components/new-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
@@ -79,6 +114,7 @@ export type {
 export type {
   SessionConversationLabels,
   SessionConversationProps,
+  SessionConversationViewProps,
 } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
@@ -97,9 +133,30 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+
+// Why a message can't start, with machine choice and recheck. Every word comes
+// from the message catalog (`sessionAdmission.*`). The headless state is
+// `useSessionStart` in `@opengeni/react/session`.
+export {
+  PersonalMachineExplanation,
+  SessionAdmissionNotice,
+  SessionMachineAccessNotice,
+  SessionMachineChoices,
+  SessionStartNotice,
+} from "./components/session-admission-notice";
+export type {
+  SessionAdmissionNoticeProps,
+  SessionMachineChoicesProps,
+  SessionStartNoticeProps,
+} from "./components/session-admission-notice";

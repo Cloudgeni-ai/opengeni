@@ -2,9 +2,11 @@ import {
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
 } from "@opengeni/config";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   resolveSessionAgentConfigForCreate,
@@ -124,7 +126,8 @@ export function createAutomationActivities(
         const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
         const catalogSettings =
           requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-          requestedModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
+          requestedModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) ||
+          requestedModel.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX)
             ? (
                 await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
                   accountId: input.accountId,
@@ -209,7 +212,11 @@ export function createAutomationActivities(
             config: resolution.config,
             instructions: resolution.instructions,
             firstPartyMcpTools: written.firstPartyMcpTools,
-            tools: written.tools,
+            tools: newSessionKnowledgeSearchTools(
+              written.tools,
+              resolution.config,
+              written.firstPartyMcpTools,
+            ),
           };
         } catch (error) {
           if (!isUnprocessableEntity(error)) throw error;
@@ -289,7 +296,8 @@ export function createAutomationActivities(
           ...(agentWriteThrough.config ? { agentConfig: agentWriteThrough.config } : {}),
           retainWorkspaceCustomModel:
             model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-            model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX),
+            model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) ||
+            model.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX),
           createIdempotencyKey: `automation-run:${run.id}`,
           subjectId: accepted.serviceSubjectId,
         });

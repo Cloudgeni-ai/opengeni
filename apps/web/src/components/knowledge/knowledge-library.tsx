@@ -21,18 +21,18 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -42,7 +42,7 @@ import {
   ToolbarSummary,
   type ToolbarFilterGroup,
   type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/toolbar";
 
 import { errorText, scopeFilterValue, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeSearchFallback, knowledgeIndexLabel } from "./knowledge-index-status";
@@ -85,6 +85,15 @@ const TYPE_FILTERS: KnowledgeEntryKind[] = [
 
 const FILTER_GROUPS: ToolbarFilterGroup[] = [
   {
+    id: "added",
+    label: "Added",
+    options: [
+      { id: "day", label: "Last 24 hours" },
+      { id: "week", label: "Last 7 days" },
+      { id: "month", label: "Last 30 days" },
+    ],
+  },
+  {
     id: "type",
     label: "Type",
     options: TYPE_FILTERS.map((kind) => ({
@@ -108,7 +117,7 @@ const FILTER_GROUPS: ToolbarFilterGroup[] = [
   },
 ];
 
-/** Type and Status are one value each (the API filters one kind and one view). */
+/** Added, Type and Status each take one value; supporting sources is independent. */
 function singleChoice(previous: ToolbarFilterValue, next: ToolbarFilterValue): ToolbarFilterValue {
   const result: ToolbarFilterValue = {};
   for (const [group, ids] of Object.entries(next)) {
@@ -122,10 +131,20 @@ function singleChoice(previous: ToolbarFilterValue, next: ToolbarFilterValue): T
   return result;
 }
 
+/** Rolling windows use the original entry date, never the latest edit date. */
+export function knowledgeAddedSince(
+  period: string | undefined,
+  now = Date.now(),
+): string | undefined {
+  const days = period === "day" ? 1 : period === "week" ? 7 : period === "month" ? 30 : undefined;
+  return days === undefined ? undefined : new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function libraryRequest(
   view: LibraryView,
   search: string,
   fileId: string | undefined,
+  createdSince: string | undefined,
 ): KnowledgeEntryListRequest {
   const kind = view.filters.type?.[0] as KnowledgeEntryKind | undefined;
   const status = view.filters.status?.[0] as "archived" | "rejected" | undefined;
@@ -139,6 +158,7 @@ function libraryRequest(
     ...(evidence || kind === "source" || fileId ? { includeEvidence: true } : {}),
     ...(fileId ? { fileId } : {}),
     ...(search ? { query: search } : {}),
+    ...(createdSince ? { createdSince } : {}),
   };
 }
 
@@ -198,6 +218,10 @@ export const ENTRY_COLUMNS: RowListColumn[] = [
   { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
 ];
 
+const ADDED_COLUMNS: RowListColumn[] = [
+  { id: "updated", label: "Added", width: 112, align: "end", hideLabel: true },
+];
+
 export interface EntryRowActions {
   canEdit: (entry: KnowledgeEntrySummary) => boolean;
   onOpen: (entry: KnowledgeEntrySummary) => void;
@@ -223,11 +247,13 @@ export function EntryRow({
   actions,
   searching = false,
   status,
+  added = false,
 }: {
   entry: KnowledgeEntrySummary;
   actions: EntryRowActions;
   searching?: boolean;
   status?: "archived" | "rejected";
+  added?: boolean;
 }) {
   const editable = actions.canEdit(entry);
   const state = status
@@ -255,7 +281,14 @@ export function EntryRow({
           </StatusBadge>
         ) : undefined
       }
-      cells={{ updated: <RelativeTime date={entry.updatedAt} /> }}
+      cells={{
+        updated: (
+          <RelativeTime
+            date={added ? entry.createdAt : entry.updatedAt}
+            prefix={!added && entry.revision.kind === "group" ? "Edited" : undefined}
+          />
+        ),
+      }}
       onOpen={() => actions.onOpen(entry)}
       menu={
         <>
@@ -305,6 +338,7 @@ export function EntryList({
   status,
   busy,
   flush = true,
+  added = false,
 }: {
   label: string;
   entries: KnowledgeEntrySummary[];
@@ -314,9 +348,15 @@ export function EntryList({
   busy?: boolean;
   /** Tiles and titles line up with the page's edge (the default). */
   flush?: boolean;
+  added?: boolean;
 }) {
   return (
-    <RowList label={label} busy={busy} flush={flush} columns={ENTRY_COLUMNS}>
+    <RowList
+      label={label}
+      busy={busy}
+      flush={flush}
+      columns={added ? ADDED_COLUMNS : ENTRY_COLUMNS}
+    >
       {entries.map((entry) => (
         <EntryRow
           key={entry.id}
@@ -324,6 +364,7 @@ export function EntryList({
           actions={actions}
           searching={searching}
           status={status}
+          added={added}
         />
       ))}
     </RowList>
@@ -368,10 +409,18 @@ export function LibraryTab({
   const status = view.filters.status?.[0] as "archived" | "rejected" | undefined;
   const narrowed = Object.values(view.filters).some((ids) => ids.length > 0) || Boolean(fileId);
   const collections = view.layout === "collections" && !searching && !narrowed;
+  const addedPeriod = view.filters.added?.[0];
+  // Freeze the cutoff across search, other filters and Load more. A page refresh
+  // intentionally starts a fresh window and resets the list's cursor.
+  const createdSince = useMemo(
+    () => knowledgeAddedSince(addedPeriod),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- refresh starts a fresh time window
+    [addedPeriod, refresh],
+  );
   const request = useMemo(
-    () => (collections ? null : libraryRequest(view, search, fileId)),
+    () => (collections ? null : libraryRequest(view, search, fileId, createdSince)),
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- the query is debounced into `search`
-    [collections, view.scope, view.filters, search, fileId],
+    [collections, view.scope, view.filters, search, fileId, createdSince],
   );
   const list = useKnowledgeList(workspaceId, request, refresh);
   const set = (patch: Partial<LibraryView>) => onViewChange({ ...view, ...patch });
@@ -467,6 +516,7 @@ export function LibraryTab({
           searching={searching}
           status={status}
           busy={list.loading}
+          added={Boolean(createdSince)}
         />
         {list.error ? (
           <p role="alert" className="text-sm text-danger">

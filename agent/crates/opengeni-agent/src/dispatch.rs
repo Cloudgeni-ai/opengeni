@@ -66,6 +66,20 @@ pub struct DispatchContext {
 /// best-effort first cut, not the sole guard.
 pub const REPLY_ENVELOPE_MARGIN: usize = 4 * 1024;
 
+/// Controller body bytes one reply may carry: the negotiated payload less the
+/// envelope and the bounded controller response headers. `None` when the
+/// transport reports no bound (a test/sync context).
+fn reply_body_budget(ctx: &DispatchContext) -> Option<usize> {
+    (ctx.max_reply_bytes != 0).then(|| {
+        ctx.max_reply_bytes
+            .saturating_sub(
+                REPLY_ENVELOPE_MARGIN
+                    + opengeni_agent_platform::BROWSER_CONTROL_HTTP_MAX_HEADER_BYTES,
+            )
+            .max(1)
+    })
+}
+
 impl DispatchContext {
     /// Milliseconds since the agent process started (the monotonic clock the
     /// ping/heartbeat reports for skew estimation).
@@ -148,6 +162,7 @@ async fn dispatch_future<P: Platform>(
             RespResult::Ping(v1::PingResponse {
                 nonce: req.nonce,
                 agent_monotonic_ms: ctx.monotonic_ms(),
+                control_replay_tokens: Vec::new(),
             }),
         ),
         Op::Metrics(_) => metrics_response(request_id).await,
@@ -165,14 +180,21 @@ async fn dispatch_future<P: Platform>(
             request_id,
             "agent_update_apply must be handled by the process supervisor",
         ),
+        Op::CredentialRenew(_) => protocol_error(
+            request_id,
+            "credential_renew must be handled by the process supervisor",
+        ),
 
         // --- op-stream (v1.1): wire types exist, no runtime serves them yet ----
         // The runner does not advertise `Capabilities.op_stream`, so a compliant
         // server never sends these; answer any that arrive with a typed Unsupported
         // rather than a silent drop, until the op engine is wired.
-        Op::OpStart(_) | Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::WriteChunk(_) => {
-            op_stream_unsupported(request_id)
-        }
+        Op::OpStart(_)
+        | Op::OpCancel(_)
+        | Op::OpQuery(_)
+        | Op::OpAttach(_)
+        | Op::OpRelease(_)
+        | Op::WriteChunk(_) => op_stream_unsupported(request_id),
 
         // --- platform-backed Channel-A ops -----------------------------------
         // NOTE: `fs_read` can produce a reply larger than the transport's max
@@ -215,6 +237,22 @@ async fn dispatch_future<P: Platform>(
             request_id,
             platform.browser_control_ensure(&req).await,
             RespResult::BrowserControlEnsure,
+        ),
+        // The reply carries the controller's body, so bound it by the same
+        // negotiated payload the transport can publish; the rest is spooled.
+        Op::BrowserControlHttp(req) => result(
+            request_id,
+            platform
+                .browser_control_http(&req, reply_body_budget(ctx))
+                .await,
+            RespResult::BrowserControlHttp,
+        ),
+        Op::BrowserControlHttpRead(req) => result(
+            request_id,
+            platform
+                .browser_control_http_read(&req, reply_body_budget(ctx))
+                .await,
+            RespResult::BrowserControlHttpRead,
         ),
         Op::BrowserFramesOpen(req) => result(
             request_id,
@@ -627,6 +665,7 @@ mod tests {
                 stderr: prost::bytes::Bytes::new(),
                 timed_out: false,
                 duration_ms: 1,
+                background_children_stopped: false,
             })
         }
         async fn fs_read(&self, _req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
@@ -716,7 +755,13 @@ mod tests {
     #[tokio::test]
     async fn ping_is_answered_by_the_agent() {
         let platform = Arc::new(FakePlatform::default());
-        let req = request(5, Op::Ping(v1::PingRequest { nonce: 99 }));
+        let req = request(
+            5,
+            Op::Ping(v1::PingRequest {
+                nonce: 99,
+                ..Default::default()
+            }),
+        );
         let resp = dispatch(req, &platform, &ctx()).await;
         match resp.result {
             Some(RespResult::Ping(p)) => assert_eq!(p.nonce, 99),

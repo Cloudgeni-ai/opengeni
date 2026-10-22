@@ -13,38 +13,46 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import {
+  DestructiveConfirm,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Toolbar, ToolbarSearch, ToolbarSummary } from "@opengeni/react/ui/toolbar";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   useOrganizationDirectory,
@@ -53,6 +61,7 @@ import {
 } from "./organization-directory";
 import { useOrganizationNavigation, type OrganizationNavigation } from "./organization-nav";
 import {
+  filterWorkspacesByName,
   initialsOf,
   joinNames,
   memberName,
@@ -60,9 +69,10 @@ import {
   workspaceMemberName,
   workspaceRoleLabel,
   workspaceRoleOptions,
+  WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import type { ReturnTo } from "@/lib/return-to";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it
@@ -231,6 +241,7 @@ function WorkspacesList({
   nav: OrganizationNavigation;
 }) {
   const [joining, setJoining] = useState<OrganizationWorkspaceAccess | null>(null);
+  const [query, setQuery] = useState("");
   const overview = directory.overview;
   if (overview.error && !overview.value) {
     return (
@@ -268,29 +279,59 @@ function WorkspacesList({
       />
     );
   }
+  const searchable = workspaces.length > WORKSPACE_SEARCH_THRESHOLD;
+  const shown = searchable ? filterWorkspacesByName(workspaces, query) : workspaces;
+  const filtered = searchable && query.trim().length > 0;
   return (
     <>
-      <RowList
-        columns={COLUMNS}
-        label={`Workspaces in ${overview.value.organization.name}`}
-        nameLabel="Workspace"
-        flush
-      >
-        {workspaces.map((workspace) => (
-          <ListRow
-            key={workspace.id}
-            leading={<LogoTile name={workspace.name} />}
-            title={workspace.name}
-            cells={{
-              people: <PeopleStack members={workspace.members} />,
-              access: <YourAccess workspace={workspace} onJoin={() => setJoining(workspace)} />,
-              created: <RelativeTime date={workspace.createdAt} format="date" />,
-            }}
-            indicator="open"
-            onOpen={() => nav.openWorkspace(workspace.id)}
-          />
-        ))}
-      </RowList>
+      {searchable ? (
+        <div className="flex min-w-0 flex-col gap-4 pb-4">
+          <Toolbar>
+            <ToolbarSearch
+              value={query}
+              onValueChange={setQuery}
+              placeholder="Search workspaces"
+              aria-label="Search workspaces"
+            />
+          </Toolbar>
+          {filtered ? (
+            <ToolbarSummary>
+              {shown.length} of {workspaces.length} workspaces
+            </ToolbarSummary>
+          ) : null}
+        </div>
+      ) : null}
+      {filtered && shown.length === 0 ? (
+        <EmptyState
+          variant="page"
+          icon={<SquareStackIcon />}
+          title="No workspaces match"
+          description="Try another name."
+          className="pt-8 pb-6"
+        />
+      ) : (
+        <RowList
+          columns={COLUMNS}
+          label={`Workspaces in ${overview.value.organization.name}`}
+          nameLabel="Workspace"
+          flush
+        >
+          {shown.map((workspace) => (
+            <ListRow
+              key={workspace.id}
+              leading={<LogoTile name={workspace.name} />}
+              title={workspace.name}
+              cells={{
+                people: <PeopleStack members={workspace.members} />,
+                access: <YourAccess workspace={workspace} onJoin={() => setJoining(workspace)} />,
+                created: <RelativeTime date={workspace.createdAt} format="date" />,
+              }}
+              indicator="open"
+              onOpen={() => nav.openWorkspace(workspace.id)}
+            />
+          ))}
+        </RowList>
+      )}
       {joining ? (
         <JoinDialog
           workspace={joining}
@@ -325,6 +366,8 @@ function accessMembers(
       initials: initialsOf(workspaceMemberName(member, you)),
       kind: service ? "service" : "person",
       isYou: member.subjectId === directory.identity.subjectId,
+      // Organization owners and admins set their own access here too.
+      managesOwnAccess: !directory.singleUser,
       tag: directory.singleUser ? "Owner" : undefined,
       // Single-user mode: the local administrator has every permission.
       role: directory.singleUser ? "admin" : member.role,
@@ -422,7 +465,10 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
-  const back = { label: "Workspaces", onClick: () => nav.openSection("workspaces") };
+  const back = {
+    label: "Workspaces",
+    onClick: () => nav.openSection("workspaces"),
+  };
   const overview = directory.overview.value;
   const workspace = overview?.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
 
@@ -491,7 +537,10 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
     const organizationMembershipId = current.organizationMembershipId;
     const before = current.role;
     try {
-      await directory.removeWorkspaceAccess({ workspaceId: workspace.id, member: current });
+      await directory.removeWorkspaceAccess({
+        workspaceId: workspace.id,
+        member: current,
+      });
     } catch (error) {
       toast.error(`Couldn't remove ${member.name}`, {
         description: userErrorText(error),
