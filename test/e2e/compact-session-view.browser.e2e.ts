@@ -550,6 +550,15 @@ describe("compact session view on the live local workspace route (API fixture)",
       { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
     );
   };
+  // The rail starts its re-read asynchronously after an invalidation. Wait for
+  // that request to reach the fixture instead of a fixed delay; the bound stays
+  // well below the rail's 15s fallback poll.
+  const awaitBrowseReadStart = () =>
+    waitFor(() => archiveFixture?.readStarted === true, {
+      timeoutMs: 5_000,
+      intervalMs: 10,
+      describe: () => "No browse read started after the session list invalidation.",
+    });
   const settleRead = async () => {
     await page.waitForLoadState("networkidle");
     await page.evaluate(
@@ -675,7 +684,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       archiveFixture.holdRead = delayed;
       archiveFixture.readStarted = false;
       await invalidate();
-      await page.waitForTimeout(100);
+      await awaitBrowseReadStart();
       expect(archiveFixture.readStarted).toBe(true);
       // Pending transitions cannot be revived by an invalidation.
       expect(await matchingChildren.count()).toBe(0);
@@ -927,7 +936,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       archiveFixture.holdRead = oldWorkspaceRead;
       archiveFixture.readStarted = false;
       await invalidate();
-      await page.waitForTimeout(100);
+      await awaitBrowseReadStart();
       expect(archiveFixture.readStarted).toBe(true);
       await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();
