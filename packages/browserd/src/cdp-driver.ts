@@ -425,6 +425,10 @@ type TargetState = {
   unsubscribe: Array<() => void>;
   /** Set only while dispatching one action of a traced command. */
   actionTrace?: { actionIndex: number; trace: InteractionDispatchTrace } | undefined;
+  /** Set only while dispatching a later action of a batch without
+   * fenceEachAction: its locator wait may follow the page to a new document.
+   * Every other action acts only on the document it was checked against. */
+  locatorFollowsNavigation?: boolean;
   /** Cross-origin iframes (out-of-process frames) by frame id. Each has its own
    * flattened CDP session, auto-attached from this page session. */
   oopifs: Map<string, OopifSession>;
@@ -1719,6 +1723,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
+        state.locatorFollowsNavigation =
+          command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
         const effectsBeforeAction = state.actionEffectCount;
         try {
           if (action.type === "handle_dialog") {
@@ -1741,6 +1747,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           state.nodeRoute = null;
           state.actionTrace = undefined;
+          state.locatorFollowsNavigation = false;
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length)
@@ -1756,6 +1763,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         } catch (error) {
           state.nodeRoute = null;
           state.actionTrace = undefined;
+          state.locatorFollowsNavigation = false;
           if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
             // This action counts as run once it sent input: that input is
             // what opened the dialog, or it may have had effects before it.
@@ -4699,6 +4707,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * changes runs without an observation between them. A ref names a node the
    * caller already saw, so it does not wait to appear. The wait ends at
    * LOCATOR_WAIT_MS; the action then fails as it would have without waiting.
+   * Only a later action of a batch without fenceEachAction may follow the page
+   * to a new document while it waits; any other action stops with
+   * document_stale before input, as its document fence requires.
    */
   private async resolveActionLocator(
     state: TargetState,
@@ -4707,6 +4718,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<CdpAccessibilityEntry> {
     const input = options.input ?? true;
     const deadline = Date.now() + LOCATOR_WAIT_MS;
+    const fence = state.locatorFollowsNavigation
+      ? null
+      : { document: state.documentGeneration, frame: state.frameGeneration };
     let pause = 25;
     let entry: CdpAccessibilityEntry;
     for (;;) {
@@ -4723,6 +4737,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ) {
           throw error;
         }
+      }
+      if (
+        fence &&
+        (state.documentGeneration !== fence.document || state.frameGeneration !== fence.frame)
+      ) {
+        throw new InteractionDefiniteDriverError(
+          "document_stale",
+          "browser document changed while the action waited for its element",
+        );
       }
       if (found) {
         if (!input || Date.now() >= deadline || !(await this.nodeDisabled(state, found))) {
