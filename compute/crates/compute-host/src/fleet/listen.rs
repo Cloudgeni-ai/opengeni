@@ -5,8 +5,10 @@
 //!
 //! A request goes through only while the host holds the registration it
 //! names, its lease has not run out, and it is no more than the request
-//! window of renewals old; anything else is answered `unavailable` or
-//! `expired` without reaching the agent. One that does is served exactly
+//! window of renewals old, and only while the agent serves: from when it
+//! has taken back what an earlier run left until it starts to stop;
+//! anything else is answered `unavailable` or `expired` without reaching
+//! the agent. One that does is served exactly
 //! as on the Unix socket, under the owner epoch it names and the
 //! [`Admission`] it passed, which the agent checks again when it acts,
 //! through a socket pair: its first reply line is wrapped in an [`Answer`]
@@ -41,9 +43,9 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 
+use super::Agent;
 use super::gate::{Admission, LeaseGate};
 use super::tls::names_service;
-use crate::agent::Handle;
 use crate::server::serve_one;
 use crate::store::OwnerEpoch;
 
@@ -61,9 +63,9 @@ pub(crate) struct Listening {
     /// The name the control service is reached by: only a certificate
     /// valid for it is the service's.
     pub(crate) service: ServerName<'static>,
-    /// A handle of the host's own origin; each request runs under the
-    /// owner epoch it names.
-    pub(crate) handle: Handle,
+    /// The agent, through a handle of the host's own origin once it has
+    /// started; each request runs under the owner epoch it names.
+    pub(crate) agent: Agent,
     pub(crate) gate: LeaseGate,
 }
 
@@ -133,13 +135,19 @@ impl Listening {
         if let Some(reply) = refusal(&self.gate, &envelope.sent, &envelope.request) {
             return answer(&mut caller, reply, admitted).await;
         }
+        // Refused before it reaches the agent, so the service places a
+        // create elsewhere and its callers try again.
+        let Some(handle) = self.agent.handle() else {
+            let reply = refused(ErrorCode::Unavailable, self.agent.not_serving().to_owned());
+            return answer(&mut caller, reply, admitted).await;
+        };
         let owner = OwnerEpoch(envelope.sent.owner_epoch.unwrap_or(OwnerEpoch::FIRST.0));
         let admission = Admission {
             host_epoch: envelope.sent.host_epoch,
             stamp: envelope.sent.stamp,
         };
         let (ours, theirs) = UnixStream::pair()?;
-        let handle = self.handle.admitted(owner, admission);
+        let handle = handle.admitted(owner, admission);
         tokio::spawn(async move {
             if let Err(error) = serve_one(&handle, theirs).await {
                 tracing::debug!(%error, "fleet request ended with an error");

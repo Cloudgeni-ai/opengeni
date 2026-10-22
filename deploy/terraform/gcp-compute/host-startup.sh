@@ -6,7 +6,8 @@
 # hosts' authority from the metadata, which gets the host its certificate
 # from the control service and starts the guard and the agent. A new
 # bundle reaches a host when the host is replaced or rebooted with a
-# template naming it.
+# template naming it, or when the operator runs its install.sh in place
+# (operations.md, Upgrades).
 set -euo pipefail
 export PATH=$PATH:/snap/bin
 

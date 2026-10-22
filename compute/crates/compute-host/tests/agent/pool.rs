@@ -59,7 +59,9 @@ fn templates(root: &Path) -> Vec<PathBuf> {
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| !["vm", "used"].contains(&path.file_name().unwrap().to_str().unwrap()))
+        .filter(|path| {
+            !["vm", "used", "inputs"].contains(&path.file_name().unwrap().to_str().unwrap())
+        })
         .collect();
     found.sort();
     found

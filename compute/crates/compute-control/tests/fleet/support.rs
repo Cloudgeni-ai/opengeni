@@ -497,6 +497,9 @@ struct HostInner {
     behaviour: Mutex<Behaviour>,
     guest: Mutex<Option<Guest>>,
     renewing: AtomicBool,
+    /// Whether it renews without a capacity, as a restarted agent does
+    /// while it takes its sandboxes back.
+    starting: AtomicBool,
     /// Whether it checks that callers keep their side open.
     check_open: AtomicBool,
     /// Renewals a request's stamp may be behind its own before it refuses
@@ -548,6 +551,7 @@ impl FakeHost {
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
             guest: Mutex::new(None),
             renewing: AtomicBool::new(true),
+            starting: AtomicBool::new(false),
             check_open: AtomicBool::new(false),
             window: AtomicU64::new(0),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
@@ -612,6 +616,12 @@ impl FakeHost {
     /// Stops or resumes its renewals.
     pub fn renewing(&self, on: bool) {
         self.inner.renewing.store(on, Ordering::SeqCst);
+    }
+
+    /// Starts or stops renewing without a capacity, as a restarted agent
+    /// does while it takes its sandboxes back.
+    pub fn starting(&self, on: bool) {
+        self.inner.starting.store(on, Ordering::SeqCst);
     }
 
     /// Has it decide requests by `behaviour`.
@@ -826,7 +836,8 @@ async fn renew(inner: Arc<HostInner>, every: Duration) {
             host: inner.id.load(Ordering::SeqCst),
             epoch: inner.epoch.load(Ordering::SeqCst),
             seq: inner.seq.fetch_add(1, Ordering::SeqCst) + 1,
-            capacity: inner.capacity.lock().unwrap().clone(),
+            capacity: (!inner.starting.load(Ordering::SeqCst))
+                .then(|| inner.capacity.lock().unwrap().clone()),
         };
         let sent = inner
             .http

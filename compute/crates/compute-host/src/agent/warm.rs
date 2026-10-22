@@ -11,7 +11,7 @@ use compute_engine::Engine;
 use tokio::time::Instant;
 
 use crate::layout::{Images, templates_dir};
-use crate::pool::{self, Build, Built, Held, Pool, Shape, Sources, Template, Uses};
+use crate::pool::{self, Build, Built, Hashes, Held, Pool, Shape, Sources, Template, Uses};
 use crate::protocol::{Id, ImageId};
 use crate::rootfs::Cache;
 use crate::store::Store;
@@ -44,6 +44,7 @@ impl Warm {
         rootfs: &Arc<Cache>,
         images: &Images,
     ) -> Started {
+        let began = Instant::now();
         let (config, root) = (host.pool.clone(), host.root.as_path());
         let (depends_on, ready_port) = config.as_ref().map_or((Vec::new(), 0), |config| {
             (config.depends_on.clone(), config.ready_port)
@@ -57,7 +58,7 @@ impl Warm {
             networked: host.network.is_some(),
             memory: format!("{:?}", engine.memory_profile()),
             ready_port,
-            hashes: std::sync::Mutex::default(),
+            hashes: Hashes::load(&templates_dir(root)),
         });
         let held = pool::end_leftover_builds(engine, root, &sources, images.first_uid).await;
         let Some(config) = config else {
@@ -91,6 +92,11 @@ impl Warm {
         for shape in &unused {
             pool.retire(*shape);
         }
+        tracing::info!(
+            templates = found.len(),
+            ms = began.elapsed().as_millis(),
+            "templates found"
+        );
         Started {
             warm: Some(Self {
                 pool,

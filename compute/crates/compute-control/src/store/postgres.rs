@@ -523,18 +523,19 @@ impl Store for PostgresStore {
     }
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
+        // A renewal without a capacity keeps the one last heard.
         let updated = self
             .client()
             .await?
             .execute(
                 "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
-                 capacity = $4, changed = nextval('compute_changes') \
+                 capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
                  where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
                 &[
                     &big(renew.host)?,
                     &big(renew.epoch)?,
                     &big(renew.seq)?,
-                    &Json(&renew.capacity),
+                    &renew.capacity.as_ref().map(Json),
                     &names,
                 ],
             )
