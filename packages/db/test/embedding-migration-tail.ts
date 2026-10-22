@@ -375,4 +375,7 @@ export const embeddingMigrationTail = [
   "0897_workspace_owner_administers_subscriptions.sql",
   // Restricts the predicate 0897 creates.
   "0900_workspace_admin_predicate_privileges.sql",
+  // Patches the scheduled admission and live-authority routines from withheld
+  // 0275/0478/0534/0539/0622/0864 by exact anchors; replay after all of them.
+  "0906_scheduled_shared_slack_authority.sql",
 ];
