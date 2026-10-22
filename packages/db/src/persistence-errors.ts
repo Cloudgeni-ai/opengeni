@@ -10,6 +10,12 @@ export type SafeDatabaseErrorFacts = {
   dataType?: string;
   constraint?: string;
   routine?: string;
+  /**
+   * Our own PL/pgSQL functions on the error's call chain, innermost first, as
+   * `name:line` (for example `fence_turn:42`). This names the exact check that
+   * raised a refusal; the raised message and SQL text are never copied.
+   */
+  plpgsql?: string[];
 };
 
 export type PersistenceFailureDetails = {
@@ -348,6 +354,25 @@ export function isDatabasePersistenceFailure(error: unknown): boolean {
 }
 
 /** Extract only PostgreSQL diagnostic identifiers; never query text/parameters. */
+// One `PL/pgSQL function <schema.>name(<arg types>) line <n> at <statement>`
+// context line. Interleaved `SQL statement "..."` lines can contain literal
+// values and never match.
+const PLPGSQL_CONTEXT_LINE =
+  /^PL\/pgSQL function (?:[A-Za-z_][A-Za-z0-9_$]*\.)?([A-Za-z_][A-Za-z0-9_$]*)\([^)\n]*\) line (\d+) at [A-Z][A-Z ]*$/;
+const MAX_PLPGSQL_LOCATIONS = 8;
+
+function plpgsqlLocations(where: unknown): string[] {
+  if (typeof where !== "string" || where.length === 0) return [];
+  const locations: string[] = [];
+  for (const line of where.split("\n")) {
+    const match = PLPGSQL_CONTEXT_LINE.exec(line.trim());
+    if (!match) continue;
+    locations.push(`${match[1]}:${match[2]}`);
+    if (locations.length === MAX_PLPGSQL_LOCATIONS) break;
+  }
+  return locations;
+}
+
 export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();
@@ -360,6 +385,10 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
       if (facts[destination] !== undefined) continue;
       const value = safeFact(current[source]);
       if (value !== undefined) facts[destination] = value;
+    }
+    if (facts.plpgsql === undefined) {
+      const locations = plpgsqlLocations(current.where);
+      if (locations.length > 0) facts.plpgsql = locations;
     }
     for (const key of NESTED_ERROR_KEYS) {
       const nested = current[key];
