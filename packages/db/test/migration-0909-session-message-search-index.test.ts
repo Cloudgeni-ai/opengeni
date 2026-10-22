@@ -177,7 +177,7 @@ test("new messages are indexed by the trigger and deleting an event removes its 
   expect(left!.count).toBe(2);
 }, 120_000);
 
-test("the application role reads only through the pattern, can use the trigram index, and cannot write", async () => {
+test("the application role reads only through the pattern and can use the trigram index", async () => {
   const { accountId, workspaceId } = workspaces[1]!;
   // Enough ordinary history that the selective pattern, not the key, is the
   // cheapest way in.
@@ -211,10 +211,63 @@ test("the application role reads only through the pattern, can use the trigram i
       "session_message_search_texts_trgm_idx",
     );
   });
+}, 120_000);
+
+test("the application role's own message inserts are indexed, and it can write nothing else", async () => {
+  const { accountId, workspaceId, id } = sessions[1]!;
+  const asApp = (run: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+    app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true),
+        set_config('opengeni.principal_kind', 'human_session', true)`;
+      return run(tx);
+    });
+  // The trigger runs with the application role's own rights (no SECURITY
+  // DEFINER routine), admitted by the event-mirror policy.
+  const [mode] = await admin<{ definer: boolean }[]>`
+    select prosecdef as definer from pg_proc
+    where oid = 'opengeni_private.index_session_message_search_text()'::regprocedure`;
+  expect(mode!.definer).toBe(false);
+  const [last] = await admin<{ sequence: number }[]>`
+    select max(sequence)::int as sequence from session_events
+    where workspace_id = ${workspaceId} and session_id = ${id}`;
+  const prompt = last!.sequence + 1;
+  const tool = prompt + 1;
+  await asApp(async (tx) => {
+    await tx`select pg_advisory_xact_lock_shared(hashtextextended('session-tenancy:' || ${workspaceId}::text, 0))`;
+    await tx`
+    insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values
+      (${accountId}, ${workspaceId}, ${id}, ${prompt}, 'user.message', ${tx.json({ text: "app prompt" })}),
+      (${accountId}, ${workspaceId}, ${id}, ${tool}, 'agent.toolCall.output', ${tx.json({ text: "app tool" })})`;
+  });
+  const indexed = await admin<{ sequence: number; text: string }[]>`
+    select sequence, text from session_message_search_texts
+    where workspace_id = ${workspaceId} and session_id = ${id} and sequence >= ${prompt} order by sequence`;
+  expect([...indexed]).toEqual([{ sequence: prompt, text: "app prompt" }]);
+  // A row that does not mirror a visible message event is refused: no event,
+  // different text, or an event that is not a message.
+  for (const [sequence, text] of [
+    [99, "forged"],
+    [3, "Historical answer 1 with forged text"],
+    [tool, "app tool"],
+  ] as const) {
+    await expect(
+      asApp(
+        (tx) => tx`insert into session_message_search_texts
+          (account_id, workspace_id, session_id, sequence, encoded, text)
+          values (${accountId}, ${workspaceId}, ${id}, ${sequence}, false, ${text})`,
+      ),
+    ).rejects.toThrow(/row-level security/);
+  }
+  // The application role still cannot change or remove indexed text.
   await expect(
-    app`insert into session_message_search_texts (account_id, workspace_id, session_id, sequence, encoded, text)
-      values (${accountId}, ${workspaceId}, ${sessions[1]!.id}, 99, false, 'forged')`,
+    asApp((tx) => tx`update session_message_search_texts set text = 'changed'`),
   ).rejects.toThrow(/permission denied/);
+  await expect(asApp((tx) => tx`delete from session_message_search_texts`)).rejects.toThrow(
+    /permission denied/,
+  );
 }, 120_000);
 
 test("search finds historical messages through the index", async () => {

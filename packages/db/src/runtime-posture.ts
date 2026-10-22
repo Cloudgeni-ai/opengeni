@@ -294,6 +294,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 0907: the invoker-rights trigger that keeps a workspace's own
   // subscription connection serving only that workspace.
   "guard_subscription_workspace_owner_reach()",
+  // Migration 0909: the invoker-rights trigger that mirrors a message event's
+  // text into session_message_search_texts (triggers fire without the
+  // writing role holding EXECUTE).
+  "index_session_message_search_text()",
   // Migration 0716: the authority marker and compatibility guards, the
   // per-path source resolvers and the deferred compatibility check. The
   // triggers fire without the writing role holding EXECUTE.
@@ -2400,7 +2404,6 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "plan_credit_periods",
   "preference_registry_events",
   "preference_registry_snapshots",
-  "session_message_search_texts",
   "session_tenancy_activations",
   "session_work_claims",
   "site_hostname_holds",
@@ -2470,6 +2473,9 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "session_attempt_tool_catalogs",
   "session_content_blobs",
   "session_goal_revisions",
+  // Written by the invoker-rights 0909 trigger, admitted only as an exact
+  // mirror of a visible message event.
+  "session_message_search_texts",
   "session_spawn_denials",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
