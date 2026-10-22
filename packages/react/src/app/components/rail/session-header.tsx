@@ -72,7 +72,7 @@ import {
   sessionHasUpcomingSchedule,
   sessionInputWait,
 } from "../../lib/session-rail";
-import { useSessionStartup } from "../../lib/session-startup";
+import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,

@@ -2,6 +2,7 @@ import type { SendMessageInput } from "@opengeni/sdk";
 import { useLayoutEffect, useMemo, useRef } from "react";
 import { projectPendingApprovals } from "../approvals";
 import { conversationTimeline } from "../conversation-timeline";
+import { useSessionStartupTimeline } from "../lib/session-startup-timeline";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
@@ -128,10 +129,23 @@ export function useSessionConversation(
     },
     onDeliveryError: host?.onDeliveryError,
   });
-  const timeline = useMemo(
+  const conversation = useMemo(
     () => conversationTimeline(feed.timeline, queue, composer),
     [feed.timeline, queue, composer],
   );
+  // The same startup row as the web app's session page: from the accepted
+  // prompt until the turn's own work row, one loading state, never a gap.
+  // A partial session (no control state yet) shows no startup row rather than
+  // guessing whether it is active.
+  const session = detail.session;
+  const startupControl = queue.effectiveControl ?? session?.effectiveControl;
+  const timeline = useSessionStartupTimeline(conversation, {
+    session: session && startupControl ? { ...session, effectiveControl: startupControl } : null,
+    events: feed.events,
+    optimisticMessages: composer.optimisticMessages,
+    hasNewer: feed.hasNewer,
+    queue: queue.snapshot,
+  });
   const error = detail.error ?? feed.error ?? human.error;
   const loadFailed = Boolean(feed.error) && !feed.initialHistoryReady;
   const retry = async () => {

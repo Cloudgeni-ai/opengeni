@@ -24,6 +24,15 @@ export type {
 } from "./session-context";
 export { createEmbeddedSessionClient } from "./embedded-session-client";
 export { conversationTimeline } from "./conversation-timeline";
+export {
+  SessionStartupProvider,
+  sessionStartupPhase,
+  useSessionStartup,
+  useSessionStartupState,
+  type SessionStartup,
+  type SessionStartupSource,
+} from "./lib/session-startup";
+export { sessionStartupTimeline, useSessionStartupTimeline } from "./lib/session-startup-timeline";
 export type {
   ComposerDraftMapContext,
   CreateEmbeddedSessionClientOptions,

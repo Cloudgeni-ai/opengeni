@@ -85,6 +85,11 @@ export type {
   ToolRendererProps,
 } from "./timeline";
 export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export {
+  PendingConversation,
+  pendingConversationTimeline,
+  type PendingConversationProps,
+} from "./components/pending-conversation";
 export { useSessionConversation } from "./hooks/use-session-conversation";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {

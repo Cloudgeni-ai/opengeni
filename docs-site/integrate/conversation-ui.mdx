@@ -31,6 +31,8 @@ Live voice is off unless you turn it on, because each call is paid from your Ope
 
 The indicator shown while the agent starts says "Thinking…". Use `conversationProps={{ genieLoading: { phrases: ["One moment…"] } }}` for your own copy, or `genieLoading.render` for your own visual.
 
+While a new chat's first turn starts, the conversation shows a startup row with the current step (queued, preparing the sandbox, contacting the model), the same row the Opengeni web app shows. If your server creates the session itself and the person should see their message before that call returns, render `PendingConversation` with the sent text and time in the conversation's place, then swap in `SessionConversation` when you have the session ID. It draws the same message and startup row, so nothing jumps and no second loading style appears.
+
 For anonymous visitors on a public site, return `visitor: true` from the proxy's `resolve`. Visitors get no attach button (the proxy also refuses their uploads) unless you set `visitorUploads: true`.
 
 If your app authenticates with a bearer token instead of cookies, pass it on every request and read it in the proxy's `resolve`:

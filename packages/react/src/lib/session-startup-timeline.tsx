@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
-import type { ComposerState, TimelineItem } from "../../session";
+import type { ComposerState, TimelineItem } from "../session";
 import { useSessionStartupState, type SessionStartupSource } from "./session-startup";
 
 type StartupInput = {
@@ -167,15 +167,24 @@ export function sessionStartupTimeline(items: TimelineItem[], input: StartupInpu
 }
 
 type Bridge = { scope: string; id: string; turnId: string | null; since: string; sequence: number };
-/** Keep the current loading visual while a session-only wake acquires a turn ID. */
+/**
+ * Keep the current loading visual while a session-only wake acquires a turn ID.
+ * The web app's session page and the embeddable conversation both project
+ * through this, so a sent prompt shows the same startup row in either. A
+ * session that has not loaded yet leaves the timeline unchanged.
+ */
 export function useSessionStartupTimeline(
   items: TimelineItem[],
-  input: Omit<StartupInput, "fallbackStartedAt"> & {
-    session: StartupInput["session"] & SessionStartupSource;
+  input: Omit<StartupInput, "fallbackStartedAt" | "session"> & {
+    session: (StartupInput["session"] & SessionStartupSource) | null;
   },
 ): TimelineItem[] {
   const startup = useSessionStartupState(input.session);
   const bridgeRef = useRef<Bridge | null>(null);
+  if (!input.session) {
+    bridgeRef.current = null;
+    return items;
+  }
   const scope = `${input.session.workspaceId}:${input.session.id}`;
   if (
     bridgeRef.current?.scope !== scope ||
@@ -205,6 +214,7 @@ export function useSessionStartupTimeline(
   }
   const projected = sessionStartupTimeline(items, {
     ...input,
+    session: input.session,
     fallbackStartedAt,
   });
   if (projected !== items) {

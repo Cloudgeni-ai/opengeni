@@ -27,7 +27,7 @@ import {
   createFailedSessionRetry,
   type FailedSessionRetryInput,
 } from "../lib/failed-session-retry";
-import { useSessionStartupTimeline } from "../lib/session-startup-timeline";
+import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { isPaymentRequiredError } from "../lib/model-access";

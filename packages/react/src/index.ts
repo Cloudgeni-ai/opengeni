@@ -599,6 +599,11 @@ export type { CommandPaletteProps } from "./components/command-palette";
 export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export {
+  PendingConversation,
+  pendingConversationTimeline,
+  type PendingConversationProps,
+} from "./components/pending-conversation";
 export { useSessionConversation } from "./hooks/use-session-conversation";
 export {
   useSessionReadAcknowledgement,
