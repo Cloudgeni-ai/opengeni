@@ -4954,6 +4954,17 @@ sandbox, sandbox environment, repository, and other setup rows whose starts appe
 The timeline labels that overlap explicitly instead of presenting the parent as
 an additional sequential wait.
 
+Eager owned-box platform setup (rig setup, credential hooks and repository
+clones) needs nothing from file delivery or the model input, so the worker
+starts it once agent preparation finishes and runs it alongside worker file
+delivery and model-input preparation; the first model stream joins it before the
+provider request. When the runtime delivers files itself, setup still waits for
+the prepared input it annotates with unavailable-file notes. Later streams of
+the same attempt run the idempotent setup again, and a box rebound while the
+early setup ran gets its own setup. The attempt settles a started setup before
+it returns, so no setup admission outlives it. Model-visible input and its
+order are unchanged.
+
 The periodic warm-workspace snapshot is mid-session durability. The lease
 heartbeat must not start it until the first provider request has reached its
 transport boundary: before then there is no agent-produced work to protect, and

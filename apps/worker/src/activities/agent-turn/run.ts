@@ -79,6 +79,7 @@ import {
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
+import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
@@ -1968,212 +1969,255 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             outcome: "completed",
             durationSeconds: (performance.now() - postAgentPreparationStartedAt) / 1_000,
           });
-          let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
-          let fileDownloadsMaterializedForRun = false;
-          if (
+          // Platform setup (rig setup, credential hooks, repository clones)
+          // needs nothing from file delivery or the model input, so it starts
+          // now and the first model stream joins it. When the runtime delivers
+          // files itself, setup must wait for the prepared input it annotates.
+          const workerDeliversFiles = Boolean(
             sandboxState.resolvedSandbox &&
             sandboxState.setupBoxSession &&
-            fileResourceDownloads.length > 0
-          ) {
-            const fileMaterializationStartedAt = performance.now();
-            let fileMaterializationOutcome: "completed" | "failed" = "completed";
-            let fileMaterializationCache: "hit" | "miss" = "miss";
-            try {
-              const boxInstanceId = sandboxState.resolvedSandbox.established.instanceId;
-              // A successful transfer is durable for this exact filesystem instance.
-              // Do not turn later model startup into an integrity scan. If an owner or
-              // agent removes the file, it can be restored explicitly through the
-              // existing Files MCP using the durable file id carried in model history.
-              const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-                instanceId: boxInstanceId,
-              });
-              const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
-                fileResourceDownloads,
-                alreadyMaterialized,
-              );
-              if (downloadsToMaterialize.length === 0) {
-                fileMaterializationCache = "hit";
-              }
-              const runAs = sandboxRunAs(runSettings);
-              if (downloadsToMaterialize.length > 0) {
-                const materialized = await runWorkspaceMutationForSandbox(
-                  sandboxState.resolvedSandbox,
-                  "fileMaterialization",
-                  async () =>
-                    await materializeSandboxFileDownloads(
-                      sandboxState.setupBoxSession as CodemodeTokenWriterSession,
-                      downloadsToMaterialize,
-                      {
-                        onRuntimeEvent: async (event) => {
-                          await eventing.publish!(
-                            [{ type: event.type, payload: event.payload }],
-                            true,
-                          );
-                        },
-                        ...(runAs ? { runAs } : {}),
-                        ...(eventing.toolCancellationFenceRef.current
-                          ? {
-                              commandRunner:
-                                eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                                  eventing.toolCancellationFenceRef.current,
-                                ),
-                            }
-                          : {}),
-                      },
-                    ),
+            fileResourceDownloads.length > 0,
+          );
+          const eagerOwnedSandboxSetup = createEagerOwnedSandboxSetup(
+            {
+              input,
+              db,
+              observability,
+              runtimeCancellationSignal,
+              sandboxState,
+              eventing: wiredEventing,
+              leases,
+              runWorkspaceMutationForSandbox,
+              attachGitCredentialRenewal,
+              attachRunCredentialRenewal,
+              activeSandboxBackend,
+              groupBoxBackend,
+              turnExecutionPolicy,
+              agent,
+              runSettings,
+              initialRunCredentialMaterial,
+              initialGitCredentials,
+              sandboxEnvironment,
+              fileResourceDownloads,
+            },
+            hasEagerOwnedSandboxSetup(sandboxState) &&
+              (workerDeliversFiles || fileResourceDownloads.length === 0)
+              ? { fileDownloadsMaterialized: workerDeliversFiles }
+              : undefined,
+          );
+          try {
+            let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
+            let fileDownloadsMaterializedForRun = false;
+            if (
+              sandboxState.resolvedSandbox &&
+              sandboxState.setupBoxSession &&
+              fileResourceDownloads.length > 0
+            ) {
+              const fileMaterializationStartedAt = performance.now();
+              let fileMaterializationOutcome: "completed" | "failed" = "completed";
+              let fileMaterializationCache: "hit" | "miss" = "miss";
+              try {
+                const boxInstanceId = sandboxState.resolvedSandbox.established.instanceId;
+                // A successful transfer is durable for this exact filesystem instance.
+                // Do not turn later model startup into an integrity scan. If an owner or
+                // agent removes the file, it can be restored explicitly through the
+                // existing Files MCP using the durable file id carried in model history.
+                const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
+                  instanceId: boxInstanceId,
+                });
+                const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
+                  fileResourceDownloads,
+                  alreadyMaterialized,
                 );
-                fileMaterializationFailures = materialized.failures;
-                fileMaterializationOutcome = sandboxFileMaterializationOutcome(
-                  materialized.failures,
-                );
-                const failedFileIds = new Set(
-                  materialized.failures.map((failure) => failure.fileId),
-                );
-                const succeededFileIds = downloadsToMaterialize
-                  .map((download) => download.fileId)
-                  .filter((fileId) => !failedFileIds.has(fileId));
-                if (succeededFileIds.length > 0) {
-                  await markSandboxFileResourcesMaterialized(db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sandboxGroupId: session.sandboxGroupId,
-                    expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-                    instanceId: boxInstanceId,
-                    fileIds: succeededFileIds,
-                  });
+                if (downloadsToMaterialize.length === 0) {
+                  fileMaterializationCache = "hit";
                 }
+                const runAs = sandboxRunAs(runSettings);
+                if (downloadsToMaterialize.length > 0) {
+                  const materialized = await runWorkspaceMutationForSandbox(
+                    sandboxState.resolvedSandbox,
+                    "fileMaterialization",
+                    async () =>
+                      await materializeSandboxFileDownloads(
+                        sandboxState.setupBoxSession as CodemodeTokenWriterSession,
+                        downloadsToMaterialize,
+                        {
+                          onRuntimeEvent: async (event) => {
+                            await eventing.publish!(
+                              [{ type: event.type, payload: event.payload }],
+                              true,
+                            );
+                          },
+                          ...(runAs ? { runAs } : {}),
+                          ...(eventing.toolCancellationFenceRef.current
+                            ? {
+                                commandRunner:
+                                  eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+                                    eventing.toolCancellationFenceRef.current,
+                                  ),
+                              }
+                            : {}),
+                        },
+                      ),
+                  );
+                  fileMaterializationFailures = materialized.failures;
+                  fileMaterializationOutcome = sandboxFileMaterializationOutcome(
+                    materialized.failures,
+                  );
+                  const failedFileIds = new Set(
+                    materialized.failures.map((failure) => failure.fileId),
+                  );
+                  const succeededFileIds = downloadsToMaterialize
+                    .map((download) => download.fileId)
+                    .filter((fileId) => !failedFileIds.has(fileId));
+                  if (succeededFileIds.length > 0) {
+                    await markSandboxFileResourcesMaterialized(db, {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sandboxGroupId: session.sandboxGroupId,
+                      expectedEpoch: sandboxState.resolvedSandbox.leaseEpoch,
+                      instanceId: boxInstanceId,
+                      fileIds: succeededFileIds,
+                    });
+                  }
+                }
+                fileDownloadsMaterializedForRun = true;
+              } catch (error) {
+                fileMaterializationOutcome = "failed";
+                throw error;
+              } finally {
+                recordTurnStartupPhase(observability, {
+                  phase: "file_materialization",
+                  provider: turnExecutionPolicy.providerId,
+                  backend: activeSandboxBackend ?? groupBoxBackend,
+                  outcome: fileMaterializationOutcome,
+                  durationSeconds: (performance.now() - fileMaterializationStartedAt) / 1_000,
+                  count: fileResourceDownloads.length,
+                  cache: fileMaterializationCache,
+                });
               }
-              fileDownloadsMaterializedForRun = true;
-            } catch (error) {
-              fileMaterializationOutcome = "failed";
-              throw error;
-            } finally {
+            } else {
               recordTurnStartupPhase(observability, {
                 phase: "file_materialization",
                 provider: turnExecutionPolicy.providerId,
                 backend: activeSandboxBackend ?? groupBoxBackend,
-                outcome: fileMaterializationOutcome,
-                durationSeconds: (performance.now() - fileMaterializationStartedAt) / 1_000,
-                count: fileResourceDownloads.length,
-                cache: fileMaterializationCache,
+                outcome: "completed",
+                durationSeconds: 0,
+                count: 0,
               });
             }
-          } else {
-            recordTurnStartupPhase(observability, {
-              phase: "file_materialization",
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: "completed",
-              durationSeconds: 0,
-              count: 0,
+            const requiredVideoFileIds = new Set(
+              requiredGeneratedVideoFiles.map((file) => file.fileId),
+            );
+            const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
+              requiredVideoFileIds.has(failure.fileId),
+            );
+            if (failedRequiredVideo) {
+              // Retention is already durable. A sandbox copy miss must not fail the
+              // turn or replay generation; the File remains retrievable via Files MCP.
+              observability.warn("Generated video sandbox materialization deferred", {
+                errorClass: "SandboxFileDownloadFailure",
+                errorCode: "generated_video_materialization_deferred",
+                origin: "worker",
+              });
+            }
+            const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
+              fileMaterializationFailures,
+            );
+            return await runTurnStreamAttempt({
+              input,
+              settings: capabilitySettings,
+              db,
+              bus,
+              runtime,
+              objectStorage,
+              observability,
+              entitlements,
+              startVideoGenerationWorkflow,
+              startSessionTitleWorkflow,
+              sessionTitleExpectedCurrent: { title: session.title, source: session.titleSource },
+              cancellationSignal,
+              runtimeCancellationSignal,
+              activityContext,
+              dispatchId,
+              control,
+              attempt,
+              billingState,
+              sandboxState,
+              eventing: wiredEventing,
+              providerTurn,
+              leases,
+              historySink,
+              checkpointBeforeProviderDispatch,
+              media,
+              toolResultSpill,
+              claimedResult,
+              flushRuntimeBatcher,
+              finalizeTurnOpStreamOps,
+              runWorkspaceMutationForSandbox,
+              throwIfWorkerShuttingDown,
+              throwIfTurnCancelled,
+              setLastInputTokensFenced,
+              attachGitCredentialRenewal,
+              attachCodemodeTokenRenewal,
+              attachRunCredentialRenewal,
+              withProviderRequestContext,
+              withSessionTitleProviderRequestContext,
+              publishCompactionLiveEvents,
+              publishCompactionOutcomeEvents,
+              recordCompanyBrainContributionReceiptOnce,
+              modelCheckpointMemoryCollector,
+              claimedModelUsageSourceKeys,
+              emittedModelUsageSourceKeys,
+              modelUsageDispatchId,
+              workerPreparationStartedAt,
+              fileDownloadsMaterializedForRun,
+              eagerOwnedSandboxSetup,
+              unavailableSandboxFilesNote,
+              runCredentialsNote,
+              mcpAvailabilityNote,
+              knowledgeSourcePreparationNote,
+              fileAuthoritySubjectId,
+              activeSandboxBackend,
+              groupBoxBackend,
+              turnExecutionPolicy,
+              turn,
+              trigger,
+              humanInputResume,
+              attachPendingUpdatesAfterOpenSuffix,
+              agent,
+              resolvedModel,
+              providerApi,
+              runSettings,
+              turnTools,
+              generateSessionTitleInParallel,
+              sessionTitlePrompt: session.initialMessage.trim()
+                ? session.initialMessage
+                : turn.prompt,
+              compactSummarizer,
+              settleDeferredSteerAfterCompaction,
+              compactionModelHistoryProjector,
+              generatedImageHistoryProjector,
+              modelHistoryProjector,
+              compactionModeOptions,
+              initialRunCredentialMaterial,
+              initialGitCredentials,
+              sandboxEnvironment,
+              sandboxCodemodeToken,
+              sandboxCodemodeTokenExpiresAt,
+              fileResourceDownloads,
+              runCredentialResolver,
+              videoGenerationAcceptancesByCallId,
             });
+          } finally {
+            // Never leave a started setup's workspace admission running past
+            // this attempt, including exits before the first model stream.
+            await eagerOwnedSandboxSetup.settled();
           }
-          const requiredVideoFileIds = new Set(
-            requiredGeneratedVideoFiles.map((file) => file.fileId),
-          );
-          const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
-            requiredVideoFileIds.has(failure.fileId),
-          );
-          if (failedRequiredVideo) {
-            // Retention is already durable. A sandbox copy miss must not fail the
-            // turn or replay generation; the File remains retrievable via Files MCP.
-            observability.warn("Generated video sandbox materialization deferred", {
-              errorClass: "SandboxFileDownloadFailure",
-              errorCode: "generated_video_materialization_deferred",
-              origin: "worker",
-            });
-          }
-          const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
-            fileMaterializationFailures,
-          );
-          return await runTurnStreamAttempt({
-            input,
-            settings: capabilitySettings,
-            db,
-            bus,
-            runtime,
-            objectStorage,
-            observability,
-            entitlements,
-            startVideoGenerationWorkflow,
-            startSessionTitleWorkflow,
-            sessionTitleExpectedCurrent: { title: session.title, source: session.titleSource },
-            cancellationSignal,
-            runtimeCancellationSignal,
-            activityContext,
-            dispatchId,
-            control,
-            attempt,
-            billingState,
-            sandboxState,
-            eventing: wiredEventing,
-            providerTurn,
-            leases,
-            historySink,
-            checkpointBeforeProviderDispatch,
-            media,
-            toolResultSpill,
-            claimedResult,
-            flushRuntimeBatcher,
-            finalizeTurnOpStreamOps,
-            runWorkspaceMutationForSandbox,
-            throwIfWorkerShuttingDown,
-            throwIfTurnCancelled,
-            setLastInputTokensFenced,
-            attachGitCredentialRenewal,
-            attachCodemodeTokenRenewal,
-            attachRunCredentialRenewal,
-            withProviderRequestContext,
-            withSessionTitleProviderRequestContext,
-            publishCompactionLiveEvents,
-            publishCompactionOutcomeEvents,
-            recordCompanyBrainContributionReceiptOnce,
-            modelCheckpointMemoryCollector,
-            claimedModelUsageSourceKeys,
-            emittedModelUsageSourceKeys,
-            modelUsageDispatchId,
-            workerPreparationStartedAt,
-            fileDownloadsMaterializedForRun,
-            unavailableSandboxFilesNote,
-            runCredentialsNote,
-            mcpAvailabilityNote,
-            knowledgeSourcePreparationNote,
-            fileAuthoritySubjectId,
-            activeSandboxBackend,
-            groupBoxBackend,
-            turnExecutionPolicy,
-            turn,
-            trigger,
-            humanInputResume,
-            attachPendingUpdatesAfterOpenSuffix,
-            agent,
-            resolvedModel,
-            providerApi,
-            runSettings,
-            turnTools,
-            generateSessionTitleInParallel,
-            sessionTitlePrompt: session.initialMessage.trim()
-              ? session.initialMessage
-              : turn.prompt,
-            compactSummarizer,
-            settleDeferredSteerAfterCompaction,
-            compactionModelHistoryProjector,
-            generatedImageHistoryProjector,
-            modelHistoryProjector,
-            compactionModeOptions,
-            initialRunCredentialMaterial,
-            initialGitCredentials,
-            sandboxEnvironment,
-            sandboxCodemodeToken,
-            sandboxCodemodeTokenExpiresAt,
-            fileResourceDownloads,
-            runCredentialResolver,
-            videoGenerationAcceptancesByCallId,
-          });
         },
       );
     } catch (error) {
