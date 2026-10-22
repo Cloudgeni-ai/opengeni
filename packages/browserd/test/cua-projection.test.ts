@@ -233,3 +233,28 @@ test("file dialog places, folders and files open on invoke and are not edited", 
   expect(actions.get("s:2")).not.toContain("set_value");
   expect(actions.get("s:3")).toContain("invoke");
 });
+
+test("Chrome tabs are named without their live memory usage", () => {
+  const tab = (index: number, label: string) => ({
+    element_index: index,
+    element_token: `s:${index}`,
+    role: "AXRadioButton",
+    label,
+    actions: ["AXPress"],
+  });
+  const nodes = projectElements(
+    [
+      tab(0, "Inbox (3) - Memory usage - 85.2 MB"),
+      tab(1, "Docs - High memory usage - 1.2 GB"),
+      tab(2, "Player - Audio playing - Memory usage - 312 MB"),
+      tab(3, "Memory usage - 10 MB notes"),
+    ],
+    "macos",
+  );
+  expect(nodes.map((node) => node.name)).toEqual([
+    "Inbox (3)",
+    "Docs",
+    "Player - Audio playing",
+    "Memory usage - 10 MB notes",
+  ]);
+});

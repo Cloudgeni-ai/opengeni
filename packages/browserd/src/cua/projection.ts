@@ -174,6 +174,15 @@ function repeatsParentLabel(
   return byIndex.get(element.parent_index)?.label?.trim() === text;
 }
 
+/**
+ * Chrome names each tab with the memory its page uses ("Inbox - Memory usage
+ * - 85.2 MB"). The figure changes all the time and would make every tab
+ * read as changed after each action, so a tab is named by its page alone.
+ */
+function withoutLiveMemoryUsage(label: string): string {
+  return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
+}
+
 export function projectElements(
   allElements: CuaElement[],
   platform: Platform = "macos",
@@ -231,7 +240,12 @@ export function projectElements(
       // Only macOS's driver focuses an element on its own.
       if (platform === "macos" && actions.length > 0) actions.push("focus");
     }
-    const label = element.label && !valueLabel ? element.label : undefined;
+    const label =
+      element.label && !valueLabel
+        ? platform === "macos"
+          ? withoutLiveMemoryUsage(element.label)
+          : element.label
+        : undefined;
     const contained = (childTexts.get(element.element_index) ?? []).filter(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
