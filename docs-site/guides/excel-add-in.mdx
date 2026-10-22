@@ -14,8 +14,9 @@ Microsoft 365 subscription or Excel 2021 and later.
 
 ## Install
 
-- **From Microsoft's add-in store.** In Excel, choose **Home** > **Add-ins**,
-  search for **Opengeni** and choose **Add**.
+- **From Microsoft's add-in store, once it is listed there.** In Excel, choose
+  **Home** > **Add-ins**, search for **Opengeni** and choose **Add**. If it
+  isn't there yet, install it from your Opengeni account instead.
 - **From your Opengeni account.** Open [app.opengeni.ai/excel](https://app.opengeni.ai/excel).
   It shows the steps for your platform and the add-in file to use.
 - **For a whole organization.** A Microsoft 365 admin can deploy it to
@@ -46,8 +47,15 @@ reach it.
 
 ## Your data
 
-- The add-in reads and changes only the workbook it is open in, and only when
-  an agent runs a step for you. Nothing runs when you are not using it.
+- The add-in works only in the workbook it is open in, and only while its pane
+  is open and connected.
+- While the pane is connected, it reads your selection each time it changes:
+  the selected range and a short sample of the cells in it that have content
+  (at most the first 20 rows and 8 columns, as displayed, and their formulas).
+  That sample goes with your next message from the pane, shown as a pill above
+  the message box. Remove the pill to leave it out.
+- Agents read or change anything else in the workbook only when they run a
+  step for you.
 - Workbook content an agent reads is handled like any other content in your
   Opengeni chats, as described in the [privacy policy](https://opengeni.ai/privacy).
 - Only you can reach the workbooks you connect, and only from the workspace you
