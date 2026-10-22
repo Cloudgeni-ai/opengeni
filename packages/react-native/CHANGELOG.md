@@ -1,5 +1,33 @@
 # @opengeni/react-native
 
+## 4.5.0
+
+### Minor Changes
+
+- 1d65f48: The mobile app can search chats across all of a person's workspaces, like ⌘K on the web. A search button on the home screen opens the chat search, which matches chat titles in the current workspace first and in the person's other workspaces after, labelling each chat from another workspace with its workspace's name. Matching workspaces appear too, so a search can also switch workspace. Opening a chat from another workspace switches to that workspace. `SessionRow` accepts an optional `workspaceName`, and `@opengeni/react` exports the chat-title ranking helpers `rankLabel`, `foldForSearch` and `LOOSE_MATCH_BELOW`.
+
+### Patch Changes
+
+- 7e5e08f: Every first-party tool step in the timeline now draws an icon that matches its words (a globe for the browser, a monitor for the screen, a spreadsheet for Excel, an hourglass for waiting, and so on) instead of the generic wrench. The mapping lives in one shared table keyed by tool step, so the web app, React Native and embedded chats all get the same icons; a new step without an icon fails to compile. Connector and custom tools keep their family icon or the wrench.
+- c64be29: A link the host draws as a block card now spans the message width when it is alone in its paragraph, instead of sizing to its content. A list item whose only content is such a card drops its bullet or number and indent, so it lines up with the same card on its own line.
+- Updated dependencies [f838cb7]
+- Updated dependencies [6f9b6f5]
+- Updated dependencies [7e5e08f]
+- Updated dependencies [1d65f48]
+- Updated dependencies [debd64e]
+- Updated dependencies [0910456]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [0b3b079]
+- Updated dependencies [d8179be]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/react@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

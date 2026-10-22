@@ -1,5 +1,16 @@
 # @opengeni/codex
 
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/network@4.5.0
+
 ## 4.4.1
 
 ### Patch Changes
