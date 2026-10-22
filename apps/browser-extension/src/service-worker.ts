@@ -1,3 +1,4 @@
+import { BRAND } from "./brand";
 import { HANDSHAKE_TIMEOUT_ERROR, agentStatus } from "./agent-status";
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -158,7 +159,7 @@ async function connect(): Promise<void> {
       if (nativePort === connectingPort) handleNativeMessage(message);
     });
     port.onDisconnect.addListener(() => {
-      const error = chrome.runtime.lastError?.message ?? "Opengeni agent disconnected";
+      const error = chrome.runtime.lastError?.message ?? `${BRAND.product} agent disconnected`;
       disconnectPort(connectingPort, error);
     });
     await setBadge(false);
@@ -238,7 +239,7 @@ function handleNativeMessage(message: unknown): void {
     if (refusal.reason === "extension_outdated") requestExtensionUpdate();
     disconnectPort(
       port,
-      `Opengeni agent unavailable: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ""}`,
+      `${BRAND.product} agent unavailable: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ""}`,
       refusal,
     );
     return;
@@ -381,7 +382,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       if (!attachedDebuggerTabs.has(tabId)) {
         throw new BridgeCommandError(
           "debugger_unavailable",
-          "Opengeni is not attached to this tab",
+          `${BRAND.product} is not attached to this tab`,
         );
       }
       assertAllowedDebuggerMethod(command.method);
@@ -545,7 +546,7 @@ async function setBadge(connected: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: connected ? "" : "!" });
   if (!connected) await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
   await chrome.action.setTitle({
-    title: connected ? "Opengeni Browser · Connected" : "Opengeni Browser · Agent unavailable",
+    title: `${BRAND.name} · ${connected ? "Connected" : "Agent unavailable"}`,
   });
 }
 
