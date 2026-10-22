@@ -66,6 +66,7 @@ import {
 } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
@@ -1752,10 +1753,31 @@ export function providerRecoveryCode(
   return failure.code;
 }
 
+/** Transport failures that are terminal on ordinary requests only because replay could repeat effects. */
+const REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES: ReadonlySet<string> = new Set([
+  "invalid_sse_terminal",
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+]);
+
 function classifyAgentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  // A checkpoint (compaction) request only summarizes history: it runs no
+  // tools and its output is discarded unless it completes. A stream that ended
+  // without a terminal event or timed out is therefore safe to send again,
+  // unlike the same failure on an ordinary request, so recover the same turn.
+  if (
+    error instanceof CompactionProviderResponseError &&
+    error.code !== undefined &&
+    REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES.has(error.code)
+  ) {
+    return {
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+    };
+  }
   const sizeError = findAnthropicRequestSizeError(error);
   if (sizeError)
     return {
