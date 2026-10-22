@@ -3,6 +3,7 @@
 // and the callback page hands the one-time code back to this pane, which
 // redeems it (PKCE) for the add-in's own revocable credential.
 import { OpenGeniClient } from "@opengeni/sdk";
+import { openOfficeDialog } from "@opengeni/sdk/office";
 
 const TOKEN_KEY = "opengeni.office.token";
 export const CALLBACK_PATH = "/office/auth-callback.html";
@@ -38,36 +39,6 @@ async function challengeFor(verifier: string): Promise<string> {
   return base64url(new Uint8Array(digest));
 }
 
-function openDialog(url: string, promptBeforeOpen: boolean): Promise<string> {
-  return new Promise((resolve, reject) => {
-    Office.context.ui.displayDialogAsync(
-      url,
-      { height: 70, width: 35, promptBeforeOpen },
-      (result) => {
-        if (result.status !== "succeeded") {
-          // 12009: the person ignored Office's "allow this window" prompt.
-          // 12011: the browser's popup blocker stopped a window opened without one.
-          const code = (result.error as { code?: number } | undefined)?.code;
-          reject(
-            Object.assign(new Error(result.error?.message ?? "The sign-in window didn't open."), {
-              blocked: code === 12011,
-            }),
-          );
-          return;
-        }
-        const dialog = result.value;
-        dialog.addEventHandler(Office.EventType.DialogMessageReceived, (event) => {
-          dialog.close();
-          resolve(event.message ?? "");
-        });
-        dialog.addEventHandler(Office.EventType.DialogEventReceived, () => {
-          reject(new Error("Sign-in was closed before it finished."));
-        });
-      },
-    );
-  });
-}
-
 /** PKCE material, made ahead so the click opens the window without awaiting anything. */
 export type SignInRequest = { verifier: string; challenge: string; state: string };
 
@@ -87,12 +58,7 @@ export async function signIn(apiBaseUrl: string, request: SignInRequest): Promis
     device_name: "Excel",
   });
   const url = `${window.location.origin}/native-sign-in?${query}`;
-  // Opened straight from the click, the window needs no extra "allow" prompt.
-  // If a popup blocker stops it anyway, fall back to Office's prompt.
-  const message = await openDialog(url, false).catch((error: { blocked?: boolean }) => {
-    if (error?.blocked) return openDialog(url, true);
-    throw error;
-  });
+  const message = await openOfficeDialog(url);
   const returned = new URLSearchParams(message);
   if (returned.get("state") !== state) throw new Error("The sign-in didn't match. Try again.");
   if (returned.get("error")) throw new Error("Sign-in was cancelled.");

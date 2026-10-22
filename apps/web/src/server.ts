@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
-import { OFFICE_MANIFEST_PATH, officeAddinManifest } from "./office-manifest";
+import { OFFICE_MANIFEST_PATH, opengeniOfficeManifest } from "./office-manifest";
 import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
 
 const DEFAULT_PORT = 3000;
@@ -100,7 +100,7 @@ export function createWebHandler(
 
     if (pathname === OFFICE_MANIFEST_PATH) {
       // The Excel add-in manifest names this deployment's own pages.
-      const manifest = officeAddinManifest(publicOrigin ?? url.origin);
+      const manifest = await opengeniOfficeManifest(publicOrigin ?? url.origin);
       return new Response(request.method === "HEAD" ? null : manifest, {
         headers: {
           "content-type": "application/xml;charset=utf-8",

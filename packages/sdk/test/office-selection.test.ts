@@ -6,7 +6,7 @@ import {
   selectionContextItem,
   type SelectionRequestContext,
   type SelectionSnapshot,
-} from "./selection-context";
+} from "../src/office/selection";
 
 const base: SelectionSnapshot = {
   sheet: "Budget",

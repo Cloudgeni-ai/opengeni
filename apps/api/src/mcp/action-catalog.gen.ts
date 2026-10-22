@@ -979,6 +979,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOfficeWorkbookTicket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/office/workbook-tickets",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "createOrganization",
     "method": "POST",
     "path": "/v1/organizations",
@@ -2074,13 +2081,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "FsWriteResponse"
     ]
-  },
-  {
-    "id": "GET /v1/office/workbooks",
-    "method": "GET",
-    "path": "/v1/office/workbooks",
-    "request": [],
-    "response": []
   },
   {
     "id": "GET /v1/organizations/:accountId/insights/calls",
@@ -4550,6 +4550,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "NetworkRouteListResponse"
     ]
+  },
+  {
+    "id": "listOfficeWorkbooks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/office/workbooks",
+    "request": [],
+    "response": []
   },
   {
     "id": "listOpenGeniSlackChannelRoutes",

@@ -6568,6 +6568,31 @@ export type MemberNotificationsSetting = {
   allowOthers: boolean;
 };
 
+// --- Excel workbooks connected by an Office add-in -------------------------------------------
+
+/** A short-lived ticket that lets one add-in socket connect a workbook to a workspace. */
+export type OfficeWorkbookTicket = {
+  ticket: string;
+  expiresAt: string;
+  /** The socket's path on the Opengeni API, such as "/v1/office/workbooks/live". */
+  path: string;
+  /** The socket's full URL on the deployment's public API, when it has one. */
+  url?: string;
+  /** The WebSocket subprotocol the socket must offer. */
+  protocol: string;
+};
+
+/** An open workbook the caller's agents in a workspace can reach with `excel_run`. */
+export type OfficeWorkbook = {
+  id: string;
+  name: string;
+  /** "Excel on the web", "Excel for Mac", "Excel for Windows"... */
+  app: string;
+  version: string | null;
+  excelApi: string | null;
+  connectedAt: string;
+};
+
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
 /** `office`: the Opengeni add-in for Excel, signed in from its task pane. */
