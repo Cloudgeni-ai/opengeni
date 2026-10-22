@@ -2481,7 +2481,7 @@ async function projectManagedOrganizationAccess(
     subjectId: string;
     subjectLabel: string;
     organizationMemberships: OrganizationMemberType[];
-    preferredDefaultWorkspaceId?: string | null;
+    userId: string;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const activeOrganizationMemberships = input.organizationMemberships.flatMap(
@@ -2509,43 +2509,69 @@ async function projectManagedOrganizationAccess(
     throw new Error("Inactive managed organization unexpectedly passed active membership");
   }
 
+  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  // Preserve the final scope of the old per-organization loop. These authority
+  // tables are non-RLS: every join is explicitly limited to the subject and the
+  // active organization ids just returned by the canonical membership helper.
+  await setRlsContext(db, {
+    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
+    workspaceId: null,
+  });
+  const rows = await db
+    .select({
+      accountId: schema.managedAccounts.id,
+      accountName: schema.managedAccounts.name,
+      workspaceId: schema.workspaces.id,
+      permissions: schema.workspaceMemberships.permissions,
+      preferredDefaultWorkspaceId: sql<string | null>`(
+        select legacy.id from ${schema.workspaces} legacy
+        join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
+        where fallback.id = ${defaultAccountId}::uuid
+          and fallback.external_source = 'better-auth:user'
+          and fallback.external_id = ${input.userId}
+          and legacy.external_source = 'better-auth:user'
+          and legacy.external_id = ${`${input.userId}:default`}
+        limit 1
+      )`,
+    })
+    .from(schema.managedAccounts)
+    .leftJoin(
+      schema.workspaceMemberships,
+      and(
+        eq(schema.workspaceMemberships.accountId, schema.managedAccounts.id),
+        eq(schema.workspaceMemberships.subjectId, input.subjectId),
+      ),
+    )
+    .leftJoin(
+      schema.workspaces,
+      and(
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
+      ),
+    )
+    .where(
+      inArray(
+        schema.managedAccounts.id,
+        activeOrganizationMemberships.map((row) => row.organizationId),
+      ),
+    )
+    .orderBy(desc(schema.workspaces.createdAt));
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
-    await setRlsContext(db, {
-      accountId: organizationMembership.organizationId,
-      workspaceId: null,
-    });
-    // These authority tables are non-RLS, so the account GUC does not scope this query.
-    const persistedMemberships = await db
-      .select({
-        membership: schema.workspaceMemberships,
-        workspace: schema.workspaces,
-      })
-      .from(schema.workspaceMemberships)
-      .innerJoin(
-        schema.workspaces,
-        and(
-          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
-          eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.workspaceMemberships.subjectId, input.subjectId),
-          eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
-          eq(schema.workspaces.accountId, organizationMembership.organizationId),
-        ),
-      )
-      .orderBy(desc(schema.workspaces.createdAt));
     workspaceGrants.push(
-      ...persistedMemberships.map((row) => ({
-        workspaceId: row.workspace.id,
-        accountId: row.workspace.accountId,
-        subjectId: input.subjectId,
-        subjectLabel: input.subjectLabel,
-        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
-        principalKind: "human_session" as const,
-      })),
+      ...rows
+        .filter(
+          (row) =>
+            row.accountId === organizationMembership.organizationId && row.workspaceId !== null,
+        )
+        .map((row) => ({
+          workspaceId: row.workspaceId!,
+          accountId: row.accountId,
+          subjectId: input.subjectId,
+          subjectLabel: input.subjectLabel,
+          permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
+          principalKind: "human_session" as const,
+        })),
     );
   }
   for (const organizationMembership of activeOrganizationMemberships) {
@@ -2564,28 +2590,13 @@ async function projectManagedOrganizationAccess(
       });
     }
   }
-  const organizationAccounts = await db
-    .select({
-      id: schema.managedAccounts.id,
-      name: schema.managedAccounts.name,
-    })
-    .from(schema.managedAccounts)
-    .where(
-      inArray(
-        schema.managedAccounts.id,
-        activeOrganizationMemberships.map((membership) => membership.organizationId),
-      ),
-    );
-  const organizationNameById = new Map(
-    organizationAccounts.map((organization) => [organization.id, organization.name]),
-  );
-  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
-        grant.workspaceId === input.preferredDefaultWorkspaceId,
+        grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
     )?.workspaceId ?? defaultPersonalWorkspaceId;
   return {
     accessContext: {
@@ -2645,44 +2656,12 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
-    const [fallbackAccount] = await tx
-      .select({ id: schema.managedAccounts.id })
-      .from(schema.managedAccounts)
-      .where(
-        and(
-          eq(schema.managedAccounts.externalSource, "better-auth:user"),
-          eq(schema.managedAccounts.externalId, input.userId),
-        ),
-      )
-      .limit(1);
     if (existingOrganizationMemberships.some((membership) => membership.status === "active")) {
-      const firstActiveMembership = existingOrganizationMemberships.find(
-        (membership) => membership.status === "active" && membership.personalWorkspaceId !== null,
-      );
-      let preferredDefaultWorkspaceId: string | null = null;
-      if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
-        await setRlsContext(txDb, {
-          accountId: fallbackAccount.id,
-          workspaceId: null,
-        });
-        const [legacyDefaultWorkspace] = await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(
-            and(
-              eq(schema.workspaces.accountId, fallbackAccount.id),
-              eq(schema.workspaces.externalSource, "better-auth:user"),
-              eq(schema.workspaces.externalId, `${input.userId}:default`),
-            ),
-          )
-          .limit(1);
-        preferredDefaultWorkspaceId = legacyDefaultWorkspace?.id ?? null;
-      }
       return await projectManagedOrganizationAccess(txDb, {
         subjectId,
         subjectLabel,
         organizationMemberships: existingOrganizationMemberships,
-        preferredDefaultWorkspaceId,
+        userId: input.userId,
       });
     }
     if (
