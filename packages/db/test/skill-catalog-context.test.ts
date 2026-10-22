@@ -225,7 +225,7 @@ test("the router probe is a partial-index lookup that never visits ordinary hist
   ).toBe(false);
 }, 180_000);
 
-test("response pages batch router probes in one transaction, without scanning retained history", async () => {
+test("response pages batch keyed router probes in one transaction with bounded history reads", async () => {
   const f = await fixture();
   const turn = await f.claim();
   expect(
@@ -317,35 +317,72 @@ test("response pages batch router probes in one transaction, without scanning re
   if (!batchQuery) throw new Error("No batch query captured");
   await shared.admin`analyze session_history_items`;
   const query = batchQuery;
-  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
-    const fragments = query.text
-      .split(/\$(\d+)/g)
-      .map((part, index) =>
-        index % 2 === 0 ? sql.raw(part) : sql`${sql.param(query.params[Number(part) - 1])}`,
+  for (const bitmapScan of [true, false]) {
+    await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+      if (!bitmapScan) await tx.execute(sql`set local enable_bitmapscan = off`);
+      const fragments = query.text
+        .split(/\$(\d+)/g)
+        .map((part, index) =>
+          index % 2 === 0 ? sql.raw(part) : sql`${sql.param(query.params[Number(part) - 1])}`,
+        );
+      const rows = await tx.execute(
+        sql`explain (analyze, format json) ${sql.join(fragments, sql``)}`,
       );
-    const rows = await tx.execute(
-      sql`explain (analyze, format json) ${sql.join(fragments, sql``)}`,
-    );
-    type Node = {
-      "Index Name"?: string;
-      "Actual Rows": number;
-      "Actual Loops": number;
-      Plans?: Node[];
-    };
-    const plans = rows[0]?.["QUERY PLAN"] as { Plan: Node }[] | undefined;
-    const plan = plans?.[0]?.Plan;
-    if (!plan) throw new Error("No batch router-history plan returned");
-    const probes: Node[] = [];
-    const visit = (node: Node) => {
-      if (node["Index Name"] === "session_history_items_tool_router_idx") probes.push(node);
-      node.Plans?.forEach(visit);
-    };
-    visit(plan);
-    expect(probes.length).toBeGreaterThan(0);
-    expect(
-      probes.reduce((sum, node) => sum + node["Actual Rows"] * node["Actual Loops"], 0),
-    ).toBeLessThanOrEqual(50);
-  });
+      type Node = {
+        "Node Type": string;
+        "Index Name"?: string;
+        "Index Cond"?: string;
+        "Relation Name"?: string;
+        "Actual Rows": number;
+        "Actual Loops": number;
+        "Rows Removed by Filter"?: number;
+        "Rows Removed by Index Recheck"?: number;
+        "Exact Heap Blocks"?: number;
+        "Lossy Heap Blocks"?: number;
+        Plans?: Node[];
+      };
+      const plans = rows[0]?.["QUERY PLAN"] as { Plan: Node }[] | undefined;
+      const plan = plans?.[0]?.Plan;
+      if (!plan) throw new Error("No batch router-history plan returned");
+      if (process.env.OPENGENI_BENCH_ROUTER_HISTORY === "1")
+        console.log(JSON.stringify({ bitmapScan, routerHistoryPlan: plan }));
+      const probes: Node[] = [];
+      const historyReads: Node[] = [];
+      const visit = (node: Node) => {
+        if (node["Index Name"] === "session_history_items_tool_router_idx") probes.push(node);
+        if (node["Relation Name"] === "session_history_items") historyReads.push(node);
+        node.Plans?.forEach(visit);
+      };
+      visit(plan);
+      expect(probes.length).toBeGreaterThan(0);
+      for (const probe of probes) {
+        expect(probe["Index Cond"]).toContain("workspace_id =");
+        expect(probe["Index Cond"]).toContain("session_id = requested.session_id");
+      }
+      // LIMIT stops heap reads, not bitmap construction: a valid bitmap index
+      // scan can collect every matching router TID before fetching its first row.
+      // Assert the actual history reads and keyed partial-index access separately.
+      expect(historyReads.length).toBeGreaterThan(0);
+      for (const read of historyReads) expect(read["Node Type"]).not.toBe("Seq Scan");
+      expect(
+        historyReads.reduce(
+          (sum, node) =>
+            sum +
+            (node["Actual Rows"] +
+              (node["Rows Removed by Filter"] ?? 0) +
+              (node["Rows Removed by Index Recheck"] ?? 0)) *
+              node["Actual Loops"],
+          0,
+        ),
+      ).toBeLessThanOrEqual(50);
+      // EXPLAIN rounds per-loop row counts; exact heap blocks are an additional
+      // check that catches a bitmap heap scan traversing retained history.
+      expect(
+        historyReads.reduce((sum, node) => sum + (node["Exact Heap Blocks"] ?? 0), 0),
+      ).toBeLessThanOrEqual(50);
+      expect(historyReads.some((node) => (node["Lossy Heap Blocks"] ?? 0) > 0)).toBe(false);
+    });
+  }
 }, 180_000);
 
 test("catalog changes append without rewriting history; unchanged turns and retries freeze the same snapshot", async () => {
