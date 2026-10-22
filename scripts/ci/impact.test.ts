@@ -1139,6 +1139,7 @@ function requiredResult(
     artifactRuntime: boolean;
     build: number;
     bakeImages?: boolean;
+    preImage?: boolean;
   },
 ): boolean {
   const result = spawnSync(
@@ -1175,6 +1176,9 @@ function requiredResult(
       "--argjson",
       "build",
       String(options.build),
+      "--argjson",
+      "preImage",
+      String(options.preImage ?? false),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1331,6 +1335,93 @@ describe("workflow fail-closed contracts", () => {
       false,
     );
     expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
+  });
+
+  test("pre-image validation requires every non-image lane exactly and never sees images", () => {
+    const lanes = [
+      "plan",
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "artifact-runtime",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+      "deployment",
+    ];
+    const full = Object.fromEntries(lanes.map((name) => [name, { result: "success" }]));
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 1,
+      integration: 1,
+      e2e: 1,
+      browser: 1,
+      artifactRuntime: true,
+      build: 1,
+      bakeImages: true,
+      preImage: true,
+    };
+    expect(requiredResult(full, options)).toBe(true);
+    // Every lane a full main push selects must have succeeded: a failure, a
+    // cancellation or a skip of a selected lane stops the release image.
+    for (const name of lanes) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(requiredResult({ ...full, [name]: { result } }, options), `${name}/${result}`).toBe(
+          false,
+        );
+      }
+    }
+    // A missing lane result is never treated as success.
+    for (const name of lanes) {
+      const { [name]: _omitted, ...missing } = full;
+      expect(requiredResult(missing, options), `${name}/missing`).toBe(false);
+    }
+    // The gate runs before any image job; an image result in its input means
+    // the topology changed and fails closed.
+    expect(requiredResult({ ...full, images: { result: "success" } }, options)).toBe(false);
+    // The final aggregate is unchanged: without preImage, images stay required.
+    expect(requiredResult(full, { ...options, preImage: false })).toBe(false);
+    expect(
+      requiredResult({ ...full, images: { result: "success" } }, { ...options, preImage: false }),
+    ).toBe(true);
+
+    // A docs main push still bakes images; unselected test lanes must be skipped.
+    const docsOptions = {
+      ...options,
+      mode: "docs" as const,
+      unit: 0,
+      integration: 0,
+      e2e: 0,
+      browser: 0,
+      build: 0,
+    };
+    const docs = { ...full };
+    for (const name of [
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ]) {
+      docs[name] = { result: "skipped" };
+    }
+    expect(requiredResult(docs, { ...docsOptions, browserdRealE2e: false })).toBe(true);
+    for (const name of ["source-contracts", "artifact-runtime", "deployment"]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(
+          requiredResult(
+            { ...docs, [name]: { result } },
+            { ...docsOptions, browserdRealE2e: false },
+          ),
+          `docs/${name}/${result}`,
+        ).toBe(false);
+      }
+    }
   });
 
   test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {
