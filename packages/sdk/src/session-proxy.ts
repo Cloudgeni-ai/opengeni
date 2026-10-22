@@ -328,6 +328,17 @@ export type SessionProxyHandlerOptions = {
    */
   sites?: boolean | undefined;
   /**
+   * Let the product's Excel add-in connect the open workbook for the signed-in
+   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
+   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
+   * user in the resolved workspace; agents working for them there reach it with
+   * `excel_run`. The ticket authenticates the add-in's WebSocket to
+   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
+   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
+   * Explicit opt-in, default false.
+   */
+  office?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session Opengeni lets that user read in the workspace (shared
@@ -431,6 +442,7 @@ export function createSessionProxyHandler(
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const sitesEnabled = options.sites === true;
+  const officeEnabled = options.office === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -806,6 +818,16 @@ export function createSessionProxyHandler(
           reject(403, "control_not_allowed", "Only workspace resume is available.");
         }
         return json(await client.requestJson("POST", `${base}/inference-control`, body));
+      }
+
+      if (area === "office" && officeEnabled && tail.length === 1) {
+        if (tail[0] === "workbook-tickets" && method === "POST") {
+          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
+        }
+        if (tail[0] === "workbooks" && method === "GET") {
+          return await read(`${base}/office/workbooks`);
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
       }
 
       if (area === "files" && filesEnabled && method === "POST") {

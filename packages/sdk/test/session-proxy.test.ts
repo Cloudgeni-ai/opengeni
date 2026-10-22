@@ -2012,6 +2012,33 @@ describe("createSessionProxyHandler", () => {
     expect((await on.handler(new Request(editable))).status).toBe(404);
   });
 
+  test("Excel workbook routes are opt-in and act as the resolved user", async () => {
+    const off = setup();
+    await expect(off.browser.createOfficeWorkbookTicket(WORKSPACE_ID)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(off.upstream.requests.some((r) => r.url.pathname.includes("/office/"))).toBe(false);
+
+    const on = setup({ office: true });
+    await on.browser.createOfficeWorkbookTicket(WORKSPACE_ID);
+    const minted = on.upstream.requests.at(-1)!;
+    expect(minted.method).toBe("POST");
+    expect(minted.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbook-tickets`);
+    expect(minted.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    await on.browser.listOfficeWorkbooks(WORKSPACE_ID).catch(() => undefined);
+    const listed = on.upstream.requests.at(-1)!;
+    expect(listed.method).toBe("GET");
+    expect(listed.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbooks`);
+    // Another workspace and other office paths stay closed.
+    await expect(on.browser.createOfficeWorkbookTicket(OTHER_WORKSPACE_ID)).rejects.toMatchObject({
+      status: 403,
+    });
+    const other = await on.handler(
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/office/anything`),
+    );
+    expect(other.status).toBe(404);
+  });
+
   test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {
     const item = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`;
     const scoped = { "x-opengeni-session-id": SESSION_ID };

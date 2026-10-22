@@ -93,11 +93,12 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `openOfficeDialog(url)`, a top-level window on the product's origin, and
   have the page it lands on send a short-lived credential back with
   `office().context.ui.messageParent`.
-- **Server passthrough.** Allow `POST /v1/workspaces/{ws}/office/workbook-tickets`
-  for the signed-in user (with that user as the acting subject, so each
-  person's workbooks stay theirs) and pass the WebSocket upgrade for
-  `/v1/office/workbooks/live` through to the Opengeni API. The ticket, not a
-  cookie or header, authenticates the socket.
+- **Server passthrough.** With the packaged session proxy, set
+  `office: true` in `createSessionProxyHandler`: it mints workbook tickets as
+  the signed-in user (`asUser`), so each person's workbooks stay theirs. Pass
+  the WebSocket upgrade for `<proxy base>/v1/office/workbooks/live` through to
+  the Opengeni API's `/v1/office/workbooks/live`. The ticket, not a cookie or
+  header, authenticates the socket.
 - **Agents.** Allow the first-party `excel_run` tool for the product's chats.
   Set `OPENGENI_OFFICE_ADDIN_NAME` to the add-in's name and
   `OPENGENI_OFFICE_ADDIN_INSTALL_URL` to the product's install page, so agents
