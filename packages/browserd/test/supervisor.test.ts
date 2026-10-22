@@ -26,6 +26,7 @@ import {
   SqliteBrowserWorkingRuntimeJournal,
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
+import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
 import {
   adoptionPaths,
@@ -780,6 +781,7 @@ describe("BrowserSupervisor", () => {
   test("a quiescent attached Chrome session does not hold back an update", async () => {
     const gate = deferred();
     const dispatched = deferred();
+    let clock = 1_000_000;
     await withSupervisor(
       async ({ supervisor }) => {
         const session = reference(2);
@@ -795,16 +797,24 @@ describe("BrowserSupervisor", () => {
           },
         });
         // The user's Chrome keeps its tabs and pages across a controller
-        // restart; an idle attached session has nothing to lose.
+        // restart; an idle attached session has nothing to lose once its
+        // agent has paused.
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         const action = supervisor.action(command(created.observation));
         await dispatched.promise;
         expect(supervisor.isIdle()).toBe(false);
         gate.resolve();
         await action;
+        // Mid-task: a restart now would fail the agent's next call.
+        expect(supervisor.updateBlockers()).toEqual([
+          { kind: "browser_recent_use", resourceId: session.browserSessionId, count: 1 },
+        ]);
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
       },
       {
+        now: () => clock,
         driverHooks: {
           async dispatch() {
             dispatched.resolve();
@@ -818,6 +828,7 @@ describe("BrowserSupervisor", () => {
   test("a settled attached transport failure does not retain update admission", async () => {
     const dispatched = deferred();
     const fail = deferred();
+    let clock = 1_000_000;
     await withSupervisor(
       async ({ supervisor }) => {
         const created = await supervisor.createSession({
@@ -838,10 +849,12 @@ describe("BrowserSupervisor", () => {
         expect((await action).state).toBe("outcome_unknown");
         // The uncertain action stays in its journal, but no dispatched work
         // remains. Restart does not replay the action or close the user's tabs.
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         expect(supervisor.updateBlockers()).toEqual([]);
       },
       {
+        now: () => clock,
         driverHooks: {
           async dispatch() {
             dispatched.resolve();
@@ -1646,6 +1659,7 @@ async function withSupervisor(
       requiresExplicitProfileRestore?: boolean;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
+    now?: () => number;
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-supervisor-");
@@ -1662,6 +1676,7 @@ async function withSupervisor(
       return fakeDriver(context, options.driverHooks, driverInstance);
     },
     ...(options.uploadArtifact ? { uploadArtifact: options.uploadArtifact } : {}),
+    ...(options.now ? { now: options.now } : {}),
   });
   try {
     await callback({ supervisor, contexts });
@@ -2404,8 +2419,10 @@ describe("same-working-directory controller restart", () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       const dispatched = deferred(),
         release = deferred();
+      let clock = 1_000_000;
       const supervisor = await BrowserSupervisor.open({
         rootDirectory,
+        now: () => clock,
         inspectOwnedProcess: async () => "live",
         createDriver: async (context) => ({
           ...fakeDriver(context, {
@@ -2423,7 +2440,9 @@ describe("same-working-directory controller restart", () => {
           recoverExistingWorkingDirectory: true,
         });
         // A quiescent session whose owned browser shutdown preserves is no
-        // reason to refuse a restart.
+        // reason to refuse a restart once its agent has paused.
+        expect(supervisor.isIdle()).toBe(false);
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         const running = supervisor.action(command(created.observation));
         await dispatched.promise;
@@ -2431,6 +2450,8 @@ describe("same-working-directory controller restart", () => {
         release.resolve();
         await running;
         await Bun.sleep(1);
+        expect(supervisor.isIdle()).toBe(false);
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         // A launch without a durable working runtime cannot be reattached.
         await supervisor.createSession({ ...reference(46), headed: false });

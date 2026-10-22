@@ -1,3 +1,9 @@
+/** How long after a browser or computer session's last request an agent update
+ * waits. A restart mid-task fails the agent's next calls while it lasts, even
+ * for sessions that survive it; agents pause between steps for a model turn,
+ * rarely this long. */
+export const RECENT_USE_UPDATE_HOLD_MS = 3 * 60_000;
+
 /** Content-free ownership evidence for an update hold. Never include page
  * titles, URLs, command text, local paths or credentials. */
 export interface UpdateBlocker {
