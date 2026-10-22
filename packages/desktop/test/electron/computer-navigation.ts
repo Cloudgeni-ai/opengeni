@@ -73,7 +73,7 @@ async function main() {
     window?.window.destroy();
     server.close();
     rmSync(directory, { recursive: true, force: true });
-    app.exit(process.exitCode ?? 0);
+    app.exit(Number(process.exitCode ?? 0));
   }
 }
 void main();
