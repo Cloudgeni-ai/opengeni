@@ -5,6 +5,7 @@ import {
   WorkspaceVideoGenerationSettings,
 } from "@opengeni/contracts";
 import {
+  getVideoGenerationOperation,
   getVideoGenerationOperationSummary,
   withSessionRlsActorContext,
   getWorkspaceVercelAiGatewayConnectionMetadata,
@@ -17,6 +18,10 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   fileOwnerContextForAccess,
+  grantHasAgentAttemptAuthority,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
   requireWorkspaceSettingsGrant,
   VIDEO_GENERATION_MODEL_CATALOG,
   videoGenerationModelSupportsFundingSource,
@@ -134,6 +139,34 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
       throw new HTTPException(404, {
         message: "video generation operation not found",
       });
+    // Operation status can precede its File. Apply the source chat's live host
+    // decision before returning even a pending or failed summary.
+    if (deps.sessionAuthorization || grantHasAgentAttemptAuthority(access.grant)) {
+      const operation = await withSessionRlsActorContext(actor, () =>
+        getVideoGenerationOperation(deps.db, workspaceId, c.req.param("operationId")),
+      );
+      if (!operation?.sourceSessionIdSnapshot)
+        throw new HTTPException(404, { message: "video generation operation not found" });
+      try {
+        await requireSessionAuthorization(deps, access.grant, {
+          sessionId: operation.sourceSessionIdSnapshot,
+          operation: "session.read",
+          surface: "http",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError)
+          throw new HTTPException(404, {
+            message: "video generation operation not found",
+            cause: error,
+          });
+        if (error instanceof SessionAuthorizationUnavailableError)
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+            cause: error,
+          });
+        throw error;
+      }
+    }
     return c.json(VideoGenerationOperationSummary.parse(summary));
   });
 }

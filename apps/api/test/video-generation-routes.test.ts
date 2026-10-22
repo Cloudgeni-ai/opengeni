@@ -5,6 +5,7 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
+  createSession,
   connectSubscriptionCoreXaiConnection,
   deleteWorkspace,
   SUBSCRIPTION_RETIREMENT_MIGRATION,
@@ -77,6 +78,68 @@ function settingsUrl(workspaceId: string) {
 }
 
 describe("video generation workspace routes", () => {
+  test("operation summaries follow the live source session host decision", async () => {
+    const workspace = await workspaceFixture();
+    try {
+      const source = await createSession(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        initialMessage: "Generate a video",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      });
+      const operationId = crypto.randomUUID();
+      await shared!.admin`insert into video_generation_operations(
+        id, account_id, workspace_id, session_id, source_session_id_snapshot,
+        source_session_shared_unrestricted, tool_call_id, admission_key,
+        request_digest, prompt_digest, model_id, source_mode,
+        capability_revision, funding_source, credential_version,
+        provider_idempotency_key, expected_artifact_id, expected_file_id,
+        reserved_bytes, recovery_deadline_at
+      ) values(
+        ${operationId}, ${workspace.accountId}, ${workspace.workspaceId},
+        ${source.id}, ${source.id}, true, 'test-call', ${"a".repeat(64)},
+        ${"b".repeat(64)}, ${"c".repeat(64)}, ${MODEL_ID}, 'text',
+        ${"d".repeat(64)}, 'supergrok_subscription', 1,
+        'test-provider-operation', ${crypto.randomUUID()}, ${crypto.randomUUID()},
+        1000000, ${new Date(Date.now() + 60_000)}
+      )`;
+      const decisions: string[] = [];
+      let allowed = true;
+      const hosted = new Hono();
+      registerVideoGenerationRoutes(hosted, {
+        db: client.db,
+        settings: testSettings({ delegationSecret: SECRET }),
+        sessionAuthorization: {
+          authorizeSession: async ({ target, operation, surface }) => {
+            decisions.push(`${target.sessionId}:${operation}:${surface}`);
+            return allowed ? { allowed: true } : { allowed: false, reason: "revoked" };
+          },
+          resolveListScope: async () => ({ kind: "all" }),
+        },
+      } as ApiRouteDeps);
+      const path = `${settingsUrl(workspace.workspaceId)}/operations/${operationId}`;
+      const headers = { authorization: await bearer(workspace, ["workspace:read"]) };
+      expect((await app.request(path, { headers })).status).toBe(200);
+      const visible = await hosted.request(path, { headers });
+      expect(visible.status).toBe(200);
+      expect(await visible.json()).toMatchObject({ operationId, status: "preparing" });
+      allowed = false;
+      expect((await hosted.request(path, { headers })).status).toBe(404);
+      expect(decisions).toEqual([
+        `${source.id}:session.read:http`,
+        `${source.id}:session.read:http`,
+      ]);
+    } finally {
+      await deleteWorkspace(client.db, workspace.workspaceId);
+    }
+  });
+
   test("keeps video disabled until an admin enables Seedance on a connected Gateway", async () => {
     const workspace = await workspaceFixture();
     try {
