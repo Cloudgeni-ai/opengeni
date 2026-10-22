@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createWebHandler,
   demoApiProxyFromEnvironment,
+  previousAssetRootsFromEnvironment,
   publicWebOriginFromEnvironment,
   withAbsoluteLinkPreviewUrls,
 } from "./server";
@@ -513,6 +514,154 @@ describe("production web handler", () => {
     expect(headers.get("x-opengeni-access-key")).toBe("mounted-access-value");
   });
 });
+
+describe("previous web build assets", () => {
+  // A tab loaded from an older build (after a deploy) or a newer one (during a
+  // rollout) keeps requesting its own hashed names from whichever pod answers.
+  test("serves a hashed asset this build lacks from a previous build, with immutable caching", async () => {
+    const root = await fixture();
+    const previous = await previousBuild({
+      "assets/route-old111.js": "export const old = true;\n",
+      "assets/route-old111.js.gz": Bun.gzipSync("export const old = true;\n"),
+      "assets/styles-old111.css": "body{}\n",
+    });
+    const handler = createWebHandler(root, { previousAssetRoots: [previous] });
+
+    const chunk = await handler(
+      new Request("https://example.test/assets/route-old111.js", {
+        headers: { "accept-encoding": "gzip" },
+      }),
+    );
+    expect(chunk.status).toBe(200);
+    expect(chunk.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(chunk.headers.get("content-encoding")).toBe("gzip");
+    expect(chunk.headers.get("content-type")).toContain("javascript");
+    expect(chunk.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(
+      await new Response(chunk.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+    ).toBe("export const old = true;\n");
+
+    const stylesheet = await handler(new Request("https://example.test/assets/styles-old111.css"));
+    expect(stylesheet.status).toBe(200);
+    expect(stylesheet.headers.get("content-type")).toContain("text/css");
+    expect(stylesheet.headers.get("content-encoding")).toBeNull();
+    expect(await stylesheet.text()).toBe("body{}\n");
+  });
+
+  test("answers HEAD for a previous build's asset without a body", async () => {
+    const previous = await previousBuild({ "assets/route-old111.js": "export const old = 1;\n" });
+    const handler = createWebHandler(await fixture(), { previousAssetRoots: [previous] });
+    const head = await handler(
+      new Request("https://example.test/assets/route-old111.js", { method: "HEAD" }),
+    );
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String("export const old = 1;\n".length));
+    expect(head.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(await head.text()).toBe("");
+  });
+
+  test("prefers this build, then previous builds newest first", async () => {
+    const root = await fixture();
+    const newer = await previousBuild({ "assets/shared-1.js": "newer\n" });
+    const older = await previousBuild({
+      "assets/app-abc123.js": "older copy of current\n",
+      "assets/shared-1.js": "older\n",
+      "assets/only-older-2.js": "only older\n",
+    });
+    const handler = createWebHandler(root, { previousAssetRoots: [newer, older] });
+    const text = async (path: string) =>
+      (await handler(new Request(`https://example.test${path}`))).text();
+
+    expect(await text("/assets/app-abc123.js")).toBe("export const ready = true;\n");
+    expect(await text("/assets/shared-1.js")).toBe("newer\n");
+    expect(await text("/assets/only-older-2.js")).toBe("only older\n");
+  });
+
+  test("covers the Excel add-in and React demo asset directories with their usual caching", async () => {
+    const previous = await previousBuild({
+      "office/assets/taskpane-old.js": "office\n",
+      "react-demo/assets/demo-old.js": "demo\n",
+    });
+    const handler = createWebHandler(await fixture(), { previousAssetRoots: [previous] });
+    for (const [path, body] of [
+      ["/office/assets/taskpane-old.js", "office\n"],
+      ["/react-demo/assets/demo-old.js", "demo\n"],
+    ] as const) {
+      const response = await handler(new Request(`https://example.test${path}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
+      expect(await response.text()).toBe(body);
+    }
+  });
+
+  test("still answers a missing asset with 404, never the SPA shell", async () => {
+    const previous = await previousBuild({ "assets/route-old111.js": "old\n" });
+    const handler = createWebHandler(await fixture(), {
+      previousAssetRoots: [join(previous, "missing-build"), previous],
+    });
+    for (const path of ["/assets/route-gone999.js", "/office/assets/gone.js", "/assets/"]) {
+      const missing = await handler(new Request(`https://example.test${path}`));
+      expect(missing.status).toBe(404);
+      expect(await missing.text()).toBe("Not Found");
+    }
+  });
+
+  test("serves only hashed asset directories from previous builds and stays inside them", async () => {
+    const root = await fixture();
+    const previous = await previousBuild({
+      "index.html": "<!doctype html><title>previous shell</title>",
+      "secret.js": "outside the asset directories\n",
+      "office/taskpane.html": "<!doctype html><title>previous office</title>",
+      "assets/route-old111.js": "old\n",
+    });
+    await Bun.write(join(previous, "..", "beside-previous.js"), "beside\n");
+    const handler = createWebHandler(root, { previousAssetRoots: [previous] });
+    const request = (path: string) => handler(new Request(`https://example.test${path}`));
+
+    // Encoded separators decode after URL normalization; no dot-segment form may
+    // reach a non-asset file in a previous build or a file beside it.
+    for (const path of [
+      "/assets/%2e%2e/secret.js",
+      "/assets/..%2fsecret.js",
+      "/assets/..%5csecret.js",
+      "/assets/%2e%2e/%2e%2e/beside-previous.js",
+      "/assets/..%2f..%2fbeside-previous.js",
+      "/office/assets/..%2f..%2fsecret.js",
+      "/assets/..%2f..%2f..%2fetc%2fpasswd",
+    ]) {
+      const response = await request(path);
+      expect([400, 404]).toContain(response.status);
+      expect(await response.text()).toMatch(/^(Bad Request|Not Found)$/u);
+    }
+    const officePage = await request("/office/taskpane.html");
+    expect(officePage.status).toBe(404);
+    expect(await officePage.text()).toBe("Not Found");
+    expect(await (await request("/")).text()).not.toContain("previous shell");
+    expect((await request("/secret.js")).status).toBe(404);
+    // A dot segment that stays inside the asset directory is still an asset.
+    expect(await (await request("/assets/nested/%2e%2e/route-old111.js")).text()).toBe("old\n");
+  });
+
+  test("reads previous asset roots from a comma-separated environment value", () => {
+    expect(previousAssetRootsFromEnvironment({})).toEqual([]);
+    expect(
+      previousAssetRootsFromEnvironment({
+        OPENGENI_WEB_PREVIOUS_ASSET_ROOTS: " /var/lib/a/0 ,,/var/lib/a/1, ",
+      }),
+    ).toEqual(["/var/lib/a/0", "/var/lib/a/1"]);
+  });
+});
+
+async function previousBuild(files: Record<string, string | Uint8Array>): Promise<string> {
+  const container = await mkdtemp(join(tmpdir(), "opengeni-web-previous-"));
+  roots.push(container);
+  const root = join(container, "build");
+  await mkdir(root, { recursive: true });
+  for (const [path, contents] of Object.entries(files)) {
+    await Bun.write(join(root, path), contents);
+  }
+  return root;
+}
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "opengeni-web-handler-"));
