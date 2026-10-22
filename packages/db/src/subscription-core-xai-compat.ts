@@ -121,7 +121,7 @@ export async function getSubscriptionCoreXaiWorkspaceProjection(
         projectSubscriptionCoreXaiAccount(
           entry.row,
           entry.source,
-          entry.row.allocator_enabled && entry.poolAllocatorEnabled,
+          entry.row.allocator_enabled,
         ),
       ),
       ...view.personal.map((row) => projectSubscriptionCoreXaiAccount(row, "user")),

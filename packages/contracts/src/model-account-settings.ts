@@ -59,8 +59,10 @@ export const ModelAccountSettingValues = /* @__PURE__ */ defineSchema(() =>
     providers: z.record(
       z.string(),
       z.object({
+        /** Deprecated and never set: every account that reaches a workspace serves it. */
         inferenceSource: z.enum(["automatic", "workspace", "organization"]).optional(),
-        useOrganizationAccounts: z.boolean(),
+        /** Deprecated: always true. Every account that reaches a workspace serves it. */
+        useOrganizationAccounts: z.boolean().default(true),
         enabled: z.boolean(),
       }),
     ),

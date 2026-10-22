@@ -73,25 +73,27 @@ test("folds pool rows and the source preference into one owner and reach per con
     personal?: boolean;
     manager?: string | null;
     reach?: string[];
-    pools?: Array<[string, Pool, boolean]>;
+    pools?: Array<[string, Pool, boolean, string[]?]>;
+    models?: string[] | null;
   }) => {
     const id = crypto.randomUUID();
     await fixture(async (tx) => {
       await tx`insert into subscription_connections (id, account_id, provider, kind,
           credential_encrypted, credential_format, provider_account_id, plan_type, ownership,
-          scope_kind, status, allocator_enabled, allow_personal_workspaces, managed_by_workspace_id)
+          scope_kind, status, allocator_enabled, allow_personal_workspaces, managed_by_workspace_id,
+          allowed_model_ids)
         values (${id}, ${accountId}, 'codex', 'subscription', 'fixture', 'v1', ${crypto.randomUUID()},
           'pro', 'shared', ${input.scope}, 'active', ${input.on ?? true}, ${input.personal ?? false},
-          ${input.manager ?? null})`;
+          ${input.manager ?? null}, ${input.models ?? null})`;
       for (const workspaceId of input.reach ?? []) {
         await tx`insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
           values (${accountId}, ${id}, ${workspaceId})`;
       }
-      for (const [workspaceId, pool, enabled] of input.pools ?? []) {
+      for (const [workspaceId, pool, enabled, models] of input.pools ?? []) {
         await tx`insert into subscription_connection_assignment_policies (account_id, connection_id,
             workspace_id, inference_pool, allocator_enabled, allowed_model_ids, excluded_models,
             managed_by_workspace_id)
-          values (${accountId}, ${id}, ${workspaceId}, ${pool}, ${enabled}, null, '{}',
+          values (${accountId}, ${id}, ${workspaceId}, ${pool}, ${enabled}, ${models ?? null}, '{}',
             ${pool === "workspace" ? workspaceId : null})`;
       }
     });
@@ -140,6 +142,26 @@ test("folds pool rows and the source preference into one owner and reach per con
     pools: [
       [alpha, "organization", false],
       [gamma, "organization", false],
+    ],
+  });
+  // Narrowed by its policies wherever it was used: their union becomes its own
+  // list, intersected with the connection's.
+  const narrowed = await connection({
+    scope: "workspaces",
+    reach: [alpha, gamma],
+    models: ["codex/a", "codex/b", "codex/c"],
+    pools: [
+      [alpha, "organization", true, ["codex/a"]],
+      [gamma, "organization", true, ["codex/b", "codex/z"]],
+    ],
+  });
+  // Unrestricted in one workspace that used it: its list stays.
+  const partly = await connection({
+    scope: "workspaces",
+    reach: [alpha, gamma],
+    pools: [
+      [alpha, "organization", true, ["codex/a"]],
+      [gamma, "organization", true],
     ],
   });
   await fixture(async (tx) => {
@@ -210,6 +232,15 @@ test("folds pool rows and the source preference into one owner and reach per con
     owner: null,
     reach: sorted(alpha, gamma),
   });
+
+  const models = async (id: string) =>
+    (
+      await admin<Array<{ allowed_model_ids: string[] | null }>>`
+        select allowed_model_ids from subscription_connections where id = ${id}`
+    )[0]!.allowed_model_ids;
+  expect(await models(narrowed)).toEqual(["codex/a", "codex/b"]);
+  expect(await models(partly)).toBeNull();
+  expect(await models(orgWide)).toBeNull();
 
   const [policies] = await admin<Array<{ count: number }>>`
     select count(*)::int as count from subscription_connection_assignment_policies`;

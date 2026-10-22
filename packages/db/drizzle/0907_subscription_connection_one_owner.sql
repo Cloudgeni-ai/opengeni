@@ -26,7 +26,10 @@
 --    it reaches that workspace alone; otherwise it becomes the
 --    organization's. A connection no workspace manages whose only use was as
 --    one workspace's own copy becomes that workspace's.
--- 4. Every policy row is removed, the preference keys are stripped from
+-- 4. A model list the admitting policies narrowed in every workspace that
+--    used the connection moves onto the connection (the union across those
+--    workspaces, so nobody loses a model).
+-- 5. Every policy row is removed, the preference keys are stripped from
 --    settings, and the reach applied to new workspaces no longer writes
 --    policy rows.
 --
@@ -92,6 +95,7 @@ WITH connection AS (
     OR (workspace.personal AND connection.allow_personal_workspaces)
 )
 SELECT in_scope.connection_id, in_scope.workspace_id, in_scope.personal, in_scope.assigned,
+  source.inference_source,
   CASE
     WHEN EXISTS (SELECT 1 FROM subscription_connection_assignment_policies policy
         WHERE policy.connection_id = in_scope.connection_id
@@ -130,6 +134,8 @@ DECLARE
   assigned_ids uuid[];
   local_ids uuid[];
   personal_used boolean;
+  models_unrestricted boolean;
+  policy_models text[];
   personal_any boolean;
   everywhere boolean;
   owner_workspace uuid;
@@ -155,6 +161,29 @@ BEGIN
     INTO used_ids, assigned_ids, local_ids, personal_used, personal_any, everywhere
     FROM subscription_one_owner_use use
     WHERE use.connection_id = target.id;
+
+    -- A model list the admitting policies narrowed in every workspace that
+    -- used the connection becomes the connection's own (their union, so no
+    -- workspace loses a model it had). Policies never stored exclusions.
+    SELECT coalesce(bool_or(policy.connection_id IS NULL OR policy.allowed_model_ids IS NULL), true),
+      coalesce(array_agg(DISTINCT model.id ORDER BY model.id)
+        FILTER (WHERE model.id IS NOT NULL), '{}')
+    INTO models_unrestricted, policy_models
+    FROM subscription_one_owner_use use
+    LEFT JOIN subscription_connection_assignment_policies policy
+      ON policy.connection_id = use.connection_id AND policy.workspace_id = use.workspace_id
+        AND policy.allocator_enabled
+        AND (use.inference_source = 'automatic' OR policy.inference_pool = use.inference_source)
+    LEFT JOIN LATERAL unnest(policy.allowed_model_ids) AS model(id) ON true
+    WHERE use.connection_id = target.id AND use.used;
+    IF NOT models_unrestricted THEN
+      UPDATE subscription_connections SET allowed_model_ids = CASE
+          WHEN allowed_model_ids IS NULL THEN policy_models
+          ELSE ARRAY(SELECT unnest(allowed_model_ids) INTERSECT SELECT unnest(policy_models)
+            ORDER BY 1) END,
+        access_version = access_version + 1, updated_at = clock_timestamp()
+      WHERE id = target.id;
+    END IF;
 
     -- 2. What it reaches: where it was used, or, used nowhere, where it is
     -- listed (switched off below).
@@ -259,7 +288,7 @@ WHERE managed_by_workspace_id IS NOT NULL AND allow_personal_workspaces;
 
 DELETE FROM subscription_connection_assignment_policies;
 
--- 4. The per-workspace preference is gone; an entry left empty is no
+-- 5. The per-workspace preference is gone; an entry left empty is no
 -- override at all.
 UPDATE subscription_settings settings SET providers = coalesce((
     SELECT jsonb_object_agg(entry.key, entry.value - 'inferenceSource' - 'useOrganizationAccounts')

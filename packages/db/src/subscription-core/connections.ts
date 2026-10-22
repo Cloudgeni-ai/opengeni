@@ -481,13 +481,6 @@ async function connectShared(
       await write.execute(sql`insert into subscription_connection_workspaces
         (account_id, connection_id, workspace_id)
       values (${input.accountId}::uuid, ${createdId}::uuid, ${input.workspaceId}::uuid)`);
-      await write.execute(sql`insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool, allocator_enabled,
-        allowed_model_ids, excluded_models, managed_by_workspace_id
-      ) values (
-        ${input.accountId}::uuid, ${createdId}::uuid, ${input.workspaceId}::uuid, 'workspace',
-        true, null, '{}'::text[], ${input.workspaceId}::uuid
-      )`);
     });
   } catch (error) {
     if (isSubscriptionCoreRlsRefusal(error)) return { kind: "refused", reason: "forbidden" };

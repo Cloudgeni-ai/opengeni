@@ -1252,7 +1252,8 @@ describe.skipIf(!realDb)("migration 0751: the drained subscription legacy retire
         (select count(*)::int from subscription_connection_assignment_policies
           where connection_id = ${connections.reach}::uuid and workspace_id = ${later}::uuid
             and inference_pool = 'organization' and allocator_enabled) as policies`;
-    expect(assigned).toEqual({ workspaces: 1, policies: 1 });
+    // Since 0907 a new workspace joins by assignment alone, without a pool row.
+    expect(assigned).toEqual({ workspaces: 1, policies: 0 });
   }, 180_000);
 
   test("the posture is clean as the application role, before and after provisioning again", async () => {

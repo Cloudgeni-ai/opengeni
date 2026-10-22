@@ -378,4 +378,6 @@ export const embeddingMigrationTail = [
   // Patches the scheduled admission and live-authority routines from withheld
   // 0275/0478/0534/0539/0622/0864 by exact anchors; replay after all of them.
   "0906_scheduled_shared_slack_authority.sql",
+  // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
+  "0907_subscription_connection_one_owner.sql",
 ];

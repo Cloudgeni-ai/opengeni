@@ -28,12 +28,7 @@ import {
   subscriptionConnectionEffectiveLastError,
   subscriptionConnectionEffectiveStatus,
 } from "../subscription-core-repository";
-import {
-  organizationAdministeredConnection,
-  organizationAllocator,
-  organizationAllocatorCopies,
-  organizationModels,
-} from "./access";
+import { organizationAdministeredConnection } from "./access";
 import { SubscriptionCoreError } from "./errors";
 import {
   lockSubscriptionSettings,
@@ -154,7 +149,6 @@ function date(value: Date | string | null | undefined): Date | null {
 /** The provider's effective settings at one workspace. */
 export type SubscriptionCoreProviderSettings = {
   enabled: boolean;
-  inferenceSource: "automatic" | "workspace" | "organization";
   rotationMode: "spread" | "primary_first";
   rotationSource: "organization" | "workspace";
 };
@@ -166,14 +160,12 @@ export function subscriptionCoreProviderSettings(
   const id = subscriptionCoreProviderId(provider);
   const values = effective.values as unknown as {
     rotation?: Record<string, { mode?: unknown } | undefined>;
-    providers?: Record<string, { enabled?: unknown; inferenceSource?: unknown } | undefined>;
+    providers?: Record<string, { enabled?: unknown } | undefined>;
   };
   const own = values.providers?.[id];
-  const source = own?.inferenceSource;
   const rotationSources = effective.sources.rotation as Record<string, string | undefined>;
   return {
     enabled: own?.enabled !== false,
-    inferenceSource: source === "workspace" || source === "organization" ? source : "automatic",
     rotationMode: values.rotation?.[id]?.mode === "primary_first" ? "primary_first" : "spread",
     rotationSource: rotationSources[id] === "workspace" ? "workspace" : "organization",
   };
@@ -213,11 +205,16 @@ export async function readSubscriptionCorePrimaryConnectionId(
   return row?.primary_id ?? null;
 }
 
-export type SubscriptionCoreWorkspaceSourceMode =
-  | "automatic"
-  | "workspace"
-  | "organization"
-  | "disabled";
+/**
+ * Whether the provider is on in this workspace. `automatic` is on; the older
+ * `workspace` and `organization` values are no longer stored (D-50).
+ */
+export type SubscriptionCoreWorkspaceSourceMode = "automatic" | "disabled";
+/**
+ * `disabled` when the provider is off here; otherwise `workspace` when the
+ * workspace has its own connection, else `organization`. Every connection
+ * that reaches the workspace serves either way (D-50).
+ */
 export type SubscriptionCoreEffectiveSource = "workspace" | "organization" | "disabled";
 
 export type SubscriptionCoreWorkspaceSource = {
@@ -226,30 +223,25 @@ export type SubscriptionCoreWorkspaceSource = {
   workspaceKind: "personal" | "shared";
   mode: SubscriptionCoreWorkspaceSourceMode;
   effectiveSource: SubscriptionCoreEffectiveSource;
+  /** The workspace has a connection of its own. */
   workspaceAvailable: boolean;
+  /** An organization connection reaches the workspace. */
   organizationAvailable: boolean;
+  /** Always false: no connection is set aside (D-50). Kept for older clients. */
+  workspaceSetAside: false;
   /**
-   * Some of the workspace's own connections are not in the effective pool
-   * (set aside while the organization's are used). An own connection the
-   * organization also gives this workspace stays in the pool, so it is not.
-   */
-  workspaceSetAside: boolean;
-  /**
-   * How many shared connections other than the workspace's own the
-   * organization gives this workspace (in use under the organization's
-   * source, set aside under the workspace's own). Connections limited to
-   * chosen people are not counted: they reach people, not workspaces.
+   * How many organization connections reach this workspace. Connections
+   * limited to chosen people are not counted: they reach people, not
+   * workspaces.
    */
   organizationCount: number;
 };
 
-/** One shared connection of a workspace's effective pool. */
+/** One shared connection that reaches a workspace. */
 export type SubscriptionCorePoolConnection = {
   row: SubscriptionCoreConnectionRow;
-  /** The pool the connection belongs to for this workspace. */
+  /** `workspace` for the workspace's own connection, else `organization`. */
   source: "workspace" | "organization";
-  /** Whether the connection's assignment in the effective pool admits new allocations. */
-  poolAllocatorEnabled: boolean;
 };
 
 export type SubscriptionCoreWorkspacePool = {
@@ -260,11 +252,11 @@ export type SubscriptionCoreWorkspacePool = {
 };
 
 /**
- * The workspace's shared pool of this provider: the connections of the
- * effective source, the primary connection and the source. Requires the
+ * The shared connections of this provider that reach the workspace, the
+ * primary connection and whether the provider is on here. Requires the
  * workspace RLS context on `tx`. Only shared subscription connections in the
  * workspace's scope are listed; an administrator's wider visibility is
- * filtered explicitly.
+ * filtered explicitly. Nothing is listed while the provider is off here.
  */
 export async function readSubscriptionCoreWorkspacePool(
   tx: Database,
@@ -274,7 +266,7 @@ export async function readSubscriptionCoreWorkspacePool(
     workspaceId: string;
     /** Session picker only: include shared accounts assigned to the scoped caller. */
     includeOwnPeopleScope?: boolean;
-    /** Limits overview only: include every available source, not just the selected inference source. */
+    /** Limits overview only: list the connections even while the provider is off here. */
     includeAllAvailableConnections?: boolean;
   },
 ): Promise<SubscriptionCoreWorkspacePool> {
@@ -289,15 +281,9 @@ export async function readSubscriptionCoreWorkspacePool(
     provider,
     await readSubscriptionEffectiveSettings(tx, input.accountId, input.workspaceId),
   );
-  const rows = await rawRows<SubscriptionCoreConnectionRow & { pools: string[] | null }>(
+  const rows = await rawRows<SubscriptionCoreConnectionRow & { scope_kind: string }>(
     tx,
-    sql`select ${CONNECTION_COLUMNS},
-      (select array_agg(policy.inference_pool || ':' || policy.allocator_enabled::text
-          order by policy.inference_pool)
-        from subscription_connection_assignment_policies policy
-        where policy.account_id = connection.account_id
-          and policy.connection_id = connection.id
-          and policy.workspace_id = ${input.workspaceId}::uuid) as pools
+    sql`select ${CONNECTION_COLUMNS}, connection.scope_kind
     from subscription_connections connection
     left join subscription_connection_quota quota
       on quota.account_id = connection.account_id and quota.connection_id = connection.id
@@ -321,44 +307,21 @@ export async function readSubscriptionCoreWorkspacePool(
                 opengeni_private.subscription_own_person_membership_id(connection.account_id))))
     order by connection.created_at, connection.id`,
   );
-  const pools = rows.map((row) => {
-    const entries = (row.pools ?? []).map((entry) => {
-      const [pool, allocator] = entry.split(":");
-      return { pool: pool as "workspace" | "organization", allocator: allocator === "true" };
-    });
-    // M2 worlds without the assignment relation classify by management.
-    const local =
-      entries.length > 0
-        ? entries.some((entry) => entry.pool === "workspace")
-        : row.managed_by_workspace_id === input.workspaceId;
-    return { row, entries, local };
-  });
-  const workspaceAvailable = pools.some((entry) => entry.local);
-  const organizationAvailable = pools.some((entry) =>
-    entry.entries.length > 0
-      ? entry.entries.some((policy) => policy.pool === "organization")
-      : !entry.local,
-  );
-  const mode: SubscriptionCoreWorkspaceSourceMode = await (async () => {
-    const [row] = await rawRows<{
-      own: { enabled?: unknown; inferenceSource?: unknown } | null;
-    }>(
-      tx,
-      sql`select providers->(${providerId}::text) as own from subscription_settings
-        where account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid`,
-    );
-    if (row?.own?.enabled === false) return "disabled";
-    if (row?.own?.inferenceSource === "workspace") return "workspace";
-    if (row?.own?.inferenceSource === "organization") return "organization";
-    return "automatic";
-  })();
+  const reaching = rows.map(({ scope_kind: scopeKind, ...row }) => ({
+    row,
+    people: scopeKind === "people",
+    source:
+      row.managed_by_workspace_id === input.workspaceId
+        ? ("workspace" as const)
+        : ("organization" as const),
+  }));
+  const workspaceAvailable = reaching.some((entry) => entry.source === "workspace");
+  const organizationAvailable = reaching.some((entry) => entry.source === "organization");
   const effectiveSource: SubscriptionCoreEffectiveSource = !settings.enabled
     ? "disabled"
-    : settings.inferenceSource !== "automatic"
-      ? settings.inferenceSource
-      : workspaceAvailable
-        ? "workspace"
-        : "organization";
+    : workspaceAvailable
+      ? "workspace"
+      : "organization";
   let primaryConnectionId = await readSubscriptionCorePrimaryConnectionId(
     tx,
     provider,
@@ -370,58 +333,26 @@ export async function readSubscriptionCoreWorkspacePool(
   if (workspaceKind === "shared" && !rows.some((row) => row.id === primaryConnectionId)) {
     primaryConnectionId = null;
   }
-  // Only the effective pool is listed (legacy parity): nothing while the
-  // provider is disabled here, only workspace-classified connections for the
-  // workspace source and only organization-classified ones for the
-  // organization source. Automatic admits both shared pools on the core, so
-  // both are listed. Callers with mere workspace read access must not see
-  // accounts that cannot serve this workspace.
-  const inEffectiveSource = (entry: (typeof pools)[number]) =>
-    effectiveSource === "disabled"
-      ? false
-      : settings.inferenceSource === "automatic"
-        ? true
-        : effectiveSource === "workspace"
-          ? entry.local
-          : entry.entries.length > 0
-            ? entry.entries.some((policy) => policy.pool === "organization")
-            : !entry.local;
-  const connections = pools
-    .filter((entry) => input.includeAllAvailableConnections || inEffectiveSource(entry))
-    .map(({ row, entries, local }) => {
-      // The switch placement reads: under the automatic source any enabled
-      // copy in this workspace serves (both pools are admitted), otherwise the
-      // effective pool's copy.
-      const shown =
-        settings.inferenceSource === "automatic"
-          ? entries
-          : entries.filter((entry) => entry.pool === effectiveSource);
-      return {
-        row,
-        source: local ? ("workspace" as const) : ("organization" as const),
-        poolAllocatorEnabled:
-          entries.length === 0 ||
-          (shown.length > 0 ? shown : entries).some((entry) => entry.allocator),
-      };
-    });
   return {
-    connections,
+    // Callers with mere workspace read access must not see accounts that
+    // cannot serve this workspace, so nothing is listed while it is off.
+    connections:
+      settings.enabled || input.includeAllAvailableConnections
+        ? reaching.map(({ row, source }) => ({ row, source }))
+        : [],
     primaryConnectionId,
     rotationMode: settings.rotationMode,
     source: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       workspaceKind,
-      mode,
+      mode: settings.enabled ? "automatic" : "disabled",
       effectiveSource,
       workspaceAvailable,
       organizationAvailable,
-      workspaceSetAside: pools.some((entry) => entry.local && !inEffectiveSource(entry)),
-      organizationCount: pools.filter(
-        (entry) =>
-          !entry.local &&
-          (entry.entries.length === 0 ||
-            entry.entries.some((policy) => policy.pool === "organization")),
+      workspaceSetAside: false,
+      organizationCount: reaching.filter(
+        (entry) => entry.source === "organization" && !entry.people,
       ).length,
     },
   };
@@ -546,51 +477,11 @@ export async function readSubscriptionCoreOrganizationPool(
       order by connection.created_at, connection.id`,
       );
       if (!rows.some((row) => row.id === primaryConnectionId)) primaryConnectionId = null;
-      // A workspace-managed account's delegated manager writes the
-      // connection's own switch and list; the organization's are its own
-      // copies' (what the organization route shows and flips).
-      for (const row of rows) {
-        if (row.managed_by_workspace_id === null) continue;
-        row.allocator_enabled =
-          row.allocator_enabled &&
-          (await organizationAllocator(tx, provider, input.organizationId, row.id, true));
-        row.allowed_model_ids = await organizationModels(tx, provider, input.organizationId, row);
-      }
-      // A workspace-pool row makes it the workspace's own; a world without
-      // policy rows for that pair classifies by management.
-      const own = await rawRows<{ connection_id: string; workspace_id: string }>(
-        tx,
-        sql`select connection.id::text as connection_id, workspace.workspace_id::text as workspace_id
-        from subscription_connections connection
-        cross join list_organization_workspace_ids(${input.organizationId}::uuid) workspace
-        where connection.account_id = ${input.organizationId}::uuid
-          and connection.provider = ${providerId}
-          and connection.kind = ${subscriptionCoreConnectionKind(provider)}
-          and connection.disconnected_at is null and connection.ownership = 'shared'
-          and (connection.scope_kind = 'organization'
-            or (connection.scope_kind = 'workspaces' and exists (
-              select 1 from subscription_connection_workspaces assignment
-              where assignment.account_id = connection.account_id
-                and assignment.connection_id = connection.id
-                and assignment.workspace_id = workspace.workspace_id)))
-          and case when exists (select 1 from subscription_connection_assignment_policies policy
-              where policy.account_id = connection.account_id
-                and policy.connection_id = connection.id
-                and policy.workspace_id = workspace.workspace_id)
-            then exists (select 1 from subscription_connection_assignment_policies policy
-              where policy.account_id = connection.account_id
-                and policy.connection_id = connection.id
-                and policy.workspace_id = workspace.workspace_id
-                and policy.inference_pool = 'workspace')
-            else connection.managed_by_workspace_id = workspace.workspace_id end
-        order by 1, 2`,
-      );
+      // A workspace's own connection is that workspace's alone (D-50).
       const ownInWorkspaceIds = new Map<string, string[]>();
-      for (const row of own)
-        ownInWorkspaceIds.set(row.connection_id, [
-          ...(ownInWorkspaceIds.get(row.connection_id) ?? []),
-          row.workspace_id,
-        ]);
+      for (const row of rows)
+        if (row.managed_by_workspace_id !== null)
+          ownInWorkspaceIds.set(row.id, [row.managed_by_workspace_id]);
       return {
         rows,
         ownInWorkspaceIds,
@@ -780,8 +671,6 @@ async function visibleSharedConnection(
   allocatorEnabled: boolean;
   allocatorVersion: number;
   managedByWorkspaceId: string | null;
-  /** On a workspace route, the switch its page shows for this workspace's copies. */
-  poolAllocatorEnabled: boolean;
 } | null> {
   const providerId = subscriptionCoreProviderId(provider);
   const connectionId = await resolveSubscriptionConnectionId(tx, {
@@ -815,40 +704,20 @@ async function visibleSharedConnection(
         }`,
   );
   if (!row) return null;
-  let poolAllocatorEnabled = true;
   if (input.workspaceId !== null) {
     const pool = await readSubscriptionCoreWorkspacePool(tx, provider, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      includeAllAvailableConnections: true,
     });
-    const entry = pool.connections.find((candidate) => candidate.row.id === connectionId);
-    if (!entry) return null;
-    poolAllocatorEnabled = entry.poolAllocatorEnabled;
+    if (!pool.connections.some((candidate) => candidate.row.id === connectionId)) return null;
   }
   return {
     id: connectionId,
     allocatorEnabled: row.allocator_enabled,
     allocatorVersion: Number(row.allocator_version),
     managedByWorkspaceId: row.managed_by_workspace_id,
-    poolAllocatorEnabled,
   };
-}
-
-/** The managing workspace's own copy's switch: none, or its one row's. */
-async function workspaceOwnAllocator(
-  tx: Database,
-  accountId: string,
-  workspaceId: string,
-  connectionId: string,
-): Promise<boolean[]> {
-  const rows = await rawRows<{ allocator_enabled: boolean }>(
-    tx,
-    sql`select allocator_enabled from subscription_connection_assignment_policies
-      where account_id = ${accountId}::uuid and connection_id = ${connectionId}::uuid
-        and workspace_id = ${workspaceId}::uuid and inference_pool = 'workspace'
-        and managed_by_workspace_id = ${workspaceId}::uuid`,
-  );
-  return rows.map((row) => row.allocator_enabled);
 }
 
 function wakeFor(
@@ -865,8 +734,10 @@ function wakeFor(
 /**
  * New-allocation eligibility of one connection, with the legacy optimistic
  * concurrency: the same state is idempotent even with a stale version; a
- * conflicting stale version returns the current one. Organization
- * administrators and the connection's delegated manager may toggle it.
+ * conflicting stale version returns the current one. A connection has one
+ * switch (D-50): organization administrators may toggle any shared
+ * connection, a workspace's administrators their workspace's own (the
+ * connection write policy decides).
  */
 export async function setSubscriptionCoreAllocator(
   db: Database,
@@ -910,45 +781,8 @@ export async function setSubscriptionCoreAllocator(
       sql`select updated_at from subscription_connections
         where account_id = ${input.accountId}::uuid and id = ${current.id}::uuid`,
     );
-    // Each route shows and flips its own switch: the connection's switch with
-    // the organization's own copies (organization route: its organization-pool
-    // rows and the reach for workspaces created later) or with the managing
-    // workspace's own copy (workspace route). The connection's switch gates
-    // every copy, so either side can turn the account off everywhere, but
-    // turning it on reaches only that side's copies: a delegated manager never
-    // re-enables what the organization switched off for other workspaces.
-    // "Unchanged" means every part this route writes already has the value,
-    // so a switch the other side already turned off still records this side's
-    // "off". An account no workspace manages is the organization's alone: its
-    // route shows the connection's switch, as the shipped page does, and
-    // writes every part. A workspace-managed account switches only on the
-    // organization's route and its managing workspace's: another workspace's
-    // route would switch the connection alone, so the manager's next "on"
-    // would undo its "off" for every other workspace. It is refused (that
-    // workspace's page opens the organization's page for it).
-    if (
-      input.workspaceId !== null &&
-      current.managedByWorkspaceId !== null &&
-      current.managedByWorkspaceId !== input.workspaceId
-    )
-      return { result: { kind: "not_found" }, wake: null };
-    const copies =
-      input.workspaceId === null
-        ? await organizationAllocatorCopies(tx, provider, input.accountId, current.id)
-        : await workspaceOwnAllocator(tx, input.accountId, input.workspaceId, current.id);
-    // What the route's page shows: the workspace page's switch for this
-    // workspace (placement's rule for its source), or on the organization
-    // route the organization's copies (the connection's alone for an account
-    // no workspace manages).
-    const shown =
-      current.allocatorEnabled &&
-      (input.workspaceId !== null
-        ? current.poolAllocatorEnabled
-        : current.managedByWorkspaceId === null || copies.length === 0 || copies.every(Boolean));
-    if (
-      current.allocatorEnabled === input.enabled &&
-      copies.every((copy) => copy === input.enabled)
-    ) {
+    const shown = current.allocatorEnabled;
+    if (current.allocatorEnabled === input.enabled) {
       return {
         result: projection("unchanged", shown, current.allocatorVersion, stamp?.updated_at ?? null),
         wake: null,
@@ -976,27 +810,6 @@ export async function setSubscriptionCoreAllocator(
               and allocator_version = ${input.expectedVersion}
             returning allocator_version, updated_at`,
         );
-        if (row) {
-          // The pool rows and the reach for workspaces created later carry
-          // their own allocator copy, which placement also requires.
-          if (input.workspaceId === null) {
-            await savepoint.execute(sql`update subscription_connection_assignment_policies
-              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
-              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
-                and inference_pool = 'organization' and managed_by_workspace_id is null`);
-            // The reach row's switch alone: its model list stays the
-            // organization's.
-            await savepoint.execute(sql`select opengeni_private.set_subscription_core_reach_allocator(
-              ${subscriptionCoreProviderId(provider)}, ${input.accountId}::uuid,
-              ${current.id}::uuid, ${input.enabled}::boolean)`);
-          } else {
-            await savepoint.execute(sql`update subscription_connection_assignment_policies
-              set allocator_enabled = ${input.enabled}, updated_at = clock_timestamp()
-              where account_id = ${input.accountId}::uuid and connection_id = ${current.id}::uuid
-                and workspace_id = ${input.workspaceId}::uuid and inference_pool = 'workspace'
-                and managed_by_workspace_id = ${input.workspaceId}::uuid`);
-          }
-        }
         return row;
       });
     } catch (error) {
@@ -1005,20 +818,13 @@ export async function setSubscriptionCoreAllocator(
     }
     // The update policy hides a connection this subject may not manage.
     if (!updated) return { result: { kind: "not_found" }, wake: null };
-    // A workspace's "on" turns on its own copy; under the organization's pool
-    // the organization's copy, which only organization administrators switch,
-    // decides what its page shows.
-    const after =
-      input.enabled && input.workspaceId !== null
-        ? ((
-            await readSubscriptionCoreWorkspacePool(tx, provider, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-            })
-          ).connections.find((entry) => entry.row.id === current.id)?.poolAllocatorEnabled ?? false)
-        : input.enabled;
     return {
-      result: projection("updated", after, Number(updated.allocator_version), updated.updated_at),
+      result: projection(
+        "updated",
+        input.enabled,
+        Number(updated.allocator_version),
+        updated.updated_at,
+      ),
       // Re-enabling can make a waiting turn placeable; disabling changes nothing
       // a waiter needs, but a single wake is cheap and keeps the rule simple.
       wake: {
@@ -1456,9 +1262,8 @@ export async function setSubscriptionCoreRotation(
 }
 
 /**
- * Workspace source modes as the workspace's provider override: `automatic`
- * removes it, `workspace`/`organization` set `inferenceSource`, `disabled`
- * sets `enabled = false`. Connection scope and the model allowlist are never
+ * Whether the provider is on in a workspace, as the workspace's provider
+ * override: `automatic` removes it, `disabled` sets `enabled = false`. Connection scope and the model allowlist are never
  * touched (design 5.2). Throws the provider's source-refused error.
  */
 export async function setSubscriptionCoreWorkspaceSource(
@@ -1484,12 +1289,7 @@ export async function setSubscriptionCoreWorkspaceSource(
       );
     }
     const written = await writeSettingsRow(tx, provider, input, {
-      providerSettings:
-        input.mode === "automatic"
-          ? null
-          : input.mode === "disabled"
-            ? { enabled: false }
-            : { enabled: true, inferenceSource: input.mode },
+      providerSettings: input.mode === "automatic" ? null : { enabled: false },
     });
     if (!written) {
       throw provider.errors.sourceRefused(

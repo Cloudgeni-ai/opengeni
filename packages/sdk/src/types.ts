@@ -4551,7 +4551,9 @@ export type ModelAccountSettingValues = {
   providers: Record<
     string,
     {
+      /** @deprecated Never set: every account that reaches a workspace serves it. */
       inferenceSource?: "automatic" | "workspace" | "organization" | undefined;
+      /** @deprecated Always true: every account that reaches a workspace serves it. */
       useOrganizationAccounts: boolean;
       enabled: boolean;
     }
@@ -4849,6 +4851,10 @@ export type CodexConnectionStatus = {
   source?: WorkspaceCodexSubscriptionSource;
 };
 
+/**
+ * `automatic`: Codex is on here; `disabled`: off. The older `workspace` and
+ * `organization` values are accepted and mean on.
+ */
 export type WorkspaceCodexSubscriptionMode =
   | "automatic"
   | "workspace"
@@ -4863,11 +4869,11 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
-  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  /** @deprecated Always false: no account is set aside. Absent from older servers. */
   workspaceSetAside?: boolean;
   /**
-   * How many organization accounts other than the workspace's own reach this
-   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   * How many organization accounts reach this workspace (accounts limited to
+   * chosen people aside). Absent from older servers.
    */
   organizationCount?: number;
 };

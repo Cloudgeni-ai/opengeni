@@ -470,9 +470,8 @@ export type SubscriptionCoreClaudeCatalogReadiness = {
   /** `organization-claude-subscription/` models: the organization inference pool. */
   organization: boolean;
   /**
-   * Each prefix's model restriction: the union of its serving allowlists,
-   * each built from its own pool's assignment policies only (null: every
-   * model).
+   * Each prefix's model restriction: the union of its serving allowlists
+   * (null: every model).
    */
   restrictions: {
     readonly "organization-claude-subscription/": readonly string[] | null;
@@ -490,30 +489,8 @@ function servesWorkspacePool(connection: SubscriptionCoreServingConnection): boo
   return connection.ownership === "personal" || connection.pools.includes("workspace");
 }
 
-/**
- * The connection's model policy as one pool sees it: a classified shared
- * connection keeps only that pool's assignment policies (a connection in
- * both pools never lets one pool's policy widen the other's prefix).
- */
-function inPool(
-  connection: SubscriptionCoreServingConnection,
-  pool: "workspace" | "organization",
-): SubscriptionCoreServingConnection {
-  return connection.assignments === null
-    ? connection
-    : {
-        ...connection,
-        assignments: connection.assignments.filter((policy) => policy.inferencePool === pool),
-      };
-}
-
-function allowlistUnion(
-  connections: readonly SubscriptionCoreServingConnection[],
-  pool: "workspace" | "organization",
-) {
-  const allowlists = connections.map((connection) =>
-    subscriptionCoreConnectionAllowlist(inPool(connection, pool)),
-  );
+function allowlistUnion(connections: readonly SubscriptionCoreServingConnection[]) {
+  const allowlists = connections.map(subscriptionCoreConnectionAllowlist);
   return allowlists.some((allowed) => allowed === null)
     ? null
     : [...new Set(allowlists.flatMap((allowed) => allowed ?? []))].sort();
@@ -548,17 +525,17 @@ export async function readSubscriptionCoreClaudeCatalogReadiness(
     organization: organization.length > 0,
     restrictions: {
       "organization-claude-subscription/":
-        organization.length > 0 ? allowlistUnion(organization, "organization") : [],
+        organization.length > 0 ? allowlistUnion(organization) : [],
       "workspace-claude-subscription/":
-        workspace.length > 0 ? allowlistUnion(workspace, "workspace") : [],
+        workspace.length > 0 ? allowlistUnion(workspace) : [],
     },
   };
 }
 
 /**
- * Organization custom-model admission on the core: the workspace's
- * effective Claude source admits organization connections and an active,
- * allocatable organization-pool shared connection admits the model. Shared
+ * Organization custom-model admission on the core: an active, allocatable
+ * organization-pool shared connection reaching the workspace admits the
+ * model. Shared
  * capacity only: no person (and no session creator) is read or inferred.
  */
 export async function subscriptionCoreClaudeOrganizationModelAdmitted(
@@ -574,7 +551,7 @@ export async function subscriptionCoreClaudeOrganizationModelAdmitted(
   return serving.some(
     (connection) =>
       servesOrganizationPool(connection) &&
-      subscriptionCoreConnectionAllowsModel(inPool(connection, "organization"), productModelId),
+      subscriptionCoreConnectionAllowsModel(connection, productModelId),
   );
 }
 
