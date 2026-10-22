@@ -2032,6 +2032,15 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
 
 - the source SHA must be that PR's `merge_commit_sha`;
 - reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- GitHub rewrites a merged PR's `pull.base.sha` to the merge-time `main` tip,
+  so the reviewed delta starts at the provider compare's merge base (the
+  recorded `patchBaseSha`) and must equal the landed delta path for path. When
+  that patch base differs from `pull.base.sha`, no exact-head Version CI ran
+  against the landed base: admission then also requires a `changeset-release/main`
+  PR from the GitHub Actions bot whose head is one commit on the patch base, and
+  the landed commit's own complete fully green `push` run, `Full CI` status and
+  current-attempt receipts as required for tested descendants below. The
+  provider identity fields and review digest still use `pull.base.sha`;
 - trees, merge provenance, `opengeni-release-head-<head>` retention, and the
   required main CI jobs remain fail-closed;
 - GitHub branch protection may still require a review to merge into `main`;

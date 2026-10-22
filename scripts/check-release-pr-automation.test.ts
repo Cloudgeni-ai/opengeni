@@ -3022,34 +3022,48 @@ describe("release approval provenance", () => {
     },
   );
 
-  test.each(["moving-main-squash", "moving-main-merge"] as const)(
-    "accepts %s when the provider PR base has advanced to the landing parent",
-    async (mergeMethod) => {
+  // Acceptance with the landed commit's complete full-green evidence is proven
+  // against real Git history in scripts/release/descendant-release-admission.test.ts.
+  test.each([
+    [
+      "moving-main-squash without landed full-green evidence",
+      { mergeMethod: "moving-main-squash" as const },
+      `${RELEASE_AUTOMATION_CONTRACT.checks.fullGreenJobs[0]} check run is missing on ${mergeSha}`,
+    ],
+    [
+      "moving-main-merge of a multi-commit head",
+      { mergeMethod: "moving-main-merge" as const },
+      "advanced-provider-base release head is not one generated commit on its patch base",
+    ],
+    [
+      "a non-automation pull request",
+      {
+        mergeMethod: "moving-main-squash" as const,
+        author: { login: "contributor", id: 5150, type: "User" },
+      },
+      "Version provenance pull-request author numeric identity changed",
+    ],
+  ] as const)(
+    "rejects %s when the provider PR base has advanced to the landing parent",
+    async (_label, options, message) => {
       const fixture = approvalFixture({
-        mergeMethod,
         reviewedBaseSha: movingMainParentSha,
         controllerSha: movingMainParentSha,
         controllerTreeSha: movingMainParentTreeSha,
+        ...options,
       });
-      const result = await verifyApprovedMerge({
-        env: approvalEnv({
-          GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
-          GITHUB_SHA: movingMainParentSha,
-          GITHUB_WORKFLOW_SHA: movingMainParentSha,
-          RELEASE_CONTROLLER_SHA: movingMainParentSha,
+      await expect(
+        verifyApprovedMerge({
+          env: approvalEnv({
+            GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${movingMainParentSha}`,
+            GITHUB_SHA: movingMainParentSha,
+            GITHUB_WORKFLOW_SHA: movingMainParentSha,
+            RELEASE_CONTROLLER_SHA: movingMainParentSha,
+          }),
+          fetchImpl: fixture.fetchImpl,
+          logger: { log() {} },
         }),
-        fetchImpl: fixture.fetchImpl,
-        logger: { log() {} },
-      });
-      expect(result).toMatchObject({
-        reviewedBaseSha: movingMainParentSha,
-        reviewedBaseTreeSha: movingMainParentTreeSha,
-        sourceComposition: {
-          patchBaseSha: baseSha,
-          integrationBaseSha: movingMainParentSha,
-          pathCount: 1,
-        },
-      });
+      ).rejects.toThrow(message);
       expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
     },
   );
