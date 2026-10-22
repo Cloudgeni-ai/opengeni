@@ -858,6 +858,7 @@ const ComputerOpenInput = z
     name: z.string().trim().min(1).max(200).optional(),
     placement: InteractionPlacement.optional(),
     includeScreenshot: z.boolean().optional(),
+    applicationId: z.string().trim().min(1).max(1_024).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -877,7 +878,12 @@ const ComputerOpenInput = z
     }
   });
 const ComputerOpenOutput = z
-  .object({ session: ComputerSession, targets: z.array(ComputerTarget) })
+  .object({
+    session: ComputerSession,
+    targets: z.array(ComputerTarget),
+    /** The launch of `applicationId`: its receipt observes the app's window. */
+    launch: ComputerActionReceipt.optional(),
+  })
   .strict();
 const CurrentComputerSessionId = z
   .string()
@@ -2533,13 +2539,20 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. When the task is about one app, pass applicationId (what a launch action takes, such as a macOS bundle ID like com.apple.calculator) to launch it in the background, or find it if it is already running, and get its window's observation (and with includeScreenshot its screenshot) in the same call. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
-    modelText: computerOpenText,
-    execute: async ({ includeScreenshot, ...value }, context) => {
+    modelText: (output, context) => {
+      const opened = computerOpenText(output);
+      const launch = output.launch;
+      if (!launch) return opened;
+      if (launch.observation && context.caller.kind === "model")
+        rememberComputerReading(launch.observation);
+      return `${opened}\n${computerActionText(launch)}`;
+    },
+    execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
       const opened = await openComputer(
         input.transport,
         input.workspaceId,
@@ -2548,12 +2561,38 @@ export function createInteractionAttemptToolDefinitions(
         context,
       );
       currentComputer.use(opened.session.id);
-      if (!includeScreenshot) return opened;
-      // The computer is already open. A failed capture must not turn its result
-      // into an error the model could answer by opening another computer.
-      const target = openedScreenshotTarget(opened.targets);
+      // The computer is already open. A failed launch or capture must not turn
+      // its result into an error the model could answer by opening another
+      // computer: the result says what failed instead.
+      const notes: Array<{ type: "text"; text: string }> = [];
+      let result: z.input<typeof ComputerOpenOutput> = opened;
+      let appWindow: { id: string; targetGeneration: string } | null = null;
+      if (applicationId) {
+        const launched = await launchOpenedComputerApp(
+          input.transport,
+          input.workspaceId,
+          opened,
+          applicationId,
+          context,
+        );
+        if ("note" in launched) notes.push({ type: "text", text: launched.note });
+        else {
+          result = { ...opened, launch: launched.launch };
+          const observed = launched.launch.observation?.target;
+          if (launched.launch.state === "completed" && observed) {
+            // Later reads and actions without a target start in the app.
+            currentComputer.use(opened.session.id, observed.id);
+            if (observed.kind === "window") appWindow = observed;
+          }
+        }
+      }
+      if (!includeScreenshot)
+        return notes.length ? new InteractionExecutionResult(result, notes) : result;
+      // With a launched app, its window; otherwise the screen.
+      const target = appWindow ?? openedScreenshotTarget(opened.targets);
       if (!target)
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: "The computer opened, but it has no screen or window to capture a screenshot of.",
@@ -2568,7 +2607,8 @@ export function createInteractionAttemptToolDefinitions(
         // As in computer_observe: pixels of a target that changed since the
         // computer listed it would not match the targets the result names.
         if (frame.targetGeneration !== target.targetGeneration)
-          return new InteractionExecutionResult(opened, [
+          return new InteractionExecutionResult(result, [
+            ...notes,
             {
               type: "text" as const,
               text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
@@ -2576,7 +2616,8 @@ export function createInteractionAttemptToolDefinitions(
           ]);
         rememberFullFrame(opened.session.id, target.id, frame);
         const image = await compactComputerImage(frame.data, frame.mediaType);
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: `Screenshot of ${target.id}: frameId ${frame.frameId}, ${frame.width}x${frame.height} pixels; use these pixels for pointer coordinates.`,
@@ -2588,7 +2629,8 @@ export function createInteractionAttemptToolDefinitions(
           },
         ]);
       } catch (error) {
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: `The computer opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
@@ -4182,6 +4224,47 @@ async function openComputer(
         ? (await transport.listComputerTargets(workspaceId, session.id)).targets
         : [],
   };
+}
+
+/**
+ * Launch `applicationId` in a computer `computer_open` just opened, or find it
+ * already running. A launch acts on no window's contents, so any listed target
+ * carries it: the screen when there is one. Its receipt observes the app's
+ * window. A launch that cannot run is a note on the opened result, never an
+ * error that would hide the open computer.
+ */
+async function launchOpenedComputerApp(
+  transport: InteractionTransport,
+  workspaceId: string,
+  opened: { session: { id: string }; targets: readonly ComputerTarget[] },
+  applicationId: string,
+  context: AttemptToolExecutionContext,
+): Promise<{ launch: z.input<typeof ComputerActionReceipt> } | { note: string }> {
+  const carrier = opened.targets.find((target) => target.kind === "screen") ?? opened.targets[0];
+  if (!carrier)
+    return {
+      note: `The computer opened, but it has no screen or window to launch ${applicationId} from.`,
+    };
+  try {
+    return {
+      launch: await transport.actInComputer(workspaceId, opened.session.id, {
+        operationId: derivedOperationId(
+          "computer-open-launch",
+          context.operationId,
+          opened.session.id,
+        ),
+        targetId: carrier.id,
+        expectedTargetGeneration: carrier.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "launch", applicationId },
+      }),
+    };
+  } catch (error) {
+    return {
+      note: `The computer opened, but ${applicationId} could not be launched: ${screenshotFailureReason(error)}`,
+    };
+  }
 }
 
 type InteractionPlacementTransport = InteractionTransport &
