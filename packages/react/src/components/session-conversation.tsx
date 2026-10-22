@@ -80,7 +80,15 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
 
 export type SessionConversationProps = ClientOverride &
   SessionProxyBaseUrl & {
-    sessionId: string;
+    /**
+     * `null` while your server is still creating the session. Render the
+     * conversation as soon as the person sends, with `pendingPrompt`, then
+     * pass the id when creation returns: it is the same mounted conversation,
+     * so the prompt and its startup row stay put and nothing flashes.
+     */
+    sessionId: string | null;
+    /** See `useSessionConversation`'s `pendingPrompt`. Read once per conversation. */
+    pendingPrompt?: UseSessionConversationOptions["pendingPrompt"];
     /** Product-owned desktop connection flow for computer offers. No console URLs or shell commands are assumed. */
     computerConnection?: Omit<ThisComputerCardProps, "rationale">;
     /** Host-owned artifact links, previews and other message presentation. */
@@ -250,9 +258,29 @@ export type SessionConversationViewProps = Omit<
   | "attachments"
   | "modelPicker"
   | "composerOptions"
+  | "pendingPrompt"
 > & {
   conversation: SessionConversationController;
 };
+
+/**
+ * One mount per conversation. A host-created session goes from `null` to its
+ * id inside the same conversation; any other change of id is a new one.
+ */
+function useConversationIdentity(workspaceId: string | undefined, sessionId: string | null) {
+  const ref = useRef<{ workspaceId: string | undefined; sessionId: string | null; key: string }>(
+    null,
+  );
+  const previous = ref.current;
+  if (
+    !previous ||
+    previous.workspaceId !== workspaceId ||
+    (previous.sessionId !== sessionId && previous.sessionId !== null)
+  )
+    ref.current = { workspaceId, sessionId, key: `${workspaceId ?? ""}:${sessionId ?? "new"}` };
+  else if (previous.sessionId !== sessionId) ref.current = { ...previous, sessionId };
+  return ref.current!.key;
+}
 
 /** Complete existing-session conversation. Uses the provider's normal SDK client
  * (including Site clients), one shared event feed, and authoritative queue state.
@@ -264,7 +292,7 @@ export function SessionConversation({
   fetch,
   ...props
 }: SessionConversationProps) {
-  const resetKey = `${props.workspaceId ?? ""}:${props.sessionId}`;
+  const resetKey = useConversationIdentity(props.workspaceId, props.sessionId);
   if (baseUrl === undefined)
     return (
       <ConversationRenderBoundary resetKey={resetKey}>
@@ -290,9 +318,10 @@ export function SessionConversation({
 function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
+  const identity = useConversationIdentity(props.workspaceId, props.sessionId);
   return (
     <Conversation
-      key={`${props.workspaceId ?? ""}:${props.sessionId}:${attempt}`}
+      key={`${identity}:${attempt}`}
       {...props}
       onRetry={() => setAttempt((value) => value + 1)}
     />
@@ -306,12 +335,12 @@ function Conversation(props: SessionConversationProps & { onRetry: () => void })
 
 /** Stock view for a controller mounted in a stable host. No second event feed or draft. */
 export function SessionConversationView(props: SessionConversationViewProps) {
+  const identity = useConversationIdentity(
+    props.conversation.workspaceId,
+    props.conversation.sessionId,
+  );
   return (
-    <ConversationView
-      key={`${props.conversation.workspaceId}:${props.conversation.sessionId}`}
-      {...props}
-      onRetry={() => void props.conversation.retry()}
-    />
+    <ConversationView key={identity} {...props} onRetry={() => void props.conversation.retry()} />
   );
 }
 
@@ -411,12 +440,14 @@ function ConversationView({
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
     () =>
-      sessionLinkResolver(t, {
-        client: context.client,
-        workspaceId: context.workspaceId,
-        sessionId,
-        sandboxFiles: config.sandboxFiles,
-      }),
+      sessionId
+        ? sessionLinkResolver(t, {
+            client: context.client,
+            workspaceId: context.workspaceId,
+            sessionId,
+            sandboxFiles: config.sandboxFiles,
+          })
+        : null,
     [context.client, context.workspaceId, sessionId, config.sandboxFiles, t],
   );
   const onOpenArtifactRef = useRef(onOpenArtifact);
@@ -473,7 +504,7 @@ function ConversationView({
   const voiceControl =
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
-    voiceModels.length > 0 && status && !terminal && voiceControl ? (
+    sessionId && voiceModels.length > 0 && status && !terminal && voiceControl ? (
       <Suspense fallback={null}>
         <LazyEmbeddedRealtimeVoice
           {...realtimeVoiceProps}
@@ -681,7 +712,9 @@ function ConversationView({
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
                 composer={composer}
                 attachments={uploadsEnabled ? files : undefined}
-                disabled={terminal || composerProps?.disabled}
+                // Nothing can be written (typed, dictated or chosen) into a
+                // session the host is still creating.
+                disabled={sessionId === null || terminal || composerProps?.disabled}
                 controlsStart={
                   composerProps?.controlsStart ??
                   (showModelPicker && composer.policy && (
@@ -694,11 +727,11 @@ function ConversationView({
                       latencyMode={composer.policy.latencyMode}
                       loading={catalog.loading}
                       error={catalog.error?.message}
-                      disabled={terminal}
+                      disabled={sessionId === null || terminal}
                       // A session frozen on Codex remote compaction refuses
                       // other providers' models; offer them only as disabled.
                       codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
-                      sessionKey={sessionId}
+                      sessionKey={sessionId ?? undefined}
                       onOpenChange={(open) => {
                         if (open) void catalog.refresh();
                       }}
@@ -739,7 +772,7 @@ function embeddedGenieLoading(
 }
 
 type ConversationChromeProps = {
-  sessionId: string;
+  sessionId: string | null;
   client: unknown;
   workspaceId: string;
   events: UseGoalOptions["events"];
@@ -753,10 +786,20 @@ function ConversationChrome(props: ConversationChromeProps) {
     typeof goals.getGoal === "function" &&
     typeof goals.updateGoal === "function" &&
     typeof goals.deleteGoal === "function";
-  return canReachGoals ? <GoalChrome {...props} /> : <SessionChrome {...props.chrome} />;
+  return canReachGoals && props.sessionId ? (
+    <GoalChrome {...props} sessionId={props.sessionId} />
+  ) : (
+    <SessionChrome {...props.chrome} />
+  );
 }
 
-function GoalChrome({ sessionId, client, workspaceId, events, chrome }: ConversationChromeProps) {
+function GoalChrome({
+  sessionId,
+  client,
+  workspaceId,
+  events,
+  chrome,
+}: ConversationChromeProps & { sessionId: string }) {
   const goal = useGoal(sessionId, {
     client: client as UseGoalOptions["client"],
     workspaceId,
@@ -773,9 +816,10 @@ const LazyChatInteractiveBlock = lazy(() =>
 );
 
 /** This client with the conversation's session scope header, when it can add headers. */
-function sessionScoped<T>(client: T, sessionId: string): T {
+function sessionScoped<T>(client: T, sessionId: string | null): T {
   const candidate = client as { withHeaders?: (headers: Readonly<Record<string, string>>) => T };
-  return typeof candidate.withHeaders === "function"
+  // Nothing in a conversation whose session is still being created can read.
+  return sessionId && typeof candidate.withHeaders === "function"
     ? candidate.withHeaders({ [SESSION_SCOPE_HEADER]: sessionId })
     : client;
 }
@@ -784,7 +828,7 @@ function sessionScoped<T>(client: T, sessionId: string): T {
 function useDefaultInteractiveBlock(
   client: unknown,
   workspaceId: string,
-  sessionId: string,
+  sessionId: string | null,
   sitesAvailable: boolean,
   sitePreviewUnavailable: string,
 ): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
@@ -842,7 +886,7 @@ type RetainedLoaderClient = Partial<
 function useRetainedLoaders(
   client: unknown,
   workspaceId: string,
-  sessionId: string,
+  sessionId: string | null,
 ): Pick<
   MessageTimelineProps,
   "loadRetainedArtifact" | "loadRetainedScreenshot" | "loadVideoArtifactPlayback"
@@ -863,7 +907,7 @@ function useRetainedLoaders(
               )(artifact, signal, options),
           }
         : {}),
-      ...(typeof base.downloadRetainedScreenshot === "function"
+      ...(sessionId && typeof base.downloadRetainedScreenshot === "function"
         ? {
             loadRetainedScreenshot: (artifact, signal) =>
               createSessionRetainedScreenshotLoader(

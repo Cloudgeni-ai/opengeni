@@ -619,6 +619,7 @@ export type {
   NewConversationLabels,
 } from "./components/new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";

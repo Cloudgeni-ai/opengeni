@@ -27,7 +27,7 @@ import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-p
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
-import { SessionStartupProvider } from "../../lib/session-startup";
+import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
   requestSessionUsageLimitEditor,
   sessionUsageLimitCapability,

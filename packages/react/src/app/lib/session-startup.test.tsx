@@ -11,7 +11,7 @@ import {
   sessionStartupPhase,
   useSessionStartup,
   SessionStartupProvider,
-} from "./session-startup";
+} from "../../lib/session-startup";
 
 beforeAll(() => {
   GlobalRegistrator.register();

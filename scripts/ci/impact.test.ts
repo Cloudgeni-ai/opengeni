@@ -67,7 +67,7 @@ describe("fail-closed change impact", () => {
     for (const path of [
       SESSION_LOADING_STARTUP_E2E,
       "apps/web/src/context.tsx",
-      "packages/react/src/app/lib/session-startup.tsx",
+      "packages/react/src/lib/session-startup.tsx",
       "packages/react/src/components/session-status.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",

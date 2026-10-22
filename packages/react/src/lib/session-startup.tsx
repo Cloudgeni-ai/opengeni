@@ -95,12 +95,12 @@ export function useSessionStartup(session: SessionStartupSource): SessionStartup
   return useSessionStartupState(session)?.phase ?? null;
 }
 
-export function useSessionStartupState(session: SessionStartupSource): StartupState | null {
+export function useSessionStartupState(session: SessionStartupSource | null): StartupState | null {
   const shared = useContext(StartupContext);
   // Standalone components/previews may have no shell. Never run a second clock
   // for real header/wait consumers, including their conditional first mount.
   const local = useStartupClock(shared ? null : session);
-  if (sessionStartupPhase(session, 0) === null) return null;
+  if (!session || sessionStartupPhase(session, 0) === null) return null;
   return shared
     ? shared.key === `${session.workspaceId}:${session.id}` && shared.startup.phase !== null
       ? shared.startup

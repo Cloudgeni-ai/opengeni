@@ -247,6 +247,10 @@ function Chat({
           {selected ? (
             <SessionConversation
               {...conversationProps}
+              // The first prompt and its startup row show from the first frame.
+              {...(handoff?.sessionId === selected && handoff.initialMessage
+                ? { pendingPrompt: { text: handoff.initialMessage, sentAt: handoff.sentAt } }
+                : {})}
               composerOptions={{
                 ...conversationProps?.composerOptions,
                 ...(handoff?.sessionId === selected ? { initialDraft: handoff.draft } : {}),
