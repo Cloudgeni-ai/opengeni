@@ -441,6 +441,31 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="trigger-host-icon"]')).not.toBeNull();
   });
 
+  test("the connect-a-model pill keeps its label on the primary wash", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[]}
+        connectModelsHref="/settings"
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const trigger = container.querySelector<HTMLButtonElement>(".og-model-policy-trigger")!;
+    expect(trigger.className).toContain("text-og-primary-fg");
+    const labels = trigger.querySelectorAll(
+      ".og-model-policy-label-full, .og-model-policy-label-short",
+    );
+    expect(labels.length).toBe(2);
+    for (const label of labels) {
+      expect(label.textContent).toBe("Connect a model");
+      expect(label.className).not.toContain("text-og-fg");
+    }
+  });
+
   test("explicit null hides group icons and descriptions", async () => {
     const container = await mount(
       <ModelPolicyPickerMenu
