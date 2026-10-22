@@ -568,6 +568,8 @@ function MachineRow({
 
 export type ChromeState = {
   connected: { name: string } | null;
+  /** A read completed, so a null `connected` means Chrome is not linked yet. */
+  checked: boolean;
   /** Start checking for the extension (after the person opens the store). */
   watch: () => void;
   /** Checking for the extension after the person opened the store. */
@@ -578,17 +580,24 @@ export type ChromeState = {
 export type AttachedChromeScope = { enrollmentId: string } | "any" | null;
 
 /**
- * Whether the Opengeni Browser extension linked a Chrome profile on this exact
- * machine (or, with "any", on any machine). Reads once; polls only after the
- * person opens the store, stops once linked, after a bounded time, or when the
- * inventory is not available to them.
+ * Whether the Opengeni Browser extension linked a Chrome profile the agent can
+ * use (the same check browser_open applies) on this exact machine, or, with
+ * "any", on any machine. Reads once, and again whenever `refreshKey` changes
+ * (for example when a computer comes online); polls only after the person opens
+ * the store, stops once linked, after a bounded time, or when the inventory is
+ * not available to them.
  */
-export function useAttachedChrome(workspaceId: string, scope: AttachedChromeScope): ChromeState {
+export function useAttachedChrome(
+  workspaceId: string,
+  scope: AttachedChromeScope,
+  refreshKey: string | null = null,
+): ChromeState {
   const { client } = useAppContext();
   // Poll on its own timer; a new client identity on re-render must not refetch.
   const clientRef = useRef(client);
   clientRef.current = client;
   const [connected, setConnected] = useState<{ name: string } | null>(null);
+  const [checked, setChecked] = useState(false);
   const [watchSince, setWatchSince] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
@@ -597,6 +606,7 @@ export function useAttachedChrome(workspaceId: string, scope: AttachedChromeScop
 
   useEffect(() => {
     setConnected(null);
+    setChecked(false);
     setDenied(false);
   }, [enrollmentId]);
 
@@ -610,9 +620,11 @@ export function useAttachedChrome(workspaceId: string, scope: AttachedChromeScop
         const device = result.devices.find(
           (candidate) =>
             candidate.state === "connected" &&
+            candidate.capabilities.debuggerAttachment &&
             (enrollmentId === "*" || candidate.enrollmentId === enrollmentId),
         );
         setConnected(device ? { name: device.profileLabel ?? device.browserName } : null);
+        setChecked(true);
       } catch (failure) {
         // Without inventory access the step still offers the install link.
         if (
@@ -639,13 +651,18 @@ export function useAttachedChrome(workspaceId: string, scope: AttachedChromeScop
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [denied, enrollmentId, linked, watchSince, workspaceId]);
+  }, [denied, enrollmentId, linked, refreshKey, watchSince, workspaceId]);
 
   const watch = useCallback(() => {
     setExpired(false);
     setWatchSince(Date.now());
   }, []);
-  return { connected, watch, watching: watchSince !== null && !linked && !expired && !denied };
+  return {
+    connected,
+    checked,
+    watch,
+    watching: watchSince !== null && !linked && !expired && !denied,
+  };
 }
 
 /** How long to keep checking for the new consent, or a granted Mac permission. */

@@ -5,6 +5,7 @@ import {
   userSetupBlocker,
   userSetupCardShownMessage,
   userSetupCardUnpostedMessage,
+  userSetupUnavailableMessage,
 } from "../src/index";
 
 describe("refusals the person can fix", () => {
@@ -50,5 +51,14 @@ describe("refusals the person can fix", () => {
     expect(text).toContain("capability_authorization_request (capabilityId api:connected-machine)");
     expect(text).toContain(OPENGENI_BROWSER_EXTENSION_URL);
     expect(text).toContain("Do not only report that it is unavailable");
+  });
+
+  test("when the deployment can't offer the fix, the agent says so and posts no card", () => {
+    const chrome = userSetupBlocker("attached_browser_unavailable")!;
+    const text = userSetupUnavailableMessage(chrome);
+    expect(text).toStartWith(chrome.problem);
+    expect(text).toContain("can't fix it here");
+    expect(text).toContain("do not post a setup card");
+    expect(text).not.toContain("capability_authorization_request");
   });
 });

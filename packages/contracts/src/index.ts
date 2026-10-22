@@ -4191,6 +4191,17 @@ export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string 
   );
 }
 
+/**
+ * What the agent reads when the card's capability is turned off on this
+ * deployment, so the person cannot fix the blocker here.
+ */
+export function userSetupUnavailableMessage(blocker: UserSetupBlocker): string {
+  return (
+    `${blocker.problem} This deployment doesn't support the setup that fixes it, so the person can't fix it here. ` +
+    "Tell them that in one short sentence and carry on without it; do not post a setup card."
+  );
+}
+
 /** The web link to a chat, or null when no safe web base is configured. */
 export function sessionChatUrl(
   base: string | null | undefined,

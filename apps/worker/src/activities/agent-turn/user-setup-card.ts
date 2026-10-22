@@ -27,8 +27,9 @@ export type UserSetupCardInput = {
  * Posts the setup card for a tool refusal the person can fix (see
  * USER_SETUP_BLOCKERS) in the calling turn, at most once per turn and card: a
  * later refusal in the same turn reuses the card already shown. The append
- * runs under the attempt fence, so a replaced turn posts nothing. Resolves null
- * when the card can't help on this deployment or was not posted.
+ * runs under the attempt fence, so a replaced turn posts nothing. Resolves
+ * "unavailable" when the card can't help on this deployment, and null when it
+ * was not posted.
  */
 export function userSetupCardPoster(input: UserSetupCardInput): UserSetupCardPoster {
   const append = input.append ?? appendTurnCapabilityCardOnce;
@@ -38,7 +39,7 @@ export function userSetupCardPoster(input: UserSetupCardInput): UserSetupCardPos
       blocker.capabilityId === CONNECTED_MACHINE_CAPABILITY_ID &&
       !input.connectedMachinesEnabled
     ) {
-      return null;
+      return "unavailable";
     }
     const payload = userSetupCardPayload(blocker, { toolName });
     if (!payload) return null;

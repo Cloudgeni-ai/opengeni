@@ -9,6 +9,7 @@ import {
   userSetupBlocker,
   userSetupCardShownMessage,
   userSetupCardUnpostedMessage,
+  userSetupUnavailableMessage,
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
@@ -3295,10 +3296,15 @@ function chooseAttachedProfile(
   return { chosen, others };
 }
 
+/**
+ * Posts a blocker's setup card. Resolves the chat link once it is posted,
+ * "unavailable" when the card's capability is off on this deployment, or null
+ * when it could not be posted.
+ */
 export type UserSetupCardPoster = (
   blocker: UserSetupBlocker,
   toolName: string,
-) => Promise<{ chatUrl: string | null } | null>;
+) => Promise<{ chatUrl: string | null } | "unavailable" | null>;
 
 /**
  * A tool was refused for something the person can fix themselves (a missing
@@ -3306,7 +3312,8 @@ export type UserSetupCardPoster = (
  * card in the chat right away, so the person sees the fix on the first attempt
  * instead of having to ask, and tell the model the card is there so it neither
  * repeats its steps nor posts another. Without a card (no poster, or posting
- * failed), tell the model to offer the fix itself. Every other error is
+ * failed), tell the model to offer the fix itself; when the deployment can't
+ * offer the fix, say so. Every other error is
  * returned unchanged.
  */
 async function withUserSetupCard(
@@ -3327,9 +3334,11 @@ async function withUserSetupCard(
   }
   return new OpenGeniApiError(
     error.status,
-    posted
-      ? userSetupCardShownMessage(blocker, posted.chatUrl)
-      : userSetupCardUnpostedMessage(blocker),
+    posted === "unavailable"
+      ? userSetupUnavailableMessage(blocker)
+      : posted
+        ? userSetupCardShownMessage(blocker, posted.chatUrl)
+        : userSetupCardUnpostedMessage(blocker),
     { code: blocker.code, retryable: false },
   );
 }

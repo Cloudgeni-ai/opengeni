@@ -4,7 +4,7 @@ import { MACHINES_SESSION_POLL_MS } from "../../../machines";
 import { machineDisplayName } from "../../../sandbox-label-model";
 import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useAppApi } from "../../lib/app-api";
 import { ConnectMachineDialog } from "../machines/connect-machine-dialog";
@@ -82,7 +82,15 @@ export function SessionChromeCapabilityCard({
         machine.hasDisplay &&
         isMachineComputeSelectable(machine.state),
     ) ?? null;
-  const chrome = useAttachedChrome(workspaceId, "any");
+  // Read again when a computer comes online: its Chrome may already have the
+  // extension, so the card can skip straight to Continue.
+  const chrome = useAttachedChrome(workspaceId, "any", computer?.sandboxId ?? null);
+  // Continue is offered only after this card saw Chrome missing, so an old card,
+  // or one reloaded after Chrome connected, never sends a stray message.
+  const [sawMissing, setSawMissing] = useState(false);
+  useEffect(() => {
+    if (chrome.checked && chrome.connected === null) setSawMissing(true);
+  }, [chrome.checked, chrome.connected]);
   const desktop = useDesktopThisComputer();
   const offerThisComputer =
     computer === null &&
@@ -95,7 +103,7 @@ export function SessionChromeCapabilityCard({
   const computerName = computer ? machineDisplayName(t, computer) : "";
 
   const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
-  const canContinue = canMessage && !chat.awaitingHuman && !sent;
+  const canContinue = canMessage && sawMissing && !chat.awaitingHuman && !sent;
   const sendContinue = async () => {
     if (sending || !canContinue) return;
     const current = sendContext?.() ?? chat;
@@ -138,8 +146,8 @@ export function SessionChromeCapabilityCard({
         typeLabel="Browser"
         description={
           step === "extension"
-            ? `Add the Opengeni Browser extension to Chrome on ${computerName}.`
-            : `${item.capability?.rationale ?? "Connect your Chrome so the agent can use it."} First connect this computer, then add the Opengeni Browser extension.`
+            ? `Add the extension to Chrome on ${computerName}.`
+            : `${item.capability?.rationale ?? "Connect your Chrome so the agent can use it."} First connect a computer, then add the extension.`
         }
         skill={false}
         expanded={false}
@@ -158,7 +166,7 @@ export function SessionChromeCapabilityCard({
               ? desktop.computer.acting
                 ? "Connecting…"
                 : "Use this computer"
-              : "Connect this computer"
+              : "Connect a computer"
         }
         busy={step === "computer" && offerThisComputer && desktop.computer.acting}
         actionUnavailable={actionUnavailable}

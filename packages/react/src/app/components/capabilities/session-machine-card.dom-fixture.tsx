@@ -434,6 +434,7 @@ describe("Connected Machine conversation card", () => {
           profileLabel: "Teammate",
           browserName: "Chrome",
           state: "connected",
+          capabilities: { debuggerAttachment: true },
         },
         {
           id: "device",
@@ -442,6 +443,7 @@ describe("Connected Machine conversation card", () => {
           profileLabel: "Work",
           browserName: "Chrome",
           state: "connected",
+          capabilities: { debuggerAttachment: true },
         },
       ],
     };

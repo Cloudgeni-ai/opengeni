@@ -165,17 +165,19 @@ async function render(item: AuthNeededItem = chromeNotice, sendContext?: () => S
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(
-      <SessionCapabilityCard
-        item={item}
-        workspaceId="workspace"
-        sessionId="session"
-        sendContext={sendContext as never}
-      />,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
+  const paint = async () =>
+    act(async () => {
+      root.render(
+        <SessionCapabilityCard
+          item={item}
+          workspaceId="workspace"
+          sessionId="session"
+          sendContext={sendContext as never}
+        />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  await paint();
   const dialog = () => document.querySelector<HTMLElement>("[data-connect-machine-dialog]");
   return {
     text: () => container.textContent ?? "",
@@ -185,6 +187,11 @@ async function render(item: AuthNeededItem = chromeNotice, sendContext?: () => S
         (button) => button.textContent?.trim() === name,
       ) ?? null,
     dialog,
+    /** Render again after the mocked machines or browsers changed. */
+    rerender: async () => {
+      await paint();
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    },
     command: () => dialog()?.querySelector("[data-connect-command]")?.textContent ?? "",
     close: async () => {
       await act(async () => root.unmount());
@@ -202,17 +209,17 @@ async function click(element: HTMLElement | null) {
 }
 
 describe("Chrome setup card", () => {
-  test("without a computer, its one action connects this computer", async () => {
+  test("without a computer, its one action connects a computer", async () => {
     const view = await render();
     expect(view.text()).toContain("Chrome");
     expect(view.text()).toContain(
-      "Connect your Chrome so the agent can use it. First connect this computer, then add the Opengeni Browser extension.",
+      "Connect your Chrome so the agent can use it. First connect a computer, then add the extension.",
     );
     // It is about Chrome, not about where this chat runs.
     expect(view.text()).not.toContain("Choose where this chat runs");
     expect(view.text()).not.toContain("Use in this chat");
     expect(view.button("Add to Chrome")).toBeNull();
-    await click(view.button("Connect this computer"));
+    await click(view.button("Connect a computer"));
     expect(view.dialog()).not.toBeNull();
     // The shared connect dialog, opened on its first step.
     expect(view.dialog()?.textContent).toContain("Open app and connect");
@@ -222,8 +229,8 @@ describe("Chrome setup card", () => {
   test("with a computer online, its one action adds the extension and then waits for Chrome", async () => {
     fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
     const view = await render();
-    expect(view.text()).toContain("Add the Opengeni Browser extension to Chrome on Ada's MacBook.");
-    expect(view.button("Connect this computer")).toBeNull();
+    expect(view.text()).toContain("Add the extension to Chrome on Ada's MacBook.");
+    expect(view.button("Connect a computer")).toBeNull();
     await click(view.button("Add to Chrome"));
     expect(opened).toEqual([[STORE_URL, "_blank", "noopener,noreferrer"]]);
     expect(view.note()).toBe("Waiting for Chrome to connect…");
@@ -237,19 +244,21 @@ describe("Chrome setup card", () => {
       machine("box", "Build server", { os: "linux", hasDisplay: false }),
     ];
     const view = await render();
-    expect(view.button("Connect this computer")).not.toBeNull();
+    expect(view.button("Connect a computer")).not.toBeNull();
     expect(view.button("Add to Chrome")).toBeNull();
     await view.close();
   });
 
   test("once Chrome is connected, Continue tells the agent to go on", async () => {
     fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
-    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
     const view = await render(chromeNotice, () => ({
       blocked: null,
       awaitingHuman: false,
       extras: { model: "codex/test" },
     }));
+    expect(view.button("Continue")).toBeNull();
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    await click(view.button("Add to Chrome"));
     expect(view.text()).toContain("Chrome is connected (Work).");
     await click(view.button("Continue"));
     expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -262,32 +271,75 @@ describe("Chrome setup card", () => {
   });
 
   test("Continue waits for an open question and follows the composer's block", async () => {
-    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
     const waiting = await render(chromeNotice, () => ({
       blocked: null,
       awaitingHuman: true,
       extras: {},
     }));
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    await click(waiting.button("Add to Chrome"));
     expect(waiting.text()).toContain("Chrome is connected (Work).");
     expect(waiting.button("Continue")).toBeNull();
     await waiting.close();
 
+    browsers = { devices: [], bridges: [], revision: 1 };
     const blocked = await render(chromeNotice, () => ({
       blocked: "Choose a model first.",
       awaitingHuman: false,
       extras: {},
     }));
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    await click(blocked.button("Add to Chrome"));
     await click(blocked.button("Continue"));
     expect(sendMessage).not.toHaveBeenCalled();
     expect(blocked.text()).toContain("Choose a model first.");
     await blocked.close();
   });
 
+  test("a Chrome profile the agent cannot drive does not count as connected", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = {
+      devices: [{ ...chromeProfile("Work"), capabilities: { debuggerAttachment: false } }],
+      bridges: [],
+      revision: 2,
+    };
+    const view = await render();
+    expect(view.text()).not.toContain("Chrome is connected");
+    expect(view.button("Add to Chrome")).not.toBeNull();
+    await view.close();
+  });
+
+  test("when a computer comes online with Chrome already linked, Continue appears without Add to Chrome", async () => {
+    const view = await render();
+    expect(view.button("Connect a computer")).not.toBeNull();
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    await view.rerender();
+    expect(opened).toEqual([]);
+    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.button("Continue")).not.toBeNull();
+    await view.close();
+  });
+
+  test("a card shown after Chrome already connected offers no Continue", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    const view = await render(chromeNotice, () => ({
+      blocked: null,
+      awaitingHuman: false,
+      extras: {},
+    }));
+    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.button("Continue")).toBeNull();
+    await view.close();
+  });
+
   test("says who can connect when this person cannot", async () => {
     fleet.canManage = false;
     const member = await render();
     expect(member.text()).toContain("Ask a workspace admin to connect a computer.");
-    expect(member.button("Connect this computer")).toBeNull();
+    expect(member.button("Connect a computer")).toBeNull();
     await member.close();
 
     fleet.error = new OpenGeniApiError(404, "not found", {});

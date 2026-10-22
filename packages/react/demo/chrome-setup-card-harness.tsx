@@ -19,6 +19,7 @@ const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 const params = new URLSearchParams(window.location.search);
 const state = params.get("state") ?? "no-computer";
 const dark = params.get("theme") === "dark";
+const CHROME_LINKS_AFTER_MS = 2_000;
 
 const mac: MachineView = {
   ...onlineMachine,
@@ -40,12 +41,14 @@ class PreviewClient extends MockOpenGeniClient {
       machines: state === "no-computer" ? [] : [mac],
     };
   }
+  // In the "chrome" state, Chrome links up shortly after the page opens, as it
+  // does once the person adds the extension, so the card shows Continue.
   override async listAttachedBrowsers() {
     return {
       revision: 2,
       bridges: [],
       devices:
-        state === "chrome"
+        state === "chrome" && performance.now() > CHROME_LINKS_AFTER_MS
           ? [
               {
                 id: "device-work",

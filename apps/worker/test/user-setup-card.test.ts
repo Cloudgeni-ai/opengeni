@@ -56,9 +56,9 @@ describe("setup card for a refusal the person can fix", () => {
     ).not.toHaveProperty("purpose");
   });
 
-  test("posts nothing when Connected Machines are off", async () => {
+  test("posts nothing and reports unavailable when Connected Machines are off", async () => {
     const { post, appends } = poster({ connectedMachinesEnabled: false });
-    expect(await post(chrome, "browser_open")).toBeNull();
+    expect(await post(chrome, "browser_open")).toBe("unavailable");
     expect(appends).toHaveLength(0);
   });
 

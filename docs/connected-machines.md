@@ -1492,11 +1492,17 @@ Two refusals are registered today:
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`
-  (`session-chrome-card.tsx`), shows one step at a time: **Connect this
+  (`session-chrome-card.tsx`), shows one step at a time: **Connect a
   computer** when no online machine with a display exists, then **Add to
   Chrome** (the Opengeni Browser extension), then **Continue** once a Chrome
-  profile connects, which sends `Chrome is connected. Continue.` Nothing is
-  posted when Connected Machines are off on the deployment.
+  profile `browser_open` can drive (connected, with debugger attachment)
+  links up, which sends `Chrome is connected. Continue.` The card checks Chrome
+  again when a computer comes online, and offers Continue only after it saw
+  Chrome missing, so an old or reloaded card sends nothing. The card reflects
+  the viewer's own machines and Chrome; in a shared workspace a teammate may see
+  a different step than the person who started the turn. When Connected
+  Machines are off on the deployment, nothing is posted and the agent is told
+  the person can't fix it here.
 
 A repeated refusal in the same turn reuses that turn's card for the same
 capability, requested machine and purpose; the lookup and append run atomically,

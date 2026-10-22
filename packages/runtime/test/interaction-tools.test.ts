@@ -1846,6 +1846,16 @@ describe("interaction attempt tools", () => {
       expect(result.isError).toBeFalsy();
       expect(posts).toBe(0);
     });
+
+    test("says the fix isn't available when this deployment can't offer it", async () => {
+      const { result } = await open([], async () => "unavailable");
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result.structuredContent);
+      expect(text).toContain("attached_browser_unavailable");
+      expect(text).toContain("can't fix it here");
+      expect(text).not.toContain("now posted in this chat");
+      expect(text).not.toContain("capability_authorization_request");
+    });
   });
 
   test("any tool refused for something the person can fix posts the same setup card", async () => {
