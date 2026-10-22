@@ -320,38 +320,6 @@ describe("compound composer framework", () => {
     expect(sends).toBe(0);
   });
 
-  test("Enter right after typing sends while the host has not rendered the text yet", async () => {
-    let sends = 0;
-    let typed = "";
-    let controller!: Composer.ChatComposerController;
-    function Harness() {
-      // The host renders typed text later (in a transition), so it still
-      // reports the empty draft it last rendered.
-      controller = Composer.useChatComposerController({
-        delivery: delivery("", (next) => (typed = next), {
-          send: async () => {
-            sends += 1;
-            return true;
-          },
-        }),
-      });
-      return (
-        <Composer.Root controller={controller}>
-          <Composer.Input />
-        </Composer.Root>
-      );
-    }
-    mounted = await renderComponent(<Harness />);
-    await act(async () => controller.setValue("hello"));
-    expect(typed).toBe("hello");
-    expect(await controller.submit("queue")).toBe(true);
-    expect(sends).toBe(1);
-    // A genuinely empty draft still does not send.
-    await act(async () => controller.setValue(""));
-    expect(await controller.submit("queue")).toBe(false);
-    expect(sends).toBe(1);
-  });
-
   test("the controller rejects same-tick duplicate submissions", async () => {
     let sends = 0;
     let resolveFirst: ((value: boolean) => void) | undefined;

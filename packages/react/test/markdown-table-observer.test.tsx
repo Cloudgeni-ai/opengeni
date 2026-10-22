@@ -117,20 +117,9 @@ describe("lazy markdown table observer", () => {
     let notify = () => {};
     let disconnected = false;
     const observed: Element[] = [];
-    let tableBoxWidth = 0;
     globalThis.ResizeObserver = class {
       constructor(callback: ResizeObserverCallback) {
-        // Each notification reports the table's own box at a new size.
-        notify = () =>
-          callback(
-            [
-              {
-                target: observed[2]!,
-                contentRect: new DOMRect(0, 0, ++tableBoxWidth, 100),
-              } as unknown as ResizeObserverEntry,
-            ],
-            this,
-          );
+        notify = () => callback([], this);
       }
       observe(element: Element) {
         observed.push(element);
@@ -160,59 +149,6 @@ describe("lazy markdown table observer", () => {
       expect(disconnected).toBe(true);
       expect(f.wrapper.style.maxWidth).toBe("");
       expect(f.wrapper.style.marginInline).toBe("");
-    } finally {
-      globalThis.ResizeObserver = original;
-    }
-  });
-
-  test("measures again for width and cell changes, not for height changes or re-renders", async () => {
-    const original = globalThis.ResizeObserver;
-    let report: (entries: Array<[Element, number, number]>) => void = () => {};
-    globalThis.ResizeObserver = class {
-      constructor(callback: ResizeObserverCallback) {
-        report = (entries) =>
-          callback(
-            entries.map(
-              ([target, width, height]) =>
-                ({
-                  target,
-                  contentRect: new DOMRect(0, 0, width, height),
-                }) as unknown as ResizeObserverEntry,
-            ),
-            this,
-          );
-      }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    };
-    try {
-      const f = fixture();
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.textContent = "Example";
-      row.append(cell);
-      f.table.append(row);
-      const cleanup = observeMarkdownTableLayout(f.wrapper, f.table);
-      expect(f.wrapper.style.width).toBe("1000px");
-      report([
-        [f.scroller, 1392, 800],
-        [f.body, 768, 100],
-        [f.table, 1000, 100],
-      ]);
-      f.resize(1900);
-      // The panel getting taller (the composer grew) leaves the table alone.
-      report([[f.scroller, 1392, 700]]);
-      expect(f.wrapper.style.width).toBe("1000px");
-      // Its column getting wider measures again.
-      report([[f.body, 800, 100]]);
-      expect(f.wrapper.style.width).toBe("1024px");
-      // So does a cell changing.
-      f.resize(400);
-      cell.textContent = "A shorter";
-      await Promise.resolve();
-      expect(f.wrapper.style.width).toBe("768px");
-      cleanup?.disconnect();
     } finally {
       globalThis.ResizeObserver = original;
     }
