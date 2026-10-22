@@ -584,13 +584,20 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         // either acknowledged or truthfully pending; the model/turn checks
         // below establish that this specific session actually executed.
         expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
+        // The child result is delivered to exactly one system turn. The active
+        // goal may then legitimately continue in its own goal turn, and the
+        // global dispatcher may run other sessions on this worker, so count
+        // this session's turns rather than the shared model's calls.
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
+        let observedTurns: Awaited<ReturnType<typeof listSessionTurns>> = [];
         await waitFor(
           async () => {
             const current = await getSession(dbClient.db, grant.workspaceId, session.id);
             observedSession = current;
+            observedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
             return (
-              model.calls === 1 && (current?.status === "idle" || current?.status === "failed")
+              observedTurns.some((turn) => turn.source === "system" && turn.finishedAt) &&
+              (current?.status === "idle" || current?.status === "failed")
             );
           },
           {
@@ -599,6 +606,10 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
                 modelCalls: model.calls,
                 status: observedSession?.status ?? null,
                 activeTurnId: observedSession?.activeTurnId ?? null,
+                turns: observedTurns.map((turn) => ({
+                  source: turn.source,
+                  status: turn.status,
+                })),
               }),
           },
         );
@@ -617,21 +628,29 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           );
         }
 
-        expect(model.calls).toBe(1);
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-        expect(turns).toHaveLength(1);
-        expect(turns[0]).toMatchObject({
-          source: "system",
-          status: "completed",
-        });
+        const systemTurns = turns.filter((turn) => turn.source === "system");
+        expect(systemTurns).toHaveLength(1);
+        expect(systemTurns[0]).toMatchObject({ status: "completed" });
+        expect(turns.every((turn) => turn.source === "system" || turn.source === "goal")).toBe(
+          true,
+        );
         expect(
           await listSessionSystemUpdatesForTurn(
             dbClient.db,
             grant.workspaceId,
             session.id,
-            turns[0]!.id,
+            systemTurns[0]!.id,
           ),
         ).toHaveLength(1);
+        expect(
+          countOccurrences(
+            JSON.stringify(
+              await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id),
+            ),
+            input.summary,
+          ),
+        ).toBe(1);
         const durable = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
         expect(committedEventIds.every((id) => durable.some((event) => event.id === id))).toBe(
           true,
