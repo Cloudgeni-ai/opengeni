@@ -28,10 +28,13 @@
 //! A file's modified time is when a create last used it. An image no
 //! create used for as long as a template may go unused, that no template
 //! is being built or kept from, is removed. Every create or template build
-//! shares the image's lock from the check until its copy is made, so any
-//! number copy one image at once; its fetch, its first check and its
-//! removal take the lock alone, and a removal looks at the time again, so
-//! an image is never removed under a copy of it.
+//! shares the image's file lock from the check until its copy is made, so
+//! any number copy one image at once, and never wait for each other's
+//! copies. Only a removal takes that lock alone, and it does not wait for
+//! it: it skips an image in use, and looks at the time again under the
+//! lock, so an image is never removed under a copy, a fetch or a check.
+//! An image's fetch and its first check run once each, under a second lock
+//! of its own; other creates of it wait for that work, never for a copy.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -41,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock};
 
 use crate::layout::{remove_if_present, sync_parent};
 use crate::protocol::ImageId;
@@ -69,6 +72,17 @@ pub(crate) struct Held {
     _lock: OwnedRwLockReadGuard<()>,
 }
 
+/// One image's locks.
+#[derive(Clone, Debug, Default)]
+struct Locks {
+    /// Shared by everything that uses its file, taken alone only by its
+    /// removal.
+    file: Arc<RwLock<()>>,
+    /// Taken by its fetch and by its first check, under a share of `file`,
+    /// so each runs once while other creates of the image wait for it.
+    work: Arc<AsyncMutex<()>>,
+}
+
 /// The host's images.
 #[derive(Debug)]
 pub(crate) struct Cache {
@@ -77,9 +91,7 @@ pub(crate) struct Cache {
     present: Mutex<HashSet<ImageId>>,
     /// Images an earlier agent left, not checked against their ids yet.
     recovered: Mutex<HashSet<ImageId>>,
-    /// One lock per image: shared by its copies, taken alone by its fetch,
-    /// its first check and its removal.
-    locks: Mutex<HashMap<ImageId, Arc<RwLock<()>>>>,
+    locks: Mutex<HashMap<ImageId, Locks>>,
     /// How long an image may go unused before it is removed.
     unused_after: Duration,
     /// Kept by every piece of work in flight.
@@ -148,15 +160,12 @@ impl Cache {
     }
 
     /// Checks an image an earlier agent left against its id, once: it
-    /// becomes present if it matches and is removed if not. Call under
-    /// the image's lock, taken alone.
+    /// becomes present if it matches and is removed if not. Call with a
+    /// share of the image's file lock and its work lock. It stays
+    /// unchecked until the check ends, so anyone who finds it unchecked
+    /// meanwhile waits for this one.
     async fn check_recovered(&self, image: ImageId) {
-        if !self
-            .recovered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&image)
-        {
+        if !self.unchecked(image) {
             return;
         }
         let path = self.path(image);
@@ -184,6 +193,18 @@ impl Cache {
             Ok(false) => tracing::warn!(%image, "a kept image did not match its id; removed"),
             Err(error) => tracing::warn!(%image, %error, "could not check a kept image"),
         }
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&image);
+    }
+
+    /// Whether `image` is one an earlier agent left, not checked yet.
+    fn unchecked(&self, image: ImageId) -> bool {
+        self.recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&image)
     }
 
     /// Where the image `image` is kept.
@@ -200,33 +221,27 @@ impl Cache {
             .contains(&image)
     }
 
-    fn lock(&self, image: ImageId) -> Arc<RwLock<()>> {
-        Arc::clone(
-            self.locks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(image)
-                .or_default(),
-        )
-    }
-
-    /// The image's lock, shared, once the image is checked if an earlier
-    /// agent left it: that first check takes the lock alone.
-    async fn shared(&self, image: ImageId) -> OwnedRwLockReadGuard<()> {
-        let lock = self.lock(image);
-        // Only opening the cache adds to these, so one not among them now
-        // never needs the check.
-        let unchecked = self
-            .recovered
+    fn locks(&self, image: ImageId) -> Locks {
+        self.locks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&image);
-        if unchecked {
-            let alone = lock.write_owned().await;
+            .entry(image)
+            .or_default()
+            .clone()
+    }
+
+    /// A share of the image's file lock, once the image is checked if an
+    /// earlier agent left it.
+    async fn shared(&self, image: ImageId) -> OwnedRwLockReadGuard<()> {
+        let locks = self.locks(image);
+        let shared = locks.file.read_owned().await;
+        // Only opening the cache adds to these, so one not among them now
+        // never needs the check.
+        if self.unchecked(image) {
+            let _work = locks.work.lock().await;
             self.check_recovered(image).await;
-            return alone.downgrade();
         }
-        lock.read_owned().await
+        shared
     }
 
     /// The image `image`, fetched from `store` first if the host does not
@@ -234,15 +249,17 @@ impl Cache {
     pub async fn get<S: Store>(&self, image: ImageId, store: &S) -> Result<Held, Missing> {
         let shared = self.shared(image).await;
         let path = self.path(image);
-        if self.has(image) {
-            return Ok(self.used(image, path, shared).await);
-        }
-        drop(shared);
-        // One fetch runs per image: other creates of it wait here, then
-        // find it present.
-        let lock = self.lock(image).write_owned().await;
         let failed = |error: String| Missing::Failed { image, error };
-        if !self.has(image) {
+        // One fetch runs per image: other creates of it wait here, then
+        // find it present. No one uses the file under its final name
+        // until then.
+        let work = self.locks(image).work;
+        let fetching = if self.has(image) {
+            None
+        } else {
+            Some(work.lock().await)
+        };
+        if fetching.is_some() && !self.has(image) {
             let staging = self.staging(image);
             // Kept until the fetch's last write: the store writes into the
             // staging file.
@@ -274,7 +291,8 @@ impl Cache {
                 .insert(image);
             tracing::info!(%image, "image fetched from the store");
         }
-        Ok(self.used(image, path, lock.downgrade()).await)
+        drop(fetching);
+        Ok(self.used(image, path, shared).await)
     }
 
     /// The image `image` if the host has it, marked used now; never
@@ -325,7 +343,7 @@ impl Cache {
         let mut removed = Vec::new();
         for image in present {
             // A copy holding it is using it.
-            let Ok(_lock) = self.lock(image).try_write_owned() else {
+            let Ok(_lock) = self.locks(image).file.try_write_owned() else {
                 continue;
             };
             let path = self.path(image);
