@@ -306,6 +306,19 @@ describe("durable video generation operation", () => {
             getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
           ))?.status,
         ).toBe("prepared");
+        const agentSummary = (rootSessionId: string, humanSubjectId = grant.subjectId) =>
+          withSessionRlsActorContext(
+            {
+              subjectId: "service:agent-turn",
+              initiatingHumanSubjectId: humanSubjectId,
+              agentCallerSessionId: session.id,
+              agentRootSessionId: rootSessionId,
+            },
+            () => getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          );
+        expect((await agentSummary(session.id))?.status).toBe("prepared");
+        expect(await agentSummary(crypto.randomUUID())).toBeNull();
+        expect(await agentSummary(session.id, `other-${grant.subjectId}`)).toBeNull();
         await shared!.admin.begin(async (tx) => {
           await tx`set local session_replication_role = replica`;
           await tx`update sessions set visibility = 'workspace_shared',

@@ -6,8 +6,10 @@ import {
   createConnection,
   createDb,
   createSession,
+  claimSessionWorkForAttempt,
   connectSubscriptionCoreXaiConnection,
   deleteWorkspace,
+  initializeSessionStartAtomically,
   SUBSCRIPTION_RETIREMENT_MIGRATION,
   type DbClient,
 } from "@opengeni/db";
@@ -135,6 +137,63 @@ describe("video generation workspace routes", () => {
         `${source.id}:session.read:http`,
         `${source.id}:session.read:http`,
       ]);
+      const started = await initializeSessionStartAtomically(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        sessionId: source.id,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+      });
+      if (!started.turn) throw new Error("Video source turn was not created");
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: source.id,
+        workflowId: `session-${source.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error("Video source attempt was not claimed");
+      const membershipId = crypto.randomUUID();
+      const [personalWorkspace] = await shared!.admin`
+        insert into workspaces(account_id, name)
+        values(${workspace.accountId}, 'Video source Personal') returning id`;
+      await shared!.admin.begin(async (tx) => {
+        // Simulate the source audience snapshot while its turn remains active.
+        await tx`set local session_replication_role = replica`;
+        await tx`insert into organization_memberships(
+          id, account_id, subject_id, role, status, personal_workspace_id)
+          values(${membershipId}, ${workspace.accountId}, ${workspace.subjectId},
+            'owner', 'active', ${personalWorkspace!.id})`;
+        await tx`update sessions set visibility = 'user_private',
+          owner_subject_id = ${workspace.subjectId},
+          owner_organization_membership_id = ${membershipId} where id = ${source.id}`;
+        await tx`update video_generation_operations
+          set source_session_owner_subject_id = ${workspace.subjectId},
+            source_session_shared_unrestricted = false where id = ${operationId}`;
+      });
+      const agentAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        sessionId: source.id,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+        firstPartyMcpTools: [],
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      })}`;
+      allowed = true;
+      const agentHeaders = { authorization: agentAuthorization };
+      expect((await app.request(path, { headers: agentHeaders })).status).toBe(200);
+      const agentVisible = await hosted.request(path, { headers: agentHeaders });
+      expect(agentVisible.status).toBe(200);
+      expect(await agentVisible.json()).toMatchObject({ operationId, status: "preparing" });
+      allowed = false;
+      expect((await hosted.request(path, { headers: agentHeaders })).status).toBe(404);
     } finally {
       await deleteWorkspace(client.db, workspace.workspaceId);
     }

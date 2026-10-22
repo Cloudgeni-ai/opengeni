@@ -1329,6 +1329,8 @@ export async function getVideoGenerationOperationSummary(
   }
   // Pending and failed operations have no retained File to apply the File
   // source policy. Recheck the source audience before returning their status.
+  // An agent's service subject may read a private source only through its
+  // exact caller root and the source owner's initiating human.
   const [source] = await withWorkspaceRls(db, workspaceId, (tx) =>
     rawRows<{ visible: boolean }>(
       tx,
@@ -1351,9 +1353,27 @@ export async function getVideoGenerationOperationSummary(
                     AND slack.session_reservation_id = source_session.root_session_id
                     AND slack.visibility = 'private')
             ))
-            OR (NOT op.source_session_shared_unrestricted
-              AND op.source_session_owner_subject_id =
-                nullif(current_setting('opengeni.subject_id', true), ''))
+            OR (NOT op.source_session_shared_unrestricted AND (
+              op.source_session_owner_subject_id =
+                nullif(current_setting('opengeni.subject_id', true), '')
+              OR EXISTS (
+                SELECT 1 FROM sessions source_session
+                JOIN sessions caller_session
+                  ON caller_session.account_id = source_session.account_id
+                  AND caller_session.workspace_id = source_session.workspace_id
+                  AND caller_session.id::text =
+                    nullif(current_setting('opengeni.agent_caller_session_id', true), '')
+                  AND caller_session.root_session_id::text =
+                    nullif(current_setting('opengeni.agent_root_session_id', true), '')
+                WHERE source_session.account_id = op.account_id
+                  AND source_session.workspace_id = op.workspace_id
+                  AND source_session.id = op.source_session_id_snapshot
+                  AND source_session.root_session_id = caller_session.root_session_id
+                  AND (source_session.visibility <> 'user_private'
+                    OR source_session.owner_subject_id =
+                      nullif(current_setting('opengeni.initiating_human_subject_id', true), ''))
+              )
+            ))
           )
       ) AS visible`,
     ),
