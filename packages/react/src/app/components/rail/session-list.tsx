@@ -5,6 +5,7 @@
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
+import { useSiteOpenedListener } from "../../lib/site-opened";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -533,6 +534,9 @@ export function SessionList() {
     },
     [refresh, refreshGlobalPins, refreshChannels],
   );
+  // Opening a Site moves its row: only the root page carries Site rows.
+  const refreshSiteRows = useCallback(() => void refresh(), [refresh]);
+  useSiteOpenedListener(rail.workspaceId, refreshSiteRows);
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
     if (!workspaceSessionListEvent.available) return;

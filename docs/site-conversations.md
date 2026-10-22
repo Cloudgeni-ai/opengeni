@@ -59,6 +59,25 @@
   conversation as a full chat or the Site's details (`/artifacts/:id`, with
   settings, sharing and its Conversations tab). `/artifacts/:id` (with its tabs)
   and `/sessions/:id` keep working.
+- A Site is a sidebar row even before anyone asks it anything. Placement has
+  one rule: a Site is a top-level row in the project of the chat that created
+  it (the session tree of its first version), and new Site conversations are
+  filed in that project too, so the Site and its conversations stay together.
+  It is a row of its own rather than a child of that chat because a chat's
+  children in the sidebar are the work it spawned, and a Site outlives and is
+  used apart from its chat. The row is listed when the viewer lists that chat
+  (respecting its archive state and filters) or has opened the Site, and only
+  for a Site in the viewer's audience; other artifacts never get rows.
+  Opening a Site in the console (`POST
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
+  `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
+  latest open. A row's activity is the latest of its conversations, the
+  Site's own changes and that open, so Sites in use rise and untouched ones
+  sort down like old sessions, without being hidden. Opens are personal and
+  never visible to anyone else; a Site page cannot record one. Without
+  conversations a row has no count and nothing to disclose; it opens the
+  Site view. Conversations someone moved to another project still nest under
+  the Site's row in that project.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

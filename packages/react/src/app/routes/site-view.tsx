@@ -29,6 +29,7 @@ import { sessionDisplayTitle } from "../lib/session-rename";
 import { sessionStateLabel } from "../lib/session-rail";
 import { sessionSiteOrigin } from "../lib/session-site-origin";
 import { isRunningStatus, relativeTimeLabel } from "../lib/sessions-group";
+import { useRecordSiteOpened } from "../lib/site-opened";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 
@@ -59,6 +60,7 @@ export function SiteViewRoute({
   const toolBridge = useConsoleSiteToolBridge(workspaceId);
   const [site, setSite] = useState<SiteState>({ status: "loading" });
   const [siteAttempt, setSiteAttempt] = useState(0);
+  useRecordSiteOpened(client, workspaceId, siteId);
   useEffect(() => {
     const abort = new AbortController();
     setSite({ status: "loading" });

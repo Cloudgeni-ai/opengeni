@@ -199,6 +199,14 @@ export const WorkspaceArtifactEvent = /* @__PURE__ */ defineSchema(() =>
 );
 export type WorkspaceArtifactEvent = z.infer<typeof WorkspaceArtifactEvent>;
 
+/** When this person last opened the Site; it orders the Site's sidebar row. */
+export const SiteOpenedResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    openedAt: z.string().datetime({ offset: true }),
+  }),
+);
+export type SiteOpenedResponse = z.infer<typeof SiteOpenedResponse>;
+
 export const WorkspaceArtifactListQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
     limit: z.coerce

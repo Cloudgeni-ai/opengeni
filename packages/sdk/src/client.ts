@@ -2086,6 +2086,17 @@ export class OpenGeniClient {
     return response;
   }
 
+  /**
+   * Record that this person opened a Site, which orders its sidebar row like
+   * session activity. Personal; needs `artifacts:read`.
+   */
+  async recordSiteOpened(workspaceId: string, siteId: string): Promise<{ openedAt: string }> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}/opened`,
+    );
+  }
+
   /** Console/owner-authorized agent only. Never available through the Site frame bridge. */
   async listSiteSessionAccess(
     workspaceId: string,

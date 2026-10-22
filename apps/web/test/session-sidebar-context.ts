@@ -175,6 +175,20 @@ h1{font-size:20px;font-weight:600;margin:0 0 4px}p{margin:0;color:var(--muted)}
 const siteConversationIds = new Set<string>();
 export const usageSiteId = "00000000-0000-4000-a000-000000000001";
 export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+export const pricingSiteId = "00000000-0000-4000-a000-000000000003";
+export const checklistSiteId = "00000000-0000-4000-a000-000000000004";
+/**
+ * Sites a listed chat created that have no conversations yet. Each sits in
+ * its creating chat's project, ordered by its own latest activity.
+ */
+const createdSites: Array<{
+  siteId: string;
+  title: string;
+  channelId: string | null;
+  updatedAt: string;
+}> = [];
+/** This person's latest open of each Site, which counts as its activity. */
+const siteOpenedAt = new Map<string, string>();
 if (previewParameters.get("scenario") === "sites") {
   const siteConversation = (
     number: number,
@@ -205,6 +219,22 @@ if (previewParameters.get("scenario") === "sites") {
     siteConversation(902, "Weekly active users by plan", usage, null, 180),
     siteConversation(903, "Export usage to CSV", usage, null, 2600),
     siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
+  );
+  // "Pricing page copy" (Website redesign) and "Workspace Site planning"
+  // (Default) each made a Site nobody has asked anything yet.
+  createdSites.push(
+    {
+      siteId: pricingSiteId,
+      title: "Pricing calculator",
+      channelId: redesignId,
+      updatedAt: timeBefore(390),
+    },
+    {
+      siteId: checklistSiteId,
+      title: "Launch checklist",
+      channelId: null,
+      updatedAt: timeBefore(2880),
+    },
   );
 }
 
@@ -365,6 +395,8 @@ export type SessionSidebarEvidence = {
     previousChannelId: string | null;
     returnedChannelId: string | null;
   }[];
+  /** Sites this person opened, in order. */
+  siteOpens: string[];
   failChannelId: string | null;
   failCursor: string | null;
   failTodayCursor: string | null;
@@ -381,6 +413,7 @@ export type SessionSidebarEvidence = {
 export const evidence: SessionSidebarEvidence = {
   listCalls: [],
   archiveCalls: [],
+  siteOpens: [],
   failChannelId: previewParameters.get("fail") === "bugfixes" ? bugfixesId : null,
   failCursor: null,
   failTodayCursor: null,
@@ -481,6 +514,32 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       activeWork: 0,
     });
   }
+  const later = (a: string, b: string | undefined) => (b && b > a ? b : a);
+  for (const group of groups.values())
+    group.updatedAt = later(group.updatedAt, siteOpenedAt.get(group.siteId));
+  const listed = new Set([...groups.values()].map((group) => group.siteId));
+  if (!options.needsYouOnly && options.archiveStatus !== "archived")
+    for (const created of createdSites) {
+      if (listed.has(created.siteId)) continue;
+      if (options.channelId !== undefined && options.channelId !== created.channelId) continue;
+      groups.set(created.siteId, {
+        siteId: created.siteId,
+        channelId: created.channelId,
+        title: created.title,
+        conversations: 0,
+        updatedAt: later(created.updatedAt, siteOpenedAt.get(created.siteId)),
+        createdAt: created.updatedAt,
+        total: 0,
+        attention: 0,
+        attentionSince: null,
+        failed: 0,
+        active: 0,
+        queued: 0,
+        waiting: 0,
+        unread: 0,
+        activeWork: 0,
+      });
+    }
   return [...groups.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -605,6 +664,8 @@ if (previewParameters.get("scenario") === "sites") {
       sites: [
         { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
         { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
+        { id: pricingSiteId, title: "Pricing calculator", html: usageSiteHtml },
+        { id: checklistSiteId, title: "Launch checklist", html: usageSiteHtml },
       ],
       history: new Map([
         [
@@ -637,6 +698,12 @@ if (previewParameters.get("scenario") === "sites") {
       ]),
     }),
     {
+      recordSiteOpened: async (_workspace: string, siteId: string) => {
+        const openedAt = new Date().toISOString();
+        siteOpenedAt.set(siteId, openedAt);
+        evidence.siteOpens.push(siteId);
+        return { openedAt };
+      },
       tools: {
         forWorkspace: () => ({
           $catalog: async () => ({ tools: [], revision: "preview" }),
