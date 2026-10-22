@@ -183,6 +183,177 @@ function withoutLiveMemoryUsage(label: string): string {
   return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
 }
 
+/** One part of a web page's date or time field, in the order the page shows
+ * them (the locale's order: day, month, year in much of the world). */
+export type DateSegment =
+  | "year"
+  | "month"
+  | "day"
+  | "week"
+  | "hours"
+  | "minutes"
+  | "seconds"
+  | "milliseconds"
+  | "meridiem";
+
+const DATE_SEGMENT_NAMES: Record<string, DateSegment> = {
+  year: "year",
+  month: "month",
+  day: "day",
+  week: "week",
+  hours: "hours",
+  minutes: "minutes",
+  seconds: "seconds",
+  milliseconds: "milliseconds",
+  "am/pm": "meridiem",
+};
+
+/**
+ * The date and time fields of web content (Chrome's and Safari's date, time,
+ * month, week and datetime-local inputs), by element_index, with their parts
+ * in the order shown. macOS reads such a field as an AXDateField or
+ * AXTimeField whose parts are AXIncrementors named "<part> <field label>"
+ * ("Day Date of birth"). A part cannot take the focus or a value on its own,
+ * and the field takes no value through accessibility, so it is filled by
+ * typing each part's digits. A field with a part this does not know (a
+ * browser in another language names them differently) is left out.
+ */
+export function dateFields(
+  elements: readonly CuaElement[],
+  webContent: ReadonlySet<number> = webContentIndexes(elements),
+): Map<number, { segments: DateSegment[]; parts: number[] }> {
+  const fields = new Map<number, { segments: DateSegment[]; parts: number[] }>();
+  const children = new Map<number, CuaElement[]>();
+  for (const element of elements)
+    if (element.parent_index !== undefined && element.role === "AXIncrementor")
+      children.set(element.parent_index, [...(children.get(element.parent_index) ?? []), element]);
+  for (const element of elements) {
+    if (
+      (element.role !== "AXDateField" && element.role !== "AXTimeField") ||
+      !element.element_token ||
+      !webContent.has(element.element_index)
+    )
+      continue;
+    const parts = children.get(element.element_index) ?? [];
+    const fieldLabel = (element.label ?? "").trim();
+    const segments = parts.map((part) => {
+      const label = (part.label ?? "").trim();
+      const name =
+        fieldLabel && label.endsWith(` ${fieldLabel}`)
+          ? label.slice(0, -fieldLabel.length - 1)
+          : label;
+      return DATE_SEGMENT_NAMES[name.trim().toLowerCase()];
+    });
+    if (segments.length === 0 || segments.some((segment) => segment === undefined)) continue;
+    if (new Set(segments).size !== segments.length) continue;
+    fields.set(element.element_index, {
+      segments: segments as DateSegment[],
+      parts: parts.map((part) => part.element_index),
+    });
+  }
+  return fields;
+}
+
+/** The ISO form a date or time field with these parts takes and shows. */
+export function dateFieldFormat(segments: readonly DateSegment[]): string {
+  const has = (segment: DateSegment) => segments.includes(segment);
+  const date = has("week")
+    ? "YYYY-Www"
+    : has("day")
+      ? "YYYY-MM-DD"
+      : has("month")
+        ? "YYYY-MM"
+        : has("year")
+          ? "YYYY"
+          : "";
+  const time = has("hours")
+    ? `HH:MM${has("seconds") ? ":SS" : ""}${has("milliseconds") ? ".mmm" : ""}`
+    : "";
+  return date && time ? `${date}T${time}` : date || time;
+}
+
+type DateParts = Partial<Record<Exclude<DateSegment, "meridiem">, number>>;
+
+/** The parts of an ISO date, time, month, week or local date-time, or null. */
+export function parseDateValue(value: string): DateParts | null {
+  const text = value.trim();
+  if (!text) return null;
+  const [datePart, timePart] = /^\d{4,6}-.*[T ]/u.test(text)
+    ? (text.split(/[T ]/u, 2) as [string, string])
+    : text.includes(":")
+      ? ["", text]
+      : [text, ""];
+  const parts: DateParts = {};
+  if (datePart) {
+    const week = /^(\d{4,6})-W(\d{1,2})$/iu.exec(datePart);
+    const date = /^(\d{4,6})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/u.exec(datePart);
+    if (week) Object.assign(parts, { year: Number(week[1]), week: Number(week[2]) });
+    else if (date) {
+      parts.year = Number(date[1]);
+      if (date[2] !== undefined) parts.month = Number(date[2]);
+      if (date[3] !== undefined) parts.day = Number(date[3]);
+    } else return null;
+  }
+  if (timePart) {
+    const time = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/u.exec(timePart);
+    if (!time) return null;
+    parts.hours = Number(time[1]);
+    parts.minutes = Number(time[2]);
+    if (time[3] !== undefined) parts.seconds = Number(time[3]);
+    if (time[4] !== undefined) parts.milliseconds = Number(time[4].padEnd(3, "0"));
+  }
+  const ranges: Record<keyof DateParts, [number, number]> = {
+    year: [1, 275760],
+    month: [1, 12],
+    day: [1, 31],
+    week: [1, 53],
+    hours: [0, 23],
+    minutes: [0, 59],
+    seconds: [0, 59],
+    milliseconds: [0, 999],
+  };
+  for (const [key, part] of Object.entries(parts) as [keyof DateParts, number][]) {
+    const [low, high] = ranges[key];
+    if (part < low || part > high) return null;
+  }
+  return parts;
+}
+
+/**
+ * The text to type into each part of a date or time field to give it this
+ * ISO value, in the parts' order, or why the value does not fit the field.
+ * Seconds and milliseconds the value leaves out are zero.
+ */
+export function dateFieldTyping(
+  segments: readonly DateSegment[],
+  value: string,
+): { texts: string[] } | { error: string } {
+  const format = dateFieldFormat(segments);
+  const unfit = {
+    error: `This date or time field takes its whole value in the form ${format}`,
+  };
+  const parts = parseDateValue(value);
+  if (!parts) return unfit;
+  const fieldParts = new Set<string>(segments);
+  if (Object.keys(parts).some((key) => !fieldParts.has(key))) return unfit;
+  const texts: string[] = [];
+  for (const segment of segments) {
+    if (segment === "meridiem") {
+      if (parts.hours === undefined) return unfit;
+      texts.push(parts.hours < 12 ? "A" : "P");
+      continue;
+    }
+    let part = parts[segment];
+    if (part === undefined && (segment === "seconds" || segment === "milliseconds")) part = 0;
+    if (part === undefined) return unfit;
+    if (segment === "hours" && fieldParts.has("meridiem")) part = part % 12 || 12;
+    texts.push(
+      String(part).padStart(segment === "year" ? 4 : segment === "milliseconds" ? 3 : 2, "0"),
+    );
+  }
+  return { texts };
+}
+
 export function projectElements(
   allElements: CuaElement[],
   platform: Platform = "macos",
@@ -194,6 +365,8 @@ export function projectElements(
       ? allElements.filter((element) => !repeatsParentLabel(element, byIndex))
       : allElements;
   const webContent = platform === "macos" ? webContentIndexes(allElements) : new Set<number>();
+  const typedFields =
+    platform === "macos" ? dateFields(allElements, webContent) : new Map<number, unknown>();
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
@@ -225,14 +398,15 @@ export function projectElements(
             ? element.actions.includes("set_value")
             : // An item of a file list is shown as a text field, but its text is
               // the item's name, not something to edit.
-              !opensOnInvoke(element) &&
-              [
-                "AXTextField",
-                "AXTextArea",
-                "AXSecureTextField",
-                "AXSlider",
-                "AXPopUpButton",
-              ].includes(element.role)
+              (!opensOnInvoke(element) &&
+                [
+                  "AXTextField",
+                  "AXTextArea",
+                  "AXSecureTextField",
+                  "AXSlider",
+                  "AXPopUpButton",
+                ].includes(element.role)) ||
+              typedFields.has(element.element_index)
       )
         actions.push("set_value");
       // A control a person can operate can take the keyboard focus, so keys
