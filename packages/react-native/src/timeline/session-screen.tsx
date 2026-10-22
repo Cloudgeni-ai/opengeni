@@ -552,6 +552,11 @@ function StuckCard({
   // machines this person may move the chat to, and one fenced recheck.
   const start = useSessionStart({ session, onSessionChanged });
   const [failed, setFailed] = useState(false);
+  // The recheck is one fenced Resume outside the session control runner, so
+  // the card holds its own pending state: busy while it runs, and a second tap
+  // before the first settles sends nothing (as the web notice does).
+  const [rechecking, setRechecking] = useState(false);
+  const recheckPending = useRef(false);
   const [moving, setMoving] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
   const c = theme.colors;
@@ -651,12 +656,21 @@ function StuckCard({
         <Button
           label={m.stuckRetry}
           variant="primary"
-          busy={busy}
-          disabled={busy}
+          busy={busy || rechecking}
+          disabled={busy || rechecking}
           style={{ alignSelf: "flex-start" }}
           onPress={() => {
+            if (recheckPending.current) return;
+            recheckPending.current = true;
+            setRechecking(true);
             setFailed(false);
-            start.recheck().catch(() => setFailed(true));
+            start
+              .recheck()
+              .catch(() => setFailed(true))
+              .finally(() => {
+                recheckPending.current = false;
+                setRechecking(false);
+              });
           }}
         />
       )}
