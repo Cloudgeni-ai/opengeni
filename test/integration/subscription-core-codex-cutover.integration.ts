@@ -110,7 +110,7 @@ describe.skipIf(!realDb)(
       const owner = postgres(owned.ownerUrl, { max: 1 });
       try {
         await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${PERSONAL_QUARANTINE_EXPIRY}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SHARED_PERSONAL_CHOICE}), (${RETIREMENT}), (${PERSONAL_SHARING}), (${INDEXED_LINEAGE})`;
+        await owner`INSERT INTO schema_migrations(name) VALUES(${MIGRATION}), (${PRECURSOR}), (${PROVIDER_KEYED_REACH}), (${WORKSPACE_MANAGED_ACCOUNTS}), (${API_KEY_CONNECTIONS}), (${PERSONAL_CONNECT_FORMAT}), (${COMPAT}), (${FENCES}), (${PERSONAL_CONNECTION_VERSIONS}), (${PERSONAL_QUARANTINE_EXPIRY}), (${FAILOVER_READINESS}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SHARED_PERSONAL_CHOICE}), (${RETIREMENT}), (${PERSONAL_SHARING}), (${INDEXED_LINEAGE}), ('0907_subscription_connection_one_owner.sql')`;
         await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
         await owner`DELETE FROM schema_migrations WHERE name IN (${MIGRATION}, ${PRECURSOR}, ${PROVIDER_KEYED_REACH}, ${WORKSPACE_MANAGED_ACCOUNTS}, ${API_KEY_CONNECTIONS}, ${PERSONAL_CONNECT_FORMAT}, ${COMPAT}, ${FENCES}, ${PERSONAL_CONNECTION_VERSIONS}, ${PERSONAL_QUARANTINE_EXPIRY}, ${FAILOVER_READINESS}, ${PERSONAL_SHARING}, ${INDEXED_LINEAGE})`;
       } finally {

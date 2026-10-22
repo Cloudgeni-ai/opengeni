@@ -8,6 +8,7 @@ import {
   agentConfigFirstPartyMcpTools,
   agentConfigToolRefs,
   legacyEffectiveAgentCapabilities,
+  mergeToolRefEager,
   resolveAgentConfig,
   resolveWorkspaceAgentDefaults,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -22,6 +23,41 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+
+/**
+ * Creation only: save the normal eager selection; never rewrite an existing session.
+ * The Docs fallback applies only when the configured `docs` server offers
+ * `knowledge_search` (the built-in one does); a deployment may define its own
+ * `docs` server with different tools.
+ */
+export function newSessionKnowledgeSearchTools(
+  tools: ToolRef[],
+  config: ResolvedAgentConfig | null,
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  mcpServers: readonly { id: string; allowedTools?: readonly string[] | undefined }[],
+): ToolRef[] {
+  if (!config?.capabilities.knowledge) return tools;
+  const canSearch = (tool: ToolRef) =>
+    tool.kind === "mcp" &&
+    (tool.allowedTools === undefined || tool.allowedTools.includes("knowledge_search"));
+  const docsServerSearches =
+    mcpServers
+      .find((server) => server.id === "docs")
+      ?.allowedTools?.includes("knowledge_search") === true;
+  const serverId =
+    firstPartyMcpTools.includes("knowledge_search") &&
+    tools.some((tool) => tool.id === "opengeni" && canSearch(tool))
+      ? "opengeni"
+      : docsServerSearches && tools.some((tool) => tool.id === "docs" && canSearch(tool))
+        ? "docs"
+        : null;
+  if (!serverId) return tools;
+  return tools.map((tool) =>
+    tool.id === serverId && canSearch(tool)
+      ? { ...tool, eager: mergeToolRefEager(tool.eager, ["knowledge_search"]) }
+      : tool,
+  );
+}
 
 /**
  * Run an agent-config resolution step and surface its typed failure as a 422

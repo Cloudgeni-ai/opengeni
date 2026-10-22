@@ -446,6 +446,7 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
+export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-input-draft-store";
 
 // Timeline projection
 export {

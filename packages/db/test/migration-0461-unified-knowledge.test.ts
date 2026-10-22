@@ -85,6 +85,7 @@ const forwardMigrations = [
   "0657_session_archive_purge_retained_evidence.sql",
   // The list notification projection includes withheld archive/import fields.
   "0888_session_list_invalidation.sql",
+  "0905_schedule_timing_session_list_hints.sql",
   "0660_session_archive_preference_snapshot_export.sql",
   // Resolves the Knowledge claim installed by the withheld 0461 migration.
   "0730_maintenance_work_probes.sql",

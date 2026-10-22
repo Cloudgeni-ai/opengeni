@@ -101,6 +101,17 @@ export function sessionInputWait(
     : null;
 }
 
+/**
+ * A schedule targeting this session can still start a run. Paused schedules
+ * and one-time schedules whose time has passed are not upcoming. Servers
+ * without the field keep the earlier any-schedule meaning.
+ */
+export function sessionHasUpcomingSchedule(
+  session: Pick<SessionListRow, "hasSchedules" | "hasUpcomingSchedules">,
+): boolean {
+  return session.hasUpcomingSchedules ?? session.hasSchedules === true;
+}
+
 export function hasActiveEffectiveControl(session: SessionListRow): boolean {
   return (session.effectiveControl?.state ?? "active") === "active";
 }
@@ -290,7 +301,9 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
   if (hours < 24) {
     return `${hours}h`;
   }
-  const days = Math.floor(hours / 24);
+  // Past a day, count calendar days in the viewer's time zone, like the long
+  // form ("4 days ago"), so both read the same for the same chat.
+  const days = Math.max(1, localCalendarDaysBetween(new Date(timestamp), now));
   if (days < 7) {
     return `${days}d`;
   }
@@ -298,6 +311,12 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
     month: "short",
     day: "numeric",
   });
+}
+
+function localCalendarDaysBetween(from: Date, to: Date): number {
+  const start = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((end - start) / 86_400_000);
 }
 
 /** Codex subscription product ids are prefixed `codex/`. */

@@ -29,11 +29,14 @@ import { hasWorkspacePermission } from "../../lib/permissions";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
-import { SessionMachineCapabilityCard } from "./session-machine-card";
+import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { usePage } from "../../lib/navigation";
 
 /** The built-in card for connecting a person's own computer to this chat. */
 export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
+
+/** The built-in tile and card that install the deployment's Excel add-in. */
+export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
 
 /** Recommendations carry identity and rationale, never connection configuration.
  * Expand against the current authenticated catalog before rendering any form. */
@@ -86,6 +89,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
     : props.item;
   const capability = item.capability;
   if (capability?.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    // The same request was made again further down, where its card is live.
+    if (item.askedAgainLater) return <RepeatedMachineRequestNote />;
     return (
       <SessionMachineCapabilityCard
         key={`${props.workspaceId}:${props.sessionId}`}
@@ -167,32 +172,39 @@ function ScopedSessionCapabilityCard({
     setExpanded(false);
   };
   const skill = recommendation.kind === "skill";
+  const excel = recommendation.id === EXCEL_ADDIN_CAPABILITY_ID;
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
       subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
       logo={logo}
-      typeLabel={skill ? "Skill" : recommendation.kind === "mcp" ? "MCP server" : "API"}
+      typeLabel={
+        skill ? "Skill" : excel ? "Add-in" : recommendation.kind === "mcp" ? "MCP server" : "API"
+      }
       description={catalogItem?.description || recommendation.rationale}
       skill={skill}
       expanded={expanded}
       complete={complete}
       actionLabel={
-        catalogItem?.enabled
-          ? "Review"
-          : skill
-            ? "Review skill"
-            : apiKey
-              ? "Add API key"
-              : `Connect ${catalogItem?.name ?? recommendation.name}`
+        excel
+          ? "Add to Excel"
+          : catalogItem?.enabled
+            ? "Review"
+            : skill
+              ? "Review skill"
+              : apiKey
+                ? "Add API key"
+                : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
       note={
-        skill
-          ? "Skill content is reviewed separately from permission to use any integration."
-          : apiKey
-            ? "Add credentials in the protected form, not in a chat message."
-            : "Review access before signing in. You'll return to this conversation after authorization."
+        excel
+          ? "The add-in runs in your own Excel. Agents reach a workbook only while you have the add-in open in it."
+          : skill
+            ? "Skill content is reviewed separately from permission to use any integration."
+            : apiKey
+              ? "Add credentials in the protected form, not in a chat message."
+              : "Review access before signing in. You'll return to this conversation after authorization."
       }
       onOpen={() => setExpanded(true)}
       onClose={close}

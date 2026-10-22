@@ -1,5 +1,7 @@
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
+import { scheduledTaskSessionTitle } from "./scheduled-task-title";
+export { scheduledTaskSessionTitle } from "./scheduled-task-title";
 import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
@@ -19,7 +21,6 @@ import {
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
-  normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   resolveWorkspaceSessionToolDefaults,
@@ -51,6 +52,7 @@ import {
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
   recordUserMessageAccepted,
@@ -252,10 +254,6 @@ function recordScheduledSessionCreated(observability: ProductUsageMetricsSink | 
     createdByKind: "service",
     parentSessionId: null,
   });
-}
-
-export function scheduledTaskSessionTitle(taskName: string): string {
-  return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
 }
 
 /**
@@ -649,7 +647,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
-          taskTools = written.tools;
+          taskTools = newSessionKnowledgeSearchTools(
+            written.tools,
+            resolvedAgentConfig,
+            firstPartyMcpTools,
+            settings.mcpServers,
+          );
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;

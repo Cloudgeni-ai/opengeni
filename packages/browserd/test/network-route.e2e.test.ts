@@ -58,7 +58,6 @@ e2e(
     if (!address || typeof address === "string") throw new Error("proxy did not bind TCP");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(root, "state"),
-      socketRootDirectory: join(root, "s"),
     });
     const reference = {
       browserSessionId: randomUUID(),

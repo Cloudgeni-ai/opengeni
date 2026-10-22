@@ -184,6 +184,14 @@ pub(crate) enum WakeRoom {
     Refused,
 }
 
+/// What a wake can take of a budget with `headroom` left (negative when
+/// it is overdrawn), giving back `own`, what the wake books already, after
+/// `wanted`, what the wakes queued before it need: none when that is less
+/// than nothing.
+fn room(headroom: i128, own: u64, wanted: i128) -> u64 {
+    u64::try_from(headroom + i128::from(own) - wanted).unwrap_or(0)
+}
+
 /// Whether `step` wakes a sandbox into memory: it creates or resumes a VM
 /// process, or fetches a sandbox only to restore it, so it is admitted
 /// before any download starts and holds the room meanwhile.
@@ -367,20 +375,11 @@ impl Host {
         remote: bool,
         files: DiskSpace,
     ) -> CreateRoom {
-        let percent = self.compressed_percent();
         let own = self.creating.get(&sandbox);
-        let queued: Vec<&Sandbox> = Step::ALL
-            .into_iter()
-            .filter(|step| needs_memory(*step))
-            .flat_map(|step| self.queues[step.index()].iter())
-            .filter_map(|key| self.sandboxes.get(&key.sandbox))
-            .collect();
-        let free = |headroom: i128, own: u64, wanted: i128| {
-            u64::try_from(headroom + i128::from(own) - wanted).unwrap_or(0)
-        };
+        let queued = self.queued_wakes();
         if let Some(cpu) = self.cpu_capacity() {
             let wanted = queued.iter().map(|slot| i128::from(slot.cpu_need())).sum();
-            let free = free(cpu.headroom(), own.map_or(0, |own| own.size.cpu), wanted);
+            let free = room(cpu.headroom(), own.map_or(0, |own| own.size.cpu), wanted);
             if size.cpu > free {
                 return CreateRoom::Short(Resource::Cpu, size.cpu, free);
             }
@@ -409,22 +408,60 @@ impl Host {
                 awaits_reading = Some(short);
             }
         }
-        if let Some(capacity) = self.capacity() {
-            let (dropping, droppable) = self.instant_room(now, sandbox);
-            let wanted: u64 = queued.iter().map(|slot| slot.wake_need(percent)).sum();
-            let headroom = capacity.headroom() + i128::from(dropping) + i128::from(droppable);
-            let free = free(
-                headroom,
-                own.map_or(0, |own| own.size.request),
-                i128::from(wanted),
-            );
-            if size.request > free {
-                return CreateRoom::Short(Resource::Memory, size.request, free);
-            }
+        let own = own.map_or(0, |own| own.size.request);
+        if let Some(free) = self.memory_room(now, Some(sandbox), own, &queued)
+            && size.request > free
+        {
+            return CreateRoom::Short(Resource::Memory, size.request, free);
         }
         awaits_reading.map_or(CreateRoom::Fits, |short| {
             CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
         })
+    }
+
+    /// Sandboxes whose wake into memory is queued, in queue order.
+    fn queued_wakes(&self) -> Vec<&Sandbox> {
+        Step::ALL
+            .into_iter()
+            .filter(|step| needs_memory(*step))
+            .flat_map(|step| self.queues[step.index()].iter())
+            .filter_map(|key| self.sandboxes.get(&key.sandbox))
+            .collect()
+    }
+
+    /// Bytes of the budget a wake queued behind `queued` could take at
+    /// once: what is left of the budget and the instant relief, other than
+    /// `waiter`'s own, less what the queued wakes need, with `own` (what
+    /// the waiter books already) given back. `None` without admission.
+    fn memory_room(
+        &self,
+        now: At,
+        waiter: Option<SandboxId>,
+        own: u64,
+        queued: &[&Sandbox],
+    ) -> Option<u64> {
+        let capacity = self.capacity()?;
+        let percent = self.compressed_percent();
+        let (dropping, droppable) = self.instant_room(now, waiter);
+        let wanted: u64 = queued.iter().map(|slot| slot.wake_need(percent)).sum();
+        let headroom = capacity.headroom() + i128::from(dropping) + i128::from(droppable);
+        Some(room(headroom, own, i128::from(wanted)))
+    }
+
+    /// Bytes beyond [`Capacity::free`] that the first wake of a new
+    /// sandbox could take now by ending VM processes, as
+    /// [`Self::create_room`] counts it: those already ending, idle ones
+    /// whose state is saved, and ready spare VMs, less what an overdrawn
+    /// budget and the wakes already queued take of that relief first. Zero
+    /// without admission. Placement and host groups count it as free.
+    #[must_use]
+    pub fn reclaimable_memory(&self, now: At) -> u64 {
+        let Some(capacity) = self.capacity() else {
+            return 0;
+        };
+        let queued = self.queued_wakes();
+        self.memory_room(now, None, 0, &queued)
+            .map_or(0, |room| room.saturating_sub(capacity.free()))
     }
 
     /// Takes in [`crate::Input::Creating`].
@@ -672,7 +709,7 @@ impl Host {
             let cpu_need = i128::from(slot.cpu_need());
             let fits = cpu.is_none_or(|headroom| cpu_need <= headroom)
                 && capacity.is_none_or(|capacity| {
-                    let (dropping, droppable) = self.instant_room(now, *id);
+                    let (dropping, droppable) = self.instant_room(now, Some(*id));
                     i128::from(wanted + need)
                         <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
                 })
@@ -745,7 +782,7 @@ impl Host {
     /// processes that are already saved, least recently used first, after
     /// ready spare VMs, oldest first, counting those already ending.
     fn drop_for(&mut self, now: At, waiter: SandboxId, deficit: u64) -> Room {
-        let (dropping, droppable) = self.instant_room(now, waiter);
+        let (dropping, droppable) = self.instant_room(now, Some(waiter));
         let Some(mut needed) = deficit.checked_sub(dropping).filter(|needed| *needed > 0) else {
             return Room::Coming;
         };
@@ -787,12 +824,12 @@ impl Host {
     /// would free besides, ready spare VMs included. Both take milliseconds
     /// and no I/O; a sandbox backing off after a failed step takes no step
     /// until its backoff ends, so it counts for neither.
-    fn instant_room(&self, now: At, waiter: SandboxId) -> (u64, u64) {
+    fn instant_room(&self, now: At, waiter: Option<SandboxId>) -> (u64, u64) {
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
         let (mut dropping, mut droppable) = (self.spares.ending(), self.spares.endable());
         for (id, slot) in &self.sandboxes {
-            if *id == waiter {
+            if waiter == Some(*id) {
                 continue;
             }
             let ending = slot

@@ -810,7 +810,11 @@ export function SessionTenancyControl({
         ) : (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span tabIndex={0} aria-label={`${stateLabel} session access. ${stateDescription}`}>
+              <span
+                role="img"
+                tabIndex={0}
+                aria-label={`${stateLabel} session access. ${stateDescription}`}
+              >
                 {stateChip}
               </span>
             </TooltipTrigger>

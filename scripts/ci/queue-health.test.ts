@@ -1,5 +1,11 @@
-import { test, expect } from "bun:test";
+import { afterAll, test, expect } from "bun:test";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  GH_MAX_BUFFER_BYTES,
+  ghApi,
+  paginated,
   isRedMain,
   isBatchRun,
   batchTiming,
@@ -327,4 +333,143 @@ test("duplicate run delivery does not duplicate incident or PR comments", () => 
     candidate,
   );
   expect(result.reported).toBe(true);
+});
+
+// A real executable on the gh boundary: live CI run objects are ~14 KB each, so
+// a 100-row page is ~1.5 MB, above execFileSync's 1 MiB default buffer.
+const fakeRoot = mkdtempSync(join(tmpdir(), "queue-health-gh-"));
+afterAll(() => rmSync(fakeRoot, { recursive: true, force: true }));
+const fakeGh = join(fakeRoot, "gh");
+const RED_RUN_ID = 7_000_123;
+writeFileSync(
+  fakeGh,
+  `#!${process.execPath}
+import { writeSync } from "node:fs";
+const [, path = "", ...rest] = process.argv.slice(2);
+const url = new URL(path, "https://api.invalid/");
+const page = Number(url.searchParams.get("page") ?? 1);
+const runRow = (id, extra = {}) => ({
+  id, run_attempt: 1, head_sha: "b".repeat(40), head_branch: "main", event: "push",
+  path: ".github/workflows/ci.yml", created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(), html_url: "https://example.invalid/runs/" + id,
+  status: "completed", conclusion: "success",
+  repository: { description: "FAKE_RUN_PADDING".repeat(860) }, ...extra,
+});
+const write = (value) => writeSync(1, JSON.stringify(value));
+if (url.pathname.endsWith("/fail")) {
+  write({ message: "FAKE_BODY_PADDING".repeat(120_000) });
+  writeSync(2, "gh: Server Error (HTTP 502)\\n");
+  process.exit(1);
+} else if (url.pathname.endsWith("/malformed")) {
+  writeSync(1, "{not json");
+} else if (url.pathname.endsWith("/echo")) {
+  write({ path, rest, input: rest.includes("--input") ? await Bun.stdin.text() : null });
+} else if (url.pathname.endsWith("/workflows/ci.yml/runs")) {
+  // 341 rows like the failed scheduled run: three full pages and a partial one.
+  const total = 341;
+  const rows = [];
+  for (let index = (page - 1) * 100; index < Math.min(page * 100, total); index++)
+    rows.push(index === 205 ? runRow(${RED_RUN_ID}, { conclusion: "failure" }) : runRow(1000 + index));
+  write({ total_count: total, workflow_runs: rows });
+} else if (url.pathname.includes("/workflows/")) {
+  write({ total_count: 0, workflow_runs: [] });
+} else {
+  writeSync(2, "gh: Not Found (HTTP 404)\\n");
+  process.exit(1);
+}
+`,
+);
+chmodSync(fakeGh, 0o755);
+const ciRuns = "repos/owner/repo/actions/workflows/ci.yml/runs?event=push&branch=main";
+
+test("gh reads full >1 MiB provider pages and paginates every row without truncation", () => {
+  const pageBytes = Buffer.byteLength(
+    JSON.stringify(ghApi(fakeGh)(`${ciRuns}&per_page=100&page=1`)),
+  );
+  expect(pageBytes).toBeGreaterThan(1024 * 1024);
+  expect(pageBytes).toBeLessThan(GH_MAX_BUFFER_BYTES);
+  const rows = paginated(ghApi(fakeGh), ciRuns, "workflow_runs");
+  expect(rows).toHaveLength(341);
+  expect(new Set(rows.map((row) => row.id)).size).toBe(341);
+  expect(rows.filter(isRedMain).map((row) => row.id)).toEqual([RED_RUN_ID]);
+});
+
+test("gh output beyond the bound fails the report with a bounded diagnostic, never a partial page", () => {
+  const call = () => paginated(ghApi(fakeGh, 512 * 1024), ciRuns, "workflow_runs");
+  expect(call).toThrow(
+    "gh api GET repos/owner/repo/actions/workflows/ci.yml/runs?event=push&branch=main&per_page=100&page=1 failed (code=ENOBUFS",
+  );
+  expect(call).toThrow("exceeded the 524288-byte gh output bound; refusing a partial report");
+  const message = (() => {
+    try {
+      call();
+    } catch (error) {
+      return (error as Error).message;
+    }
+  })()!;
+  expect(message.length).toBeLessThan(1000);
+  expect(message).not.toContain("FAKE_RUN_PADDING");
+});
+
+test("a failed provider call stays actionable without carrying its megabyte response body", () => {
+  let failure: Partial<Record<"message" | "stdout" | "output" | "cause", unknown>> & {
+    message: string;
+  } = new Error("unreached");
+  try {
+    ghApi(fakeGh)("repos/owner/repo/fail");
+  } catch (error) {
+    failure = error as typeof failure;
+  }
+  expect(failure.message).toContain("gh api GET repos/owner/repo/fail failed (");
+  expect(failure.message).toContain("exit=1");
+  expect(failure.message).toContain("gh stderr: gh: Server Error (HTTP 502)");
+  expect(failure.message).toMatch(/stdoutBytes=\d{7}/);
+  expect(failure.message.length).toBeLessThan(1000);
+  expect(failure.message).not.toContain("FAKE_BODY_PADDING");
+  // No provider stdout/output properties ride along to the uncaught-error printer.
+  expect(failure.stdout).toBeUndefined();
+  expect(failure.output).toBeUndefined();
+  expect(failure.cause).toBeUndefined();
+  expect(() => ghApi(fakeGh)("repos/owner/repo/missing")).toThrow("HTTP 404");
+  expect(() => ghApi(fakeGh)("repos/owner/repo/malformed")).toThrow(
+    "gh api GET repos/owner/repo/malformed returned malformed JSON (9 bytes)",
+  );
+  expect(() => ghApi(join(fakeRoot, "absent-gh"))("repos/owner/repo/echo")).toThrow("code=ENOENT");
+});
+
+test("gh mutations keep method and stdin body", () => {
+  expect(ghApi(fakeGh)("repos/owner/repo/echo", "POST", { body: "alert" })).toEqual({
+    path: "repos/owner/repo/echo",
+    rest: ["--method", "POST", "--input", "-"],
+    input: JSON.stringify({ body: "alert" }),
+  });
+});
+
+test("scheduled reconciliation completes over >1 MiB main CI pages and still finds the red run", () => {
+  const work = mkdtempSync(join(fakeRoot, "run-"));
+  const eventPath = join(work, "event.json");
+  writeFileSync(eventPath, "{}");
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env))
+    if (value !== undefined && key !== "QUEUE_HEALTH_ALERTS" && key !== "GITHUB_STEP_SUMMARY")
+      env[key] = value;
+  const result = Bun.spawnSync([process.execPath, join(import.meta.dir, "queue-health.ts")], {
+    cwd: work,
+    env: {
+      ...env,
+      PATH: `${fakeRoot}:${process.env.PATH ?? ""}`,
+      GITHUB_REPOSITORY: "owner/repo",
+      GITHUB_EVENT_PATH: eventPath,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stderr.toString()).not.toContain("ENOBUFS");
+  expect(result.exitCode).toBe(0);
+  const report = JSON.parse(readFileSync(join(work, "queue-health.json"), "utf8"));
+  expect(report.alertsEnabled).toBe(false);
+  expect(report.alerts).toEqual([
+    { reported: false, runId: RED_RUN_ID, reason: "QUEUE_HEALTH_ALERTS is not enabled" },
+  ]);
+  expect(report.batchError).toBeNull();
 });

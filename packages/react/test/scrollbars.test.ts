@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse, type AtRule } from "postcss";
 import { markClassicScrollbars } from "../src/lib/scrollbars";
 import { registerDom } from "./render-hook";
 
@@ -44,10 +45,26 @@ describe("markClassicScrollbars", () => {
 
   test("styles only documents marked classic", () => {
     const css = readFileSync(join(import.meta.dir, "../styles/index.css"), "utf8");
-    const block = css.slice(css.indexOf("@supports selector(::-webkit-scrollbar)"));
-    for (const selector of block.match(/^\s*:where[^{]+\{/gm) ?? []) {
-      expect(selector).toContain(':root[data-og-scrollbars="classic"]');
-    }
-    expect(block).toContain("scrollbar-width: auto");
+    const blocks: AtRule[] = [];
+    parse(css).walkAtRules("supports", (rule) => {
+      if (rule.params === "selector(::-webkit-scrollbar)") blocks.push(rule);
+    });
+    expect(blocks).toHaveLength(1);
+    let selectors = 0;
+    let resets = 0;
+    blocks[0]!.walkRules((rule) => {
+      // Visit every comma-separated selector, not just lines beginning :where.
+      // An unscoped rule or a missing block must not make this guard vacuous.
+      for (const selector of rule.selectors) {
+        expect(selector).toContain(':root[data-og-scrollbars="classic"]');
+        selectors += 1;
+      }
+      rule.walkDecls("scrollbar-width", (declaration) => {
+        expect(declaration.value).toBe("auto");
+        resets += 1;
+      });
+    });
+    expect(selectors).toBeGreaterThan(0);
+    expect(resets).toBeGreaterThan(0);
   });
 });

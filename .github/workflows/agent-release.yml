@@ -194,21 +194,13 @@ jobs:
             echo "::error::linux computer-native must use the glibc dynamic linker; got ${native_interp:-<missing>}" >&2
             exit 1
           fi
-          OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
-          OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
-          OPENGENI_BROWSERD_TARGET_MUSL=false \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}" \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}" .
           chmod 0755 \
             "opengeni-browserd-${{ matrix.target }}" \
-            "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-${{ matrix.target }}" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/opengeni-agent-browser-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/opengeni-computer-native-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/$browser_arch/embedded.rs" \
               cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
@@ -270,35 +262,20 @@ jobs:
           codesign --verify --strict opengeni-browserd-arm64
           lipo -create opengeni-browserd-x64 opengeni-browserd-arm64 \
             -output "opengeni-browserd-${{ matrix.target }}"
-          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
-          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-x64 \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
-          OPENGENI_BROWSERD_TARGET_ARCH=arm64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-arm64 \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          lipo -create \
-            packages/browserd/dist/opengeni-agent-browser-x64 \
-            packages/browserd/dist/opengeni-agent-browser-arm64 \
-            -output "opengeni-agent-browser-${{ matrix.target }}"
           bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun packages/browserd/scripts/stage-cua-runtime.ts arm64
           chmod 0755 \
             "opengeni-browserd-${{ matrix.target }}" \
-            "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-x64" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-x64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/x86_64-apple-darwin/release/opengeni-computer-native" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/x64/embedded.rs" \
               cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-arm64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/opengeni-computer-native" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/arm64/embedded.rs" \
               cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
@@ -347,17 +324,11 @@ jobs:
             --outfile "opengeni-browserd-${{ matrix.target }}.exe"
           bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
           bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
-          OPENGENI_BROWSERD_TARGET_PLATFORM=win32 \
-          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}.exe" \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}.exe" .
           workspace_windows="$(pwd -W)"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$workspace_windows\\opengeni-browserd-${{ matrix.target }}.exe" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$workspace_windows\\opengeni-agent-browser-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$workspace_windows\\opengeni-computer-native-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$workspace_windows\\packages\\browserd\\dist\\cua\\x64\\embedded.rs" \
               cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
@@ -374,7 +345,7 @@ jobs:
         run: |
           set -euo pipefail
           shipped=("${{ matrix.asset }}" "opengeni-computer-native-${{ matrix.target }}.exe")
-          for helper in "opengeni-browserd-${{ matrix.target }}.exe" "opengeni-agent-browser-${{ matrix.target }}.exe"; do
+          for helper in "opengeni-browserd-${{ matrix.target }}.exe"; do
             if [ -f "$helper" ]; then shipped+=("$helper"); fi
           done
           bun scripts/check-windows-binary-imports.ts "${shipped[@]}"
@@ -468,7 +439,6 @@ jobs:
           cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
           chmod 0755 "$APP/Contents/MacOS/opengeni-agent"
           cp "opengeni-browserd-${{ matrix.target }}" "$APP/Contents/Helpers/opengeni-browserd"
-          cp "opengeni-agent-browser-${{ matrix.target }}" "$APP/Contents/Helpers/agent-browser"
           cp "opengeni-computer-native-${{ matrix.target }}" \
             "$APP/Contents/Helpers/opengeni-computer-native"
           cp agent/install/OpenGeni-Agent.icns "$APP/Contents/Resources/OpenGeni-Agent.icns"
@@ -518,7 +488,6 @@ jobs:
           for executable in \
             "Contents/MacOS/opengeni-agent" \
             "Contents/Helpers/opengeni-browserd" \
-            "Contents/Helpers/agent-browser" \
             "Contents/Helpers/opengeni-computer-native"
           do
             if [ ! -x "$VERIFY_DIR/$APP/$executable" ]; then
@@ -558,7 +527,6 @@ jobs:
           $files = @(
             "${{ matrix.asset }}",
             "opengeni-browserd-${{ matrix.target }}.exe",
-            "opengeni-agent-browser-${{ matrix.target }}.exe",
             "opengeni-computer-native-${{ matrix.target }}.exe"
           ) | Where-Object { Test-Path $_ } | ForEach-Object { (Resolve-Path $_).Path }
           "files=$($files -join ',')" >> $env:GITHUB_OUTPUT
@@ -629,7 +597,6 @@ jobs:
           fi
           for companion in \
             "opengeni-browserd-${{ matrix.target }}"* \
-            "opengeni-agent-browser-${{ matrix.target }}"* \
             "opengeni-computer-native-${{ matrix.target }}"*
           do
             [ -f "$companion" ] || continue
@@ -656,7 +623,6 @@ jobs:
             OpenGeni-Agent.app.zip.sha256
             OpenGeni-Agent.app.zip.minisig
             opengeni-browserd-${{ matrix.target }}*
-            opengeni-agent-browser-${{ matrix.target }}*
             opengeni-computer-native-${{ matrix.target }}*
           if-no-files-found: error
 

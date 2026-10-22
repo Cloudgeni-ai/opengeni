@@ -267,7 +267,7 @@ describe("computer session and action text", () => {
         "2 targets:",
         'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
         'window window:2 "Chrome" pid 7 at 0,0 size 300x400 off screen',
-        "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.",
+        "A window marked off screen, such as one on another Space or a full-screen app, can be neither captured nor read until it is back on screen. Minimized windows and windows of hidden apps are not marked: reading one brings it back on screen behind the person's front window.",
       ].join("\n"),
     );
     expect(computerTargetsText([target])).not.toContain("off screen");

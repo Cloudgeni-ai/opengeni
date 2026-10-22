@@ -342,7 +342,7 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 9] {
+fn host_gauges() -> [HostGauge; 10] {
     [
         (
             "compute_fleet_host_memory_bytes",
@@ -353,6 +353,11 @@ fn host_gauges() -> [HostGauge; 9] {
             "compute_fleet_host_memory_free_bytes",
             "Memory a host can still promise to sandboxes that wake, beyond its buffer, as it last reported.",
             |host| bytes(host.capacity.memory_free_mib),
+        ),
+        (
+            "compute_fleet_host_memory_reclaimable_bytes",
+            "Memory a host frees at once for a wake by ending idle VM processes whose state is saved, which placement counts as free, as it last reported.",
+            |host| bytes(host.capacity.memory_reclaimable_mib),
         ),
         (
             "compute_fleet_host_cpu_cores",

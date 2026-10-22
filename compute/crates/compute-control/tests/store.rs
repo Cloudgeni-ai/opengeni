@@ -26,6 +26,7 @@ fn random() -> u64 {
 fn capacity() -> Capacity {
     Capacity {
         memory_free_mib: 1024,
+        memory_reclaimable_mib: 0,
         cpu_millis: 4000,
         cpu_free_millis: 4000,
         disk_free_mib: 1024,
@@ -138,7 +139,7 @@ async fn registration<S: Store>(store: S) {
         host: host.0,
         epoch,
         seq: 1,
-        capacity: capacity(),
+        capacity: Some(capacity()),
     };
     assert!(
         store
@@ -146,6 +147,22 @@ async fn registration<S: Store>(store: S) {
             .await
             .unwrap()
     );
+    // A restarted agent renews while it takes its sandboxes back, before
+    // it can say what it can take on: the capacity last heard stays.
+    let starting = Renew {
+        seq: 2,
+        capacity: None,
+        ..renew.clone()
+    };
+    assert!(
+        store
+            .renew(&starting, std::slice::from_ref(&name))
+            .await
+            .unwrap()
+    );
+    let hosts = store.hosts_changed(0).await.unwrap();
+    let row = hosts.iter().find(|row| row.id == host).unwrap();
+    assert_eq!((row.seq, &row.capacity), (2, &capacity()));
     assert!(
         !store
             .renew(&renew, &["someone-else.example".into()])

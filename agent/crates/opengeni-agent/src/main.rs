@@ -968,7 +968,11 @@ fn register_hosted_native_host() {
         warn!("no home directory; the attached-browser bridge is not registered");
         return;
     };
-    match browser_bridge::install_native_host_manifests(binary, &home) {
+    match browser_bridge::install_native_host_manifests(
+        binary,
+        &home,
+        &browser_bridge::extension_ids_from_env(),
+    ) {
         Ok(manifests) => {
             for manifest in manifests {
                 info!(path = %manifest.display(), "registered Chrome Native Messaging host");
@@ -990,6 +994,7 @@ fn attach_browser_controller(
         Ok(manager) => {
             let manager = Arc::new(manager.with_update_drain(update_drain));
             manager.spawn_empty_controller_reaper();
+            manager.spawn_detached_browser_sweep();
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),

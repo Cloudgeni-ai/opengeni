@@ -159,18 +159,13 @@ function bakedContentType(asset: string): string {
 async function readBaked(asset: string): Promise<ArrayBuffer | null> {
   const url = new URL(asset, BAKED_DIR);
   const runtime =
-    /^(?:opengeni-agent-browser|opengeni-computer-native|opengeni-browserd|opengeni-agent)-(.+?)(?:\.(?:sha256|minisig))?$/.exec(
+    /^(?:opengeni-computer-native|opengeni-browserd|opengeni-agent)-(.+?)(?:\.(?:sha256|minisig))?$/.exec(
       asset,
     );
   if (runtime) {
     const target = runtime[1]!;
-    const cohort = [
-      "opengeni-agent",
-      "opengeni-browserd",
-      "opengeni-agent-browser",
-      "opengeni-computer-native",
-    ].flatMap((component) =>
-      ["", ".sha256", ".minisig"].map((suffix) => `${component}-${target}${suffix}`),
+    const cohort = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].flatMap(
+      (component) => ["", ".sha256", ".minisig"].map((suffix) => `${component}-${target}${suffix}`),
     );
     const members = await Promise.all(
       cohort.map(async (name) => {

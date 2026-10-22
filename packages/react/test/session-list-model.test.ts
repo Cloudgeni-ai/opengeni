@@ -10,6 +10,7 @@ import {
   recentSessionStatus,
   recentSessionsForHome,
   relativeTimeLabel,
+  sessionHasUpcomingSchedule,
   sessionRepoLabel,
 } from "../src/session-list-model";
 import { createOpenGeniText } from "../src/messages/runtime";
@@ -72,6 +73,11 @@ describe("session-list-model", () => {
     expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
     expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
     expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");
+    // Calendar days in local time, as the long form counts them: from 20:00
+    // three days back to 12:00 today is 2 days 16 hours, and reads 3d.
+    const localNoon = new Date(2026, 9, 3, 12, 0);
+    const threeEveningsAgo = new Date(2026, 8, 30, 20, 0).toISOString();
+    expect(relativeTimeLabel(englishText, threeEveningsAgo, localNoon)).toBe("3d");
     expect(relativeTimeLabel(englishText, "not a date", now)).toBe("");
   });
 
@@ -223,5 +229,23 @@ describe("applySessionPinToLists", () => {
     );
     expect(ids(restored)).toEqual(ids(lists));
     expect(restored.sessions[0]).toMatchObject({ pinned: false, pinVersion: 0 });
+  });
+});
+
+describe("sessionHasUpcomingSchedule", () => {
+  test("only a schedule that can still fire shows as upcoming", () => {
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: true })).toBe(
+      true,
+    );
+    // Paused, or a one-time schedule whose time passed: still linked, not upcoming.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    expect(sessionHasUpcomingSchedule({ hasSchedules: false, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    // Servers that predate the upcoming flag keep the earlier meaning.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
+    expect(sessionHasUpcomingSchedule({})).toBe(false);
   });
 });

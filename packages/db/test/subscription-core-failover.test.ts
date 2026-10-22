@@ -47,7 +47,7 @@ test("B1 mapping diagnostic is independent of capacity, readiness and authorizat
   expect(missingCrossProviderModelMapping(input)).toBe(true);
   input.settings.fallbackOrder = { "home/model": ["target/model"] };
   expect(missingCrossProviderModelMapping(input)).toBe(false);
-  input.settings.providers = { target: { enabled: false, useOrganizationAccounts: true } };
+  input.settings.providers = { target: { enabled: false } };
   input.workspace.allowedModelIds = ["home/model"];
   expect(missingCrossProviderModelMapping(input)).toBe(false);
   input.settings.fallbackOrder = { "home/model": ["target/unknown"] };

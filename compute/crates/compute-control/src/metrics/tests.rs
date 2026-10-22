@@ -27,6 +27,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
         state,
         capacity: Reported {
             memory_free_mib: 29_000,
+            memory_reclaimable_mib: 3_000,
             cpu_millis: 6_500,
             cpu_free_millis: 6_372,
             disk_free_mib: 90_000,
@@ -64,6 +65,11 @@ fn only_the_leader_reports_the_fleet() {
         "compute_fleet_host_memory_free_bytes{host_name=\"hosts-a\"}",
     );
     assert_eq!(free, Some(29_000.0 * 1_048_576.0));
+    let reclaimable = value(
+        &text,
+        "compute_fleet_host_memory_reclaimable_bytes{host_name=\"hosts-a\"}",
+    );
+    assert_eq!(reclaimable, Some(3_000.0 * 1_048_576.0));
     assert_eq!(
         value(
             &text,

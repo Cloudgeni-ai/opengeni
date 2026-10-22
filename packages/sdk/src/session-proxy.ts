@@ -7,6 +7,7 @@ import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces"
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type {
+  AccessContext,
   CreateSessionRequest,
   FileResourceRef,
   LatencyMode,
@@ -328,6 +329,37 @@ export type SessionProxyHandlerOptions = {
    */
   sites?: boolean | undefined;
   /**
+   * Let the product's Excel add-in connect the open workbook for the signed-in
+   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
+   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
+   * user in the resolved workspace; agents working for them there reach it with
+   * `excel_run`. The ticket authenticates the add-in's WebSocket to
+   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
+   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
+   * Explicit opt-in, default false.
+   */
+  office?: boolean | undefined;
+  /**
+   * Serve the packaged session app (`SessionApp` from
+   * `@opengeni/react/session-app`, with `apiBaseUrl` set to this proxy) besides
+   * the conversation components. Explicit opt-in, default false.
+   *
+   * Every route above keeps its rules (this proxy's `createSession` hook, the
+   * message hooks, the model, upload, voice, artifact and file switches). On
+   * top of them:
+   *
+   * - `GET /v1/access/me` and `GET /v1/workspaces` answer with the resolved
+   *   user's access to the resolved workspace only.
+   * - Other `GET` routes in the resolved workspace, and in a chat the user may
+   *   open (`authorizeSession`), are read as the resolved user, so Opengeni's
+   *   permissions for that user decide what they see.
+   * - A short list of the app's own writes passes as the resolved user:
+   *   pinning a chat, moving it to a project, managing projects and a chat's
+   *   tool approval settings. Every other write is refused.
+   * - Catalog logos are served from the Opengeni API.
+   */
+  sessionApp?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session Opengeni lets that user read in the workspace (shared
@@ -431,6 +463,8 @@ export function createSessionProxyHandler(
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const sitesEnabled = options.sites === true;
+  const officeEnabled = options.office === true;
+  const sessionAppEnabled = options.sessionApp === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -475,6 +509,21 @@ export function createSessionProxyHandler(
         return errorJson(401, "user_required", "Authentication required.");
       }
       const url = new URL(request.url);
+      if (sessionAppEnabled && method === "GET") {
+        // Catalog logos the session app shows beside connectors and tools.
+        const asset = catalogAssetPath(url.pathname, options.basePath);
+        if (asset) {
+          try {
+            const blob = await service.downloadCatalogAsset(asset, { signal: request.signal });
+            return new Response(blob, {
+              headers: { "Content-Type": blob.type, "Cache-Control": "public, max-age=3600" },
+            });
+          } catch {
+            // Missing, malformed or not an image: the app shows its fallback mark.
+            return errorJson(404, "route_not_allowed", "Not found.");
+          }
+        }
+      }
       const segments = routeSegments(url.pathname, options.basePath);
       if (!segments) return errorJson(404, "route_not_allowed", "Not found.");
 
@@ -683,6 +732,45 @@ export function createSessionProxyHandler(
         );
       };
       const [root, ...rest] = segments;
+      // Session app reads and its listed writes, as the resolved user. The
+      // response passes through unread: JSON, an event stream or a file.
+      const passThrough = async (path: string, body?: Record<string, unknown>) => {
+        const search = new URLSearchParams(query).toString();
+        const upstream = await client.fetchApi(client.apiUrl(search ? `${path}?${search}` : path), {
+          method,
+          headers: {
+            Accept: request.headers.get("accept") ?? "application/json",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          signal: request.signal,
+        });
+        // Opengeni's own answer, errors included, with only neutral headers.
+        const headers = new Headers({ "Cache-Control": "no-store" });
+        for (const name of PASS_THROUGH_HEADERS) {
+          const value = upstream.headers.get(name);
+          if (value !== null) headers.set(name, value);
+        }
+        return new Response(upstream.body as BodyInit | null, {
+          status: upstream.status,
+          headers,
+        });
+      };
+      // The app's bootstrap: only the resolved workspace, never the user's
+      // other workspaces or the key's own authority.
+      if (sessionAppEnabled && method === "GET" && root === "workspaces" && rest.length === 0) {
+        const workspaces = await client.listWorkspaces();
+        return json(workspaces.filter((workspace) => workspace.id === workspaceId));
+      }
+      if (
+        sessionAppEnabled &&
+        method === "GET" &&
+        root === "access" &&
+        rest.length === 1 &&
+        rest[0] === "me"
+      ) {
+        return json(scopedAccessContext(await client.getAccessContext(), workspaceId));
+      }
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
           // The browser speaks this proxy's contract, not the upstream deployment's:
@@ -806,6 +894,16 @@ export function createSessionProxyHandler(
           reject(403, "control_not_allowed", "Only workspace resume is available.");
         }
         return json(await client.requestJson("POST", `${base}/inference-control`, body));
+      }
+
+      if (area === "office" && officeEnabled && tail.length === 1) {
+        if (tail[0] === "workbook-tickets" && method === "POST") {
+          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
+        }
+        if (tail[0] === "workbooks" && method === "GET") {
+          return await read(`${base}/office/workbooks`);
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
@@ -1006,7 +1104,17 @@ export function createSessionProxyHandler(
         });
       }
 
-      if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
+      if (area !== "sessions") {
+        if (sessionAppEnabled && area !== undefined && !PROXY_WORKSPACE_AREAS.has(area)) {
+          const route = `${method} ${[area, ...tail].join("/")}`;
+          const path = `${base}/${[area, ...tail].join("/")}`;
+          if (method === "GET") return await passThrough(path);
+          if (SESSION_APP_WORKSPACE_WRITES.some((pattern) => pattern.test(route))) {
+            return await passThrough(path, await readJsonBody(request, maxBodyBytes, true));
+          }
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
+      }
 
       if (tail.length === 0 && method === "GET") {
         if (!sessionList) return errorJson(404, "route_not_allowed", "Not found.");
@@ -1276,6 +1384,14 @@ export function createSessionProxyHandler(
       ) {
         return json(await client.requestJson("POST", `${session}/queue/${op[1]}/${op[2]}`, body));
       }
+      if (sessionAppEnabled && !PROXY_SESSION_OPERATIONS.has(op[0] ?? "")) {
+        // authorizeSession above already admitted this chat.
+        const path = `${session}/${op.join("/")}`;
+        if (method === "GET") return await passThrough(path);
+        if (SESSION_APP_SESSION_WRITES.some((pattern) => pattern.test(route))) {
+          return await passThrough(path, body);
+        }
+      }
       return errorJson(404, "route_not_allowed", "Not found.");
     } catch (error) {
       return errorResponse(error, rejectedKeyNotice);
@@ -1288,6 +1404,109 @@ export function createSessionProxyHandler(
  * attributes a verb only to the routes that actually forward it.
  */
 const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/** Workspace areas this proxy serves itself; `sessionApp` never widens them. */
+const PROXY_WORKSPACE_AREAS: ReadonlySet<string> = new Set([
+  "sessions",
+  "usage",
+  "model-catalog",
+  "realtime-model-catalog",
+  "live-events",
+  "inference-control",
+  "office",
+  "files",
+  "artifacts",
+  "transcriptions",
+  "editable-artifacts",
+  "published-artifacts",
+  // Rosters, credentials, budgets and administration stay out of the browser
+  // even when Opengeni would let the user read them.
+  "access",
+  "allowance",
+  "api-keys",
+  "auth-runs",
+  "credential-provider",
+  "enrollments",
+  "external-members",
+  "identity-links",
+  "insights",
+  "member-candidates",
+  "members",
+  "session-tenancy",
+  "subscription-usage-pools",
+  "user-resource-authorities",
+  "vault-providers",
+  "vaults",
+  "webhooks",
+]);
+
+/** Chat routes this proxy serves itself; `sessionApp` never widens them. */
+const PROXY_SESSION_OPERATIONS: ReadonlySet<string> = new Set([
+  "",
+  "archive",
+  "attention",
+  "events",
+  "steer",
+  "queue",
+  "composer-draft",
+  "control",
+  "human-input-requests",
+  "goal",
+  "realtime",
+  "fs",
+  "artifacts",
+]);
+
+/** The session app's own writes in the workspace, as the resolved user. */
+const SESSION_APP_WORKSPACE_WRITES: readonly RegExp[] = [
+  /^PUT new-session-draft$/,
+  /^POST channels$/,
+  /^(PATCH|DELETE) channels\/[^/]+$/,
+];
+
+/** The session app's own writes in a chat, as the resolved user. */
+const SESSION_APP_SESSION_WRITES: readonly RegExp[] = [
+  /^PUT pin$/,
+  /^PUT channel$/,
+  /^PUT tool-policy$/,
+  /^PATCH mcp-servers\/[^/]+\/approval-policy$/,
+];
+
+/** Response headers a passed-through read or write keeps. */
+const PASS_THROUGH_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-disposition",
+  "etag",
+  "last-modified",
+  SESSION_SEQUENCE_HEADER,
+] as const;
+
+/** The user's access to the resolved workspace only, without key authority. */
+function scopedAccessContext(access: AccessContext, workspaceId: string): AccessContext {
+  const workspaceGrants = access.workspaceGrants.filter(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const accountIds = new Set(workspaceGrants.map((grant) => grant.accountId));
+  const { credential: _credential, ...rest } = access;
+  return {
+    ...rest,
+    workspaceGrants,
+    accountGrants: access.accountGrants.filter((grant) => accountIds.has(grant.accountId)),
+    defaultWorkspaceId: workspaceGrants.length > 0 ? workspaceId : null,
+    defaultAccountId: workspaceGrants[0]?.accountId ?? null,
+  };
+}
+
+/** `catalog-assets/...` under this proxy's base path, or null. */
+function catalogAssetPath(pathname: string, basePath: string | undefined): string | null {
+  const prefix = `${basePath !== undefined ? basePath.replace(/\/+$/, "") : ""}/v1/catalog-assets/`;
+  const start = basePath !== undefined ? 0 : pathname.indexOf("/v1/catalog-assets/");
+  if (start < 0 || !pathname.startsWith(prefix, start)) return null;
+  const asset = pathname.slice(start + prefix.length);
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]*(\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/.test(asset)) return null;
+  return `catalog-assets/${asset}`;
+}
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 

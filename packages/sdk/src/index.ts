@@ -233,6 +233,7 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
+export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
   ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
@@ -965,6 +966,7 @@ export type {
   CodexConnectStart,
   CodexConnectPoll,
   SuperGrokAccount,
+  SubscriptionAccountReach,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
   SuperGrokAllocatorUpdate,
@@ -1326,6 +1328,7 @@ export type {
   SessionQueueSnapshot,
   SessionControlResponse,
   SessionRetryRequest,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryProjection,

@@ -306,9 +306,12 @@ export async function resolveWorkspaceCatalogSettings(
   // expose transactions; keep that narrow test port compatible.
   const supportsOrganizationProviderReads =
     typeof (db as Database & { transaction?: unknown }).transaction === "function";
+  // Response pages often contain many sessions using the same model. Retention
+  // is a set of model identities, not one live catalog read per session row.
+  // Preserve first-seen order and deduplicate the singular compatibility field
+  // too; the result is local to this resolution, never reused across requests.
   const retainedProductModelIds = [
-    ...(input.retainedProductModelIds ?? []),
-    input.retainedProductModelId,
+    ...new Set([...(input.retainedProductModelIds ?? []), input.retainedProductModelId]),
   ];
   const retainedGatewayUpstreamModelIds = retainedProductModelIds.flatMap((productModelId) =>
     productModelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)

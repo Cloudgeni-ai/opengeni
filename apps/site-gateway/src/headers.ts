@@ -65,7 +65,7 @@ export function shellCsp(nonce: string, options: { turnstile: boolean }): string
 }
 
 /** CSP for the gateway's own small pages (neutral, takedown, report, errors): no script at all. */
-export function pageCsp(nonce: string): string {
+export function pageCsp(nonce: string, frameable: "none" | "self" = "none"): string {
   return [
     "default-src 'none'",
     `style-src 'nonce-${nonce}'`,
@@ -73,7 +73,7 @@ export function pageCsp(nonce: string): string {
     "base-uri 'none'",
     "form-action 'self'",
     "object-src 'none'",
-    "frame-ancestors 'none'",
+    `frame-ancestors '${frameable}'`,
   ].join("; ");
 }
 

@@ -54,6 +54,12 @@ export const SELFHOSTED_IDEMPOTENT_READONLY_OPS: ReadonlySet<string> = new Set([
  */
 export const SELFHOSTED_DRAINING_MAX_RETRIES = 3;
 export const SELFHOSTED_EXEC_DRAINING_MAX_RETRIES = 10;
+/** The agent marks the refusals it sends while a verified self-update drains with
+ *  this `detail.reason`. The refused op never started, and the successor process
+ *  accepts it seconds later, so every op kind gets the patient exec budget and
+ *  rides across the update instead of failing the caller's tool call. */
+export const SELFHOSTED_AGENT_UPDATE_DRAIN_REASON = "agent_update";
+export const SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES = SELFHOSTED_EXEC_DRAINING_MAX_RETRIES;
 /** A read-only op that timed out is retried at most once (see the at-least-once
  *  note above — even a read gets a single re-issue, not an unbounded loop). */
 export const SELFHOSTED_TIMEOUT_MAX_RETRIES = 1;
@@ -155,8 +161,14 @@ export function decideSelfhostedRetry(input: {
   if (error.draining) {
     // exec is patient (the flat 8-permit pool needs longer than 5s to free a slot);
     // every other op keeps the short budget so fs/git latency stays snappy.
+    // A self-update drain ends with the successor accepting the same op, so
+    // it waits as patiently as exec whatever the op kind.
     const maxDrainingRetries =
-      opKind === "exec" ? SELFHOSTED_EXEC_DRAINING_MAX_RETRIES : SELFHOSTED_DRAINING_MAX_RETRIES;
+      error.detail.reason === SELFHOSTED_AGENT_UPDATE_DRAIN_REASON
+        ? SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES
+        : opKind === "exec"
+          ? SELFHOSTED_EXEC_DRAINING_MAX_RETRIES
+          : SELFHOSTED_DRAINING_MAX_RETRIES;
     if (drainingRetries >= maxDrainingRetries) {
       return { action: "fail" };
     }

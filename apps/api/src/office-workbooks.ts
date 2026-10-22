@@ -1,17 +1,23 @@
 // Live Excel workbooks.
 //
-// The Opengeni Office add-in, open in a person's workbook, holds one WebSocket
-// to an API instance. Agents working for that person run Office.js code in the
-// workbook (the `excel_run` tool) through it. Nothing is stored: a workbook is
-// reachable exactly while its add-in is connected.
+// An Office add-in, open in a person's workbook, holds one WebSocket to an API
+// instance. Agents working for that person in the workspace the add-in
+// connected to run Office.js code in the workbook (the `excel_run` tool)
+// through it. Nothing is stored: a workbook is reachable exactly while its
+// add-in is connected.
+//
+// A workbook belongs to one person in one workspace. Products that embed
+// Opengeni often act for every user through one service identity, so the
+// workspace (one per tenant) is what keeps one tenant's workbooks away from
+// another's agents.
 //
 // Routing uses the bus's NATS connection, so any API instance reaches a socket
 // held by another:
 // - `office.workbook.<connectionId>.run`: request/reply to the instance that
 //   holds that socket.
 // - `office.workbooks.<ownerKey>.presence`: an instance lists a person's open
-//   workbooks by publishing one query and collecting every instance's answer
-//   for a short window.
+//   workbooks in a workspace by publishing one query and collecting every
+//   instance's answer for a short window.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { EventBus, OpStreamConnection } from "@opengeni/events";
 import type {
@@ -64,21 +70,29 @@ export type OfficeRunOutcome =
   /** The code was delivered but no result came back in time; it may have run. */
   | { kind: "unknown"; reason: string };
 
+/** Who a workbook belongs to: one person in one workspace. */
+export type OfficeWorkbookOwner = { subjectId: string; workspaceId: string };
+
+function sameOwner(a: OfficeWorkbookOwner, b: OfficeWorkbookOwner): boolean {
+  return a.subjectId === b.subjectId && a.workspaceId === b.workspaceId;
+}
+
 // ---------------------------------------------------------------------------
 // Tickets: the socket is authenticated by a short-lived signed ticket minted by
 // an ordinary authenticated HTTP request, so every API auth mode works alike.
 // ---------------------------------------------------------------------------
 
-type TicketClaims = { v: 1; sub: string; exp: number; n: string };
+type TicketClaims = { v: 2; sub: string; ws: string; exp: number; n: string };
 
 export function mintOfficeWorkbookTicket(
   secret: string,
-  subjectId: string,
+  owner: OfficeWorkbookOwner,
   now = Date.now(),
 ): { ticket: string; expiresAt: string } {
   const claims: TicketClaims = {
-    v: 1,
-    sub: subjectId,
+    v: 2,
+    sub: owner.subjectId,
+    ws: owner.workspaceId,
     exp: now + TICKET_TTL_MS,
     n: randomBytes(12).toString("base64url"),
   };
@@ -89,12 +103,12 @@ export function mintOfficeWorkbookTicket(
   };
 }
 
-/** The ticket's subject, or null when it is forged, malformed or expired. */
+/** The ticket's owner, or null when it is forged, malformed or expired. */
 export function verifyOfficeWorkbookTicket(
   secret: string,
   ticket: string,
   now = Date.now(),
-): string | null {
+): OfficeWorkbookOwner | null {
   const [body, signature, extra] = ticket.split(".");
   if (!body || !signature || extra !== undefined) return null;
   const expected = Buffer.from(ticketSignature(secret, body), "utf8");
@@ -102,9 +116,10 @@ export function verifyOfficeWorkbookTicket(
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
   try {
     const claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as TicketClaims;
-    if (claims.v !== 1 || typeof claims.sub !== "string" || !claims.sub) return null;
+    if (claims.v !== 2 || typeof claims.sub !== "string" || !claims.sub) return null;
+    if (typeof claims.ws !== "string" || !claims.ws) return null;
     if (typeof claims.exp !== "number" || claims.exp <= now) return null;
-    return claims.sub;
+    return { subjectId: claims.sub, workspaceId: claims.ws };
   } catch {
     return null;
   }
@@ -116,19 +131,23 @@ function ticketSignature(secret: string, body: string): string {
     .digest("base64url");
 }
 
-/** A NATS-safe token for a subject id (which may contain `.` or `:`). */
-function ownerKey(subjectId: string): string {
-  return createHash("sha256").update(subjectId, "utf8").digest("hex").slice(0, 40);
+/** A NATS-safe token for an owner (subject ids may contain `.` or `:`). */
+function ownerKey(owner: OfficeWorkbookOwner): string {
+  return createHash("sha256")
+    .update(`${owner.workspaceId}\n${owner.subjectId}`, "utf8")
+    .digest("hex")
+    .slice(0, 40);
 }
 
 const runSubject = (connectionId: string) => `office.workbook.${connectionId}.run`;
-const presenceSubject = (subjectId: string) => `office.workbooks.${ownerKey(subjectId)}.presence`;
+const presenceSubject = (owner: OfficeWorkbookOwner) =>
+  `office.workbooks.${ownerKey(owner)}.presence`;
 
 // ---------------------------------------------------------------------------
 // Relay: this instance's sockets plus cross-instance routing.
 // ---------------------------------------------------------------------------
 
-type RunRequest = { owner: string; code: string; timeoutMs: number };
+type RunRequest = { owner: OfficeWorkbookOwner; code: string; timeoutMs: number };
 
 export class OfficeWorkbookRelay {
   private readonly local = new Map<string, OfficeWorkbookConnection>();
@@ -141,12 +160,14 @@ export class OfficeWorkbookRelay {
     private readonly options: { presenceWindowMs?: number } = {},
   ) {}
 
-  /** The person's open workbooks across every API instance, newest first. */
-  async list(subjectId: string): Promise<OfficeWorkbook[]> {
+  /** The person's open workbooks in a workspace across every API instance, newest first. */
+  async list(owner: OfficeWorkbookOwner): Promise<OfficeWorkbook[]> {
     const found = new Map<string, OfficeWorkbook>();
     for (const connection of this.local.values()) {
       const workbook = connection.describe();
-      if (connection.subjectId === subjectId && workbook) found.set(workbook.id, workbook);
+      if (connection.owner && sameOwner(connection.owner, owner) && workbook) {
+        found.set(workbook.id, workbook);
+      }
     }
     const nats = this.nats();
     if (nats) {
@@ -160,7 +181,7 @@ export class OfficeWorkbookRelay {
         }
       })().catch(() => undefined);
       await nats.flush?.();
-      nats.publish(presenceSubject(subjectId), TEXT.encode(JSON.stringify({ reply: inbox })));
+      nats.publish(presenceSubject(owner), TEXT.encode(JSON.stringify({ reply: inbox })));
       await new Promise((resolve) =>
         setTimeout(resolve, this.options.presenceWindowMs ?? PRESENCE_WINDOW_MS),
       );
@@ -170,20 +191,20 @@ export class OfficeWorkbookRelay {
     return [...found.values()].sort((a, b) => b.connectedAt.localeCompare(a.connectedAt));
   }
 
-  /** Run Office.js code in one of the person's workbooks. */
+  /** Run Office.js code in one of the person's workbooks in a workspace. */
   async run(
-    subjectId: string,
+    owner: OfficeWorkbookOwner,
     workbookId: string,
     code: string,
     timeoutMs: number,
   ): Promise<OfficeRunOutcome> {
     const local = this.local.get(workbookId);
     if (local) {
-      return local.subjectId === subjectId
+      return local.owner && sameOwner(local.owner, owner)
         ? await local.run(code, timeoutMs)
         : { kind: "disconnected" };
     }
-    const request: RunRequest = { owner: subjectId, code, timeoutMs };
+    const request: RunRequest = { owner, code, timeoutMs };
     try {
       const reply = await this.bus.request(
         runSubject(workbookId),
@@ -204,13 +225,17 @@ export class OfficeWorkbookRelay {
   }
 
   register(connection: OfficeWorkbookConnection): void {
+    const owner = connection.owner;
+    if (!owner) return;
     this.local.set(connection.id, connection);
     this.runSubscriptions.set(
       connection.id,
       this.bus.subscribeRequests(runSubject(connection.id), async (bytes) => {
         const request = JSON.parse(DECODE.decode(bytes)) as RunRequest;
         const outcome: OfficeRunOutcome =
-          request.owner === connection.subjectId && this.local.get(connection.id) === connection
+          isOwner(request.owner) &&
+          sameOwner(request.owner, owner) &&
+          this.local.get(connection.id) === connection
             ? await connection.run(
                 String(request.code),
                 clampTimeout(Number(request.timeoutMs) || OFFICE_RUN_DEFAULT_TIMEOUT_MS),
@@ -219,11 +244,11 @@ export class OfficeWorkbookRelay {
         return TEXT.encode(JSON.stringify(outcome));
       }),
     );
-    const key = ownerKey(connection.subjectId);
+    const key = ownerKey(owner);
     if (!this.presence.has(key)) {
       const nats = this.nats();
       if (nats) {
-        const subscription = nats.subscribe(presenceSubject(connection.subjectId));
+        const subscription = nats.subscribe(presenceSubject(owner));
         void (async () => {
           for await (const message of subscription) {
             let reply: unknown;
@@ -234,7 +259,7 @@ export class OfficeWorkbookRelay {
             }
             if (typeof reply !== "string" || !reply.startsWith("office.workbooks.reply.")) continue;
             const workbooks = [...this.local.values()]
-              .filter((each) => each.subjectId === connection.subjectId)
+              .filter((each) => each.owner && sameOwner(each.owner, owner))
               .flatMap((each) => {
                 const workbook = each.describe();
                 return workbook ? [workbook] : [];
@@ -248,15 +273,16 @@ export class OfficeWorkbookRelay {
   }
 
   unregister(connection: OfficeWorkbookConnection): void {
-    if (this.local.get(connection.id) !== connection) return;
+    const owner = connection.owner;
+    if (!owner || this.local.get(connection.id) !== connection) return;
     this.local.delete(connection.id);
     this.runSubscriptions.get(connection.id)?.();
     this.runSubscriptions.delete(connection.id);
     const stillHeld = [...this.local.values()].some(
-      (each) => each.subjectId === connection.subjectId,
+      (each) => each.owner && sameOwner(each.owner, owner),
     );
     if (!stillHeld) {
-      const key = ownerKey(connection.subjectId);
+      const key = ownerKey(owner);
       this.presence.get(key)?.();
       this.presence.delete(key);
     }
@@ -265,6 +291,15 @@ export class OfficeWorkbookRelay {
   private nats(): OpStreamConnection | null {
     return this.bus.getOpStreamConnection?.() ?? null;
   }
+}
+
+function isOwner(value: unknown): value is OfficeWorkbookOwner {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as OfficeWorkbookOwner).subjectId === "string" &&
+    typeof (value as OfficeWorkbookOwner).workspaceId === "string"
+  );
 }
 
 function parseWorkbooks(bytes: Uint8Array): OfficeWorkbook[] {
@@ -313,7 +348,7 @@ type PendingRun = {
 
 export class OfficeWorkbookConnection implements ApiWebSocketConnection {
   readonly id = randomBytes(16).toString("hex");
-  subjectId = "";
+  owner: OfficeWorkbookOwner | null = null;
   private socket: ApiWebSocketLike | null = null;
   private workbook: OfficeWorkbookInfo | null = null;
   private connectedAt = new Date().toISOString();
@@ -347,17 +382,17 @@ export class OfficeWorkbookConnection implements ApiWebSocketConnection {
     } catch {
       return this.fail(4400, "invalid_frame");
     }
-    if (!this.subjectId) {
+    if (!this.owner) {
       if (frame["type"] !== "hello") return this.fail(4400, "hello_required");
-      const subjectId =
+      const owner =
         typeof frame["ticket"] === "string"
           ? verifyOfficeWorkbookTicket(this.relay.ticketSecret, frame["ticket"])
           : null;
       const workbook = workbookInfo(frame["workbook"]);
-      if (!subjectId) return this.fail(4401, "invalid_ticket");
+      if (!owner) return this.fail(4401, "invalid_ticket");
       if (!workbook) return this.fail(4400, "invalid_workbook");
       if (this.helloTimer) clearTimeout(this.helloTimer);
-      this.subjectId = subjectId;
+      this.owner = owner;
       this.workbook = workbook;
       this.connectedAt = new Date().toISOString();
       this.relay.register(this);

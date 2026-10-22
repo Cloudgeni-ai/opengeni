@@ -30,6 +30,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -817,6 +818,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           managedSelfContextIdentityRef.current = acceptedManagedIdentity;
         }
         accessPrincipalIdRef.current = context.subjectId;
+        // Unsent answers to agent questions belong to this tab's principal: a
+        // different one forgets them before any session route can render.
+        claimHumanInputDraftOwner(context.subjectId);
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
         setManagedSelfContext(nextManagedSelfContext);
@@ -1030,6 +1034,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return null;
+      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -1316,6 +1321,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return false;
+      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -2144,6 +2150,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setWorkspaces([]);
       setAccessError(null);
     });
+    // The next person in this tab never sees this person's unsent answers.
+    forgetAllHumanInputDrafts();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
@@ -2302,6 +2310,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       return false;
     }
     accessPrincipalIdRef.current = nextAccessContext.subjectId;
+    claimHumanInputDraftOwner(nextAccessContext.subjectId);
     setAccessContext(nextAccessContext);
     setWorkspaces(nextWorkspaces);
     setManagedSelfContext(nextManagedSelfContext);

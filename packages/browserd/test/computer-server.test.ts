@@ -943,7 +943,6 @@ async function withServer(
   const directory = await mkdtemp("/tmp/og-computer-server-");
   const browserSupervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "browser-state"),
-    socketRootDirectory: join(directory, "browser-sockets"),
     createDriver: async () => {
       throw new Error("browser driver must not be used by computer routes");
     },

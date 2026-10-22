@@ -12,6 +12,7 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
  * columns current adapters project. */
 const sessionStorageMigrationTail = [
   "0888_session_list_invalidation.sql",
+  "0905_schedule_timing_session_list_hints.sql",
   "0649_session_content_archive.sql",
   "0650_session_archive_activity.sql",
   "0651_session_event_delta_folding.sql",

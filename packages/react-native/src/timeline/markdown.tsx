@@ -1,5 +1,6 @@
 import {
   createContext,
+  Fragment,
   useContext,
   useMemo,
   useRef,
@@ -21,6 +22,7 @@ import {
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
 import { Icon } from "./icon";
+import { isStandaloneLinkGroup } from "./markdown-standalone-links";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
@@ -464,18 +466,43 @@ function webRules(
   theme: NativeTimelineTheme,
   tone: "body" | "muted",
   onCopy?: (text: string) => void,
-  media: MarkdownMediaOptions = {},
+  media: MarkdownMediaOptions & MarkdownLinkOptions = {},
 ): RenderRules {
   const line = tone === "muted" ? 24 : 28;
   return {
     ...renderRules,
     // Every run of text is selectable, as on the web: a long press selects
-    // words (and, inside a timeline message, offers Add note).
-    textgroup: (node, children, _parent, styles) => (
-      <Text key={node.key} selectable style={styles.textgroup}>
-        {children}
-      </Text>
-    ),
+    // words (and, inside a timeline message, offers Add note). A standalone
+    // link the host drew as a block sits in a view instead, since a block
+    // nested in text does not lay out.
+    textgroup: (node, children, _parent, styles) =>
+      BLOCK_LINK_GROUPS.has(node) ? (
+        <View key={node.key}>{children}</View>
+      ) : (
+        <Text key={node.key} selectable style={styles.textgroup}>
+          {children}
+        </Text>
+      ),
+    link: (node, children, parent, styles, onLinkPress) => {
+      const href = node.attributes?.href;
+      if (
+        media.renderLink &&
+        typeof href === "string" &&
+        href &&
+        !parseOpenGeniLink(href) &&
+        !isReservedOpenGeniLink(href)
+      ) {
+        const group = parent[0];
+        const standalone = group !== undefined && isStandaloneLinkGroup(group, parent[1]);
+        const drawn = media.renderLink({ href, children, standalone });
+        if (drawn !== undefined) {
+          // Children render before their parent, so the group's rule sees this.
+          if (standalone && group) BLOCK_LINK_GROUPS.add(group);
+          return <Fragment key={node.key}>{drawn}</Fragment>;
+        }
+      }
+      return renderRules.link!(node, children, parent, styles, onLinkPress);
+    },
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {
       if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {
@@ -587,6 +614,36 @@ export interface MarkdownMediaOptions {
   renderInteractiveBlock?: ((block: NativeInteractiveBlock) => ReactNode) | undefined;
 }
 
+/**
+ * One ordinary link in an agent's Markdown that the host may draw itself: its
+ * own scheme (`myapp:order/42`), an in-app path, or a web URL. The native
+ * counterpart of the web `OpenGeniHostLink`.
+ */
+export type NativeHostLink = {
+  /** The destination exactly as the agent wrote it. It is not sanitized: check it before use. */
+  href: string;
+  /** The rendered link text (text nodes: draw it inside a `Text`). */
+  children: ReactNode;
+  /**
+   * The link is the only content of its paragraph or list item, so the host
+   * can draw it as a block (a card or preview) instead of inline text.
+   */
+  standalone: boolean;
+};
+
+export interface MarkdownLinkOptions {
+  /**
+   * Draw a host-owned link (web `renderLink`). Return `undefined` to keep the
+   * default link. Inline links sit inside text, so draw them with `Text`; a
+   * standalone link may be any block. Opengeni object links (`artifact:`,
+   * `sandbox:`) never reach it; they go to `onOpenGeniLink`.
+   */
+  renderLink?: ((link: NativeHostLink) => ReactNode | undefined) | undefined;
+}
+
+/** Text groups whose only link the host drew as a block, so they render as views. */
+const BLOCK_LINK_GROUPS = new WeakSet<object>();
+
 /** Whether the message ends inside an unclosed fence, and that fence's body. */
 export function trailingOpenFence(text: string): string | null {
   let open: { char: string; length: number; lines: string[] } | null = null;
@@ -675,7 +732,7 @@ function TrimmedMarkdown({
   streaming: boolean;
   onLinkPress?: ((url: string) => boolean) | undefined;
   onCopy?: ((text: string) => void) | undefined;
-  media: MarkdownMediaOptions;
+  media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
   const styles = useMemo(() => webMarkdownStyles(theme, tone), [theme, tone]);
@@ -707,7 +764,8 @@ export function createWebMarkdownRenderer(
     onCopy?: (text: string) => void;
     /** Opengeni links (sandbox files, artifacts, Sites); never handed to the OS. */
     onOpenGeniLink?: (target: OpenGeniLinkTarget) => void;
-  } & MarkdownMediaOptions = {},
+  } & MarkdownMediaOptions &
+    MarkdownLinkOptions = {},
 ): NativeMarkdownRenderer {
   const onLinkPress = (url: string): boolean => {
     const target = parseOpenGeniLink(url);
@@ -718,9 +776,10 @@ export function createWebMarkdownRenderer(
     return options.onLinkPress ? options.onLinkPress(url) : true;
   };
   // One stable object, so the memoized rules survive every streaming delta.
-  const media: MarkdownMediaOptions = {
+  const media: MarkdownMediaOptions & MarkdownLinkOptions = {
     renderImage: options.renderImage,
     renderInteractiveBlock: options.renderInteractiveBlock,
+    renderLink: options.renderLink,
   };
   return (text, { tone, streaming }): ReactNode =>
     text.trim() ? (

@@ -152,7 +152,7 @@ export function automaticRecoveryRetryNotice(projection: SandboxRecoveryProjecti
   if (projection.automaticLane === "fresh_workspace") {
     return "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.";
   }
-  const capturedAt = projection.checkpoint?.capturedAt;
+  const capturedAt = (projection.automaticCheckpoint ?? projection.checkpoint)?.capturedAt;
   return capturedAt
     ? `Retry will use the latest verified checkpoint from ${formatCheckpointTime(capturedAt)}. Newer files are unavailable.`
     : "Retry will use the latest verified checkpoint. Newer files are unavailable.";

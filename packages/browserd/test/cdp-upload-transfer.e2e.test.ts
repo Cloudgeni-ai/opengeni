@@ -4,11 +4,7 @@ import { mkdtemp, rm, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserLocator } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection, CdpProtocolError } from "../src/cdp";
 
 const e2e =
@@ -32,19 +28,9 @@ for (const mode of ["direct", "button", "multiple", "large", "too large"] as con
       const ids: string[] = paths.map(() => randomUUID());
       const browserSessionId = randomUUID(),
         controllerGeneration = randomUUID();
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: `upload_transfer_${randomUUID().slice(0, 8)}`,
-        sessionName: "s",
-        socketDirectory: join(directory, "s"),
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: join(directory, "profile"),
-        downloadDirectory: join(directory, "downloads"),
-        screenshotDirectory: join(directory, "screenshots"),
         headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
-        binary: await resolvePinnedAgentBrowserBinary(
-          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-            : {},
-        ),
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),

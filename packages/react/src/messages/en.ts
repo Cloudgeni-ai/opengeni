@@ -879,7 +879,10 @@ export const englishMessages = {
   "connectSetup.account": "Account",
   "connectSetup.accountLabel": "Account: {label}",
   "connectSetup.addingSelectedTools": "Adding selected tools…",
+  "connectSetup.finishingSetup": "Finishing setup…",
   "connectSetup.addSelectedTools": "Add selected tools",
+  "connectSetup.adminApprovalLink": "Admin approval link",
+  "connectSetup.afterTheyApproveConnectAgain": "After they approve, connect again.",
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
   "connectSetup.anOwnerThenConnectsThe":
@@ -905,12 +908,17 @@ export const englishMessages = {
   "connectSetup.connectionSetupCouldNotContinue":
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
+  "connectSetup.copyAdminApprovalLink": "Copy admin approval link",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
     'Don\'t see your organization? Only its owners can connect it. Choose "Install on another GitHub account" and pick the organization: GitHub lets you send its owners a request to approve.',
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
+  "connectSetup.microsoftAdminApprovalMaybe":
+    "Microsoft didn't grant access. If it said your organization needs an admin to approve {product}, a Microsoft 365 admin can approve it for everyone.",
+  "connectSetup.microsoftAdminApprovalRequired":
+    "Your organization needs a Microsoft 365 admin to approve {product} before you can connect.",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
@@ -920,6 +928,7 @@ export const englishMessages = {
   "connectSetup.openProviderVerificationPageNew": "Open provider verification page (new tab)",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
+  "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
   "connectSetup.setupExpired": "Setup expired",
@@ -1299,6 +1308,8 @@ export const englishMessages = {
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
+  "lib.format.accountUnavailable":
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
   "lib.format.modelUnavailable":
     "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
@@ -2688,6 +2699,74 @@ export const englishMessages = {
   "secretRefChip.secret": "Secret:",
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
+  "sessionAdmission.cantRecheckNote":
+    "Someone with permission to control this session can recheck after the issue is resolved.",
+  "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
+  "sessionAdmission.chooseMachine": "Choose machine",
+  "sessionAdmission.copyRequestTo": "Copy request to {owner}",
+  "sessionAdmission.genericBody":
+    "{product} couldn't start the next step. Your queued work is saved.",
+  "sessionAdmission.genericNext":
+    "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
+  "sessionAdmission.genericTitle": "Couldn't start",
+  "sessionAdmission.grantBody":
+    "A personal resource needed by this chat hasn't been authorized. Your queued work is saved.",
+  "sessionAdmission.grantNext":
+    "Ask its owner to grant access, or choose a resource you can use. Then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.grantTitle": "Resource permission needed",
+  "sessionAdmission.machineChangeFailed":
+    "The machine change could not be confirmed. Refresh and try again.",
+  "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
+  "sessionAdmission.machineChangedNext":
+    "Recheck access to try it on the selected machine. It will not retry automatically.",
+  "sessionAdmission.machineChangedTitle": "Machine changed",
+  "sessionAdmission.membershipBody":
+    "The person who started this work needs workspace access. Your queued work is saved.",
+  "sessionAdmission.membershipNext":
+    "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
+  "sessionAdmission.membershipTitle": "Workspace access needed",
+  "sessionAdmission.moving": "Moving…",
+  "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
+  "sessionAdmission.noMachineChoices":
+    "No workspace or cloud machine is available for this chat right now.",
+  "sessionAdmission.otherMachineDraftNext":
+    "Your draft stays here. Choose a machine you can use, or ask {owner} about sharing this machine with the workspace.",
+  "sessionAdmission.otherMachineExplanation":
+    "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
+  "sessionAdmission.otherMachineQueuedNext":
+    "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownMachineDraftNext":
+    "Your draft stays here. Choose a workspace or cloud machine, or ask a workspace admin to share this machine.",
+  "sessionAdmission.ownMachineExplanation":
+    "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
+  "sessionAdmission.ownMachineQueuedNext":
+    "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownerRequest":
+    "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
+  "sessionAdmission.pausedNote":
+    "This workstream is also paused. Use the existing Resume controls when you are ready; rechecking does not clear that pause.",
+  "sessionAdmission.permissionBody":
+    "The next step was blocked by a permission check. Your queued work is saved.",
+  "sessionAdmission.permissionNext":
+    "Check access to this chat's machine and resources with their owner or a workspace admin. After access changes, recheck to continue. It will not retry automatically.",
+  "sessionAdmission.permissionTitle": "Permission needed",
+  "sessionAdmission.preSendTitle": "Choose a machine before sending",
+  "sessionAdmission.recheckAccess": "Recheck access",
+  "sessionAdmission.recheckFailed":
+    "The recheck could not be confirmed. Check the session status before trying again.",
+  "sessionAdmission.rechecking": "Rechecking…",
+  "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
+  "sessionAdmission.refreshRequiredNote":
+    "Session controls changed. Refresh the status before rechecking.",
+  "sessionAdmission.refreshSessionStatus": "Refresh session status",
+  "sessionAdmission.refreshing": "Refreshing…",
+  "sessionAdmission.requestCopied": "Request copied",
+  "sessionAdmission.requestCopiedNote":
+    "Paste it into a message to the owner. Nothing has been sent.",
+  "sessionAdmission.savedMessageMachineNote":
+    "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
+  "sessionAdmission.theMachineOwner": "the machine owner",
+  "sessionAdmission.tryAgain": "Try again",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
   "sessionAgentsModel.idle": "Idle",

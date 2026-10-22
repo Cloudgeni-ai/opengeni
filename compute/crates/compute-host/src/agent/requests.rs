@@ -826,7 +826,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandboxes,
             steps,
             available_memory: self.available_memory,
-            reclaimable_memory: self.core.reclaimable_memory(),
+            reclaimable_memory: self.core.reclaimable_memory(self.now()),
             blocked: self
                 .blocked
                 .iter()

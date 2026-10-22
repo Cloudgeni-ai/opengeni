@@ -160,7 +160,7 @@ fn inputs_follow_file_contents() {
         networked: false,
         memory: String::new(),
         ready_port: 52,
-        hashes: Mutex::default(),
+        hashes: Hashes::default(),
     };
     let small = shape(1, 512);
     let before = sources.inputs(small).unwrap();
@@ -190,6 +190,123 @@ fn inputs_follow_file_contents() {
         before,
         "the same content again"
     );
+}
+
+/// A stored image is named by its id, the hash the cache checked it
+/// against: never read again, and unchanged by creates marking it used.
+#[tokio::test]
+async fn a_stored_image_is_named_by_its_id_and_never_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    let store = crate::store::Directory::new(dir.path().join("store"));
+    let image = store
+        .put_rootfs(&file("built.ext4", "an image"))
+        .await
+        .unwrap();
+    let rootfs = Arc::new(
+        Cache::open(
+            dir.path().join("rootfs"),
+            PoolConfig::UNUSED_AFTER,
+            crate::state::Ownership::detached(),
+        )
+        .unwrap(),
+    );
+    drop(rootfs.get(image, &store).await.unwrap());
+    let sources = Sources {
+        kernel: file("vmlinux", "kernel"),
+        base_image: file("base.img", "base one"),
+        rootfs: Arc::clone(&rootfs),
+        depends_on: Vec::new(),
+        boot_args: String::new(),
+        networked: false,
+        memory: String::new(),
+        ready_port: 52,
+        hashes: Hashes::default(),
+    };
+    let stored = Shape {
+        image: Some(image),
+        ..shape(1, 512)
+    };
+    let before = sources.inputs(stored).unwrap();
+    assert_eq!(before.files[1].path, rootfs.path(image));
+    assert_eq!(before.files[1].len, 8);
+    assert_eq!(
+        before.files[1].blake3,
+        blake3::hash(b"an image").to_hex().as_str()
+    );
+
+    // A create marks it used, which changes its metadata.
+    let modified = || {
+        fs::metadata(rootfs.path(image))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let unused = modified();
+    std::thread::sleep(Duration::from_millis(20));
+    drop(rootfs.hold(image).await.unwrap());
+    assert_ne!(modified(), unused);
+    assert_eq!(sources.inputs(stored).unwrap(), before);
+    assert!(!sources.hashes.knows(&rootfs.path(image)), "never read");
+}
+
+/// The next agent knows the hashes of the files unchanged since the last
+/// one read them, so it does not read them again, and forgets those of
+/// files changed since. A list it cannot read keeps none.
+#[test]
+fn hashes_are_kept_for_the_next_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let templates = dir.path().join("templates");
+    let file = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    let (kernel, base) = (file("vmlinux", "kernel"), file("base.img", "base one"));
+    let sources = |hashes| Sources {
+        kernel: kernel.clone(),
+        base_image: base.clone(),
+        rootfs: Arc::new(
+            Cache::open(
+                dir.path().join("rootfs"),
+                PoolConfig::UNUSED_AFTER,
+                crate::state::Ownership::detached(),
+            )
+            .unwrap(),
+        ),
+        depends_on: Vec::new(),
+        boot_args: String::new(),
+        networked: false,
+        memory: String::new(),
+        ready_port: 52,
+        hashes,
+    };
+    let small = shape(1, 512);
+    let first = sources(Hashes::load(&templates));
+    let kept = first.hashes.file().unwrap();
+    let before = first.inputs(small).unwrap();
+    assert!(kept.exists());
+    // The templates' directory holds it, and finding templates passes it
+    // by.
+    assert!(keep_fitting(&templates, &first).is_empty());
+    assert!(kept.exists());
+
+    fs::write(&kernel, "kernel two").unwrap();
+    let next = sources(Hashes::load(&templates));
+    assert!(next.hashes.knows(&base), "unchanged: not read again");
+    assert!(!next.hashes.knows(&kernel), "changed since: forgotten");
+    let after = next.inputs(small).unwrap();
+    assert_eq!(after.files[1], before.files[1]);
+    assert_ne!(after.files[0], before.files[0]);
+
+    fs::write(&kept, "not a list").unwrap();
+    let damaged = sources(Hashes::load(&templates));
+    assert!(!damaged.hashes.knows(&base));
+    assert_eq!(damaged.inputs(small).unwrap(), after);
 }
 
 #[test]

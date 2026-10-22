@@ -1029,6 +1029,9 @@
 :where(.og-root).z-\[2147483647\],:where(.og-root) .z-\[2147483647\] {
     z-index: 2147483647;
   }
+:where(.og-root).order-last,:where(.og-root) .order-last {
+    order: 9999;
+  }
 :where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
     grid-column: span 2 / span 2;
   }
@@ -2065,6 +2068,9 @@
   }
 :where(.og-root).max-w-\[18em\],:where(.og-root) .max-w-\[18em\] {
     max-width: 18em;
+  }
+:where(.og-root).max-w-\[40\%\],:where(.og-root) .max-w-\[40\%\] {
+    max-width: 40%;
   }
 :where(.og-root).max-w-\[45\%\],:where(.og-root) .max-w-\[45\%\] {
     max-width: 45%;
@@ -5813,18 +5819,6 @@
 :where(.og-root).group-disabled\/select-trigger\:text-fg-subtle,:where(.og-root) .group-disabled\/select-trigger\:text-fg-subtle {
     &:is(:where(.group\/select-trigger):disabled *) {
       color: var(--color-fg-subtle);
-    }
-  }
-:where(.og-root).group-has-data-\[size\=lg\]\/avatar-group\:size-10,:where(.og-root) .group-has-data-\[size\=lg\]\/avatar-group\:size-10 {
-    &:is(:where(.group\/avatar-group):has(*[data-size="lg"]) *) {
-      width: calc(var(--spacing) * 10);
-      height: calc(var(--spacing) * 10);
-    }
-  }
-:where(.og-root).group-has-data-\[size\=sm\]\/avatar-group\:size-6,:where(.og-root) .group-has-data-\[size\=sm\]\/avatar-group\:size-6 {
-    &:is(:where(.group\/avatar-group):has(*[data-size="sm"]) *) {
-      width: calc(var(--spacing) * 6);
-      height: calc(var(--spacing) * 6);
     }
   }
 :where(.og-root).group-aria-expanded\/select-trigger\:rotate-180,:where(.og-root) .group-aria-expanded\/select-trigger\:rotate-180 {
@@ -11365,22 +11359,6 @@
       rotate: 180deg;
     }
   }
-:where(.og-root).group-has-data-\[size\=lg\]\/avatar-group\:\[\&\>svg\]\:size-5,:where(.og-root) .group-has-data-\[size\=lg\]\/avatar-group\:\[\&\>svg\]\:size-5 {
-    &:is(:where(.group\/avatar-group):has(*[data-size="lg"]) *) {
-      &>svg {
-        width: calc(var(--spacing) * 5);
-        height: calc(var(--spacing) * 5);
-      }
-    }
-  }
-:where(.og-root).group-has-data-\[size\=sm\]\/avatar-group\:\[\&\>svg\]\:size-3,:where(.og-root) .group-has-data-\[size\=sm\]\/avatar-group\:\[\&\>svg\]\:size-3 {
-    &:is(:where(.group\/avatar-group):has(*[data-size="sm"]) *) {
-      &>svg {
-        width: calc(var(--spacing) * 3);
-        height: calc(var(--spacing) * 3);
-      }
-    }
-  }
 :where(.og-root).group-data-\[size\=default\]\/avatar\:\[\&\>svg\]\:size-2,:where(.og-root) .group-data-\[size\=default\]\/avatar\:\[\&\>svg\]\:size-2 {
     &:is(:where(.group\/avatar)[data-size="default"] *) {
       &>svg {
@@ -11401,6 +11379,22 @@
     &:is(:where(.group\/avatar)[data-size="sm"] *) {
       &>svg {
         display: none;
+      }
+    }
+  }
+:where(.og-root).data-\[size\=lg\]\:\[\&\>svg\]\:size-5,:where(.og-root) .data-\[size\=lg\]\:\[\&\>svg\]\:size-5 {
+    &[data-size="lg"] {
+      &>svg {
+        width: calc(var(--spacing) * 5);
+        height: calc(var(--spacing) * 5);
+      }
+    }
+  }
+:where(.og-root).data-\[size\=sm\]\:\[\&\>svg\]\:size-3,:where(.og-root) .data-\[size\=sm\]\:\[\&\>svg\]\:size-3 {
+    &[data-size="sm"] {
+      &>svg {
+        width: calc(var(--spacing) * 3);
+        height: calc(var(--spacing) * 3);
       }
     }
   }
@@ -12070,16 +12064,16 @@
   }
 }
 @media (max-width: 39.999rem) {
-  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
+  :where(.og-root).og-composer-footer[data-footer-transcription-capturing] .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) .og-composer-footer[data-footer-transcription-capturing] .og-composer-controls > :not([data-transcription-capturing]) {
     display: none;
   }
-  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+  :where(.og-root).og-composer-footer[data-footer-transcription-capturing] .og-composer-actions,:where(.og-root) .og-composer-footer[data-footer-transcription-capturing] .og-composer-actions {
     display: none;
   }
-  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
+  :where(.og-root).og-composer-footer[data-footer-transcription-attention] .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) .og-composer-footer[data-footer-transcription-attention] .og-composer-controls > :not([data-transcription-attention]) {
     display: none;
   }
-  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+  :where(.og-root).og-composer-footer[data-footer-transcription-attention] .og-composer-actions > :not([data-analytics-action]),:where(.og-root) .og-composer-footer[data-footer-transcription-attention] .og-composer-actions > :not([data-analytics-action]) {
     display: none;
   }
   :where(.og-root).og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) .og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
@@ -12090,14 +12084,14 @@
     -webkit-line-clamp: 3;
     line-height: 1.2;
   }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+  :where(.og-root).og-composer-footer[data-footer-realtime-attention] .og-composer-controls,:where(.og-root) .og-composer-footer[data-footer-realtime-attention] .og-composer-controls {
     display: none;
   }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) .og-composer-footer [data-realtime-attention],:where(.og-root)  .og-composer-footer [data-realtime-attention] {
+  :where(.og-root).og-composer-footer[data-footer-realtime-attention] .og-composer-actions,:where(.og-root) .og-composer-footer[data-footer-realtime-attention] .og-composer-actions,:where(.og-root) .og-composer-footer[data-footer-realtime-attention] .og-realtime-control,:where(.og-root)  .og-composer-footer[data-footer-realtime-attention] .og-realtime-control,:where(.og-root) .og-composer-footer [data-realtime-attention],:where(.og-root)  .og-composer-footer [data-realtime-attention] {
     flex: 1 1 auto;
     min-width: 0;
   }
-  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
+  :where(.og-root).og-composer-footer[data-footer-realtime-attention] .og-composer-actions > :not(.og-realtime-control),:where(.og-root) .og-composer-footer[data-footer-realtime-attention] .og-composer-actions > :not(.og-realtime-control) {
     flex-shrink: 0;
   }
   :where(.og-root).og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
@@ -12336,28 +12330,74 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-:where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
-  background-image: linear-gradient(90deg, light-dark(#8a8a8a,#6b6b6b) 42%, light-dark(#f2f2f2,#fff) 50%, light-dark(#8a8a8a,#6b6b6b) 58%);
-  background-size: 300% 100%;
-  background-position: 100% 0;
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: og-activity-sweep 3.6s linear infinite;
+:where(.og-root):where(.og-shimmer),:where(.og-root) :where(.og-shimmer) {
+  display: inline-block;
 }
-@keyframes og-activity-sweep {
+:where(.og-root).og-shimmer,:where(.og-root) .og-shimmer {
+  --_og-shimmer-base: var(--og-color-fg-subtle);
+  --_og-shimmer-peak: var(--og-color-fg);
+  --_og-shimmer-band: transparent 0%, #000 50%, transparent 100%;
+  --_og-shimmer-duration: 1.1s;
+  position: relative;
+  overflow: clip;
+}
+:where(.og-root).og-shimmer[data-og-shimmer-tone="reel"],:where(.og-root) .og-shimmer[data-og-shimmer-tone="reel"] {
+  --_og-shimmer-base: light-dark(#8a8a8a,#6b6b6b);
+  --_og-shimmer-peak: light-dark(#f2f2f2,#fff);
+  --_og-shimmer-band: transparent 26%, #000 50%, transparent 74%;
+  --_og-shimmer-duration: 3.6s;
+}
+:where(.og-root).og-shimmer-beam,:where(.og-root) .og-shimmer-beam {
+  position: absolute;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+  user-select: none;
+  -webkit-mask-image: linear-gradient(90deg, var(--_og-shimmer-band));
+  mask-image: linear-gradient(90deg, var(--_og-shimmer-band));
+  animation: og-shimmer-window var(--_og-shimmer-duration) linear infinite;
+}
+:where(.og-root).og-shimmer-copy,:where(.og-root) .og-shimmer-copy,:where(.og-root) .og-shimmer-beam[data-og-shimmer-copy]::before,:where(.og-root)  .og-shimmer-beam[data-og-shimmer-copy]::before {
+  position: absolute;
+  inset: 0;
+  -webkit-text-fill-color: var(--_og-shimmer-peak);
+  animation: og-shimmer-copy var(--_og-shimmer-duration) linear infinite;
+}
+:where(.og-root).og-shimmer-beam[data-og-shimmer-copy],:where(.og-root) .og-shimmer-beam[data-og-shimmer-copy] {
+  padding: inherit;
+}
+:where(.og-root).og-shimmer-beam[data-og-shimmer-copy]::before,:where(.og-root) .og-shimmer-beam[data-og-shimmer-copy]::before {
+  content: attr(data-og-shimmer-copy);
+  padding: inherit;
+}
+:where(.og-root).og-shimmer[data-og-shimmer="on"],:where(.og-root) .og-shimmer[data-og-shimmer="on"],:where(.og-root) .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"],:where(.og-root)  .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"] {
+  -webkit-text-fill-color: var(--_og-shimmer-base);
+}
+:where(.og-root).og-shimmer[data-og-shimmer="on"] > .og-shimmer-beam,:where(.og-root) .og-shimmer[data-og-shimmer="on"] > .og-shimmer-beam,:where(.og-root) .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"] > .og-shimmer-beam,:where(.og-root)  .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"] > .og-shimmer-beam {
+  display: block;
+}
+@keyframes og-shimmer-window {
   from {
-    background-position: 100% 0;
+    transform: translateX(-100%);
   }
   to {
-    background-position: 0% 0;
+    transform: translateX(100%);
+  }
+}
+@keyframes og-shimmer-copy {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(-100%);
   }
 }
 @media (prefers-reduced-motion:reduce), (forced-colors:active) {
-  :where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
-    animation: none;
-    background: none;
+  :where(.og-root).og-shimmer[data-og-shimmer="on"],:where(.og-root) .og-shimmer[data-og-shimmer="on"],:where(.og-root) .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"],:where(.og-root)  .og-rolling-status[data-running="true"] .og-shimmer[data-og-shimmer="ancestor"] {
     -webkit-text-fill-color: currentColor;
+  }
+  :where(.og-root).og-shimmer .og-shimmer-beam,:where(.og-root) .og-shimmer .og-shimmer-beam {
+    display: none !important;
   }
 }
 :where(.og-root).og-composer[data-og-responsive-basis="container"],:where(.og-root) .og-composer[data-og-responsive-basis="container"] {
@@ -12490,16 +12530,16 @@
   :where(.og-root)[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger,:where(.og-root) [data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger {
     display: none;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-capturing] .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-capturing] .og-composer-controls > :not([data-transcription-capturing]) {
     display: none;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-capturing] .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-capturing] .og-composer-actions {
     display: none;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-attention] .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-attention] .og-composer-controls > :not([data-transcription-attention]) {
     display: none;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-attention] .og-composer-actions > :not([data-analytics-action]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-transcription-attention] .og-composer-actions > :not([data-analytics-action]) {
     display: none;
   }
   :where(.og-root)[data-og-responsive-basis="container"] [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) [data-og-responsive-basis="container"] [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
@@ -12510,14 +12550,14 @@
     -webkit-line-clamp: 3;
     line-height: 1.2;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-controls,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-controls {
     display: none;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention],:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-realtime-control,:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-realtime-control,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention],:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
     flex: 1 1 auto;
     min-width: 0;
   }
-  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-actions > :not(.og-realtime-control),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer[data-footer-realtime-attention] .og-composer-actions > :not(.og-realtime-control) {
     flex-shrink: 0;
   }
   :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
@@ -13179,7 +13219,7 @@
   display: grid;
   gap: .375rem;
 }
-:where(.og-root).og-session-capability-setup .og-connect label:not(:has(input[type="checkbox"], input[type="radio"])),:where(.og-root) .og-session-capability-setup .og-connect label:not(:has(input[type="checkbox"], input[type="radio"])) {
+:where(.og-root).og-session-capability-setup .og-connect label,:where(.og-root) .og-session-capability-setup .og-connect label {
   display: grid;
   gap: .375rem;
 }
@@ -13528,22 +13568,6 @@
   place-items: center;
   width: 32px;
   flex-shrink: 0;
-}
-:where(.og-root).og-connection-option-chevron,:where(.og-root) .og-connection-option-chevron {
-  opacity: .5;
-  font-size: 20px;
-  pointer-events: none;
-}
-:where(.og-root).og-connection-option:has(.og-connection-option-chevron),:where(.og-root) .og-connection-option:has(.og-connection-option-chevron) {
-  position: relative;
-}
-:where(.og-root).og-connection-option:has(.og-connection-option-chevron) > button,:where(.og-root) .og-connection-option:has(.og-connection-option-chevron) > button {
-  padding-right: 32px;
-}
-:where(.og-root).og-connection-option:has(.og-connection-option-chevron) > .og-connection-option-action,:where(.og-root) .og-connection-option:has(.og-connection-option-chevron) > .og-connection-option-action {
-  position: absolute;
-  right: 0;
-  pointer-events: none;
 }
 @media (max-width: 480px) {
   :where(.og-root).og-connection-catalog-row,:where(.og-root) .og-connection-catalog-row {
@@ -14464,6 +14488,17 @@
   padding-left: 20px;
   display: grid;
   gap: 6px;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-link,:where(.og-root) .og-connect-setup .og-connect-setup-approval-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+:where(.og-root).og-connect-setup .og-connect-setup-approval-link a,:where(.og-root) .og-connect-setup .og-connect-setup-approval-link a {
+  color: var(--og-color-fg,inherit);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 :where(.og-root).og-connect-setup .og-connect-setup-hint,:where(.og-root) .og-connect-setup .og-connect-setup-hint {
   margin: 0;

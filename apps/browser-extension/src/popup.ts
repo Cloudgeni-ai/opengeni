@@ -1,3 +1,5 @@
+import { BRAND } from "./brand";
+
 type Status = {
   connected: boolean;
   deviceId: string | null;
@@ -23,10 +25,10 @@ async function refresh(options: { label: boolean }): Promise<void> {
   document.body.dataset.connected = String(status.connected);
   state.textContent = status.connected ? "Connected" : (status.title ?? "Agent unavailable");
   detail.textContent = status.connected
-    ? "This Chrome profile is ready in Opengeni. Tabs attach only when an agent uses them."
+    ? `This Chrome profile is ready in ${BRAND.product}. Tabs attach only when an agent uses them.`
     : (status.detail ??
       status.error ??
-      "Start the Opengeni machine agent to connect this profile.");
+      `Start the ${BRAND.product} agent on this computer to connect this profile.`);
   detail.title = status.connected ? "" : (status.error ?? "");
   // Only fill the label on open and after saving, so a refresh never
   // overwrites what the person is typing.

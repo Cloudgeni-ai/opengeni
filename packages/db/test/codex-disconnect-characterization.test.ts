@@ -160,7 +160,7 @@ describeRealDatabase("legacy Codex disconnect: known pre-fix behavior", () => {
         ('0712_subscription_core_generic_precursor.sql'), ('0713_subscription_core_provider_keyed_reach.sql'),
         ('0714_subscription_workspace_managed_organization_accounts.sql'),
         ('0715_subscription_core_api_key_connections.sql'), ('0716_subscription_authority_compat.sql'),
-        ('0717_subscription_authority_fences.sql'), ('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
+        ('0717_subscription_authority_fences.sql'), ('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql'), ('0907_subscription_connection_one_owner.sql')`;
       // The indexed readers depend on the withheld compatibility routines.
       await owner`insert into schema_migrations(name) values ('0843_indexed_inbox_lineage.sql')`;
       await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;

@@ -361,6 +361,13 @@
           "legendFormat": "{{host_name}} free",
           "editorMode": "code",
           "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (host_name) (compute_fleet_host_memory_reclaimable_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"})",
+          "legendFormat": "{{host_name}} reclaimable",
+          "editorMode": "code",
+          "range": true
         }
       ],
       "gridPos": {

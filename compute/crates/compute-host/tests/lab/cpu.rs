@@ -1,12 +1,13 @@
 //! Processor time is guaranteed: with every processor contended, by
 //! sandboxes using all their vCPUs above their requests and by work on the
 //! host beside the VMs, each awake sandbox still gets at least its CPU
-//! request, and a wake whose request no longer fits is refused at once as
+//! request, and a create whose request no longer fits is refused at once as
 //! host full.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::admission::connect;
+use compute_host::protocol::ErrorCode;
+
 use super::memory::hold_running;
 use super::*;
 
@@ -136,13 +137,15 @@ async fn fill(agent: &Agent, count: usize, capacity: u64) -> Awake {
     }
 }
 
-/// Creates `sandbox` asking for `millis`, just more than the host has
-/// left, and checks its wake is refused at once for processor time.
+/// Asks for `sandbox` requesting `millis`, just more than the host has
+/// left, and checks the create is refused at once for processor time: a
+/// host takes a sandbox only while it can wake it.
 async fn refused_for_processor_time(agent: &Agent, sandbox: Id, millis: u64) {
     let config = SandboxConfig {
         cpu_request_millis: Some(u32::try_from(millis).unwrap()),
         ..SandboxConfig::new(1, 512, NEVER)
     };
+    let begin = Instant::now();
     let reply = agent
         .client
         .call(&Request::Create {
@@ -151,12 +154,14 @@ async fn refused_for_processor_time(agent: &Agent, sandbox: Id, millis: u64) {
         })
         .await
         .unwrap();
-    assert_eq!(reply, Reply::Done);
-    let begin = Instant::now();
-    let Err(message) = connect(&agent.client, sandbox).await else {
-        panic!("{sandbox} woke beyond the processor capacity");
-    };
     let refusal = begin.elapsed();
+    let Reply::Error {
+        code: ErrorCode::HostFull,
+        message,
+    } = reply
+    else {
+        panic!("{sandbox} was taken beyond the processor capacity: {reply:?}");
+    };
     assert!(message.contains("processor time"), "{message}");
     assert!(refusal < Duration::from_millis(100), "{refusal:?}");
 }

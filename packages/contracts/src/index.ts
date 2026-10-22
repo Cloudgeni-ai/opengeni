@@ -14,6 +14,7 @@ import {
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "./claude-provider-account-authority";
 export {
+  SubscriptionAccountReach,
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionAccount,
@@ -2923,6 +2924,24 @@ export function resolveWorkspaceBusySend(settings: unknown): WorkspaceBusySend {
   return value === "steer" ? "steer" : "queue";
 }
 
+/** Realtime voice models a voice conversation can run on. */
+export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "opengeni-azure/gpt-live-1",
+    "gpt-live-1-boulder-alpha",
+    "supergrok/grok-voice-think-fast-2.0",
+    "opengeni-gateway/openai/gpt-realtime-2.1",
+    "opengeni-gateway/openai/gpt-realtime-mini",
+    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-gateway/openai/gpt-realtime-2.1",
+    "workspace-gateway/openai/gpt-realtime-mini",
+    "workspace-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-elevenlabs/eleven_realtime_v1_max",
+    "workspace-elevenlabs/eleven_realtime_v1_mini",
+  ]),
+);
+export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
 /** How readily a realtime voice model decides the speaker is done and answers. */
 export const RealtimeTurnEagerness = /* @__PURE__ */ defineSchema(() =>
   z.enum(["low", "medium", "high"]),
@@ -2989,6 +3008,12 @@ export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
      * for a model when it has saved some, and these otherwise.
      */
     realtimeVoice: z.record(z.string().min(1).max(128), RealtimeVoiceSettings),
+    /**
+     * The realtime voice model new voice conversations start with in workspaces
+     * without their own choice, while the person hasn't picked one; null
+     * leaves it automatic.
+     */
+    realtimeDefaultModel: z.string().min(1).max(128).nullable(),
     updatedAt: z.string().nullable(),
   }),
 );
@@ -3000,6 +3025,7 @@ export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Obje
   allowedModels: null,
   modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
   realtimeVoice: Object.freeze({}) as Record<string, RealtimeVoiceSettings>,
+  realtimeDefaultModel: null,
   updatedAt: null,
 });
 
@@ -3007,8 +3033,9 @@ export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Obje
  * PATCH body for organization model defaults. Each field is independent:
  * omitted keeps it, `sessionDefaults: null` makes it automatic again,
  * `modelPolicy` replaces both allowlists at once (null allows everything),
- * and compaction and voice settings merge by exact model id (null resets
- * just that model).
+ * compaction and voice settings merge by exact model id (null resets just
+ * that model), and `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
  */
 export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -3023,6 +3050,7 @@ export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSche
         .optional(),
       modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
     })
     .strict(),
 );
@@ -3065,6 +3093,18 @@ export function resolveRealtimeVoiceSettings(
   if (!byModel || !Object.hasOwn(byModel, model)) return null;
   const inherited = byModel[model];
   return inherited && Object.keys(inherited).length > 0 ? inherited : null;
+}
+
+/**
+ * The workspace's own default realtime voice model, or null when it follows
+ * its organization. Read leniently: a malformed value reads as unset.
+ */
+export function resolveWorkspaceRealtimeDefaultModel(settings: unknown): string | null {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { realtimeDefaultModel?: unknown }).realtimeDefaultModel
+      : undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
 }
 
 /** Placement inherited by new top-level chats and schedules that follow the workspace. */
@@ -3147,6 +3187,9 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // Realtime voice settings by realtime model id. Read leniently per model
       // through resolveWorkspaceRealtimeVoiceSettings.
       realtimeVoice: z.record(z.string(), z.unknown()).optional().catch(undefined),
+      // The workspace's default realtime voice model; null or absent follows
+      // the organization. Read leniently.
+      realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3347,6 +3390,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       busySend: WorkspaceBusySend.optional(),
       // Voice settings by realtime model id, merged per model; null removes one.
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
+      // Default realtime voice model; null follows the organization again.
+      realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
     })
     .passthrough(),
 );
@@ -8712,23 +8757,6 @@ export const SyncSessionRealtimeLedgerResponse = /* @__PURE__ */ defineSchema(()
 );
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
-export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
-  z.enum([
-    "opengeni-azure/gpt-live-1",
-    "gpt-live-1-boulder-alpha",
-    "supergrok/grok-voice-think-fast-2.0",
-    "opengeni-gateway/openai/gpt-realtime-2.1",
-    "opengeni-gateway/openai/gpt-realtime-mini",
-    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-gateway/openai/gpt-realtime-2.1",
-    "workspace-gateway/openai/gpt-realtime-mini",
-    "workspace-gateway/xai/grok-voice-think-fast-2.0",
-    "workspace-elevenlabs/eleven_realtime_v1_max",
-    "workspace-elevenlabs/eleven_realtime_v1_mini",
-  ]),
-);
-export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
-
 export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionRealtimeModel,
@@ -8772,6 +8800,13 @@ export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(()
      * the workspace has none of its own.
      */
     organizationVoiceSettings: RealtimeVoiceSettings.optional(),
+    /** True on the model this workspace chose to start voice conversations with. */
+    workspaceDefault: z.boolean().optional(),
+    /**
+     * True on the model the organization chose to start voice conversations
+     * with. A workspace's own choice wins over it.
+     */
+    organizationDefault: z.boolean().optional(),
   }),
 );
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -15835,6 +15870,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
     /** Current non-deleted schedules targeting this session, including paused schedules. */
     hasSchedules: z.boolean().optional(),
+    /**
+     * An active schedule targeting this session can still start a run: not
+     * paused, and not a one-time schedule whose time has passed.
+     */
+    hasUpcomingSchedules: z.boolean().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16135,6 +16175,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     status: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
+    hasUpcomingSchedules: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16241,6 +16282,8 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
   z.object({
     /** Current schedule relationship for the requested session. */
     sessionHasSchedules: z.boolean().optional(),
+    /** An active schedule targeting the requested session can still start a run. */
+    sessionHasUpcomingSchedules: z.boolean().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),
@@ -17135,6 +17178,12 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */
       setupRequest: CustomMcpSetupRequest.optional(),
+      /**
+       * The Connected Machine the agent asked for, when a Connected Machine card
+       * answers a refused switch or one-off command. Names the request; it grants
+       * nothing.
+       */
+      requestedSandboxId: z.string().uuid().optional(),
     })
     .superRefine((payload, context) => {
       if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {

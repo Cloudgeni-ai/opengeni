@@ -158,7 +158,15 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
     // Dependency-free wake detection: the live stream rejoins after a sleep.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/page-wake.ts"))).toBe(true);
-    expect(reactSources.length).toBe(46);
+    // Why a message can't start: the pure admission model, its headless hook and the
+    // provider-neutral machine read it uses to offer allowed machines.
+    expect(reactSources.some((id) => id.endsWith("/src/session-admission-model.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-start.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-machines.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-machines-list.ts"))).toBe(true);
+    // Dependency-free unsent-answer store the pending-question read prunes.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-draft-store.ts"))).toBe(true);
+    expect(reactSources.length).toBe(51);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

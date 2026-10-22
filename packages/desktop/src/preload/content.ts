@@ -15,6 +15,7 @@ import {
   type DesktopCommand,
   type DesktopMenuAction,
   type DesktopPlatform,
+  type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
 
@@ -43,18 +44,18 @@ if (origin && window.location.origin === origin) {
   // Menu commands go to the page's newest listener. A page without one (an
   // older server) still gets the navigation commands as a page load.
   let commandListener: ((command: DesktopCommand) => void) | null = null;
-  ipcRenderer.on(DESKTOP_IPC.command, (_event, command: DesktopCommand) => {
-    if (commandListener) {
-      commandListener(command);
-      return;
-    }
-    const workspaceId = /^\/workspaces\/([0-9a-f-]{36})(?:\/|$)/iu.exec(
-      window.location.pathname,
-    )?.[1];
-    if (!workspaceId) return;
-    if (command === "newSession") window.location.assign(`/workspaces/${workspaceId}/sessions`);
-    if (command === "openInbox") window.location.assign(`/workspaces/${workspaceId}/inbox`);
-  });
+  ipcRenderer.on(
+    DESKTOP_IPC.command,
+    (_event, command: DesktopCommand, fallbackPath: string | null | undefined) => {
+      if (commandListener) {
+        commandListener(command);
+        return;
+      }
+      // The shell's page for the command, on this origin only.
+      if (typeof fallbackPath === "string" && /^\/(?![/\\])/u.test(fallbackPath))
+        window.location.assign(fallbackPath);
+    },
+  );
   // Menu bar actions: the page lists them, the shell runs the chosen one back
   // through the newest listener. Leaving the page drops its actions, so the
   // menu falls back to its own items until the next page reports again.
@@ -86,6 +87,7 @@ if (origin && window.location.origin === origin) {
       "commands",
       "appShots",
       "menuActions",
+      "updates",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -151,6 +153,11 @@ if (origin && window.location.origin === origin) {
         };
       },
       onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+    },
+    updates: {
+      state: () => ipcRenderer.invoke(DESKTOP_IPC.updatesState) as Promise<DesktopUpdateState>,
+      install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
+      onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
     },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);

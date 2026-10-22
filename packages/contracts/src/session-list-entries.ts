@@ -57,6 +57,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     status: session.status,
     backgroundCommandActivity: session.backgroundCommandActivity,
     hasSchedules: session.hasSchedules,
+    hasUpcomingSchedules: session.hasUpcomingSchedules,
     title: session.title,
     titleSource: session.titleSource,
     displayTitle: deriveSessionDisplayTitle(session),

@@ -257,14 +257,17 @@ describe("readable per-turn grouping", () => {
       "Second progress",
       "Final response",
     ]);
+    // The declared answer already streams below the row, where it stays once
+    // the turn settles: the answer being read never hops past the work row.
     expect(kinds(streaming)).toEqual([
       "agent-message",
       "agent-message",
-      "agent-message",
       "activity",
+      "agent-message",
     ]);
     const settled = fold([...live, final, event("turn.completed", {})]);
     expect(visibleProse(settled)).toEqual(["Final response"]);
+    expect(kinds(settled)).toEqual(["activity", "agent-message"]);
     const work = workRows(settled)[0]!;
     expect(work.kind === "activity" && kinds(work.work!.details)).toEqual([
       "agent-message",

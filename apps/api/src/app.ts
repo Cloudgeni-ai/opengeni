@@ -144,6 +144,7 @@ import {
   databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
+  connectionAccountSelectionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -2372,6 +2373,7 @@ export function createAppComposition(deps: AppDependencies): {
           scheduledTaskTargetAccessHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
           modelUnavailableHttpError(rawError) ??
+          connectionAccountSelectionHttpError(rawError) ??
           (rawError instanceof UnsupportedLatencyModeError
             ? new ApiHttpError(422, {
                 code: "validation_failed",

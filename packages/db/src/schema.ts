@@ -4779,6 +4779,8 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .default({}),
   // Voice settings by realtime model id (0895); a workspace's own win.
   realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
+  // Realtime voice model new voice conversations start with (0903); null is automatic.
+  realtimeDefaultModel: text("realtime_default_model"),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6095,6 +6097,7 @@ export const sessionPins = pgTable(
       table.workspaceId,
       table.sessionId,
     ),
+    sessionSubject: index("session_pins_session_subject_idx").on(table.sessionId, table.subjectId),
     subjectPinned: index("session_pins_workspace_subject_pinned_idx").on(
       table.workspaceId,
       table.subjectId,

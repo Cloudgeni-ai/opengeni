@@ -1,25 +1,46 @@
 import { describe, expect, test } from "bun:test";
-import { officeAddinId, officeAddinManifest } from "./office-manifest";
+import {
+  officeManifestPublisherFromEnvironment,
+  opengeniOfficeAddinId,
+  opengeniOfficeManifest,
+} from "./office-manifest";
 
-describe("Office add-in manifest", () => {
-  test("each deployment origin gets its own stable add-in id", () => {
-    const id = officeAddinId("https://app.example.com");
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
-    expect(officeAddinId("https://app.example.com")).toBe(id);
-    expect(officeAddinId("https://other.example.com")).not.toBe(id);
+describe("Opengeni's Excel add-in manifest", () => {
+  test("keeps each deployment's add-in id", async () => {
+    // The id Excel already knows for this origin; it must never change.
+    expect(await opengeniOfficeAddinId("https://app.example.com")).toBe(
+      "ad98027b-675e-5489-9acc-6311890e81d7",
+    );
+    expect(await opengeniOfficeAddinId("https://other.example.com")).not.toBe(
+      await opengeniOfficeAddinId("https://app.example.com"),
+    );
   });
 
-  test("points every URL at the serving origin and asks for workbook access", () => {
-    const xml = officeAddinManifest("https://app.example.com");
-    expect(xml).toContain(`<Id>${officeAddinId("https://app.example.com")}</Id>`);
+  test("names this deployment and serves everything from its origin", async () => {
+    const xml = await opengeniOfficeManifest("https://app.example.com");
+    expect(xml).toContain('<DisplayName DefaultValue="Opengeni" />');
+    expect(xml).toContain("(app.example.com)");
     expect(xml).toContain('<SourceLocation DefaultValue="https://app.example.com/office/" />');
-    expect(xml).toContain("<AppDomain>https://app.example.com</AppDomain>");
-    expect(xml).toContain("<Permissions>ReadWriteDocument</Permissions>");
-    expect(xml).toContain('<Set Name="ExcelApi" MinVersion="1.7" />');
-    const urls = [...xml.matchAll(/https?:\/\/[^"<\s]+/gu)]
-      .map((match) => match[0])
-      .filter((url) => !/^http:\/\/(schemas\.microsoft\.com|www\.w3\.org)\//u.test(url));
-    expect(urls.length).toBeGreaterThan(5);
-    for (const url of urls) expect(url.startsWith("https://app.example.com")).toBe(true);
+    expect(xml).toContain("<ProviderName>Opengeni</ProviderName>");
+    expect(xml).toContain('<SupportUrl DefaultValue="https://app.example.com/excel" />');
+  });
+
+  test("uses the store publisher's name and support page when set", async () => {
+    const publisher = officeManifestPublisherFromEnvironment({
+      OPENGENI_OFFICE_ADDIN_PROVIDER_NAME: " Example AS ",
+      OPENGENI_OFFICE_ADDIN_SUPPORT_URL: "https://docs.example.com/excel-add-in",
+      OPENGENI_OFFICE_ADDIN_NAME: "",
+    });
+    expect(publisher).toEqual({
+      providerName: "Example AS",
+      supportUrl: "https://docs.example.com/excel-add-in",
+    });
+    const xml = await opengeniOfficeManifest("https://app.example.com", publisher);
+    expect(xml).toContain("<ProviderName>Example AS</ProviderName>");
+    expect(xml).toContain('<SupportUrl DefaultValue="https://docs.example.com/excel-add-in" />');
+    expect(officeManifestPublisherFromEnvironment({})).toEqual({
+      providerName: undefined,
+      supportUrl: undefined,
+    });
   });
 });

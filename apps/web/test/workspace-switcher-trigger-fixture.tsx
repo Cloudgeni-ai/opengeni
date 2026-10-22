@@ -13,8 +13,12 @@ import {
 import { WORKSPACE_SWITCHER_GRID_CLASS } from "../src/components/rail/switcher-block";
 import { WorkspaceMenu, WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { organizationsForSubject } from "@opengeni/react/app/lib/org";
 import type { ManagedSelfContext } from "@opengeni/react/app/lib/managed-self-context";
 import type { Workspace } from "@opengeni/react/app/types";
+import type { AccessContext } from "@opengeni/sdk";
 import "../src/styles.css";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
@@ -56,18 +60,43 @@ const workspaces = [
   }),
 ];
 
-const organizations = [
-  {
-    accountId,
-    label: "CloudGeni Product Engineering and Reliability",
-    canManage: true,
+// An owner of one organization and a member of another, as the API reports them.
+const accessContext: AccessContext = {
+  mode: "managed",
+  subjectId: "user:user-one",
+  accountGrants: [
+    {
+      accountId,
+      subjectId: "user:user-one",
+      role: "owner",
+      permissions: ["account:read", "account:admin", "workspace:create"],
+      metadata: { accountName: "CloudGeni Product Engineering and Reliability" },
+    },
+    {
+      accountId: secondAccountId,
+      subjectId: "user:user-one",
+      role: "member",
+      permissions: ["account:read"],
+      metadata: { accountName: "CloudGeni Research" },
+    },
+  ],
+  workspaceGrants: [],
+  defaultAccountId: accountId,
+  defaultWorkspaceId: "workspace-personal",
+};
+
+// The organizations come from the same access context, as WorkspaceSwitcherMenu
+// derives them in the app.
+const organizations = organizationsForSubject(t, accessContext, workspaces);
+
+// The picker only renders inside the app shell, which always provides the app
+// context. It reads the access context; any other read fails loudly.
+const appContext = new Proxy({ accessContext } as AppContextValue, {
+  get(target, key) {
+    if (key === "accessContext") return target.accessContext;
+    throw new Error(`The workspace switcher fixture's app context has no ${String(key)}`);
   },
-  {
-    accountId: secondAccountId,
-    label: "CloudGeni Research",
-    canManage: false,
-  },
-];
+});
 
 const selfContext: ManagedSelfContext = {
   identity: {
@@ -222,4 +251,8 @@ const router = createRouter({
   history: createMemoryHistory({ initialEntries: ["/"] }),
 });
 
-createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={appContext}>
+    <RouterProvider router={router} />
+  </AppContext.Provider>,
+);

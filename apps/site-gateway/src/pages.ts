@@ -1,4 +1,4 @@
-import { SITE_GATEWAY_LOGOUT_PATH } from "@opengeni/contracts";
+import { SITE_GATEWAY_LOGIN_PATH, SITE_GATEWAY_LOGOUT_PATH } from "@opengeni/contracts";
 import { SITE_ABUSE_CATEGORIES } from "./report-categories";
 import { applySecurityHeaders, newNonce, pageCsp, type SecurityOptions } from "./headers";
 
@@ -33,11 +33,11 @@ export function page(init: PageInit): Response {
   });
   headers.set("Content-Type", "text/html; charset=utf-8");
   headers.set("Cache-Control", "no-store");
-  headers.set("Content-Security-Policy", pageCsp(nonce));
+  headers.set("Content-Security-Policy", pageCsp(nonce, init.frameable));
   return new Response(html, { status: init.status, headers });
 }
 
-type Security = Pick<SecurityOptions, "hsts">;
+type Security = Pick<SecurityOptions, "hsts" | "frameable">;
 
 /** Missing, unpublished or not-yet-versioned hosts: say nothing about whether a Site exists. */
 export function neutralPage(security: Security): Response {
@@ -76,6 +76,31 @@ export function messagePage(
     body: `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>${
       link ? `<p><a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a></p>` : ""
     }`,
+  });
+}
+
+/**
+ * Access may change after the shell loaded, or before its cached host record
+ * catches up. Render the denial inside that shell, without serving Site HTML.
+ * The opaque-origin frame cannot navigate its parent; a user-activated new tab
+ * uses the existing popup escape permission without widening the Site sandbox.
+ */
+export function frameAccessPage(
+  security: Pick<SecurityOptions, "hsts">,
+  status: 401 | 403,
+): Response {
+  const title = status === 401 ? "Sign in required" : "No access";
+  const message =
+    status === 401
+      ? "Sign in to open this Site."
+      : "This Site is not shared with your current account. Sign in with an account that has access.";
+  return page({
+    ...security,
+    frameable: "self",
+    noindex: true,
+    status,
+    title,
+    body: `<h1>${title}</h1><p>${message}</p><p><a href="${SITE_GATEWAY_LOGIN_PATH}?return=%2F" target="_blank" rel="noopener noreferrer">Sign in in a new tab</a></p>`,
   });
 }
 

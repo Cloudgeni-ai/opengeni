@@ -20,7 +20,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
-import { signDelegatedAccessToken, UpdateWorkspaceSettingsRequest } from "@opengeni/contracts";
+import {
+  signDelegatedAccessToken,
+  UpdateOrganizationModelDefaultsRequest,
+  UpdateWorkspaceSettingsRequest,
+} from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -762,13 +766,14 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
               type: "function",
               name: "delegate_to_session",
               description:
-                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+                "Relay execution work, actions, and session tasks to the underlying session agent, which decides how to do them.",
               parameters: {
                 type: "object",
                 properties: {
                   request: {
                     type: "string",
-                    description: "Complete standalone task for the session agent",
+                    description:
+                      "The user's request in their own words and language, plus only the conversational context needed to understand it. Do not add tools, methods, steps, or details the user did not say.",
                   },
                 },
                 required: ["request"],
@@ -1192,6 +1197,72 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       workspaceVoiceSettings: { voice: "workspace-voice-id" },
       organizationVoiceSettings: { voice: "org-voice-id", turnEagerness: "low" },
     });
+  });
+
+  test("the catalog marks the default voice model the organization and the workspace chose", async () => {
+    const value = await fixture();
+    const elevenMax = "workspace-elevenlabs/eleven_realtime_v1_max";
+    const elevenMini = "workspace-elevenlabs/eleven_realtime_v1_mini";
+    const [workspace] =
+      await shared.admin`select account_id from workspaces where id = ${value.workspaceId}`;
+    const organizationId = workspace!.account_id as string;
+    const defaults = async () => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+        { headers: value.headers },
+      );
+      expect(response.status).toBe(200);
+      const catalog = (await response.json()) as {
+        models: Array<{ id: string; workspaceDefault?: boolean; organizationDefault?: boolean }>;
+      };
+      return {
+        workspace: catalog.models.filter((model) => model.workspaceDefault).map((m) => m.id),
+        organization: catalog.models.filter((model) => model.organizationDefault).map((m) => m.id),
+      };
+    };
+    // Nothing chosen: voice stays automatic.
+    expect(await defaults()).toEqual({ workspace: [], organization: [] });
+
+    const saved = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeDefaultModel: elevenMax },
+    });
+    expect(saved.realtimeDefaultModel).toBe(elevenMax);
+    expect(await defaults()).toEqual({ workspace: [], organization: [elevenMax] });
+
+    // The workspace's own choice is reported next to the organization's.
+    await updateWorkspaceSettings(client.db, value.workspaceId, {
+      realtimeDefaultModel: elevenMini,
+    });
+    expect(await defaults()).toEqual({ workspace: [elevenMini], organization: [elevenMax] });
+
+    // Null follows the organization again; an unrelated patch keeps the choice.
+    await updateWorkspaceSettings(client.db, value.workspaceId, { realtimeDefaultModel: null });
+    const kept = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeVoice: { [elevenMax]: { voice: "org-voice-id" } } },
+    });
+    expect(kept.realtimeDefaultModel).toBe(elevenMax);
+    expect(await defaults()).toEqual({ workspace: [], organization: [elevenMax] });
+
+    const cleared = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeDefaultModel: null },
+    });
+    expect(cleared.realtimeDefaultModel).toBeNull();
+    expect(await defaults()).toEqual({ workspace: [], organization: [] });
+
+    // Only realtime voice model ids are accepted.
+    expect(
+      UpdateOrganizationModelDefaultsRequest.safeParse({ realtimeDefaultModel: "codex/sol" })
+        .success,
+    ).toBe(false);
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({ realtimeDefaultModel: "codex/sol" }).success,
+    ).toBe(false);
   });
 
   test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {

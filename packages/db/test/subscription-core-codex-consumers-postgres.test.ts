@@ -160,31 +160,29 @@ async function sharedConnection(
     workspaces?: string[];
     managedBy?: string | null;
     expiresAt?: Date;
+    /** Ignored: a workspace's own connection is the one it manages (D-50). */
     pool?: "workspace" | "organization";
   } = {},
 ): Promise<string> {
+  // A workspace's own connection reaches only that workspace.
+  const managed = options.managedBy ?? null;
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id, label
+      allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+      managed_by_workspace_id, label
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
-      'shared', ${options.scope ?? "organization"}, ${`chatgpt-${label}`}, 'pro',
+      'shared', ${managed ? "workspaces" : (options.scope ?? "organization")}, ${!managed},
+      ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false, resetCreditAvailableCount: 2 })}::jsonb,
       ${(options.expiresAt ?? new Date(Date.now() + 86_400_000)).toISOString()}::timestamptz,
       ${options.managedBy ?? null}::uuid, ${label}
     ) returning id::text as id`;
-  for (const workspaceId of options.workspaces ?? []) {
+  for (const workspaceId of managed ? [managed] : (options.workspaces ?? [])) {
     await shared!.admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
       values (${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid)`;
-  }
-  for (const workspaceId of [org.personalWorkspaceId, org.sharedWorkspaceId]) {
-    await shared!.admin`
-      insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool
-      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid,
-        ${options.pool ?? "organization"})`;
   }
   return row!.id;
 }
@@ -807,44 +805,15 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       rotationStrategy: "sharded",
     });
     expect(afterSettings.accounts.find((account) => account.id === first)!.isActive).toBe(true);
-    const source = await setSubscriptionCoreWorkspaceCodexSource(client!.db, {
-      ...admin,
-      mode: "organization",
-    });
-    expect(source.source).toMatchObject({ mode: "organization", effectiveSource: "organization" });
-    // Only the effective pool is listed (legacy parity).
+    // The page lists every account that reaches the workspace once; the only
+    // workspace choice left is on or off (D-50).
     const listed = async () =>
       (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).accounts
         .map((account) => account.id)
         .sort();
-    expect(await listed()).toEqual([first]);
-    // Its own account is set aside; once the organization also gives it to
-    // this workspace it is in use through that pool, and nothing is set aside.
-    const setAside = async () =>
-      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
-        .workspaceSetAside;
-    expect(await setAside()).toBe(true);
-    // The organization gives this workspace one account besides its own.
-    const organizationCount = async () =>
-      (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source
-        .organizationCount;
-    expect(await organizationCount()).toBe(1);
-    await shared!.admin`
-      insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool
-      ) values (${org.accountId}::uuid, ${second}::uuid, ${org.sharedWorkspaceId}::uuid,
-        'organization')`;
     expect(await listed()).toEqual([first, second].sort());
-    expect(await setAside()).toBe(false);
-    // Its own account given through the organization's pool too is still its own.
-    expect(await organizationCount()).toBe(1);
-    await shared!.admin`delete from subscription_connection_assignment_policies
-      where connection_id = ${second}::uuid and inference_pool = 'organization'`;
-    await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" });
-    expect(await listed()).toEqual([second]);
-    expect(await setAside()).toBe(false);
-    // Set aside, not listed, still counted.
-    expect(await organizationCount()).toBe(1);
+    const current = (await getSubscriptionCoreCodexWorkspaceProjection(client!.db, scope)).source;
+    expect(current).toMatchObject({ workspaceSetAside: false, organizationCount: 1 });
     expect(
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }))
         .source,
@@ -857,8 +826,9 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       (await setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "automatic" }))
         .source.mode,
     ).toBe("automatic");
+    expect(await listed()).toEqual([first, second].sort());
     await expect(
-      setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "workspace" }),
+      setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...stranger, mode: "disabled" }),
     ).rejects.toMatchObject({
       message: expect.stringContaining("missing permission"),
       reason: "forbidden",
@@ -868,12 +838,29 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
         accountId: org.accountId,
         workspaceId: org.personalWorkspaceId,
         subjectId: org.ownerSubjectId,
-        mode: "workspace",
+        mode: "disabled",
       }),
     ).rejects.toMatchObject({
       message: expect.stringContaining("personal workspaces"),
       reason: "personal_workspace",
     });
+
+    // An organization account is switched on the organization's route only.
+    expect(
+      (
+        await setSubscriptionCoreCodexAllocator(client!.db, {
+          ...admin,
+          connectionId: first,
+          enabled: false,
+          expectedVersion: 1,
+        })
+      ).result.kind,
+    ).toBe("not_found");
+    const organizationRoute = {
+      accountId: org.accountId,
+      workspaceId: null,
+      subjectId: org.ownerSubjectId,
+    };
 
     // Allocator: legacy optimistic concurrency; strangers see nothing.
     expect(
@@ -889,7 +876,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(
       (
         await setSubscriptionCoreCodexAllocator(client!.db, {
-          ...admin,
+          ...organizationRoute,
           connectionId: first,
           enabled: false,
           expectedVersion: 9,
@@ -897,7 +884,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
       ).result.kind,
     ).toBe("conflict");
     const disabled = await setSubscriptionCoreCodexAllocator(client!.db, {
-      ...admin,
+      ...organizationRoute,
       connectionId: first,
       enabled: false,
       expectedVersion: 1,
@@ -911,7 +898,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(
       (
         await setSubscriptionCoreCodexAllocator(client!.db, {
-          ...admin,
+          ...organizationRoute,
           connectionId: first,
           enabled: false,
           expectedVersion: 1,
@@ -924,7 +911,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(
       (
         await setSubscriptionCoreCodexExtraCredits(client!.db, {
-          ...admin,
+          ...organizationRoute,
           connectionId: first,
           enabled: false,
           expectedVersion: 1,
@@ -934,7 +921,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(
       (
         await setSubscriptionCoreCodexExtraCredits(client!.db, {
-          ...admin,
+          ...organizationRoute,
           connectionId: first,
           enabled: true,
           expectedVersion: 1,
@@ -944,7 +931,7 @@ describe.skipIf(!realDb)("remaining Codex consumers on the shared core", () => {
     expect(
       (
         await setSubscriptionCoreCodexExtraCredits(client!.db, {
-          ...admin,
+          ...organizationRoute,
           connectionId: first,
           enabled: false,
           expectedVersion: 1,

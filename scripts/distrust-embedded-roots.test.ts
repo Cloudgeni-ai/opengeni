@@ -146,7 +146,7 @@ describe("image Bun stages use the distrusted Bun", () => {
 
 test("merge batcher ships patched Bun while retaining its nonroot portable runtime", async () => {
   const dockerfile = await readFile(join(repository, "docker/merge-batcher.Dockerfile"), "utf8");
-  expect(dockerfile).toContain("ARG BUN_VERSION=1.4.3\n");
+  expect(dockerfile).toContain("ARG BUN_VERSION=1.4.4\n");
   expect(dockerfile).toContain(
     "FROM oven/bun:${BUN_VERSION}-slim AS runtime\n" +
       "COPY --from=bun-distrusted /out/bun /usr/local/bin/bun\n",

@@ -326,6 +326,31 @@ export const KnowledgeEntryListRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type KnowledgeEntryListRequest = z.input<typeof KnowledgeEntryListRequest>;
 
+/** MCP discovery stays small; validation is identical to the HTTP UUID/date fields. */
+export const KnowledgeSearchToolRequest = /* @__PURE__ */ defineSchema(() => {
+  const uuid = z.uuid();
+  const date = z.string().datetime({ offset: true });
+  const compactUuid = z
+    .string()
+    .refine((value) => uuid.safeParse(value).success, "Invalid UUID")
+    .meta({ format: "uuid" });
+  return KnowledgeEntryListRequest.omit({
+    view: true,
+    sessionId: true,
+    reviewBatchId: true,
+  }).extend({
+    groupId: compactUuid.optional(),
+    fileId: compactUuid.optional(),
+    createdSince: z
+      .string()
+      .refine((value) => date.safeParse(value).success, "Invalid datetime")
+      .meta({ format: "date-time" })
+      .optional(),
+    view: z.enum(["published", "needs_review"]).default("published"),
+    limit: z.number().int().positive().max(50).default(5),
+  });
+});
+
 /** Lists never transfer whole source texts or evidence quotations. */
 export const KnowledgeEntrySummary = /* @__PURE__ */ defineSchema(() =>
   KnowledgeEntryRecord.omit({ revision: true }).extend({

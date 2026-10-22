@@ -13,6 +13,12 @@ class FakeNotification extends EventEmitter {
  */
 export const electronStub = {
   app: { isPackaged: true },
+  BaseWindow: EventEmitter,
+  WebContentsView: EventEmitter,
+  clipboard: {},
+  nativeTheme: {},
+  screen: {},
+  shell: { openExternal: async (_url: string): Promise<void> => {} },
   Menu: { buildFromTemplate: (template: unknown) => template },
   dialog: { showMessageBox: async () => ({ response: 0 }) },
   Notification: FakeNotification,

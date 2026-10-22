@@ -1,4 +1,5 @@
 import { Column, getTableName, is, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import type { SessionEventType } from "@opengeni/contracts";
 
 function correlatedReference(reference: SQLWrapper): SQLWrapper {
   // Drizzle's single-table SELECT projection removes Column table qualifiers,
@@ -32,6 +33,36 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
   "machine.link.lost",
   "session.event.envelope_omitted",
 ] as const;
+
+/**
+ * Events that never count as session activity by themselves: raw stream
+ * deltas, and infrastructure diagnostics such as the idle reaper's
+ * `sandbox.box.terminated` fan-out to every session sharing a drained box. A
+ * statement whose events are all of these advances the durable cursor and
+ * `last_sequence`, but neither `updated_at` (the rail's "last activity" time)
+ * nor `activity_xid` (rail order and incremental discovery). Any other event
+ * in the same statement keeps the ordinary activity projection. Attention
+ * events (`sandbox.box.lost`, `machine.link.lost`, ...) are deliberately
+ * absent: something a person must act on is activity.
+ *
+ * Migration 0904 holds the same literal list in the event cursor trigger;
+ * a change here needs a new migration.
+ */
+export const SESSION_ACTIVITY_NEUTRAL_EVENT_TYPES = [
+  "agent.message.delta",
+  "agent.reasoning.delta",
+  "sandbox.command.output.delta",
+  "terminal.pty.output.delta",
+  "sandbox.box.created",
+  "sandbox.box.terminated",
+  "sandbox.box.snapshot",
+  "sandbox.env.drift",
+  "session.route.reconciled",
+  "workspace.revision.captured",
+  "machine.op.recovered",
+  "machine.link.restored",
+  "machine.runner.restarted",
+] as const satisfies readonly SessionEventType[];
 
 /**
  * `0503` is that migration's index predicate. `0527` adds two changes: completed

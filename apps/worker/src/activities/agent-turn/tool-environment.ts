@@ -582,24 +582,37 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
-  // Independent scoped reads after the native-link authority check. Both
-  // finish before assembling the Skill index or preparing executable tools.
+  // These reads only feed the Skill index. Disabled Skills need neither the
+  // descriptors nor bundled files; agent build still rechecks live video policy.
+  // Enabled reads remain independent and finish before executable preparation.
   const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
-    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
-    listSkillDescriptors(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-    }),
+    toolFamilies.skills === false
+      ? Promise.resolve(null)
+      : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    toolFamilies.skills === false
+      ? Promise.resolve([])
+      : listSkillDescriptors(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+        }),
   ]);
-  const bundledSkills = loadConfiguredBundledSkills({
-    // Rows that could not freeze the "none" default at create (scheduled
-    // generated sessions, pre-existing rows) get the same rule here.
-    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
-    firstPartyTools: selectedFirstPartyMcpTools,
-    videoGenerationEnabled:
-      skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
-  });
+  const bundledSkills =
+    toolFamilies.skills === false
+      ? []
+      : loadConfiguredBundledSkills({
+          // Rows that could not freeze the "none" default at create (scheduled
+          // generated sessions, pre-existing rows) get the same rule here.
+          bundledSkillIds: bundledSkillSelectionForAgentConfig(
+            session.bundledSkillIds,
+            session.agent,
+          ),
+          firstPartyTools: selectedFirstPartyMcpTools,
+          videoGenerationEnabled:
+            skillConfiguration !== null &&
+            skillConfiguration.defaultModelId !== null &&
+            skillConfiguration.enabledModelIds.length > 0,
+        });
   const selectedSkills = [
     ...bundledSkills,
     ...session.skills.map((skill) => ({

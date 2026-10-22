@@ -1497,6 +1497,7 @@ export function buildTimeline(
             typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           capability,
           setupRequest,
+          requestedSandboxId: stringValue(payload.requestedSandboxId) || null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -1937,6 +1938,7 @@ export function buildTimeline(
     }
   }
   if (pendingTurnSteps) items.push(pendingTurnSteps);
+  markRepeatedMachineRequests(items);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2187,6 +2189,25 @@ function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
     ...next,
     ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
   };
+}
+
+const CONNECTED_MACHINE_CARD_ID = "api:connected-machine";
+
+/**
+ * An agent that is refused a machine often asks again in later turns. Only the
+ * newest Connected Machine card for the same request stays a full card; earlier
+ * ones become a short note, so a chat never piles up copies of the same card.
+ * Cards that name different machines are separate requests.
+ */
+function markRepeatedMachineRequests(items: TimelineItem[]): void {
+  const seen = new Set<string>();
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.kind !== "auth-needed" || item.capability?.id !== CONNECTED_MACHINE_CARD_ID) continue;
+    const key = item.requestedSandboxId ?? "";
+    if (seen.has(key)) item.askedAgainLater = true;
+    else seen.add(key);
+  }
 }
 
 /**
@@ -2769,13 +2790,16 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      // The work row leads the first visible reply of the turn.
+      // The work row leads the first visible reply of the turn. A live turn
+      // whose answer is already declared puts the row there too, so the answer
+      // being read stays put when the turn settles instead of hopping past it.
       const anchor = Math.min(
         ...[...responses].map((message) => positions.get(message) ?? groups.length),
       );
-      if (settledAt && anchor < (nextBoundary.get(group) ?? groups.length)) {
+      if (anchor < (nextBoundary.get(group) ?? groups.length)) {
         beforeRows.set(groups[anchor]!, group);
         movedRows.add(group);
+        continue;
       }
     }
     if (!settledAt) {

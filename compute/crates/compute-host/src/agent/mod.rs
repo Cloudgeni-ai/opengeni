@@ -902,6 +902,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         engine: E,
         store: S,
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
+        // On a host in a fleet requests wait until it has started; it logs
+        // how long that took.
+        let began = Instant::now();
         let (core, records, strays, images) = open_root(&config).await?;
         let net = prepare_network(config.network.clone()).await?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
@@ -995,7 +998,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             trace: None,
         };
         // Boxed: recovery's future is large, and every caller awaits this one.
-        Box::pin(agent.begin(held, strays, warm_shapes)).await;
+        Box::pin(agent.begin(held, strays, warm_shapes, began)).await;
         let handle = Handle::new(
             commands_tx,
             config.stream_idle,
@@ -1006,8 +1009,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Takes back what an earlier agent left, then takes a first reading
-    /// and starts the templates.
-    async fn begin(&mut self, held: Vec<Held>, strays: Vec<Stray>, shapes: Vec<Shape>) {
+    /// and starts the templates; then logs how long the start that `began`
+    /// then took, and its recovery.
+    async fn begin(
+        &mut self,
+        held: Vec<Held>,
+        strays: Vec<Stray>,
+        shapes: Vec<Shape>,
+        began: Instant,
+    ) {
+        let recovering = Instant::now();
         // Before any VM starts or is adopted, so no group being set up
         // looks left behind.
         if let Err(error) = self.engine.clean_up_left_behind() {
@@ -1021,6 +1032,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.sample();
         self.recovering = false;
         self.start_templates(shapes);
+        tracing::info!(
+            ms = began.elapsed().as_millis(),
+            recovery_ms = recovering.elapsed().as_millis(),
+            "started"
+        );
     }
 
     /// Refuses while some ordinal is unknown: any ordinal that looks free

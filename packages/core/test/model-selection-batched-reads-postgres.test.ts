@@ -48,6 +48,7 @@ let client: DbClient;
 let scope: { accountId: string; workspaceId: string };
 let otherScope: typeof scope;
 const directQueries: string[] = [];
+let capturedStatements: string[] | null = null;
 let directModelIds: string[];
 
 beforeAll(async () => {
@@ -56,6 +57,7 @@ beforeAll(async () => {
   client = createDb(shared.appUrl);
   const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
   driver.options.debug = (_id, query) => {
+    capturedStatements?.push(query);
     if (query.includes('from "connections"') && query.includes("direct_azure_openai")) {
       directQueries.push(query);
     }
@@ -373,6 +375,72 @@ test("workspace catalog settings expose the same active and retained custom mode
       `${claudeProviderId("claude_subscription", "workspace")}/fixture/claude_subscription-a`,
     ),
   ).toBe(false);
+});
+
+test("repeated session models read each retained Claude model only once per response", async () => {
+  const models = CLAUDE_CONNECTION_KINDS.flatMap((kind) => [
+    `${claudeProviderId(kind)}/fixture/${kind}-org-retired`,
+    `${claudeProviderId(kind, "workspace")}/fixture/${kind}-retired`,
+  ]);
+  const [single, singleTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      retainedProductModelIds: models,
+    }),
+  );
+  const started = performance.now();
+  capturedStatements = [];
+  const [repeated, repeatedTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      // A response page can contain many sessions using the same model.
+      // The singular compatibility field must not add another read either.
+      retainedProductModelIds: Array.from(
+        { length: 50 },
+        (_, index) => models[index % models.length],
+      ),
+      retainedProductModelId: models[0],
+    }),
+  );
+  const statements = capturedStatements;
+  capturedStatements = null;
+  const retainedReads = statements.filter(
+    (query) =>
+      /from "(?:organization_model_provider_custom_models|workspace_gateway_custom_models)"/.test(
+        query,
+      ) &&
+      query.includes('"upstream_model_id" =') &&
+      query.includes("limit"),
+  );
+  console.log(
+    JSON.stringify({
+      retainedModelBudget: {
+        singleTransactions,
+        repeatedTransactions,
+        statements: statements.length,
+        retainedReads: retainedReads.length,
+        elapsedMs: performance.now() - started,
+      },
+    }),
+  );
+  expect(JSON.stringify(repeated)).toBe(JSON.stringify(single));
+  expect(singleTransactions).toBe(3 + models.length);
+  expect(repeatedTransactions).toBe(singleTransactions);
+  expect(retainedReads).toHaveLength(models.length);
+
+  // This is input normalization, not a catalog cache. A later request must
+  // observe a retained model's updated metadata through the ordinary read.
+  await shared!.admin`
+    update organization_model_provider_custom_models set label = 'Updated retained model'
+    where account_id = ${scope.accountId} and provider_kind = 'anthropic'
+      and upstream_model_id = 'fixture/anthropic-org-retired'`;
+  const updated = await resolveWorkspaceCatalogSettings(client.db, settings, {
+    ...scope,
+    retainedProductModelIds: [models[0], models[0]],
+  });
+  expect(configuredModels(updated.settings).find((model) => model.id === models[0])?.label).toBe(
+    "Updated retained model",
+  );
 });
 
 const directRestrictions = (restrictions: Record<string, string[] | null>) =>

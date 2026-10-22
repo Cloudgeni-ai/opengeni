@@ -104,7 +104,10 @@ export type SessionEventMutation<Projection extends "full" | "event" = "full"> =
 export type SessionEventMutationInput =
   | SessionEventMutation
   | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
-export { sessionHasToolRouterHistory } from "./session-tool-router-history";
+export {
+  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
+} from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
@@ -166,7 +169,6 @@ export {
   createSubscriptionConnection,
   isSubscriptionProviderCutoverEnabled,
   listSubscriptionConnectionsForPlacement,
-  listSubscriptionConnectionAssignmentPolicies,
   listDueSubscriptionCapacityWaiters,
   markSubscriptionCapacityWakeDelivered,
   observeSubscriptionCapacityWaiterWake,
@@ -182,7 +184,6 @@ export {
   upsertSubscriptionCapacityWaiter,
   wakeSubscriptionCapacityWaiter,
   writeSubscriptionSessionBinding,
-  type SubscriptionConnectionAssignmentPolicy,
   type SubscriptionCapacityWaiter,
   type SubscriptionCapacityWakeDelivery,
   type DueSubscriptionCapacityWaiter,
@@ -313,6 +314,7 @@ import {
   childTerminalResultFinalAnswerWithGoalContinuations,
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryResponse,
@@ -446,6 +448,7 @@ export {
   setSubscriptionCoreAllocator,
   setSubscriptionCorePrimary,
   setSubscriptionCoreRotation,
+  type SubscriptionCoreConnectionReach,
   type SubscriptionCoreConnectionRow,
   type SubscriptionCoreWake,
   type SubscriptionCoreWorkspaceView,
@@ -2477,7 +2480,7 @@ async function projectManagedOrganizationAccess(
     subjectId: string;
     subjectLabel: string;
     organizationMemberships: OrganizationMemberType[];
-    preferredDefaultWorkspaceId?: string | null;
+    userId: string;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const activeOrganizationMemberships = input.organizationMemberships.flatMap(
@@ -2505,43 +2508,69 @@ async function projectManagedOrganizationAccess(
     throw new Error("Inactive managed organization unexpectedly passed active membership");
   }
 
+  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  // Preserve the final scope of the old per-organization loop. These authority
+  // tables are non-RLS: every join is explicitly limited to the subject and the
+  // active organization ids just returned by the canonical membership helper.
+  await setRlsContext(db, {
+    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
+    workspaceId: null,
+  });
+  const rows = await db
+    .select({
+      accountId: schema.managedAccounts.id,
+      accountName: schema.managedAccounts.name,
+      workspaceId: schema.workspaces.id,
+      permissions: schema.workspaceMemberships.permissions,
+      preferredDefaultWorkspaceId: sql<string | null>`(
+        select legacy.id from ${schema.workspaces} legacy
+        join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
+        where fallback.id = ${defaultAccountId}::uuid
+          and fallback.external_source = 'better-auth:user'
+          and fallback.external_id = ${input.userId}
+          and legacy.external_source = 'better-auth:user'
+          and legacy.external_id = ${`${input.userId}:default`}
+        limit 1
+      )`,
+    })
+    .from(schema.managedAccounts)
+    .leftJoin(
+      schema.workspaceMemberships,
+      and(
+        eq(schema.workspaceMemberships.accountId, schema.managedAccounts.id),
+        eq(schema.workspaceMemberships.subjectId, input.subjectId),
+      ),
+    )
+    .leftJoin(
+      schema.workspaces,
+      and(
+        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
+      ),
+    )
+    .where(
+      inArray(
+        schema.managedAccounts.id,
+        activeOrganizationMemberships.map((row) => row.organizationId),
+      ),
+    )
+    .orderBy(desc(schema.workspaces.createdAt));
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
-    await setRlsContext(db, {
-      accountId: organizationMembership.organizationId,
-      workspaceId: null,
-    });
-    // These authority tables are non-RLS, so the account GUC does not scope this query.
-    const persistedMemberships = await db
-      .select({
-        membership: schema.workspaceMemberships,
-        workspace: schema.workspaces,
-      })
-      .from(schema.workspaceMemberships)
-      .innerJoin(
-        schema.workspaces,
-        and(
-          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
-          eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.workspaceMemberships.subjectId, input.subjectId),
-          eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
-          eq(schema.workspaces.accountId, organizationMembership.organizationId),
-        ),
-      )
-      .orderBy(desc(schema.workspaces.createdAt));
     workspaceGrants.push(
-      ...persistedMemberships.map((row) => ({
-        workspaceId: row.workspace.id,
-        accountId: row.workspace.accountId,
-        subjectId: input.subjectId,
-        subjectLabel: input.subjectLabel,
-        permissions: normalizeWorkspaceMembershipPermissions(row.membership.permissions),
-        principalKind: "human_session" as const,
-      })),
+      ...rows
+        .filter(
+          (row) =>
+            row.accountId === organizationMembership.organizationId && row.workspaceId !== null,
+        )
+        .map((row) => ({
+          workspaceId: row.workspaceId!,
+          accountId: row.accountId,
+          subjectId: input.subjectId,
+          subjectLabel: input.subjectLabel,
+          permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
+          principalKind: "human_session" as const,
+        })),
     );
   }
   for (const organizationMembership of activeOrganizationMemberships) {
@@ -2560,28 +2589,13 @@ async function projectManagedOrganizationAccess(
       });
     }
   }
-  const organizationAccounts = await db
-    .select({
-      id: schema.managedAccounts.id,
-      name: schema.managedAccounts.name,
-    })
-    .from(schema.managedAccounts)
-    .where(
-      inArray(
-        schema.managedAccounts.id,
-        activeOrganizationMemberships.map((membership) => membership.organizationId),
-      ),
-    );
-  const organizationNameById = new Map(
-    organizationAccounts.map((organization) => [organization.id, organization.name]),
-  );
-  const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
+  const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
-        grant.workspaceId === input.preferredDefaultWorkspaceId,
+        grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
     )?.workspaceId ?? defaultPersonalWorkspaceId;
   return {
     accessContext: {
@@ -2641,44 +2655,12 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
-    const [fallbackAccount] = await tx
-      .select({ id: schema.managedAccounts.id })
-      .from(schema.managedAccounts)
-      .where(
-        and(
-          eq(schema.managedAccounts.externalSource, "better-auth:user"),
-          eq(schema.managedAccounts.externalId, input.userId),
-        ),
-      )
-      .limit(1);
     if (existingOrganizationMemberships.some((membership) => membership.status === "active")) {
-      const firstActiveMembership = existingOrganizationMemberships.find(
-        (membership) => membership.status === "active" && membership.personalWorkspaceId !== null,
-      );
-      let preferredDefaultWorkspaceId: string | null = null;
-      if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
-        await setRlsContext(txDb, {
-          accountId: fallbackAccount.id,
-          workspaceId: null,
-        });
-        const [legacyDefaultWorkspace] = await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(
-            and(
-              eq(schema.workspaces.accountId, fallbackAccount.id),
-              eq(schema.workspaces.externalSource, "better-auth:user"),
-              eq(schema.workspaces.externalId, `${input.userId}:default`),
-            ),
-          )
-          .limit(1);
-        preferredDefaultWorkspaceId = legacyDefaultWorkspace?.id ?? null;
-      }
       return await projectManagedOrganizationAccess(txDb, {
         subjectId,
         subjectLabel,
         organizationMemberships: existingOrganizationMemberships,
-        preferredDefaultWorkspaceId,
+        userId: input.userId,
       });
     }
     if (
@@ -19192,10 +19174,66 @@ export async function scheduledSessionIds(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Set<string>> {
-  if (sessionIds.length === 0) return new Set();
+  return (await sessionScheduleTargets(db, workspaceId, sessionIds)).scheduled;
+}
+
+/**
+ * Whether a schedule can still start a run on its own: it is active, and its
+ * cadence has a run left after `now`. A paused schedule, a one-time schedule
+ * whose time has passed (fired or missed), an interval past its end, and a
+ * manual task never fire by themselves. Malformed specs are not upcoming.
+ *
+ * A one-time run stops being upcoming as soon as `runAt` passes, even while
+ * 0761's 24-hour missed-run catch-up could still start it: the indicator shows
+ * what is ahead, not a late catch-up. Nothing writes at `runAt`/`endAt`, so a
+ * list read before that moment keeps the icon until its next refresh.
+ */
+export function scheduledTaskHasUpcomingRun(
+  task: { status: string; schedule: unknown },
+  now: Date,
+): boolean {
+  if (task.status !== "active") return false;
+  const spec =
+    task.schedule && typeof task.schedule === "object"
+      ? (task.schedule as Record<string, unknown>)
+      : null;
+  const later = (value: unknown) => {
+    const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(at) && at > now.getTime();
+  };
+  switch (spec?.type) {
+    case "once":
+      return later(spec.runAt);
+    case "interval":
+      return spec.endAt === undefined || spec.endAt === null || later(spec.endAt);
+    case "calendar":
+      return true;
+    default:
+      return false;
+  }
+}
+
+export type SessionScheduleTargets = {
+  /** Sessions any current schedule targets, including paused and finished ones. */
+  scheduled: Set<string>;
+  /** Sessions an active schedule targets that can still start a run. */
+  upcoming: Set<string>;
+};
+
+export async function sessionScheduleTargets(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  now: Date = new Date(),
+): Promise<SessionScheduleTargets> {
+  if (sessionIds.length === 0) return { scheduled: new Set(), upcoming: new Set() };
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
-      .selectDistinct({ sessionId: schema.scheduledTasks.reusableSessionId })
+      .select({
+        sessionId: schema.scheduledTasks.reusableSessionId,
+        status: schema.scheduledTasks.status,
+        schedule: schema.scheduledTasks.schedule,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -19205,7 +19243,13 @@ export async function scheduledSessionIds(
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
       );
-    return new Set(rows.flatMap((row) => (row.sessionId ? [row.sessionId] : [])));
+    const targets: SessionScheduleTargets = { scheduled: new Set(), upcoming: new Set() };
+    for (const row of rows) {
+      if (!row.sessionId) continue;
+      targets.scheduled.add(row.sessionId);
+      if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+    }
+    return targets;
   });
 }
 
@@ -33010,7 +33054,10 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive personal_state as materialized (
+    -- Inline this subject's state so each lateral lookup can use the session
+    -- key. A materialized workspace range has no index: generic estimates can
+    -- choose to rescan the whole range once per root or descendant.
+    with recursive personal_state as not materialized (
       select workspace_id, subject_id, session_id, pinned, archived,
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
@@ -33032,8 +33079,12 @@ async function sessionListTotalsInScope(
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
         coalesce(root_personal.actively_working, false) as actively_working
       from ${schema.sessions}
-      left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
-      left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.id} offset 0
+      ) root_personal on true
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.rootSessionId} offset 0
+      ) root_archive on true
       where ${rootFilters}
     ), visible_children as materialized (
       -- Immutable root lineage excludes trees that cannot enter this recursion.
@@ -33047,7 +33098,9 @@ async function sessionListTotalsInScope(
           else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
         coalesce(personal.actively_working, false) as actively_working
       from ${schema.sessions} child
-      left join personal_state personal on personal.session_id = child.id
+      left join lateral (
+        select * from personal_state where session_id = child.id offset 0
+      ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
@@ -44374,7 +44427,7 @@ const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
 
 type ProviderLossRecord = {
   version: 1;
-  source: "drain_probe" | "warm_resume";
+  source: "drain_probe" | "warm_resume" | "continuity_restore";
   leaseId: string;
   lostEpoch: number;
   instanceId: string | null;
@@ -44382,7 +44435,33 @@ type ProviderLossRecord = {
   observedAt: string;
   /** The lost object's recorded hard provider deadline, when known. */
   providerDeadlineAt: string | null;
+  /** Backend-specific proof that the lost object, and with it every copy of
+   * the workspace that only it held, no longer exists anywhere. A NotFound on
+   * its own is an observation, not proof: without this (or Modal's hard
+   * lifetime, or the compute control plane's own answer) the loss may at most
+   * restore a checkpoint, never continue on an empty workspace. */
+  deathProof?: ProviderDeathProof;
 };
+
+type ProviderDeathProof = {
+  /** `workspace_absent`: the same Docker daemon reports the exact container
+   * gone and its owned host workspace directory no longer exists.
+   * `provider_lifetime`: the provider ends every box within a known bound,
+   * so none can still be running after `provenAt`. */
+  kind: "workspace_absent" | "provider_lifetime";
+  provenAt: string;
+};
+
+function parsedProviderDeathProof(value: unknown): ProviderDeathProof | null | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const proof = value as Record<string, unknown>;
+  return (proof.kind === "workspace_absent" || proof.kind === "provider_lifetime") &&
+    typeof proof.provenAt === "string" &&
+    Number.isFinite(Date.parse(proof.provenAt))
+    ? { kind: proof.kind, provenAt: proof.provenAt }
+    : null;
+}
 
 function providerLossRecord(
   resumeState: Record<string, unknown> | null | undefined,
@@ -44391,7 +44470,9 @@ function providerLossRecord(
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   return record.version === 1 &&
-    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    (record.source === "drain_probe" ||
+      record.source === "warm_resume" ||
+      record.source === "continuity_restore") &&
     typeof record.leaseId === "string" &&
     typeof record.lostEpoch === "number" &&
     Number.isSafeInteger(record.lostEpoch) &&
@@ -44402,7 +44483,8 @@ function providerLossRecord(
     Number.isFinite(Date.parse(record.observedAt)) &&
     (record.providerDeadlineAt === null ||
       (typeof record.providerDeadlineAt === "string" &&
-        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+        Number.isFinite(Date.parse(record.providerDeadlineAt)))) &&
+    parsedProviderDeathProof(record.deathProof) !== null
     ? (record as ProviderLossRecord)
     : null;
 }
@@ -44418,7 +44500,17 @@ function providerLossRecordForLostRow(
   row: LeaseRow,
   source: ProviderLossRecord["source"],
   observedAt: string,
+  /** The provider's bound on how long any box can still run after this
+   * observation (its hard lifetime, or the renewable TTL nobody renews any
+   * more), when it has one. */
+  providerMaxRemainingLifetimeMs?: number | null,
 ): ProviderLossRecord {
+  const lifetimeEndsAt =
+    typeof providerMaxRemainingLifetimeMs === "number" &&
+    Number.isSafeInteger(providerMaxRemainingLifetimeMs) &&
+    providerMaxRemainingLifetimeMs >= 0
+      ? Date.parse(observedAt) + providerMaxRemainingLifetimeMs + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : null;
   return {
     version: 1,
     source,
@@ -44428,7 +44520,32 @@ function providerLossRecordForLostRow(
     workspaceGeneration: Number(row.workspace_generation),
     observedAt,
     providerDeadlineAt: timestampIso(row.provider_deadline_at),
+    ...(lifetimeEndsAt !== null && Number.isFinite(lifetimeEndsAt)
+      ? {
+          deathProof: {
+            kind: "provider_lifetime" as const,
+            provenAt: new Date(lifetimeEndsAt).toISOString(),
+          },
+        }
+      : {}),
   };
+}
+
+/** The carried loss record with `workspace_absent` proof added, minting the
+ * record when an older loss transition never wrote one. Never moves a record
+ * to another lease or workspace generation. */
+function providerLossRecordWithWorkspaceAbsent(
+  row: LeaseRow,
+  provenAt: string,
+): ProviderLossRecord {
+  const carried = providerLossRecord(row.resume_state);
+  const base =
+    carried &&
+    carried.leaseId === row.id &&
+    carried.workspaceGeneration === Number(row.workspace_generation)
+      ? carried
+      : providerLossRecordForLostRow(row, "continuity_restore", provenAt);
+  return { ...base, deathProof: { kind: "workspace_absent", provenAt } };
 }
 
 function resumeStateWithPreservedArchives(
@@ -45770,24 +45887,31 @@ async function sandboxGroupRecoveryBlockersTx(
   });
 }
 
-/** A registered CURRENT native Modal checkpoint older than the lost workspace.
- * The restore path independently verifies the opaque bytes and provider binding. */
+/** The CURRENT checkpoint older than the lost workspace: on Modal a registered
+ * native checkpoint, elsewhere the lease's own verified portable archive (which
+ * has no native artifact). The restore path independently verifies the bytes
+ * against the descriptor, and a native checkpoint's provider binding. */
 async function verifiedAutomaticCheckpointSelectionTx(
   tx: Database,
   row: LeaseRow,
   session: typeof schema.sessions.$inferSelect,
   recovery: SandboxRecoveryState,
-): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+): Promise<SandboxCheckpointSelection | null> {
   const descriptor = recovery.archive.current;
   if (
     recovery.archive.status !== "available" ||
     currentWorkspaceArchiveWasAbandoned(row) ||
-    descriptor?.version !== 2 ||
-    row.current_checkpoint_artifact_id === null ||
+    !descriptor ||
     row.archive_generation === null ||
     Number(row.archive_generation) >= Number(row.workspace_generation)
   )
     return null;
+  if ((row.resume_backend_id ?? row.backend) !== "modal") {
+    return descriptor.version === 1 && row.current_checkpoint_artifact_id === null
+      ? checkpointSelectionForSession(row, session, descriptor)
+      : null;
+  }
+  if (descriptor.version !== 2 || row.current_checkpoint_artifact_id === null) return null;
   const [artifact] = await rawRows<{ valid: boolean }>(
     tx,
     sql`select exists(select 1 from sandbox_checkpoint_artifacts
@@ -45808,8 +45932,8 @@ function checkpointSelectionForSession(
   row: LeaseRow,
   session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
   descriptor: { revision: string; capturedAt: string },
-): import("@opengeni/contracts").SandboxRecoverySelection | null {
-  const parsed = SandboxRecoverySelection.safeParse({
+): SandboxCheckpointSelection | null {
+  const parsed = SandboxCheckpointSelection.safeParse({
     version: 1,
     sessionId: session.id,
     sandboxGroupId: row.sandbox_group_id,
@@ -45880,7 +46004,7 @@ type AutomaticRecoveryLane =
   | {
       kind: "checkpoint";
       state: "available" | "authorized";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       operationId: string | null;
       initiatingSessionId: string | null;
       attempt: number;
@@ -45907,6 +46031,7 @@ type AutomaticRecoveryLane =
         | "restore_retry_backoff"
         | "restore_retry_exhausted"
         | "provider_lifetime_unexpired"
+        | "provider_death_unproven"
         | "authorization_pending"
         | "authorization_invalid";
       /** For a timed wait: the earliest time a new decision (Retry or a new
@@ -45922,10 +46047,42 @@ function isoTimestamp(...candidates: Array<string | null | undefined>): string {
   return new Date().toISOString();
 }
 
-/** Structural system continuity for a definitively lost managed Modal box.
- * Prefer the latest verified registered checkpoint; otherwise continue on a
- * new EMPTY workspace. Never for an ambiguous provider state, an unresolved
- * create, a live explicit authorization, or an unsettled late capture. Group
+/** Backends whose lost boxes the system may recover by itself. Connected
+ * Machines and backend-less sessions are never system recovered. */
+function automaticRecoveryBackend(
+  session: Pick<typeof schema.sessions.$inferSelect, "sandboxBackend">,
+  row: Pick<LeaseRow, "backend" | "resume_backend_id">,
+): boolean {
+  const backend = row.resume_backend_id ?? row.backend;
+  return (
+    session.sandboxBackend === backend &&
+    row.backend === backend &&
+    backend !== "none" &&
+    backend !== "selfhosted"
+  );
+}
+
+/** When the lost object is proven gone, as a database-clock epoch, or null
+ * when nothing proves it. Modal: past its hard lifetime, which no Modal
+ * sandbox outlives in any workspace. Compute: the control plane, which is
+ * authoritative for its own sandboxes, is the only source of a compute
+ * NotFound. Others: the backend-specific proof the loss recorded. */
+function providerDeathProvenAtMs(row: LeaseRow, loss: ProviderLossRecord): number | null {
+  const backend = row.resume_backend_id ?? row.backend;
+  if (backend === "modal") {
+    return loss.providerDeadlineAt
+      ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+      : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  }
+  if (backend === "compute") return Date.parse(loss.observedAt);
+  return loss.deathProof ? Date.parse(loss.deathProof.provenAt) : null;
+}
+
+/** Structural system continuity for a definitively lost managed box. Prefer
+ * the latest verified checkpoint; otherwise, only with proof the lost object is
+ * gone (providerDeathProvenAtMs), continue on a new EMPTY workspace. Never for
+ * an ambiguous provider state, an unresolved create, a live explicit
+ * authorization, or an unsettled late capture. Group
  * quiescence is checked separately, at the exact deciding attempt. Rows
  * written by older confirmDrainCold/lost-instance code qualify as-is: the
  * decision reads current lease truth, not a new loss-time receipt. */
@@ -45958,7 +46115,7 @@ async function automaticRecoveryLaneTx(
     };
   if (pendingFreshWorkspaceRecovery(row.resume_state))
     return { kind: "unavailable", reason: "authorization_invalid" };
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
+  if (!automaticRecoveryBackend(session, row))
     return { kind: "unavailable", reason: "not_applicable" };
   const automatic = automaticCheckpointMarker(row.resume_state);
   if (automatic?.status === "accepted") {
@@ -46074,13 +46231,12 @@ async function automaticRecoveryLaneTx(
     };
   }
   // No checkpoint Opengeni can restore automatically. An empty workspace is
-  // irreversible for the running sandbox, so it additionally waits until the
-  // lost object is past its hard provider lifetime: no Modal sandbox outlives
-  // it in any workspace, so a misconfigured credential or namespace cannot
-  // turn a live box into a false loss here.
-  const lifetimeEndsAt = loss.providerDeadlineAt
-    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
-    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  // irreversible for the running sandbox, so it needs proof that the lost
+  // object, and any workspace only it held, is really gone. A NotFound alone
+  // can come from a misconfigured credential or namespace, or a daemon under
+  // memory pressure, and must never turn a live workspace into an empty one.
+  const lifetimeEndsAt = providerDeathProvenAtMs(row, loss);
+  if (lifetimeEndsAt === null) return { kind: "unavailable", reason: "provider_death_unproven" };
   if (now < lifetimeEndsAt)
     return {
       kind: "unavailable",
@@ -46271,12 +46427,15 @@ async function projectPublicSandboxRecovery(
     currentWorkspace &&
     (currentWorkspace.reason === "fresh_workspace_selected" ||
       currentWorkspace.reason === "archive_retry_selected" ||
-      canRevalidateCurrentWorkspaceArchive(row) ||
-      row.backend !== "modal")
+      canRevalidateCurrentWorkspaceArchive(row))
   )
     return currentWorkspace;
-  if (session.sandboxBackend !== "modal" || row.backend !== "modal")
-    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  // Explicit historical-checkpoint consent stays Modal-only; system continuity
+  // after a loss serves every automatically recoverable backend.
+  const modalHome = session.sandboxBackend === "modal" && row.backend === "modal";
+  const homeUnsupported = (): SandboxRecoveryProjection =>
+    currentWorkspace ?? { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  if (!modalHome && !automaticRecoveryBackend(session, row)) return homeUnsupported();
   const publicRecovery = row.public_recovery as Record<string, unknown> | null;
   const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
   if (publicRecovery && acceptedSelection.success && publicRecovery.sessionId === input.sessionId) {
@@ -46316,10 +46475,18 @@ async function projectPublicSandboxRecovery(
   if (purpose === "preview") {
     const lane = await automaticRecoveryLaneTx(tx, row, session);
     if (lane.kind === "checkpoint" || lane.kind === "fresh_workspace") {
-      const checkpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      const automaticCheckpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      // `checkpoint` keeps its public shape: a native checkpoint only. A
+      // portable one is named by `automaticCheckpoint` alone.
+      const nativeCheckpoint = SandboxRecoverySelection.safeParse(automaticCheckpoint);
+      const checkpoint = nativeCheckpoint.success ? nativeCheckpoint.data : null;
+      const blocked = (blockedReason: string): SandboxRecoveryProjection => ({
+        ...unavailable(blockedReason, checkpoint),
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
+      });
       const reason =
         lane.state === "authorized" ? null : await automaticLaneQuiescenceReason(tx, row, session);
-      if (reason) return unavailable(reason, checkpoint);
+      if (reason) return blocked(reason);
       // Retry reopens the latest failed turn, and never with a tool call whose
       // outcome it cannot prove. A new message still recovers the sandbox.
       const [retryTarget] = await rawRows<{ unresolved: boolean }>(
@@ -46330,12 +46497,13 @@ async function projectPublicSandboxRecovery(
               where turn.workspace_id = ${input.workspaceId} and turn.session_id = ${session.id}
               order by turn.position desc, turn.created_at desc limit 1)) as unresolved`,
       );
-      if (retryTarget?.unresolved) return unavailable("retry_tool_outcome_unresolved", checkpoint);
+      if (retryTarget?.unresolved) return blocked("retry_tool_outcome_unresolved");
       return {
         version: 1,
         status: "eligible",
         reason: null,
         checkpoint,
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
         operationId: null,
         automaticAvailable: true,
         automaticLane: lane.kind,
@@ -46351,6 +46519,7 @@ async function projectPublicSandboxRecovery(
     )
       return unavailable(lane.reason, null, lane.availableAt);
   }
+  if (!modalHome) return homeUnsupported();
   // A system decision already owns this lease; consent may not compete with it.
   if (
     pendingFreshWorkspaceRecovery(row.resume_state) ||
@@ -46379,8 +46548,13 @@ async function projectPublicSandboxRecovery(
     !row.current_checkpoint_artifact_id
   )
     return unavailable("registered_current_checkpoint_required");
-  const selection = checkpointSelectionForSession(row, session, descriptor);
-  if (!selection) return unavailable("checkpoint_metadata_invalid");
+  // Human consent is offered only for a registered native checkpoint, so the
+  // public selection always names its artifact.
+  const parsedSelection = SandboxRecoverySelection.safeParse(
+    checkpointSelectionForSession(row, session, descriptor),
+  );
+  if (!parsedSelection.success) return unavailable("checkpoint_metadata_invalid");
+  const selection = parsedSelection.data;
   if (selection.archiveGeneration >= selection.workspaceGeneration)
     return unavailable("historical_checkpoint_not_required", selection);
   if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
@@ -46798,7 +46972,7 @@ export type AutomaticSandboxRecoveryAuthorization =
   | {
       status: "authorized" | "already_authorized";
       lane: "checkpoint";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       groupSessionCount: number;
     }
   | {
@@ -46850,7 +47024,7 @@ async function writeAutomaticRecoveryReceiptsTx(
           ? input.actor
           : { type: "service", subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT };
       if (input.lane.kind === "checkpoint") {
-        const checkpoint = SandboxRecoverySelection.parse({
+        const checkpoint = SandboxCheckpointSelection.parse({
           ...input.lane.selection,
           sessionId: member.id,
           routeEpoch: member.activeEpoch,
@@ -47256,7 +47430,7 @@ export async function getSandboxRecoveryDiscontinuity(
       );
     }
     if (rows[0].action === "sandbox.recovery.automatic") {
-      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      const selection = SandboxCheckpointSelection.parse(rows[0].result.checkpoint);
       return automaticSandboxRecoveryDiscontinuity(
         selection,
         rows[0].result.scope === "shared" ? "shared" : "session",
@@ -47470,7 +47644,7 @@ async function authorizedHistoricalArchiveGeneration(
     // until verified warm publication.
     if (!session) return null;
     return session.sandboxGroupId === row.sandbox_group_id &&
-      session.sandboxBackend === "modal" &&
+      automaticRecoveryBackend(session, row) &&
       (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
       metadata?.version === 1 &&
       metadata.automaticHistoricalCheckpoint === true &&
@@ -47479,7 +47653,7 @@ async function authorizedHistoricalArchiveGeneration(
       metadata.leaseEpoch === Number(row.lease_epoch) &&
       metadata.workspaceGeneration === Number(row.workspace_generation) &&
       metadata.archiveGeneration === archiveGeneration &&
-      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      (metadata.artifactId ?? null) === row.current_checkpoint_artifact_id &&
       archiveGeneration !== null &&
       archiveGeneration < Number(row.workspace_generation) &&
       metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
@@ -47925,6 +48099,9 @@ export async function failSandboxRematerialization(
     failureCode: string;
     retryable: boolean;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -47957,7 +48134,9 @@ export async function failSandboxRematerialization(
         }
         const current = recoveryStateFromLeaseRow(row);
         const continuity =
-          input.retryable && !input.discardContinuity ? continuityRecoveryFromLeaseRow(row) : null;
+          input.retryable && !input.discardContinuity && !input.providerWorkspaceAbsent
+            ? continuityRecoveryFromLeaseRow(row)
+            : null;
         const terminalStatus: SandboxRestoreStatus = continuity
           ? "pending"
           : input.retryable
@@ -47995,7 +48174,15 @@ export async function failSandboxRematerialization(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = JSON.stringify(recoveryResumeState(row, recovery));
+        const resumeStateJson = JSON.stringify(
+          recoveryResumeState(
+            row,
+            recovery,
+            input.providerWorkspaceAbsent
+              ? providerLossRecordWithWorkspaceAbsent(row, new Date().toISOString())
+              : undefined,
+          ),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -50712,6 +50899,9 @@ export async function markWarmLeaseInstanceLost(
     expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
+    /** The backend's bound on how long the lost box could still run (its hard
+     * lifetime or unrenewed TTL), when it has one. Recorded as death proof. */
+    providerMaxRemainingLifetimeMs?: number | null;
   },
 ): Promise<MarkWarmLeaseInstanceLostResult> {
   const backgroundCommandEvents: SessionEvent[] = [];
@@ -50839,7 +51029,12 @@ export async function markWarmLeaseInstanceLost(
         const coldResumeState = recoveryResumeState(
           current,
           recovery,
-          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+          providerLossRecordForLostRow(
+            current,
+            "warm_resume",
+            observedAt,
+            input.providerMaxRemainingLifetimeMs,
+          ),
         );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
@@ -51271,6 +51466,9 @@ export async function failWarmingToCold(
     sandboxGroupId: string;
     expectedEpoch: number;
     discardContinuity?: boolean;
+    /** The continuity restore proved the lost workspace itself is gone (see
+     * ProviderDeathProof `workspace_absent`). Implies discardContinuity. */
+    providerWorkspaceAbsent?: boolean;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -51292,11 +51490,22 @@ export async function failWarmingToCold(
         if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
-        const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
+        const continuity =
+          input.discardContinuity || input.providerWorkspaceAbsent
+            ? null
+            : continuityRecoveryFromLeaseRow(row);
         // A pending empty-workspace decision must survive a failed empty create;
-        // otherwise a null envelope would look like an ordinary new lease.
+        // otherwise a null envelope would look like an ordinary new lease. So
+        // must the evidence of a lost workspace: dropping it would let the next
+        // owner publish an empty box as if nothing had ever been there.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
-        const hasRecovery = hasArchive || continuity !== null || freshPending;
+        const carriedLoss = providerLossRecord(row.resume_state);
+        const hasRecovery =
+          hasArchive ||
+          continuity !== null ||
+          freshPending ||
+          carriedLoss !== null ||
+          input.providerWorkspaceAbsent === true;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         // beginSandboxRematerialization already proved this exact registered
         // checkpoint unusable in this warming epoch. Keep that terminal truth
@@ -51355,7 +51564,15 @@ export async function failWarmingToCold(
           ...(continuity ? { continuity } : {}),
         };
         const resumeStateJson = hasRecovery
-          ? JSON.stringify(recoveryResumeState(row, recovery))
+          ? JSON.stringify(
+              recoveryResumeState(
+                row,
+                recovery,
+                input.providerWorkspaceAbsent
+                  ? providerLossRecordWithWorkspaceAbsent(row, now)
+                  : undefined,
+              ),
+            )
           : null;
         await tx.execute(sql`
           update sandbox_leases set
@@ -54118,6 +54335,9 @@ export async function confirmDrainCold(
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
     providerMissingBeforeCapture?: boolean;
+    /** The backend's bound on how long a box reported missing could still
+     * run, when it has one. Recorded as death proof on the loss. */
+    providerMaxRemainingLifetimeMs?: number | null;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
     /** The reaper stopped the exact provider box (or proved it gone) before
@@ -54427,7 +54647,14 @@ export async function confirmDrainCold(
               recoveryResumeState(
                 row,
                 recovery,
-                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
+                workspaceLost
+                  ? providerLossRecordForLostRow(
+                      row,
+                      "drain_probe",
+                      now,
+                      input.providerMaxRemainingLifetimeMs,
+                    )
+                  : undefined,
               ),
             )
           : null;
@@ -86986,7 +87213,8 @@ export async function appendSessionEventsForTurnAttempt(
 
 /**
  * Append a capability card for the calling turn unless that turn already shows
- * a current card for the same capability. The lookup runs inside the attempt
+ * a current card for the same capability (and, for a card that names the
+ * machine it asks for, the same machine). The lookup runs inside the attempt
  * write fence, which locks the session row, so parallel callers in one turn
  * cannot both append. Cards for other capabilities are never consulted.
  */
@@ -86999,6 +87227,7 @@ export async function appendTurnCapabilityCardOnce(
   attemptId: string,
   capabilityId: string,
   input: AppendEventInput,
+  requestedSandboxId: string | null = null,
 ): Promise<{ events: SessionEvent[]; accepted: boolean; existingEventId: string | null }> {
   let existingEventId: string | null = null;
   const result = await mutateAndAppendSessionEventsForTurnAttempt(
@@ -87023,6 +87252,7 @@ export async function appendTurnCapabilityCardOnce(
             and duplicate_of_event_id is null
             and (turn_association is null or turn_association = 'current')
             and payload -> 'capability' ->> 'id' = ${capabilityId}
+            and coalesce(payload ->> 'requestedSandboxId', '') = ${requestedSandboxId ?? ""}
           order by sequence
           limit 1
         `,

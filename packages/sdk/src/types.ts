@@ -421,6 +421,10 @@ export type WorkspaceRealtimeModelCatalogItem = {
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
   /** The organization's default voice settings for this model, used while the workspace has none. */
   organizationVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** True on the model this workspace chose to start voice conversations with. */
+  workspaceDefault?: boolean | undefined;
+  /** True on the model the organization chose to start voice conversations with; a workspace's own choice wins. */
+  organizationDefault?: boolean | undefined;
 };
 
 /** How readily a realtime voice model decides the speaker is done and answers. */
@@ -1791,6 +1795,8 @@ export type Session = {
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
   hasSchedules?: boolean | undefined;
+  /** An active schedule targeting this session can still start a run. */
+  hasUpcomingSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1975,6 +1981,7 @@ export type SessionListEntry = Pick<
   | "status"
   | "backgroundCommandActivity"
   | "hasSchedules"
+  | "hasUpcomingSchedules"
   | "title"
   | "titleSource"
   | "createdBy"
@@ -2212,6 +2219,7 @@ export type LineageNode = {
 
 export type SessionLineageResponse = {
   sessionHasSchedules?: boolean | undefined;
+  sessionHasUpcomingSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;
@@ -2850,6 +2858,8 @@ export type ToolAuthNeededPayload = {
         rationale: string;
       }
     | undefined;
+  /** The Connected Machine the agent asked for; names the request, grants nothing. */
+  requestedSandboxId?: string | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -4490,12 +4500,18 @@ export type OrganizationModelDefaults = {
   modelCompactionThresholds: Record<string, number>;
   /** Voice settings by realtime model id, for workspaces without their own. */
   realtimeVoice: Record<string, RealtimeVoiceSettings>;
+  /**
+   * The voice model new voice conversations start with in workspaces without
+   * their own choice, until the person picks one; null leaves it automatic.
+   */
+  realtimeDefaultModel: string | null;
   updatedAt: string | null;
 };
 
 /**
  * Field-by-field update; compaction and voice settings merge by model id and
- * null resets one model.
+ * null resets one model. `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
  */
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
@@ -4505,6 +4521,7 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
   realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
 };
 
 /** A model-account setting an organization sets, and may lock for every workspace. */
@@ -4534,7 +4551,9 @@ export type ModelAccountSettingValues = {
   providers: Record<
     string,
     {
+      /** @deprecated Never set: every account that reaches a workspace serves it. */
       inferenceSource?: "automatic" | "workspace" | "organization" | undefined;
+      /** @deprecated Always true: every account that reaches a workspace serves it. */
       useOrganizationAccounts: boolean;
       enabled: boolean;
     }
@@ -4832,6 +4851,10 @@ export type CodexConnectionStatus = {
   source?: WorkspaceCodexSubscriptionSource;
 };
 
+/**
+ * `automatic`: Codex is on here; `disabled`: off. The older `workspace` and
+ * `organization` values are accepted and mean on.
+ */
 export type WorkspaceCodexSubscriptionMode =
   | "automatic"
   | "workspace"
@@ -4846,11 +4869,11 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
-  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  /** @deprecated Always false: no account is set aside. Absent from older servers. */
   workspaceSetAside?: boolean;
   /**
-   * How many organization accounts other than the workspace's own reach this
-   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   * How many organization accounts reach this workspace (accounts limited to
+   * chosen people aside). Absent from older servers.
    */
   organizationCount?: number;
 };
@@ -4919,6 +4942,8 @@ export type CodexAccount = {
    * their own (it was connected there).
    */
   ownInWorkspaceIds?: string[];
+  /** The organization's list only: who the account reaches. */
+  reach?: SubscriptionAccountReach;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -5101,12 +5126,32 @@ export type CodexConnectPoll =
       isActive?: boolean;
     };
 
+/**
+ * Who an account in the organization's list reaches: the workspace that owns
+ * it (its own account, used only there), every workspace including new ones,
+ * chosen shared workspaces, Personal workspaces, or chosen people.
+ */
+export type SubscriptionAccountReach = {
+  /** The workspace whose own account this is, or null for an organization account. */
+  ownerWorkspaceId: string | null;
+  /** Every shared workspace, including ones created later. */
+  everyWorkspace: boolean;
+  /** The shared workspaces it reaches, when not every one. */
+  workspaceIds: string[];
+  /** Every Personal workspace. */
+  personalWorkspaces: boolean;
+  /** How many chosen people, or null when it is not limited to people. */
+  people: number | null;
+};
+
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
 export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  /** The organization's list only: who the account reaches. */
+  reach?: SubscriptionAccountReach;
   plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
@@ -6045,6 +6090,8 @@ export type WorkspaceSettings = {
    * from the realtime model catalog's `workspaceVoiceSettings`.
    */
   realtimeVoice?: Record<string, unknown> | undefined;
+  /** The workspace's default realtime voice model; null or absent follows the organization. */
+  realtimeDefaultModel?: string | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6151,6 +6198,11 @@ export type UpdateWorkspaceSettingsRequest = {
    * settings; models not listed keep theirs.
    */
   realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  /**
+   * The voice model new voice conversations in this workspace start with
+   * until the person picks one; null follows the organization again.
+   */
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
@@ -6548,6 +6600,31 @@ export type SessionInboxMute = {
  */
 export type MemberNotificationsSetting = {
   allowOthers: boolean;
+};
+
+// --- Excel workbooks connected by an Office add-in -------------------------------------------
+
+/** A short-lived ticket that lets one add-in socket connect a workbook to a workspace. */
+export type OfficeWorkbookTicket = {
+  ticket: string;
+  expiresAt: string;
+  /** The socket's path on the Opengeni API, such as "/v1/office/workbooks/live". */
+  path: string;
+  /** The socket's full URL on the deployment's public API, when it has one. */
+  url?: string;
+  /** The WebSocket subprotocol the socket must offer. */
+  protocol: string;
+};
+
+/** An open workbook the caller's agents in a workspace can reach with `excel_run`. */
+export type OfficeWorkbook = {
+  id: string;
+  name: string;
+  /** "Excel on the web", "Excel for Mac", "Excel for Windows"... */
+  app: string;
+  version: string | null;
+  excelApi: string | null;
+  connectedAt: string;
 };
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
@@ -7098,6 +7175,11 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+/** The checkpoint automatic recovery restores, native or portable.
+ * `artifactId` is null for a portable archive. */
+export type SandboxCheckpointSelection = Omit<SandboxRecoverySelection, "artifactId"> & {
+  artifactId: string | null;
+};
 export type SandboxRecoveryTarget = {
   sessionId: string;
   sandboxGroupId: string;
@@ -7115,6 +7197,8 @@ export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
+  /** The registered native checkpoint a person can consent to restore, and for
+   * an automatic Retry its checkpoint when that one is native. */
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   target?: SandboxRecoveryTarget;
@@ -7122,9 +7206,12 @@ export type SandboxRecoveryProjection = {
   freshWorkspaceAvailable?: boolean;
   groupSessionCount?: number;
   automaticAvailable?: boolean;
-  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
-   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  /** What an automatic Retry does: restore `automaticCheckpoint`, or continue
+   * on a new empty workspace because no usable checkpoint survived the loss. */
   automaticLane?: "checkpoint" | "fresh_workspace";
+  /** The checkpoint an automatic Retry restores (lane `checkpoint`), native or
+   * portable. `checkpoint` is set as well only when it is native. */
+  automaticCheckpoint?: SandboxCheckpointSelection;
   /** For a timed recovery wait: the earliest time a Retry or a new message can
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;

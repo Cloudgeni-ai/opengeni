@@ -44,13 +44,81 @@ export interface AppLink {
   webUrl: string;
 }
 
-/** The app's own scheme for links handed over from the web: opengeni://open?url=… */
-const HANDOFF = /^opengeni:\/\/open\/?\?(.*)$/iu;
+/**
+ * Where a product's web app shows workspaces, sessions and the inbox, so a
+ * native app can read the product's links and open its pages. Each builder
+ * returns a path on the deployment's origin (with any query it needs).
+ * `OPENGENI_WEB_PATHS` describes Opengeni's own web app; a product whose web
+ * app uses its own routes passes its own.
+ */
+export interface AppWebPaths {
+  /** The page a workspace opens on, where a person starts a new session. */
+  home(workspaceId: string): string;
+  /** One session; `at` is the session moment to show (an event sequence). */
+  session(workspaceId: string, sessionId: string, at?: number | null): string;
+  /** The workspace's inbox. */
+  inbox(workspaceId: string): string;
+  /** The workspace's settings, or absent when the product has no such page. */
+  settings?(workspaceId: string): string;
+  /**
+   * The workspace or session a page shows, read from its path and query
+   * (`?a=b`, or "" for none), or null for any other page: those stay in the
+   * browser and aren't reopened. A workspace-less session link has a null
+   * `workspaceId`. A page the app should reopen whose address names neither
+   * (say, one addressed by the product's own names) returns both null: the
+   * desktop app then reopens it, but a link to it still opens in the browser.
+   */
+  match(
+    path: string,
+    query: string,
+  ): { workspaceId: string | null; sessionId: string | null; at?: number | null } | null;
+}
+
 const WEB_URL = /^(https?:\/\/[^/?#]+)(\/[^?#]*)?(\?[^#]*)?(#.*)?$/iu;
 const ID = "([A-Za-z0-9][A-Za-z0-9_-]{0,127})";
 const SESSION_PATH = new RegExp(`^/workspaces/${ID}/sessions/${ID}/?$`, "u");
 const WORKSPACE_PATH = new RegExp(`^/workspaces/${ID}(?:/sessions)?/?$`, "u");
 const BARE_SESSION_PATH = new RegExp(`^/sessions/${ID}/?$`, "u");
+const SCHEME = /^[a-z][a-z0-9+.-]*$/u;
+
+/** The `at` query parameter: a positive event sequence, or null. */
+export function sessionMoment(query: string): number | null {
+  const raw = queryParam(query, "at");
+  return raw && /^[1-9][0-9]{0,15}$/u.test(raw) ? Number(raw) : null;
+}
+
+/** Opengeni's own web app. */
+export const OPENGENI_WEB_PATHS: AppWebPaths = {
+  home: (workspaceId) => `/workspaces/${workspaceId}/sessions`,
+  session: (workspaceId, sessionId, at) =>
+    `/workspaces/${workspaceId}/sessions/${sessionId}${at ? `?at=${at}` : ""}`,
+  inbox: (workspaceId) => `/workspaces/${workspaceId}/inbox`,
+  settings: (workspaceId) => `/workspaces/${workspaceId}/settings`,
+  match(path, query) {
+    const session = SESSION_PATH.exec(path);
+    if (session)
+      return { workspaceId: session[1]!, sessionId: session[2]!, at: sessionMoment(query) };
+    const bare = BARE_SESSION_PATH.exec(path);
+    if (bare) return { workspaceId: null, sessionId: bare[1]!, at: sessionMoment(query) };
+    const workspace = WORKSPACE_PATH.exec(path);
+    if (workspace) return { workspaceId: workspace[1]!, sessionId: null, at: null };
+    return null;
+  },
+};
+
+/** How a product's app reads its links. Both default to Opengeni's own. */
+export interface AppLinkOptions {
+  /** The app's custom URL scheme, e.g. "opengeni" for `opengeni://open?url=…`. */
+  scheme?: string;
+  /** The product web app's pages. */
+  paths?: AppWebPaths;
+}
+
+function appScheme(scheme: string | undefined): string {
+  const value = scheme ?? "opengeni";
+  if (!SCHEME.test(value)) throw new Error("Invalid app scheme");
+  return value;
+}
 
 function queryParam(query: string | undefined, name: string): string | null {
   for (const part of (query ?? "").replace(/^\?/u, "").split("&")) {
@@ -65,26 +133,33 @@ function queryParam(query: string | undefined, name: string): string | null {
   return null;
 }
 
-/** The web link a raw URL points at, unwrapping the web's "Open in app" handoff. */
-export function parseAppLink(raw: string): AppLink | null {
+/**
+ * The web link a raw URL points at, unwrapping the web's "Open in app" handoff
+ * (`<scheme>://open?url=…`).
+ */
+export function parseAppLink(raw: string, options: AppLinkOptions = {}): AppLink | null {
   const trimmed = raw.trim();
-  const handoff = HANDOFF.exec(trimmed);
-  const webUrl = handoff ? queryParam(handoff[1], "url") : trimmed;
+  const handoffPrefix = `${appScheme(options.scheme)}://open`;
+  let webUrl: string | null = trimmed;
+  if (trimmed.slice(0, handoffPrefix.length).toLowerCase() === handoffPrefix) {
+    const rest = /^\/?\?(.*)$/u.exec(trimmed.slice(handoffPrefix.length));
+    if (!rest) return null;
+    webUrl = queryParam(rest[1], "url");
+  }
   if (!webUrl) return null;
   const match = WEB_URL.exec(webUrl);
   if (!match) return null;
   const origin = normalizeServerUrl(match[1]!);
   if (!origin) return null;
-  const path = match[2] ?? "/";
-  const atRaw = queryParam(match[3], "at");
-  const at = atRaw && /^[1-9][0-9]{0,15}$/u.test(atRaw) ? Number(atRaw) : null;
-  const session = SESSION_PATH.exec(path);
-  if (session) return { origin, workspaceId: session[1]!, sessionId: session[2]!, at, webUrl };
-  const bare = BARE_SESSION_PATH.exec(path);
-  if (bare) return { origin, workspaceId: null, sessionId: bare[1]!, at, webUrl };
-  const workspace = WORKSPACE_PATH.exec(path);
-  if (workspace) return { origin, workspaceId: workspace[1]!, sessionId: null, at: null, webUrl };
-  return null;
+  const page = (options.paths ?? OPENGENI_WEB_PATHS).match(match[2] ?? "/", match[3] ?? "");
+  if (!page || (!page.workspaceId && !page.sessionId)) return null;
+  return {
+    origin,
+    workspaceId: page.workspaceId,
+    sessionId: page.sessionId,
+    at: page.sessionId ? (page.at ?? null) : null,
+    webUrl,
+  };
 }
 
 /**
@@ -112,8 +187,8 @@ export function accountForAppLink<Account extends AppLinkAccount>(
 }
 
 /** The web's handoff link that opens a web page in the app. */
-export function appHandoffUrl(webUrl: string): string {
-  return `opengeni://open?url=${encodeURIComponent(webUrl)}`;
+export function appHandoffUrl(webUrl: string, scheme?: string): string {
+  return `${appScheme(scheme)}://open?url=${encodeURIComponent(webUrl)}`;
 }
 
 /** A browser's requested destination, not permission to use the computer. */
@@ -126,13 +201,14 @@ export function computerConnectUrl(input: {
   webUrl: string;
   subjectId: string;
   scheme?: string;
+  /** The product web app's pages; `webUrl` must be a workspace or session page. */
+  paths?: AppWebPaths;
 }): string {
-  const scheme = input.scheme ?? "opengeni";
-  if (!/^[a-z][a-z0-9+.-]*$/u.test(scheme)) throw new Error("Invalid app scheme");
+  const scheme = appScheme(input.scheme);
   const url = new URL(`${scheme}://connect`);
   url.searchParams.set("url", input.webUrl);
   url.searchParams.set("subject", input.subjectId);
-  if (!parseComputerConnectLink(url.toString(), scheme))
+  if (!parseComputerConnectLink(url.toString(), scheme, input.paths))
     throw new Error("Invalid computer destination");
   return url.toString();
 }
@@ -140,6 +216,7 @@ export function computerConnectUrl(input: {
 export function parseComputerConnectLink(
   raw: string,
   scheme = "opengeni",
+  paths?: AppWebPaths,
 ): ComputerConnectLink | null {
   try {
     const url = new URL(raw);
@@ -154,7 +231,7 @@ export function parseComputerConnectLink(
     // Handoffs carry a destination only, never arbitrary queries, fragments or credentials.
     if (target.username || target.password || target.search || target.hash) return null;
     if (!["https:", "http:"].includes(target.protocol)) return null;
-    const link = parseAppLink(target.toString());
+    const link = parseAppLink(target.toString(), { scheme, ...(paths ? { paths } : {}) });
     if (
       !link?.workspaceId ||
       !subjectId ||

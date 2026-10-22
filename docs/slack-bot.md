@@ -203,6 +203,13 @@ The bot connection is an `app_install` row (`subjectId = null`) stored in the Op
 
 `slack_installation_bindings` is the durable team-routing authority. One active Slack team still points to exactly one Opengeni account and **home** workspace: one credential, one connection, one binding. The callback takes a transaction-scoped team lock before connection mutation; an exact same-workspace team/bot/bot-user reinstall rotates the encrypted credential in place and preserves the connection UUID used by routing and scheduled tasks. Concurrent exact-principal callbacks converge on that row. A different Opengeni workspace or Slack bot principal receives an actionable conflict and no second connection is created. Reassignment of the binding is intentionally out of scope: there is no last-write-wins move operation or access-link shortcut.
 
+Scheduled-run admission and live claim use the same local or organization-shared
+installation. They lock the exact connection before the sharing row, compare the
+frozen installation version and sharing generation, and recheck the target
+workspace allowlist. A changed share or installation refuses the run instead of
+selecting another bot. Migration `0906_scheduled_shared_slack_authority.sql`
+repairs the older workspace-local SQL checks without rewriting accepted runs.
+
 Where a conversation's **work** lands is a separate, additive fact. See [Which workspace Slack work lands in](#which-workspace-slack-work-lands-in).
 
 Migration `0212_slack_installation_bindings.sql` backfills one newest row only when all verified legacy rows for a team agree on the exact account/workspace and bot principal. Exact-principal duplicates remain stored but are non-authoritative. Conflicting legacy rows retain their provider credentials and are marked `quarantined`; routing and reinstall fail closed until an explicit forward fix resolves them. The database trigger fences rolling-old writers before they can commit a second binding. After migration, roll forward with binding-aware code rather than dropping the ledger or guessing a tenant; removing the binding authority is not a supported rollback.

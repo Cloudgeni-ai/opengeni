@@ -104,6 +104,7 @@ fn capacity(info: &Described, reported: &Reported) -> Capacity {
     Capacity {
         memory_mib: info.memory_mib,
         free_memory_mib: reported.memory_free_mib,
+        reclaimable_memory_mib: reported.memory_reclaimable_mib,
         free_cpu_millis: reported.cpu_free_millis,
         free_disk_mib: reported.disk_free_mib,
         ready: reported
@@ -255,7 +256,10 @@ impl View {
                 let host = GroupHost {
                     draining: known.state == HostState::Draining,
                     memory_mib: known.info.memory_mib,
-                    free_memory_mib: known.capacity.memory_free_mib,
+                    free_memory_mib: known
+                        .capacity
+                        .memory_free_mib
+                        .saturating_add(known.capacity.memory_reclaimable_mib),
                     cpu_millis: known.capacity.cpu_millis,
                     free_cpu_millis: known.capacity.cpu_free_millis,
                     registered_cpu_millis: known.info.cpu_millis,
@@ -273,7 +277,8 @@ pub struct GroupHost {
     pub draining: bool,
     /// Memory in MiB it has for sandboxes.
     pub memory_mib: u64,
-    /// Memory in MiB it can still promise.
+    /// Memory in MiB it can still promise, counting what it frees at once
+    /// for a wake by ending idle VM processes whose state is saved.
     pub free_memory_mib: u64,
     /// Processor time in millicores it guarantees sandboxes now.
     pub cpu_millis: u64,

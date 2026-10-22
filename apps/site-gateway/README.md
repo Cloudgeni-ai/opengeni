@@ -28,7 +28,10 @@ host. Unknown, unpublished or version-less hosts get a neutral 404; suspended Si
 get a 410 takedown page with the abuse contact. Members and invited Sites (and
 every Site when `LOGIN_ONLY` is set) need a site session the API confirms
 through `GET /v1/site-runtime/site/config`; without one the visitor goes to
-sign-in.
+sign-in. If access changes after a shell loads, the version frame shows a
+script-free access message with a sign-in link in a new tab. Only version-frame
+responses allow same-origin framing; the shell, sign-in and report pages still
+refuse framing. The Site sandbox retains its existing navigation restrictions.
 
 The shell's browser script is the shared Site bridge host
 (`@opengeni/sdk/site-bridge-host`, also used by the console frame) plus a

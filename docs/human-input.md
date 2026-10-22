@@ -208,6 +208,25 @@ Each single- and multi-select control includes an inline Other option and text
 field. Hosts submit that exact value in `answer.other`; they should not create a
 synthetic follow-up prompt or coerce it into an option id.
 
+When the form's `request` carries `workspaceId` and `sessionId` (as every
+pending request from the hook or SDK does), unsent non-secret answers (text,
+Other text and selections) are kept per browser tab
+(`packages/react/src/human-input-draft-store.ts`: in-memory map mirrored to
+`sessionStorage`, keyed by workspace, session and request, bounded in count,
+size and age) and restored when the card mounts again, for example after
+visiting Settings. A draft is forgotten when the answer is accepted or skipped,
+when the request has expired, and when `useHumanInputRequests` reads a pending
+list that no longer contains it; a denied (401/403/404) pending-list read forgets
+every draft of that session. Secret answers are never stored. Drafts belong to
+the person signed in to the tab: the stock app calls
+`claimHumanInputDraftOwner(subjectId)` synchronously whenever it installs the
+principal's access context, before any session route renders (a different
+principal, or drafts with no recorded owner, are forgotten; the same principal
+keeps them across a reload or re-authentication), and
+`forgetAllHumanInputDrafts()` on sign-out.
+Embedding hosts whose signed-in person can change within one tab should call
+the same two functions from `@opengeni/react`.
+
 The stock Opengeni session route mounts the hook plus `HumanInputSurface` at the
 timeline tip, so the live question is part of the main conversation rather than
 a detached strip above the composer. An

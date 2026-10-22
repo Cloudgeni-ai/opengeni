@@ -37,6 +37,7 @@ mod link;
 mod observe;
 mod pool;
 mod ready;
+mod rejoin;
 mod requests;
 #[path = "../support/required.rs"]
 mod required;
@@ -138,6 +139,9 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// How long taking back each VM a previous agent left running takes,
+    /// as on a host whose VMMs answer slowly.
+    adopt_delay: Mutex<Duration>,
     /// While set, no VM's processor time can be read.
     unreadable_cpu: AtomicBool,
     /// While set, no VM's traffic can be read.
@@ -261,6 +265,40 @@ impl Meter {
 }
 
 impl Fake {
+    /// Takes back the VM a previous agent left running for `spec`, if
+    /// any.
+    fn adopt_now(&self, spec: &VmSpec) -> Result<Option<(FakeVm, Found)>, EngineError> {
+        if self.world.unadoptable.lock().unwrap().contains(&spec.name) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "adopt",
+                "the VMM did not answer",
+            ));
+        }
+        let process = self
+            .world
+            .vms
+            .lock()
+            .unwrap()
+            .get(&spec.name)
+            .filter(|process| !*process.exit.borrow())
+            .cloned();
+        Ok(process.map(|process| {
+            self.world.adopted.fetch_add(1, Ordering::Relaxed);
+            let found = if *process.paused.lock().unwrap() {
+                Found::Paused
+            } else {
+                Found::Running
+            };
+            let vm = FakeVm {
+                name: spec.name.clone(),
+                sandbox_dir: spec.dir.parent().unwrap().to_owned(),
+                process,
+            };
+            (vm, found)
+        }))
+    }
+
     fn launch(&self, spec: &VmSpec, memory: String, applied: Option<String>) -> FakeVm {
         let name = spec.name.clone();
         self.world
@@ -724,36 +762,12 @@ impl Engine for Fake {
         &self,
         spec: &VmSpec,
     ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
-        if self.world.unadoptable.lock().unwrap().contains(&spec.name) {
-            return ready(Err(EngineError::new(
-                ErrorKind::Transient,
-                "adopt",
-                "the VMM did not answer",
-            )));
+        let delay = *self.world.adopt_delay.lock().unwrap();
+        let found = self.adopt_now(spec);
+        async move {
+            sleep(delay).await;
+            found
         }
-        let process = self
-            .world
-            .vms
-            .lock()
-            .unwrap()
-            .get(&spec.name)
-            .filter(|process| !*process.exit.borrow())
-            .cloned();
-        let found = process.map(|process| {
-            self.world.adopted.fetch_add(1, Ordering::Relaxed);
-            let found = if *process.paused.lock().unwrap() {
-                Found::Paused
-            } else {
-                Found::Running
-            };
-            let vm = FakeVm {
-                name: spec.name.clone(),
-                sandbox_dir: spec.dir.parent().unwrap().to_owned(),
-                process,
-            };
-            (vm, found)
-        });
-        ready(Ok(found))
     }
 
     fn hold(

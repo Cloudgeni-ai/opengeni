@@ -1,7 +1,6 @@
 {
   "name": "@opengeni/desktop",
-  "version": "0.3.0",
-  "private": true,
+  "version": "4.3.1",
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",
   "repository": {
@@ -9,13 +8,18 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "packages/desktop"
   },
+  "files": [
+    "src",
+    "dist"
+  ],
   "type": "module",
-  "main": "./src/main/index.ts",
-  "types": "./src/main/index.ts",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./src/main/index.ts",
-      "default": "./src/main/index.ts"
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
     },
     "./contract": {
       "types": "./src/contract.ts",
@@ -34,9 +38,15 @@
       "default": "./src/preload/welcome.ts"
     }
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsrs --noEmit -p tsconfig.json"
+    "typecheck": "tsrs --noEmit -p tsconfig.json",
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@opengeni/agent-host": "workspace:*",
@@ -44,10 +54,15 @@
   },
   "devDependencies": {
     "electron": "44.7.2",
-    "electron-updater": "6.8.9"
+    "electron-updater": "6.8.9",
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
   },
   "peerDependencies": {
     "electron": ">=44",
     "electron-updater": ">=6"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

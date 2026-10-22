@@ -253,6 +253,80 @@ together came to 348 MiB stored. The working-set pack holds at most
 
 A running sandbox costs what its memory and processors use.
 
+## An idle sandbox's fixed cost (2026-10-21)
+
+One GCP N2 host machine running its sandboxes under nested
+virtualization, with the bare-metal memory profile (4 KiB pages, free page
+reporting on). The sandboxes are Opengeni's: 4 vCPUs, up to 8 GiB, the
+native agent and a virtual desktop running, and envd for E2B clients. "Held"
+is the VM's cgroup memory less clean page cache the host can drop.
+
+| State | Held | Host processor time |
+| --- | --- | --- |
+| Awake, idle | 177 to 179 MiB | 9.2 millicores |
+| Paused (from 10 s idle) | 159 MiB; 160 MiB median across 67 sandboxes on the host | none |
+| Compressed | 28 MiB, 23 MiB of it compressed, after 2.0 s of compressing | none |
+| Saved (from 30 s idle), VM process ended | none | none |
+
+Where it goes:
+
+- **Memory.** Of the paused sandbox's 159 MiB, the guest's page cache is
+  about 94 MiB, its slab 22 and its processes' own memory 20: envd 7.9,
+  the desktop's X server 7.6 and the agent 5.1 MiB. Dropping the guest's
+  clean page cache brings it to 108 MiB, but free page reporting returns
+  the pages over about 10 s while the guest runs, and the next command
+  then runs cold (259 ms against 98 to 195 ms).
+- **Maximum memory.** A sandbox booted afresh at 8 GiB holds 288 to
+  301 MiB, one at 1 GiB 90 MiB: the guest kernel's page tables for all of
+  its memory (128 MiB at 8 GiB) and its 64 MiB of bounce buffers, which
+  the guest reports reserving at boot (235,836 KiB). Sandboxes started
+  from a ready template never touch those pages: the template restores
+  lazily, and the host had made 65 sandboxes from restores against 3
+  boots. Booting small and hot-plugging memory would pay only on those
+  boots.
+- **Processor time awake.** All of it is the guest's 4 vCPU threads
+  waking about 60 times a second (local timer 52, function-call
+  interrupts 16; envd 12 task wakes a second, the agent 6.6, the X server
+  1); the VMM thread takes 0.04 millicores. Under nested virtualization a
+  guest wake costs about 150 µs of host time. Turning KVM's halt polling
+  off changed nothing (9.08, 9.22 and 9.01 millicores with it on, off and
+  on again).
+
+Waking, time to the wake and then three commands (`ls`, `git --version`
+and a Python import), on the same desktop sandbox:
+
+| From | Wake | First command | Next two |
+| --- | --- | --- | --- |
+| Compressed | 0.07 s | 0.266 s | 0.049, 0.082 s |
+| Saved, VM process ended, image in the host's page cache | 0.32 s | 0.396 s | 0.117, 0.053 s |
+| Saved, image read from disk | 0.31 s | 0.454 s | 0.116, 0.051 s |
+
+So an idle sandbox costs memory only until it is saved; from then its VM
+process can end at once whenever another sandbox needs the room, and it
+wakes in well under a second. Placement and host groups now count that
+memory as free, as the host's admission does (ADR 14): before, a host
+full of saved, idle sandboxes looked full to placement, which refused
+creates the host would have made room for, and grew its group for them.
+Compressing every idle sandbox would save only physical memory that
+admission frees on demand anyway, and costs 2 s of compressing each time
+a sandbox goes idle; memory pressure still compresses before it ends a
+VM process.
+
+Starting programs only when first used would pay little, so the guest
+starts them as before:
+
+- envd serves only E2B clients (Opengeni's sandboxes use the agent, ADR
+  21), and the X server only a desktop in use. Starting each on first use
+  would save 7.9 and 7.6 MiB of a paused sandbox's memory and 12 and 1
+  of its 60 wakes a second while it is awake. The host frees that memory
+  on demand once the sandbox is saved, and the processor time is spent
+  only in the 10 s before it pauses. In exchange an E2B create would wait
+  for envd to start, and the guest's readiness and restore notices, which
+  wait on envd, would depend on who created the sandbox.
+- Dropping the guest's page cache when it goes idle would cut 70 MiB, but
+  under memory pressure the host compresses the same sandbox to 28 MiB, and
+  every wake would then run its first commands cold.
+
 ## Fleet decisions
 
 Phase 3, measured on 2026-10-17 by `compute-fleet`'s budget test

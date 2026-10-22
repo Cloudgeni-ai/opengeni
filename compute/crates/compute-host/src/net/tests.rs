@@ -250,16 +250,6 @@ fn setup_names_the_namespace_link_and_tap() {
     assert!(inner.contains(replaced), "{inner}");
 }
 
-#[test]
-fn a_taps_owner_is_read_from_its_details() {
-    let details = "3: tap0: <BROADCAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default qlen 1000\\    link/ether 06:00:a9:fe:00:16 brd ff:ff:ff:ff:ff:ff \\    tun type tap pi off vnet_hdr on persist on user 1073741843 group 1073741843 addrgenmode eui64";
-    assert_eq!(
-        tap_owner(details),
-        (Some(1_073_741_843), Some(1_073_741_843))
-    );
-    assert_eq!(tap_owner("3: tap0: tun type tap persist on"), (None, None));
-}
-
 /// A sandbox's link is removed and another's, on the same ordinal and
 /// so under the same host name, made at once, many times over, while
 /// the kernel is still taking the old namespaces apart. Needs root and
@@ -332,6 +322,32 @@ fn a_link_name_is_free_again_as_soon_as_its_sandbox_is_removed() {
     networks.remove(a, Some(ORDINAL)).unwrap();
     networks.remove(b, None).unwrap();
     assert!(!has_interface(&right.host).unwrap());
+}
+
+/// A namespace's tap is the sandbox's own only while its user and group
+/// own it; one left by an earlier sandbox with the same id is replaced.
+/// Needs root and a lab host.
+#[test]
+fn a_tap_fits_only_the_user_and_group_that_own_it() {
+    const ORDINAL: u32 = 4004;
+    let Some((_lab, config, networks)) = lab() else {
+        return;
+    };
+    let id = Id(SandboxId(0x00c0_ffee_3000));
+    let addresses = config.addresses(ORDINAL).unwrap();
+    let earlier = Link::new(id, ORDINAL, addresses, 1_000_010, 1_000_011);
+    networks.ensure(&earlier).unwrap();
+    let path = earlier.namespace_path();
+    let found = |uid, gid| in_namespace(&path, || Tap::find(uid, gid)).unwrap();
+    assert_eq!(found(1_000_010, 1_000_011), Tap::Fits);
+    assert_eq!(found(1_000_010, 1_000_010), Tap::Foreign);
+    assert_eq!(found(1_000_020, 1_000_021), Tap::Foreign);
+
+    let now = Link::new(id, ORDINAL, addresses, 1_000_020, 1_000_021);
+    networks.ensure(&now).unwrap();
+    assert_eq!(found(1_000_020, 1_000_021), Tap::Fits, "not replaced");
+    networks.remove(id, Some(ORDINAL)).unwrap();
+    assert!(!path.exists());
 }
 
 /// Failing to look at either end of a whole pair never deletes it.

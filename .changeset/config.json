@@ -18,6 +18,7 @@
       "@opengeni/connect",
       "@opengeni/contracts",
       "@opengeni/core",
+      "@opengeni/desktop",
       "@opengeni/db",
       "@opengeni/decisions",
       "@opengeni/documents",

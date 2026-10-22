@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   mkdtempSync,
   writeFileSync,
@@ -958,4 +958,52 @@ test("drain capture is point-in-time for Modal snapshots and receipt-bearing Doc
   expect(providerDrainCaptureIsPointInTime("e2b", docker({ ...original, ...serialized }))).toBe(
     false,
   );
+});
+
+describe("dockerWorkspaceProvablyAbsent", () => {
+  async function absent(value: unknown) {
+    const { dockerWorkspaceProvablyAbsent } =
+      await import("../src/sandbox/providers/docker-workspace-drain");
+    return await dockerWorkspaceProvablyAbsent(value as never, probe);
+  }
+
+  test("proves a durable receipt's workspace gone on the same daemon", async () => {
+    const { restored } = await recordedState();
+    present = false;
+    rmSync(root, { recursive: true, force: true });
+    expect(await absent(restored)).toBe(true);
+  });
+
+  test("an existing container, root, or another daemon is never proof", async () => {
+    const { restored } = await recordedState();
+    expect(await absent(restored)).toBe(false);
+    present = false;
+    expect(await absent(restored)).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+    daemonId = "other-daemon";
+    expect(await absent(restored)).toBe(false);
+  });
+
+  test("a missing parent directory (unmounted volume) is not proof", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "opengeni-docker-absent-parent-"));
+    rmSync(root, { recursive: true, force: true });
+    root = join(parent, "workspace");
+    mkdirSync(root);
+    try {
+      const { restored } = await recordedState();
+      present = false;
+      rmSync(parent, { recursive: true, force: true });
+      expect(await absent(restored)).toBe(false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("an in-process receipt or a legacy envelope is not proof", async () => {
+    const { original } = await recordedState();
+    present = false;
+    rmSync(root, { recursive: true, force: true });
+    expect(await absent(original)).toBe(false);
+    expect(await absent(state())).toBe(false);
+  });
 });

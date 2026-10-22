@@ -817,8 +817,12 @@ pub struct HostStatus {
     pub steps: Vec<(String, StepStats)>,
     /// Host memory available, as last sampled.
     pub available_memory: Option<u64>,
-    /// Host memory that ending idle, saved VM processes would free at once
-    /// without losing anything. Placement can count it as available.
+    /// Bytes beyond [`CapacityStatus::free`] that a new sandbox's first
+    /// wake could take now by ending VM processes without losing anything
+    /// (idle ones whose state is saved, ready spare VMs), as the host's
+    /// admission counts it: none while an overdrawn budget or wakes
+    /// already queued take that relief. The host reports it to its fleet,
+    /// whose placement and scaling count it as free.
     pub reclaimable_memory: u64,
     /// Sandboxes the host cannot manage: their record could not be read,
     /// their recovery or removal failed. Their ids are refused for new

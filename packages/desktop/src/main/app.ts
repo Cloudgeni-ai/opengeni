@@ -17,6 +17,7 @@ import {
   screen,
   session,
   shell,
+  type CookiesSetDetails,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -25,8 +26,10 @@ import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
 import {
   accountForAppLink,
   normalizeServerUrl,
+  OPENGENI_WEB_PATHS,
   parseAppLink,
   parseComputerConnectLink,
+  type AppWebPaths,
   type ComputerConnectLink,
   serverLabel,
 } from "@opengeni/sdk/app-links";
@@ -47,6 +50,7 @@ import {
   type DesktopAccountsSnapshot,
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
+  type DesktopCommand,
   type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
@@ -58,6 +62,7 @@ import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { reopenablePath } from "./page-paths";
 import {
   installAppImageIntegration,
   installLinuxAutostart,
@@ -139,14 +144,6 @@ function openedAtLogin(): boolean {
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
 }
 
-/** The path a person was on, when it is one the app reopens: a workspace or a session. */
-function reopenablePath(url: string): { path: string; workspaceId: string | null } | null {
-  const link = parseAppLink(url);
-  if (!link?.workspaceId) return null;
-  const parsed = new URL(link.webUrl);
-  return { path: parsed.pathname, workspaceId: link.workspaceId };
-}
-
 /**
  * The desktop app: accounts, the window, sign-in, links, notifications, this
  * computer, the menu bar item and updates. A product creates one with its own
@@ -186,9 +183,11 @@ export class DesktopShell {
   /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
   private addingAccount = false;
   private readonly redirectUri: string;
+  private readonly paths: AppWebPaths;
 
   constructor(private readonly config: DesktopAppConfig) {
     this.redirectUri = `${config.scheme}://auth/callback`;
+    this.paths = config.webPaths ?? OPENGENI_WEB_PATHS;
     // Opened on first use, so a first launch with nothing to unlock doesn't
     // ask for the keyring. Linux desktops without a keyring (minimal window
     // managers, remote desktops) still sign in: the credential is then
@@ -235,6 +234,12 @@ export class DesktopShell {
       home: homedir(),
       env: process.env,
       agentSigningKey: config.agentSigningKey,
+      ...(config.browserExtensionIds ? { browserExtensionIds: config.browserExtensionIds } : {}),
+      ...(config.agentPath ? { agentPath: config.agentPath } : {}),
+      ...(config.agentConfigDir ? { agentConfigDir: config.agentConfigDir } : {}),
+      ...(config.adoptStandaloneAgent !== undefined
+        ? { adoptStandaloneAgent: config.adoptStandaloneAgent }
+        : {}),
       fetch: (url) => net.fetch(url),
       dataDir: app.getPath("userData"),
       systemLanguages: () => app.getPreferredSystemLanguages(),
@@ -419,7 +424,10 @@ export class DesktopShell {
           this.config.productName,
           this.config.updates,
           app.getVersion(),
-          () => Menu.setApplicationMenu(this.menu()),
+          () => {
+            Menu.setApplicationMenu(this.menu());
+            if (this.updates) this.broadcast(DESKTOP_IPC.updatesChanged, this.updates.pageState);
+          },
           () => {
             this.quitConfirmed = true;
             this.quitting = true;
@@ -529,6 +537,7 @@ export class DesktopShell {
 
   private openWindow(): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
+      connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
       crashed: (accountId) => this.window?.reload(accountId),
       loadFailed: (accountId, url) => this.loadFailed(accountId, url),
@@ -567,7 +576,7 @@ export class DesktopShell {
   }
 
   private target(account: StoredAccount) {
-    const fallback = account.workspaceId ? `/workspaces/${account.workspaceId}/sessions` : "/";
+    const fallback = account.workspaceId ? this.paths.home(account.workspaceId) : "/";
     return {
       id: account.id,
       baseUrl: account.baseUrl,
@@ -576,10 +585,14 @@ export class DesktopShell {
   }
 
   private rememberPath(accountId: string, url: string): void {
-    const reopen = reopenablePath(url);
+    const reopen = reopenablePath(url, this.paths);
     if (!reopen) return;
     this.lastPaths.set(accountId, reopen.path);
-    this.store.update(accountId, { lastPath: reopen.path, workspaceId: reopen.workspaceId });
+    // A page whose address doesn't name its workspace keeps the one last known.
+    this.store.update(accountId, {
+      lastPath: reopen.path,
+      ...(reopen.workspaceId ? { workspaceId: reopen.workspaceId } : {}),
+    });
   }
 
   private showAccount(accountId: string, path?: string): void {
@@ -686,7 +699,7 @@ export class DesktopShell {
       void this.finishSignIn(callback);
       return;
     }
-    const computerLink = parseComputerConnectLink(raw, this.config.scheme);
+    const computerLink = parseComputerConnectLink(raw, this.config.scheme, this.paths);
     if (computerLink && this.config.thisComputer) {
       if (this.connectingFromLink || this.pending) return;
       const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
@@ -694,7 +707,7 @@ export class DesktopShell {
       else void this.beginSignIn(computerLink.origin, computerLink);
       return;
     }
-    const link = parseAppLink(raw);
+    const link = parseAppLink(raw, { scheme: this.config.scheme, paths: this.paths });
     if (!link) {
       this.reveal();
       return;
@@ -710,7 +723,18 @@ export class DesktopShell {
   }
 
   private openInboxItem(accountId: string, item: InboxItem): void {
-    this.showAccount(accountId, inboxItemPath(item));
+    this.showAccount(accountId, inboxItemPath(item, this.paths));
+  }
+
+  /**
+   * Where a menu command goes when the page doesn't handle it itself (a page
+   * from an older server): the account's workspace's page for it.
+   */
+  private commandPath(account: StoredAccount, command: DesktopCommand): string | null {
+    if (!account.workspaceId) return null;
+    if (command === "newSession") return this.paths.home(account.workspaceId);
+    if (command === "openInbox") return this.paths.inbox(account.workspaceId);
+    return null;
   }
 
   // --- Sign-in ------------------------------------------------------------------------------------
@@ -721,7 +745,12 @@ export class DesktopShell {
   ): Promise<void> {
     const baseUrl = normalizeServerUrl(serverInput);
     if (!baseUrl) {
-      this.welcomeError = "Enter the address of your server, like app.opengeni.ai.";
+      this.welcomeError = `Enter the address of your server, like ${serverLabel(this.defaultServerUrl())}.`;
+      this.pushWelcome();
+      return;
+    }
+    if (!this.allowsServer(baseUrl)) {
+      this.welcomeError = `${this.config.productName} signs in to ${serverLabel(this.defaultServerUrl())} only.`;
       this.pushWelcome();
       return;
     }
@@ -990,6 +1019,7 @@ export class DesktopShell {
     return {
       productName: this.config.productName,
       defaultServerUrl: this.defaultServerUrl(),
+      otherServers: this.config.allowOtherServers !== false,
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,
       canCancel: this.store.snapshot().accounts.some((account) => !account.signedOut),
@@ -1001,6 +1031,14 @@ export class DesktopShell {
   private defaultServerUrl(): string {
     this.installedFrom ??= readInstalledFrom(app.getPath("userData"));
     return this.installedFrom || this.config.defaultServerUrl;
+  }
+
+  /** An app made for one server signs in to that server only. */
+  private allowsServer(baseUrl: string): boolean {
+    if (this.config.allowOtherServers !== false) return true;
+    return [this.defaultServerUrl(), this.config.defaultServerUrl].some(
+      (server) => normalizeServerUrl(server) === baseUrl,
+    );
   }
 
   private unreachableState(): WelcomeState["unreachable"] {
@@ -1094,6 +1132,10 @@ export class DesktopShell {
       if (typeof url === "string") openExternalSafely(url);
     });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
+    handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
+    handle(DESKTOP_IPC.updatesInstall, () => {
+      this.updates?.install();
+    });
     handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
     handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
       if (id === "screenRecording" || id === "accessibility") {
@@ -1168,6 +1210,7 @@ export class DesktopShell {
   private menu(): Menu {
     const snapshot = this.store.snapshot();
     const active = this.store.active();
+    const settings = this.paths.settings?.bind(this.paths);
     return buildApplicationMenu({
       productName: this.config.productName,
       accounts: snapshot.accounts.map((account) => ({
@@ -1182,15 +1225,16 @@ export class DesktopShell {
       },
       signOut: active ? () => void this.signOut(active.id) : null,
       openSettings:
-        active?.workspaceId && !active.signedOut
-          ? () => this.showAccount(active.id, `/workspaces/${active.workspaceId}/settings`)
+        active?.workspaceId && !active.signedOut && settings
+          ? () => this.showAccount(active.id, settings(active.workspaceId!))
           : null,
       command:
         active && !active.signedOut
           ? (command) => {
               this.reveal();
               const contents = this.window?.contentsFor(active.id);
-              if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
+              if (contents && !contents.isDestroyed())
+                contents.send(DESKTOP_IPC.command, command, this.commandPath(active, command));
             }
           : null,
       pageActions:
@@ -1297,10 +1341,10 @@ function migrateMacLoginItem(appId: string): void {
 }
 
 /** A Set-Cookie header as Electron cookie details. */
-export function cookieFromHeader(url: string, header: string): Electron.CookiesSetDetails {
+export function cookieFromHeader(url: string, header: string): CookiesSetDetails {
   const [pair = "", ...attributes] = header.split(";");
   const separator = pair.indexOf("=");
-  const details: Electron.CookiesSetDetails = {
+  const details: CookiesSetDetails = {
     url,
     name: pair.slice(0, separator).trim(),
     value: pair.slice(separator + 1).trim(),

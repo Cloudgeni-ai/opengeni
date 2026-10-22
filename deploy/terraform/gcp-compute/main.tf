@@ -317,8 +317,10 @@ resource "google_compute_instance_group_manager" "hosts" {
     instance_template = google_compute_instance_template.host.self_link
   }
 
-  # A new template reaches hosts only as the operator replaces them, each
-  # drained first (operations.md, Upgrading hosts): never all at once.
+  # A new template reaches running hosts only as the operator replaces
+  # them, each drained first, never all at once; or, when it changes only
+  # their metadata (such as the bundle), as the operator refreshes each to
+  # it and upgrades it in place (operations.md, Upgrades).
   update_policy {
     type                  = "OPPORTUNISTIC"
     minimal_action        = "REPLACE"

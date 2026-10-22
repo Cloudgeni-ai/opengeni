@@ -249,6 +249,15 @@ describe("inbox notifications", () => {
   test("opens the session at the item's moment", () => {
     expect(inboxItemPath(item({}))).toBe("/workspaces/w1/sessions/s1?at=42");
     expect(inboxItemPath(item({ sessionAvailable: false }))).toBe("/workspaces/w1/inbox");
+    const paths = {
+      home: (w: string) => `/app/${w}`,
+      session: (w: string, s: string, at?: number | null) =>
+        `/app/${w}/chat/${s}${at ? `?moment=${at}` : ""}`,
+      inbox: (w: string) => `/app/${w}/notifications`,
+      match: () => null,
+    };
+    expect(inboxItemPath(item({}), paths)).toBe("/app/w1/chat/s1?moment=42");
+    expect(inboxItemPath(item({ sessionAvailable: false }), paths)).toBe("/app/w1/notifications");
   });
 
   test("plain text for the banner", () => {

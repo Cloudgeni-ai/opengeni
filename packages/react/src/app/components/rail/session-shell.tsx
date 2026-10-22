@@ -343,7 +343,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
+      <div
+        className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
+        // Lets page chrome (the desktop title bar) follow the rail without a
+        // document-wide `:has()` selector.
+        data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
+      >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
           <nav
@@ -461,11 +466,20 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
+    // Both schedule facts come from one read, so a newer lineage never pairs
+    // with an older session read (an older server sends no upcoming flag).
+    const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
       <SessionRouteHeader
         session={{
           ...context.session,
-          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+          ...(lineageSchedules === undefined
+            ? {}
+            : {
+                hasSchedules: lineageSchedules,
+                hasUpcomingSchedules:
+                  lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+              }),
         }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}

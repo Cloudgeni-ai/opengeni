@@ -2,7 +2,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnection, createServer } from "node:net";
 import type postgres from "postgres";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, getSessionEventSequence } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  getSession,
+  getSessionEventSequence,
+} from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability, currentTraceContext } from "@opengeni/observability";
 import { startTestServices } from "@opengeni/testing/compose";
@@ -30,6 +36,9 @@ type Sample = {
 };
 const count = Number(process.env.OPENGENI_BENCH_SAMPLES ?? "15");
 if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error("Invalid samples");
+const lineageSize = Number(process.env.OPENGENI_BENCH_LINEAGE_SIZE ?? "0");
+if (!Number.isInteger(lineageSize) || lineageSize < 0 || lineageSize > 200)
+  throw new Error("Invalid lineage fixture size");
 const activeSample = new AsyncLocalStorage<Sample>();
 const samples: Sample[] = [];
 const services = await startTestServices();
@@ -77,7 +86,10 @@ try {
   const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
   const phaseBySpan = new Map<string, string>();
   driver.options.debug = (_connection, query) => {
-    const sample = activeSample.getStore();
+    // A queued pool BEGIN can execute from an earlier request's async context.
+    // This isolated harness issues one measured request at a time, so the wire
+    // owner is authoritative even when that stale context is still present.
+    const sample = currentWireSample;
     if (!sample) return;
     sample.statements++;
     const verb = query.trim().split(/\s+/u)[0]?.toLowerCase();
@@ -185,6 +197,27 @@ try {
       initialMessage: "Benchmark",
       sandboxBackend: "none",
     });
+    if (lineageSize > 0) {
+      const root = await getSession(client.db, grant.workspaceId, session.id);
+      if (!root?.agent) throw new Error("Lineage fixture requires a configured agent");
+      for (let child = 0; child < lineageSize; child++) {
+        await createSession(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          parentSessionId: root.id,
+          initialMessage: "Synthetic child",
+          resources: [],
+          metadata: {},
+          model: root.model,
+          reasoningEffort: root.reasoningEffort,
+          latencyMode: root.latencyMode,
+          sandboxBackend: "none",
+          agentConfig: root.agent,
+        });
+      }
+      await request("lineage", `${prefix}/sessions/${session.id}/lineage`);
+      continue;
+    }
     await request("get", `${prefix}/sessions/${session.id}`);
     await request("list", `${prefix}/sessions`);
     await request(

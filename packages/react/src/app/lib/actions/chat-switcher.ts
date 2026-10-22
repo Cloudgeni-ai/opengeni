@@ -1,6 +1,7 @@
 /**
  * Control+Tab in the desktop app: switch between recently viewed chats, most
- * recent first, as ⌘Tab switches apps. A quick press goes back to the previous
+ * recent first, as ⌘Tab switches apps. The list spans the person's workspaces,
+ * so it also jumps between chats in different workspaces. A quick press goes back to the previous
  * chat (press again to return); holding Control shows the list, each Tab moves
  * down it (Shift+Tab up), and releasing Control opens the highlighted chat.
  *
@@ -31,10 +32,12 @@ export function openChatSwitcher(
   directory: Pick<ChatDirectorySnapshot, "recent" | "rows">,
   currentChatId: string | null,
   backwards: boolean,
+  /** Whether a workspace is still open to the person; chats elsewhere are left out. */
+  reachable: (workspaceId: string) => boolean = () => true,
 ): ChatSwitcherState | null {
   const switchable = directory.recent.filter((id) => {
     const record = directory.rows.get(id);
-    if (!record || record.archived) return false;
+    if (!record || record.archived || !reachable(record.workspaceId)) return false;
     // Subagent chats live under their parent, as in the sidebar.
     return !record.row || record.row.parentSessionId === null;
   });

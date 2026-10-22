@@ -6,7 +6,7 @@ import { sha256Hex } from "./crypto";
 import { edgeCache, edgeCacheKey } from "./edge-cache";
 import { SITE_HTML_CSP, applySecurityHeaders } from "./headers";
 import { UpstreamError } from "./host-map";
-import { messagePage, neutralPage } from "./pages";
+import { frameAccessPage, messagePage, neutralPage } from "./pages";
 import { signedApiRequest } from "./signing";
 import { requiresSignIn, siteCaller, type SiteContext } from "./site-context";
 
@@ -61,10 +61,11 @@ export function isFrameLoad(request: Request): boolean {
  * with the ETag, so a takedown applies on the next load.
  */
 export async function handleVersionHtml(site: SiteContext, versionId: string): Promise<Response> {
+  const security = { hsts: site.hsts, frameable: "self" as const };
   const method = site.request.method;
   if (method !== "GET" && method !== "HEAD")
-    return messagePage(site, 405, "Not allowed", "Site pages are read-only.");
-  if (!UUID.test(versionId)) return neutralPage(site);
+    return messagePage(security, 405, "Not allowed", "Site pages are read-only.");
+  if (!UUID.test(versionId)) return neutralPage(security);
   if (!isFrameLoad(site.request)) {
     const response = redirect(site, "/", 302);
     response.headers.set("Vary", "Sec-Fetch-Dest");
@@ -73,11 +74,9 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   const signIn = requiresSignIn(site.config, site.record);
   if (signIn) {
     const probe = await probeAccess(site);
-    if (probe.kind === "signin")
-      return messagePage(site, 401, "Sign in required", "Sign in to open this Site.");
-    if (probe.kind === "forbidden")
-      return messagePage(site, 403, "No access", "This Site is not shared with you.");
-    if (probe.kind === "missing") return neutralPage(site);
+    if (probe.kind === "signin") return frameAccessPage(site, 401);
+    if (probe.kind === "forbidden") return frameAccessPage(site, 403);
+    if (probe.kind === "missing") return neutralPage(security);
   }
   const current = versionId === site.record.versionId;
   const cache = current ? edgeCache() : null;
@@ -111,11 +110,11 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
     }
     if (response.status === 404 || response.status === 410) {
       await response.body?.cancel();
-      return neutralPage(site);
+      return neutralPage(security);
     }
     if (response.status === 401 || response.status === 403) {
       await response.body?.cancel();
-      return messagePage(site, response.status, "No access", "This Site is not shared with you.");
+      return frameAccessPage(site, response.status);
     }
     if (!response.ok) {
       await response.body?.cancel();

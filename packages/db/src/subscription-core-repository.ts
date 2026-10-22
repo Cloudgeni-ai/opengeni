@@ -3,7 +3,6 @@ import type {
   ConnectionHealth,
   ConnectionKind,
   ConnectionOwnership,
-  InferencePool,
   ProviderId,
   QuotaBlockClaim,
   SubscriptionConnection,
@@ -37,64 +36,24 @@ export async function readSubscriptionEffectiveSettings(
     sql`select subscription_effective_settings(${accountId}::uuid, ${workspaceId}::uuid) as effective`,
   );
   if (!row) throw new Error("Subscription settings were not found");
-  return row.effective;
+  return withoutRetiredProviderKeys(row.effective);
 }
 
-export type SubscriptionConnectionAssignmentPolicy = {
-  connectionId: string;
-  provider: ProviderId;
-  workspaceId: string;
-  inferencePool: "workspace" | "organization";
-  allocatorEnabled: boolean;
-  allowedModelIds: string[] | null;
-  excludedModels: string[];
-  managedByWorkspaceId: string | null;
-};
-
-/** Reads both source memberships independently; policy values are never unioned. */
-export async function listSubscriptionConnectionAssignmentPolicies(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    provider?: ProviderId;
-    inferencePool?: "workspace" | "organization";
-  },
-): Promise<SubscriptionConnectionAssignmentPolicy[]> {
-  const rows = await rawRows<{
-    connection_id: string;
-    provider: ProviderId;
-    workspace_id: string;
-    inference_pool: "workspace" | "organization";
-    allocator_enabled: boolean;
-    allowed_model_ids: string[] | null;
-    excluded_models: string[];
-    managed_by_workspace_id: string | null;
-  }>(
-    db,
-    sql`select policy.connection_id::text as connection_id, connection.provider,
-      policy.workspace_id::text as workspace_id, policy.inference_pool,
-      policy.allocator_enabled, policy.allowed_model_ids, policy.excluded_models,
-      policy.managed_by_workspace_id::text as managed_by_workspace_id
-    from subscription_connection_assignment_policies policy
-    join subscription_connections connection
-      on connection.account_id = policy.account_id and connection.id = policy.connection_id
-    where policy.account_id = ${input.accountId}::uuid
-      and policy.workspace_id = ${input.workspaceId}::uuid
-      and (${input.provider ?? null}::text is null or connection.provider = ${input.provider ?? null})
-      and (${input.inferencePool ?? null}::text is null or policy.inference_pool = ${input.inferencePool ?? null})
-    order by policy.connection_id, policy.inference_pool`,
-  );
-  return rows.map((row) => ({
-    connectionId: row.connection_id,
-    provider: row.provider,
-    workspaceId: row.workspace_id,
-    inferencePool: row.inference_pool,
-    allocatorEnabled: row.allocator_enabled,
-    allowedModelIds: row.allowed_model_ids,
-    excludedModels: row.excluded_models,
-    managedByWorkspaceId: row.managed_by_workspace_id,
-  }));
+/**
+ * The resolver still reports the retired per-workspace source keys
+ * (`useOrganizationAccounts`, `inferenceSource`) for binaries that straddle
+ * 0907. Every account that reaches a workspace serves it now (D-50), so a
+ * provider carries only its switch. Null (no settings row yet) stays null.
+ */
+export function withoutRetiredProviderKeys<T>(effective: T): T {
+  const providers = (effective as { values?: { providers?: unknown } } | null)?.values?.providers;
+  if (!providers || typeof providers !== "object") return effective;
+  for (const entry of Object.values(providers as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    delete (entry as Record<string, unknown>).useOrganizationAccounts;
+    delete (entry as Record<string, unknown>).inferenceSource;
+  }
+  return effective;
 }
 
 /**
@@ -226,34 +185,12 @@ export async function listSubscriptionConnectionsForPlacement(
       from subscription_connection_people
       where account_id = ${input.accountId}::uuid`,
   );
-  const assignmentPolicies = await listSubscriptionConnectionAssignmentPolicies(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    ...(input.provider ? { provider: input.provider } : {}),
-  });
-
   const workspacesByConnection = groupStrings(
     workspaceAssignments,
     "connection_id",
     "workspace_id",
   );
   const peopleByConnection = groupStrings(peopleAssignments, "connection_id", "membership_id");
-  const policiesByConnection = new Map<
-    string,
-    Array<NonNullable<SubscriptionConnection["assignmentPolicies"]>[number]>
-  >();
-  for (const policy of assignmentPolicies) {
-    const current = policiesByConnection.get(policy.connectionId) ?? [];
-    current.push({
-      workspaceId: policy.workspaceId,
-      inferencePool: policy.inferencePool as InferencePool,
-      allocatorEnabled: policy.allocatorEnabled,
-      allowedModelIds: policy.allowedModelIds,
-      excludedModelIds: policy.excludedModels,
-      managedByWorkspaceId: policy.managedByWorkspaceId,
-    });
-    policiesByConnection.set(policy.connectionId, current);
-  }
 
   return rows.map((row) => {
     const health: ConnectionHealth =
@@ -284,7 +221,6 @@ export async function listSubscriptionConnectionsForPlacement(
                 },
       };
     }
-    const assignmentPolicy = policiesByConnection.get(row.id);
     return {
       id: row.id,
       provider: row.provider,
@@ -303,15 +239,6 @@ export async function listSubscriptionConnectionsForPlacement(
         : null,
       excludedModelIds: row.excluded_models,
       allowedModelIds: row.allowed_model_ids,
-      // A shared connection with no assignment-policy row for this workspace
-      // (an organization-scope connection in a workspace without a local
-      // copy, including one connected on the core after the cutover) keeps
-      // the management classification: organization pool unless this
-      // workspace manages it. Explicit rows decide everywhere else, exactly
-      // as the compatibility projection and operation candidates read them.
-      ...(ownership.kind === "shared" && assignmentPolicy && assignmentPolicy.length > 0
-        ? { assignmentPolicies: assignmentPolicy }
-        : {}),
       refreshGeneration: Number(row.refresh_generation),
       quota: decodeSubscriptionQuota(row),
     };

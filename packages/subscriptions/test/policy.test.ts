@@ -233,7 +233,7 @@ describe("effective settings", () => {
         workspaces: {
           "ws-team": {
             rotation: { codex: { mode: "spread" } },
-            providers: { codex: { useOrganizationAccounts: false, enabled: true } },
+            providers: { codex: { enabled: true } },
             personalFallbackAllowed: false,
             crossProviderFailover: false,
           },
@@ -246,10 +246,7 @@ describe("effective settings", () => {
       claude: { mode: "spread" },
     });
     expect(resolved.sources.rotation).toEqual({ codex: "workspace", claude: "organization" });
-    expect(resolved.values.providers.codex).toEqual({
-      useOrganizationAccounts: false,
-      enabled: true,
-    });
+    expect(resolved.values.providers.codex).toEqual({ enabled: true });
     expect(resolved.sources.providers).toEqual({ codex: "workspace" });
     expect(resolved.values.personalFallbackAllowed).toBe(true);
     expect(resolved.sources.personalFallbackAllowed).toBe("organization");
@@ -263,7 +260,7 @@ describe("effective settings", () => {
         organization: SETTINGS,
         locked: ["providers"],
         workspaces: {
-          "ws-team": { providers: { codex: { useOrganizationAccounts: true, enabled: false } } },
+          "ws-team": { providers: { codex: { enabled: false } } },
         },
       },
       "ws-team",
@@ -273,181 +270,6 @@ describe("effective settings", () => {
 });
 
 describe("provider switches", () => {
-  test("M3 inference source resolves legacy aliases and source-specific assignment membership", () => {
-    const workspaceAccount = connection("codex-local", "codex", {
-      ownership: {
-        kind: "shared",
-        scope: { kind: "organization" },
-        managedByWorkspaceId: "ws-team",
-      },
-      assignmentPolicies: [
-        {
-          workspaceId: "ws-team",
-          inferencePool: "workspace",
-          allowedModelIds: ["codex/a"],
-          allocatorEnabled: true,
-        },
-      ],
-    });
-    const organizationAccount = connection("codex-org", "codex", {
-      assignmentPolicies: [
-        {
-          workspaceId: "ws-team",
-          inferencePool: "organization",
-          allowedModelIds: ["codex/a"],
-          allocatorEnabled: true,
-        },
-      ],
-    });
-    const localFirst = input({
-      settings: {
-        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-local" } },
-        providers: {
-          codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
-        },
-      },
-      connections: [workspaceAccount, organizationAccount],
-    });
-    expect(decidePlacement(localFirst)).toMatchObject({
-      kind: "run",
-      connectionId: "codex-local",
-    });
-    expect(
-      decidePlacement({
-        ...localFirst,
-        settings: {
-          ...localFirst.settings,
-          providers: {
-            codex: {
-              inferenceSource: "organization",
-              useOrganizationAccounts: true,
-              enabled: true,
-            },
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "run", connectionId: "codex-org" });
-    expect(
-      decidePlacement({
-        ...localFirst,
-        settings: {
-          ...localFirst.settings,
-          providers: {
-            codex: { inferenceSource: "workspace", useOrganizationAccounts: false, enabled: true },
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "run", connectionId: "codex-local" });
-  });
-
-  test("one canonical connection keeps distinct model policy for both source memberships", () => {
-    const bothPools = connection("codex-shared", "codex", {
-      assignmentPolicies: [
-        {
-          workspaceId: "ws-team",
-          inferencePool: "workspace",
-          allowedModelIds: ["codex/a"],
-          allocatorEnabled: true,
-        },
-        {
-          workspaceId: "ws-team",
-          inferencePool: "organization",
-          allowedModelIds: ["codex/b"],
-          allocatorEnabled: true,
-        },
-      ],
-    });
-    const base = input({
-      connections: [bothPools],
-      session: { preferredModelId: "codex/a" },
-      settings: {
-        providers: {
-          codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
-        },
-      },
-    });
-    expect(decidePlacement(base)).toMatchObject({ kind: "run", connectionId: "codex-shared" });
-    expect(
-      decidePlacement({
-        ...base,
-        session: { ...base.session, preferredModelId: "codex/b" },
-        settings: {
-          ...base.settings,
-          providers: {
-            codex: { inferenceSource: "workspace", useOrganizationAccounts: false, enabled: true },
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
-    expect(
-      decidePlacement({
-        ...base,
-        session: { ...base.session, preferredModelId: "codex/b" },
-        settings: {
-          ...base.settings,
-          providers: {
-            codex: {
-              inferenceSource: "organization",
-              useOrganizationAccounts: true,
-              enabled: true,
-            },
-          },
-        },
-      }),
-    ).toMatchObject({ kind: "run", connectionId: "codex-shared", modelId: "codex/b" });
-  });
-
-  test("automatic mode never combines model access and allocator permission across assignments", () => {
-    const mixedPolicies = connection("codex-mixed", "codex", {
-      assignmentPolicies: [
-        {
-          workspaceId: "ws-team",
-          inferencePool: "workspace",
-          allowedModelIds: ["codex/a"],
-          allocatorEnabled: true,
-        },
-        {
-          workspaceId: "ws-team",
-          inferencePool: "organization",
-          allowedModelIds: ["codex/b"],
-          allocatorEnabled: false,
-        },
-      ],
-    });
-    expect(
-      decidePlacement(
-        input({
-          connections: [mixedPolicies],
-          session: { preferredModelId: "codex/b" },
-          settings: {
-            providers: {
-              codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
-            },
-          },
-        }),
-      ),
-    ).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
-  });
-
-  test("an empty shared assignment list fails closed instead of using the legacy pool fallback", () => {
-    const unassigned = connection("codex-unassigned", "codex", {
-      ownership: {
-        kind: "shared",
-        scope: { kind: "organization" },
-        managedByWorkspaceId: null,
-      },
-      assignmentPolicies: [],
-    });
-    const placement = input({ connections: [unassigned] });
-    expect(authorizationIneligibility(placement, unassigned)).toContain(
-      "inference_source_excludes_connection",
-    );
-    expect(decidePlacement(placement)).toMatchObject({
-      kind: "wait",
-      reason: "no_eligible_capacity",
-    });
-  });
-
   test("ownerless service sessions can use shared scope but never person or personal pools", () => {
     const ownerless = input({
       session: {
@@ -530,81 +352,14 @@ describe("provider switches", () => {
     ).toEqual([]);
   });
 
-  test("an explicit automatic source overrides a conflicting compatibility boolean", () => {
-    const organizationAccount = connection("codex-org", "codex", {
-      ownership: {
-        kind: "shared",
-        scope: { kind: "organization" },
-        managedByWorkspaceId: null,
-      },
-      allocatorEnabled: true,
-    });
-    expect(
-      decidePlacement(
-        input({
-          connections: [organizationAccount],
-          settings: {
-            providers: {
-              codex: {
-                inferenceSource: "automatic",
-                useOrganizationAccounts: false,
-                enabled: true,
-              },
-            },
-          },
-        }),
-      ),
-    ).toMatchObject({ kind: "run", connectionId: "codex-org" });
-  });
-
-  test("a legacy workspace opt-out overrides an inherited automatic organization source", () => {
-    const organizationOnly = effectiveSettings(
-      {
-        organization: {
-          ...SETTINGS,
-          providers: {
-            codex: { inferenceSource: "automatic", useOrganizationAccounts: false, enabled: true },
-          },
-        },
-        locked: [],
-        workspaces: {},
-      },
-      "ws-team",
-    );
-    expect(organizationOnly.values.providers.codex).toMatchObject({
-      inferenceSource: "automatic",
-      useOrganizationAccounts: true,
-    });
-
-    const resolved = effectiveSettings(
-      {
-        organization: {
-          ...SETTINGS,
-          providers: {
-            codex: { inferenceSource: "automatic", useOrganizationAccounts: true, enabled: true },
-          },
-        },
-        locked: [],
-        workspaces: {
-          "ws-team": { providers: { codex: { useOrganizationAccounts: false } } },
-        },
-      },
-      "ws-team",
-    );
-    expect(resolved.values.providers.codex).toMatchObject({
-      inferenceSource: "workspace",
-      useOrganizationAccounts: false,
-    });
-  });
-
   test("SUB-SET-06: a provider switched off for the workspace serves none of its models and is never a failover target", () => {
-    const off = { codex: { useOrganizationAccounts: true, enabled: false } };
+    const off = { codex: { enabled: false } };
     expect(decidePlacement(input({ settings: { providers: off, fallbackOrder: {} } }))).toEqual({
       kind: "wait",
       reason: "model_not_allowed",
       earliestResetAt: null,
     });
-    const claudeOff = { claude: { useOrganizationAccounts: true, enabled: false } };
+    const claudeOff = { claude: { enabled: false } };
     const exhausted = input({
       settings: { providers: claudeOff },
       connections: [
@@ -619,25 +374,6 @@ describe("provider switches", () => {
       reason: "no_eligible_capacity",
       earliestResetAt: NOW + 60_000,
     });
-  });
-
-  test("SUB-SET-06: without organization accounts only connections the workspace manages serve it", () => {
-    const local = connection("codex-local", "codex", {
-      ownership: {
-        kind: "shared",
-        scope: { kind: "workspaces", workspaceIds: ["ws-team"], allowPersonalWorkspaces: false },
-        managedByWorkspaceId: "ws-team",
-      },
-      quota: null,
-    });
-    const world = input({
-      settings: { providers: { codex: { useOrganizationAccounts: false, enabled: true } } },
-      connections: [connection("codex-org", "codex"), local],
-    });
-    expect(authorizationIneligibility(world, world.connections[0]!)).toEqual([
-      "organization_accounts_off",
-    ]);
-    expect(decidePlacement(world)).toMatchObject({ kind: "run", connectionId: "codex-local" });
   });
 });
 
@@ -962,7 +698,7 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
       {
         name: "its provider switched off for the workspace",
         world: sticky({
-          settings: { providers: { codex: { useOrganizationAccounts: true, enabled: false } } },
+          settings: { providers: { codex: { enabled: false } } },
         }),
         reason: "model_not_permitted",
       },
@@ -1413,7 +1149,7 @@ describe("explicit choices, personal fallback and explained waits", () => {
 
   test("SUB-SET-06, SUB-ELIG-02: a preferred model whose provider is switched off moves to an allowed fallback, like a restricted model (D-17, D-26)", () => {
     const world = input({
-      settings: { providers: { codex: { useOrganizationAccounts: true, enabled: false } } },
+      settings: { providers: { codex: { enabled: false } } },
       connections: [connection("claude-1", "claude")],
     });
     expect(failoverCandidateModels(world)).toEqual(["codex/a", "claude/a"]);
@@ -1737,17 +1473,14 @@ describe("cache lifetime and settings fields", () => {
       {
         organization: {
           ...SETTINGS,
-          providers: { codex: { useOrganizationAccounts: false, enabled: true } },
+          providers: { codex: { enabled: true } },
         },
         locked: [],
         workspaces: { "ws-team": { providers: { codex: { enabled: false } } } },
       },
       "ws-team",
     );
-    expect(resolved.values.providers.codex).toEqual({
-      useOrganizationAccounts: false,
-      enabled: false,
-    });
+    expect(resolved.values.providers.codex).toEqual({ enabled: false });
   });
 });
 

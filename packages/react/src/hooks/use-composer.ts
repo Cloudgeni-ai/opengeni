@@ -17,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
@@ -291,7 +292,9 @@ function restoredErrorReference(
   return message &&
     correlationId &&
     message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE &&
-    message !== t("lib.format.modelUnavailable")
+    message !== t("lib.format.modelUnavailable") &&
+    message !== COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE &&
+    message !== t("lib.format.accountUnavailable")
     ? t("hooks.useComposer.messageReferenceCorrelationid", { message, correlationId })
     : message;
 }

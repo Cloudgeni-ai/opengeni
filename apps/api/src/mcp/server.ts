@@ -16,7 +16,7 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
-import { registerExcelTools } from "./excel-tools";
+import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   sessionChatUrl,
@@ -136,6 +136,7 @@ import {
   recordSyncedSocialPosts,
   getScheduledTaskIncludingDeleted,
   requireSession,
+  requireWorkspace,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -212,6 +213,7 @@ import {
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
   CONNECTED_MACHINE_CAPABILITY_ID,
+  EXCEL_ADDIN_CAPABILITY_ID,
   nativeConnectionCapabilityRecommendations,
   OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
@@ -302,8 +304,7 @@ import {
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionToolPolicyContext,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -4325,13 +4326,15 @@ function registerFleetTools(
   // A refusal that only the owner's permission can resolve posts the Connected
   // Machine card right away, in the agent's own turn, so the person can allow
   // the machine without the agent having to find and call the card tool. Only
-  // exact agent attempts post it. A repeated machine refusal in the same turn
-  // reuses that turn's machine card (it lists every machine); the lookup and
+  // exact agent attempts post it. The card names the machine the agent asked
+  // for, so it can lead with allowing that machine. A repeated refusal for the
+  // same machine in the same turn reuses that turn's card; the lookup and
   // append run atomically under the attempt fence so parallel refusals cannot
   // stack copies. Cards for every other capability are never limited.
   const machinePermissionCard =
-    (toolName: string): MachinePermissionCardPost =>
+    (toolName: string, target: string): MachinePermissionCardPost =>
     async () => {
+      const requestedSandboxId = UUID_TARGET.test(target) ? target.toLowerCase() : null;
       if (!exactAgentAttemptClaims(grant)) return null;
       const claims = exactAgentCommandContext(grant, sessionId);
       const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
@@ -4347,12 +4350,16 @@ function registerFleetTools(
         item.id,
         {
           type: "tool.auth_needed",
-          payload: capabilityCardPayload(item, {
-            action: "connect",
-            rationale: "Allow this chat to use your computer.",
-            toolName,
-          }),
+          payload: {
+            ...capabilityCardPayload(item, {
+              action: "connect",
+              rationale: "Allow this chat to use your computer.",
+              toolName,
+            }),
+            ...(requestedSandboxId ? { requestedSandboxId } : {}),
+          },
         },
+        requestedSandboxId,
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
       if (!appended.accepted) {
@@ -4393,7 +4400,7 @@ function registerFleetTools(
       json(
         await withMachinePermissionCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_attach"),
+          machinePermissionCard("sandbox_attach", target),
         ),
       ),
   );
@@ -4409,7 +4416,7 @@ function registerFleetTools(
       json(
         await withMachinePermissionCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_swap"),
+          machinePermissionCard("sandbox_swap", target),
         ),
       ),
   );
@@ -4456,7 +4463,7 @@ function registerFleetTools(
             ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
             ...(secretResolver ? { secretResolver } : {}),
           }),
-          machinePermissionCard("run_on"),
+          machinePermissionCard("run_on", target),
         ),
       );
     },
@@ -6693,16 +6700,18 @@ function registerCapabilityDiscoveryTools(
     }
     return await Promise.all(
       items.map((item) =>
-        capabilitySetupProjection(
-          deps,
-          grant.workspaceId,
-          item,
-          availableServerIds,
-          acceptedServerIds,
-          accountSelectionKnown,
-          availableFirstPartyTools,
-          new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-        ),
+        item.id === EXCEL_ADDIN_CAPABILITY_ID
+          ? excelAddinSetup(deps, grant, sessionId)
+          : capabilitySetupProjection(
+              deps,
+              grant.workspaceId,
+              item,
+              availableServerIds,
+              acceptedServerIds,
+              accountSelectionKnown,
+              availableFirstPartyTools,
+              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+            ),
       ),
     );
   };
@@ -6855,7 +6864,9 @@ function registerCapabilityDiscoveryTools(
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
-            : "The recommendation was posted for human confirmation. No access has been granted yet.",
+            : item.id === EXCEL_ADDIN_CAPABILITY_ID
+              ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
+              : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );
@@ -7424,6 +7435,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
+/** A machine target given by its sandboxes_list id (not "session"/"default"). */
+const UUID_TARGET = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const SESSION_DISCOVERY_REVISION_MAX = (1n << 65n) - 1n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -7925,15 +7938,23 @@ async function withMcpEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session]),
+  // Share projection metadata only within this authorized full-detail response.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  void workspaceRead.catch(() => undefined);
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session], workspaceRead),
   ]);
   return sessionWithEffectiveToolPolicy(
     session,
-    workspaceServerIds,
-    workspaceDefaultServerIds,
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
     effectiveToolsContext,
   );
 }

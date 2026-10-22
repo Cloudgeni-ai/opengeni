@@ -721,6 +721,8 @@ import type {
   SkillUninstallPreview,
   UninstallSkillRequest,
   UninstallSkillResult,
+  OfficeWorkbook,
+  OfficeWorkbookTicket,
 } from "./types";
 import { GENERATED_VIDEO_MAX_BYTES } from "./types";
 import {
@@ -10427,6 +10429,27 @@ export class OpenGeniClient {
   /** Exchange a native app sign-in code and its PKCE verifier for the app's credential. */
   async exchangeNativeAppCode(input: NativeAppTokenInput): Promise<NativeAppToken> {
     return await this.requestJson<NativeAppToken>("POST", "/v1/native-app/token", input);
+  }
+
+  /**
+   * A ticket an Office add-in uses to connect the open workbook to this
+   * workspace for the signed-in person (see `@opengeni/sdk/office`).
+   */
+  async createOfficeWorkbookTicket(workspaceId: string): Promise<OfficeWorkbookTicket> {
+    return await this.requestJson<OfficeWorkbookTicket>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/office/workbook-tickets`,
+      {},
+    );
+  }
+
+  /** The caller's open workbooks in this workspace, newest first. */
+  async listOfficeWorkbooks(workspaceId: string): Promise<OfficeWorkbook[]> {
+    const { workbooks } = await this.requestJson<{ workbooks: OfficeWorkbook[] }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/office/workbooks`,
+    );
+    return workbooks;
   }
 
   /** Revoke the native app credential this client signs in with. */

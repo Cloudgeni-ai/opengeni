@@ -1237,6 +1237,7 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
+                      connectionAccounts.onSelectionError(error);
                       // A brief outage shows the updating notice, not a toast.
                       return (
                         draftConflict ||
@@ -1314,6 +1315,7 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
+                    connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
                     // An unconfirmed create keeps its idempotency key, so the
                     // person's next Send cannot start a second session.

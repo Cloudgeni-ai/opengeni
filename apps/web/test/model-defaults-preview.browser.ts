@@ -35,7 +35,10 @@ try {
         },
       );
     const shot = (name: string) =>
-      page.screenshot({ path: `${output}/${name}-${width}.png`, fullPage: true });
+      page.screenshot({
+        path: `${output}/${name}-${width}.png`,
+        fullPage: true,
+      });
     const noOverflow = async () =>
       assert(
         !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)),
@@ -76,7 +79,9 @@ try {
     // Allowed models: a following workspace shows Acme's list read-only, and
     // turning the switch off lets it choose its own.
     await open("view=workspace-allowed");
-    const follow = page.getByRole("switch", { name: "Use Acme’s allowed models" });
+    const follow = page.getByRole("switch", {
+      name: "Use Acme’s allowed models",
+    });
     await follow.waitFor();
     assert((await follow.getAttribute("aria-checked")) === "true", "following not shown");
     assert(
@@ -109,7 +114,9 @@ try {
 
     // A workspace with its own list goes back to following Acme.
     await open("view=workspace-allowed&own=1");
-    const ownFollow = page.getByRole("switch", { name: "Use Acme’s allowed models" });
+    const ownFollow = page.getByRole("switch", {
+      name: "Use Acme’s allowed models",
+    });
     await ownFollow.waitFor();
     assert(
       (await ownFollow.getAttribute("aria-checked")) === "false",
@@ -137,7 +144,9 @@ try {
 
     // Compaction for the organization saves Acme's limits.
     await open("view=organization-compaction");
-    const opus = page.getByRole("textbox", { name: "Claude Opus 5.5 compaction limit in tokens" });
+    const opus = page.getByRole("textbox", {
+      name: "Claude Opus 5.5 compaction limit in tokens",
+    });
     await opus.waitFor();
     assert((await opus.getAttribute("placeholder")) === "300,000", "model default not shown");
     await opus.fill("250k");
@@ -148,7 +157,11 @@ try {
     assert(
       (await receipts(page)) ===
         JSON.stringify([
-          { organization: { modelCompactionThresholds: { "claude-sub/opus": 250000 } } },
+          {
+            organization: {
+              modelCompactionThresholds: { "claude-sub/opus": 250000 },
+            },
+          },
         ]),
       `organization limits not saved: ${await receipts(page)}`,
     );
@@ -156,7 +169,9 @@ try {
     // Allowed models for the organization has no follow switch.
     await open("view=organization-allowed");
     await page
-      .getByText("Choose which models people can pick in every workspace.", { exact: false })
+      .getByText("Choose which models people can pick in every workspace.", {
+        exact: false,
+      })
       .waitFor();
     assert(
       (await page.getByRole("switch", { name: /Use Acme/ }).count()) === 0,
@@ -197,6 +212,60 @@ try {
     );
     await noOverflow();
     await shot("workspace-voice-own");
+
+    // Acme picks the voice model new voice conversations start with.
+    await open("view=organization-voice&orgKey=1");
+    const organizationVoiceModel = page.getByRole("combobox", {
+      name: "Default voice model",
+    });
+    await organizationVoiceModel.waitFor();
+    assert(
+      (await organizationVoiceModel.textContent())?.includes("Automatic"),
+      "organization voice model not automatic",
+    );
+    await organizationVoiceModel.click();
+    await page.getByRole("option", { name: /Eleven Realtime/ }).click();
+    await page.getByText("New voice conversations start with Eleven Realtime").waitFor();
+    assert(
+      (await receipts(page)) ===
+        JSON.stringify([
+          {
+            organization: {
+              realtimeDefaultModel: "workspace-elevenlabs/eleven_realtime_v1_max",
+            },
+          },
+        ]),
+      `organization voice model not saved: ${await receipts(page)}`,
+    );
+    await noOverflow();
+    await shot("organization-voice-model");
+
+    // A workspace following Acme names Acme's choice and can pick its own.
+    await open("view=workspace-voice&orgKey=1&orgVoice=1");
+    const workspaceVoiceModel = page.getByRole("combobox", {
+      name: "Default voice model",
+    });
+    await workspaceVoiceModel.waitFor();
+    assert(
+      (await workspaceVoiceModel.textContent())?.includes("Acme's default"),
+      "workspace voice model not following Acme",
+    );
+    await workspaceVoiceModel.click();
+    await page.getByRole("option", { name: /GPT Realtime/ }).waitFor();
+    // Capture the open menu at window size, after its fade-in.
+    await page.screenshot({
+      path: `${output}/workspace-voice-model-menu-${width}.png`,
+      animations: "disabled",
+    });
+    await page.getByRole("option", { name: /GPT Realtime/ }).click();
+    await page.getByText("New voice conversations start with GPT Realtime").waitFor();
+    assert(
+      (await receipts(page)) ===
+        JSON.stringify([{ workspace: { realtimeDefaultModel: "openai/gpt-realtime" } }]),
+      `workspace voice model not saved: ${await receipts(page)}`,
+    );
+    await noOverflow();
+    await shot("workspace-voice-model");
 
     assert(errors.length === 0, errors.join("; "));
     await page.close();

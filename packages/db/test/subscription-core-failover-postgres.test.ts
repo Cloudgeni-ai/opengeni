@@ -469,7 +469,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     });
     await fixture.admin`update subscription_settings set cross_provider_failover = false where account_id = ${org.accountId}::uuid`;
     expect(await evaluate(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
-    await fixture.admin`update subscription_settings set cross_provider_failover = true, providers = ${fixture.admin.json({ [target.adapter.provider]: false })}::jsonb where account_id = ${org.accountId}::uuid`;
+    await fixture.admin`update subscription_settings set cross_provider_failover = true, providers = ${fixture.admin.json({ [target.adapter.provider]: { enabled: false } })}::jsonb where account_id = ${org.accountId}::uuid`;
     expect(await evaluate(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
     await fixture.admin`update subscription_settings set providers = '{}'::jsonb where account_id = ${org.accountId}::uuid`;
     await fixture.admin`insert into workspace_model_policies(account_id, workspace_id, allowed_models)

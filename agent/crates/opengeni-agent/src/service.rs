@@ -625,8 +625,12 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }?;
     if install_scope == ServiceScope::User {
-        let manifests = browser_bridge::install_native_host_manifests(&spec.binary_path, &home()?)
-            .map_err(|error| error.to_string())?;
+        let manifests = browser_bridge::install_native_host_manifests(
+            &spec.binary_path,
+            &home()?,
+            &browser_bridge::extension_ids_from_env(),
+        )
+        .map_err(|error| error.to_string())?;
         for manifest in manifests {
             info!(path = %manifest.display(), "installed Chrome Native Messaging host");
         }

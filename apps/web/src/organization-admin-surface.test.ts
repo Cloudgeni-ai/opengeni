@@ -161,14 +161,12 @@ describe("organization administration surface", () => {
     expect(accessSource).toContain("administeredWorkspaceIds.length > 0");
     // A failed organization read is a load error, never an empty account list.
     expect(organizationCodexSource).toContain("const loadError = query.error ? apiErrorAdvice(");
-    expect(workspaceCodexSource).toContain("Couldn't load the organization's Codex accounts.");
     expect(workspaceCodexSource).toContain("Try again");
-    // Workspace Codex: no source control; one line says which pool new work uses, with
-    // "Use automatically" for a saved explicit choice. Organization admins open a
-    // shared account's own page on the same Models page.
+    // Workspace Codex: no source control or pool notice; each account that reaches
+    // the workspace is listed once. Organization admins open a shared account's own
+    // page on the same Models page.
     expect(workspaceCodexSource).not.toContain('label="Subscriptions from"');
-    expect(workspaceCodexSource).toContain("export function CodexPoolNotice");
-    expect(workspaceCodexSource).toContain("Use automatically");
+    expect(workspaceCodexSource).not.toContain("CodexPoolNotice");
     expect(workspaceCodexSource).not.toContain("Manage in organization settings");
     expect(workspaceCodexSource).toContain("organization.openAccount(account.id)");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
