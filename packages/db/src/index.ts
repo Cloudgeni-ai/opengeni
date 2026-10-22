@@ -7583,6 +7583,8 @@ export type EnqueueSessionTurnInput = {
 
 /** Worker-only turn projection with causal authority omitted from public APIs. */
 export type SessionTurnForExecution = SessionTurn & {
+  /** Immutable entry surface; can only add a worker File read denial. */
+  surface: SessionTurnSurface | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   /** Worker-only causal authority; never inferred from the current worker. */
@@ -89031,6 +89033,7 @@ function mapSessionTurnForExecution(
 ): SessionTurnForExecution {
   return {
     ...mapSessionTurn(row),
+    surface: (row.surface as SessionTurnSurface | null) ?? null,
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,

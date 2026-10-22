@@ -101,7 +101,7 @@ import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
   sandboxFileDownloadsForRun,
-  fileResourceAgentGrant,
+  workerFileAuthorization,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
@@ -1659,7 +1659,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   fileAuthoritySubjectId,
                   turn.resources,
                   activeSandboxBackend ?? groupBoxBackend,
-                  { grant: fileResourceAgentGrant(input, turn), port: sessionAuthorization },
+                  workerFileAuthorization(input, turn, sessionAuthorization),
                 ),
                 cancellationSignal,
                 undefined,

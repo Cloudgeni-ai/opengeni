@@ -1070,8 +1070,9 @@ test("a host denial also hides a shared source File ID and listing", async () =>
   };
   expect(firstBody.files.map((file) => file.id)).toEqual([firstVisible]);
   expect(firstBody.nextCursor).not.toBeNull();
-  const position = JSON.parse(Buffer.from(firstBody.nextCursor!, "base64url").toString("utf8"));
-  expect(position.id).toBe(firstVisible);
+  expect(Buffer.from(firstBody.nextCursor!, "base64url").toString("utf8")).not.toContain(
+    firstVisible,
+  );
   const secondPage = await f.call(
     f.other,
     "GET",
@@ -1082,6 +1083,59 @@ test("a host denial also hides a shared source File ID and listing", async () =>
     files: [{ id: secondVisible }],
   });
 });
+
+test("host-filtered listing continues past denied rows with an opaque cursor", async () => {
+  const f = await fixture(shared, db, true);
+  const source = await createSession(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Example",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    createdByContext: {},
+  });
+  const visibleId = await f.readyFile(null, f.owner.subjectId);
+  await shared.admin`update files set created_at = now() - interval '1 minute' where id = ${visibleId}`;
+  await shared.admin`
+    with generated as (select gen_random_uuid() id from generate_series(1,205))
+    insert into files(id,account_id,workspace_id,status,filename,safe_filename,
+      content_type,size_bytes,sha256,bucket,object_key,source_session_id,
+      source_session_shared_unrestricted,created_at)
+    select generated.id,${f.workspace.accountId},${f.workspace.id},'ready',
+      'hidden.txt','hidden.txt','text/plain',4,${"a".repeat(64)},'fixture',
+      'workspaces/' || ${f.workspace.id} || '/files/' || generated.id::text || '/hidden.txt',
+      ${source.id},true,now()
+    from generated`;
+  const first = await f.call(f.other, "GET", "/files?limit=1");
+  expect(first.status).toBe(200);
+  const firstBody = (await first.json()) as {
+    files: Array<{ id: string }>;
+    nextCursor: string | null;
+  };
+  expect(firstBody.files).toEqual([]);
+  expect(firstBody.nextCursor).not.toBeNull();
+  expect(Buffer.from(firstBody.nextCursor!, "base64url").toString("utf8")).not.toContain(source.id);
+  const invalid = await f.call(
+    f.other,
+    "GET",
+    `/files?limit=1&scope=personal&cursor=${encodeURIComponent(firstBody.nextCursor!)}`,
+  );
+  expect(invalid.status).toBe(422);
+  const second = await f.call(
+    f.other,
+    "GET",
+    `/files?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor!)}`,
+  );
+  expect(second.status).toBe(200);
+  expect((await second.json()) as { files: Array<{ id: string }> }).toMatchObject({
+    files: [{ id: visibleId }],
+  });
+}, 180_000);
 
 test("migration removes legacy document resolver access from custom runtime roles", async () => {
   const legacy = await acquireSharedTestDatabase("file-resolver-role", {

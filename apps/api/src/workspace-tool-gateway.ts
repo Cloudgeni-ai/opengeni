@@ -26,6 +26,7 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   type AccessGrant,
+  type SessionAuthorizationSurface,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -519,7 +520,9 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities, {
+    fileAuthorizationSurface: "first_party_mcp",
+  });
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -538,6 +541,8 @@ export async function prepareWorkspaceToolGatewayForGrant(
 }
 
 export type WorkspaceToolGatewayPreparationOptions = {
+  /** Surface of this transport for source File reads. */
+  fileAuthorizationSurface?: SessionAuthorizationSurface;
   target?: ToolGatewayTarget;
   signal?: AbortSignal;
   /** Trusted transport callback, never a request-body field. */
@@ -890,7 +895,12 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
       : []),
     ...(gatewayServerIds.has("files")
-      ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
+      ? [
+          inMemoryMcpRegistration(
+            "files",
+            buildFilesMcpServer(deps, grant, options.fileAuthorizationSurface ?? "http"),
+          ),
+        ]
       : []),
     ...(gatewayServerIds.has("docs") && hasPermission(grant.permissions, "documents:search")
       ? [

@@ -666,6 +666,8 @@ Hosts that bind this port must also inject it as
 `TurnActivityDependencies.sessionAuthorization` in every turn worker. File
 resources are checked again against the live source-session decision before
 the worker issues a sandbox download URL or mounts the File.
+Configure the same `delegationSecret` on API replicas so
+host-filtered File listings can issue encrypted continuation cursors.
 
 ```ts
 type SessionAuthorizationPort = {

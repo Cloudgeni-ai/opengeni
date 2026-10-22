@@ -7538,7 +7538,8 @@ export const sessionTurns = pgTable(
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
     // Immutable, content-free product surface the request entered through
-    // (`SessionTurnSurface`). Analytics only, never an authorization input.
+    // (`SessionTurnSurface`). Analytics, except worker File checks may use a
+    // trusted MCP value only to add an extra host denial, never to grant access.
     // Null is reserved for rolling/legacy writers (migration 0533).
     surface: text("surface"),
     // Immutable user-facing admission intent. Physical execution still uses

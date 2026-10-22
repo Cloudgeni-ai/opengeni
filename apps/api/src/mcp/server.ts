@@ -6014,6 +6014,7 @@ function registerWorkspaceOrchestrationTools(
             rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
+            { authorizationSurface: "first_party_mcp", surface: "mcp" },
           );
           return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
@@ -6087,6 +6088,7 @@ function registerWorkspaceOrchestrationTools(
               text,
               delivery: "send",
               origin: "operator",
+              authorizationSurface: "first_party_mcp",
               clientEventId: idempotencyKey,
               mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
                 SessionMcpCredentialUpdateInput.parse(update),

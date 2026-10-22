@@ -12,7 +12,12 @@ import {
 } from "../environment";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
-import { CAPABILITY_DESCRIPTORS, resourceMountPath, type ResourceRef } from "@opengeni/contracts";
+import {
+  CAPABILITY_DESCRIPTORS,
+  resourceMountPath,
+  type ResourceRef,
+  type FileAsset,
+} from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
 import { fileSourceVisibleToHost } from "@opengeni/core";
 import type { RunAgentTurnInput } from "../types";
@@ -35,6 +40,45 @@ export function fileResourceAgentGrant(
       executionGeneration: turn.executionGeneration,
     },
   };
+}
+
+export function workerFileAuthorization(
+  input: RunAgentTurnInput,
+  turn: ClaimTurnOk["turn"],
+  port: ActivityServices["sessionAuthorization"],
+) {
+  return {
+    grant: fileResourceAgentGrant(input, turn),
+    port,
+    // The immutable turn surface may only add a denial. The core check below
+    // always runs, including for legacy and unexpected surface values.
+    requireMcpSurface: turn.surface === "mcp" || turn.surface === "agent",
+  };
+}
+
+type WorkerFileAuthorization = ReturnType<typeof workerFileAuthorization>;
+
+async function workerMayReadFileSource(
+  db: ActivityServices["db"],
+  subjectId: string | null,
+  file: FileAsset,
+  authorization: WorkerFileAuthorization,
+): Promise<boolean> {
+  const visible = (surface: "core" | "first_party_mcp") =>
+    fileSourceVisibleToHost(
+      { db, sessionAuthorization: authorization.port ?? null },
+      authorization.grant,
+      file.id,
+      file.workspaceId,
+      true,
+      subjectId ?? authorization.grant.subjectId,
+      file,
+      surface,
+    );
+  return (
+    (await visible("core")) &&
+    (!authorization.requireMcpSurface || (await visible("first_party_mcp")))
+  );
 }
 
 export function filterUnmaterializedSandboxFileDownloads(
@@ -92,7 +136,7 @@ export async function assertFileResourcesRemainAuthorized(
   workspaceId: string,
   subjectId: string | null,
   resources: ResourceRef[],
-  authorization?: { grant: AccessGrant; port: ActivityServices["sessionAuthorization"] },
+  authorization?: WorkerFileAuthorization,
 ): Promise<void> {
   const fileIds = resources.flatMap((resource) =>
     resource.kind === "file" ? [resource.fileId] : [],
@@ -109,18 +153,7 @@ export async function assertFileResourcesRemainAuthorized(
   }
   if (authorization) {
     for (const file of authorized) {
-      if (
-        !(await fileSourceVisibleToHost(
-          { db, sessionAuthorization: authorization.port ?? null },
-          authorization.grant,
-          file.id,
-          file.workspaceId,
-          true,
-          subjectId ?? authorization.grant.subjectId,
-          file,
-          "core",
-        ))
-      ) {
+      if (!(await workerMayReadFileSource(db, subjectId, file, authorization))) {
         throw new Error("One or more file resources are unavailable or no longer authorized");
       }
     }
@@ -176,7 +209,7 @@ export async function sandboxFileDownloadsForRun(
   subjectId: string | null,
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
-  authorization?: { grant: AccessGrant; port: ActivityServices["sessionAuthorization"] },
+  authorization?: WorkerFileAuthorization,
 ): Promise<SandboxFileDownload[]> {
   if (!requiresSignedFileResourceDownloads(settings, activeSandboxBackend)) {
     return [];
@@ -205,19 +238,7 @@ export async function sandboxFileDownloadsForRun(
       subjectId,
       fileId: resource.fileId,
     });
-    if (
-      authorization &&
-      !(await fileSourceVisibleToHost(
-        { db, sessionAuthorization: authorization.port ?? null },
-        authorization.grant,
-        file.id,
-        file.workspaceId,
-        true,
-        subjectId ?? authorization.grant.subjectId,
-        file,
-        "core",
-      ))
-    ) {
+    if (authorization && !(await workerMayReadFileSource(db, subjectId, file, authorization))) {
       throw new Error("One or more file resources are unavailable or no longer authorized");
     }
     const url = await downloadStorage.createGetUrl({ key: file.objectKey });

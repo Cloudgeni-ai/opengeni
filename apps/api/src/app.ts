@@ -1874,7 +1874,9 @@ export function createAppComposition(deps: AppDependencies): {
           await authorizeBoundSession();
           if (c.req.method === "GET") return unsupportedGet();
           reads.handOffToToolDispatch();
-          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization, {
+            fileAuthorizationSurface: "first_party_mcp",
+          });
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
             await mcp.connect(transport);

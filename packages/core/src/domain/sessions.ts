@@ -891,6 +891,8 @@ type AgentChildSessionCreatePresentation = {
 
 /** Trusted entry-point options for creating a session outside the REST body. */
 export type SessionCreateRequestOptions = {
+  /** Host authorization surface of this trusted entry point. */
+  authorizationSurface?: SessionAuthorizationSurface;
   /**
    * Product surface when the entry point knows it (for example Slack or an
    * in-process embedding host). Omitted derives it from the grant.
@@ -3300,7 +3302,7 @@ async function createSessionForRequestInFileScope(
         ownerContext,
         grant,
         unresolvedDeps.sessionAuthorization,
-        "core",
+        requestOptions.authorizationSurface ?? "core",
       );
       // Variable Sets were replaced by vaults (RM-1); a session never selects one.
       if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
@@ -4312,6 +4314,7 @@ async function acceptSessionUserMessageInFileScope(
      * in-process embedding host). Omitted derives it from the grant.
      */
     surface?: SessionTurnSurface;
+    authorizationSurface?: SessionAuthorizationSurface;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -4348,7 +4351,7 @@ async function acceptSessionUserMessageInFileScope(
   await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: delivery === "steer" ? "session.steer" : "session.append",
-    surface: "core",
+    surface: input.authorizationSurface ?? "core",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
   const composerDraftResources = input.composerDraftResources
@@ -4558,7 +4561,7 @@ async function acceptSessionUserMessageInFileScope(
       attachmentOwnerContext,
       grant,
       deps.sessionAuthorization,
-      "core",
+      input.authorizationSurface ?? "core",
     );
     await validateGitHubRepositorySelection(db, workspaceId, [
       ...existingSession.resources,

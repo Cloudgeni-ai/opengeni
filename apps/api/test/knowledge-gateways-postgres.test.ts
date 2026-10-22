@@ -9,8 +9,10 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  bootstrapWorkspace,
   createDb,
   createFileUpload,
+  createSession,
   saveKnowledgeEntry,
   withSessionRlsActorContext,
   type KnowledgeContext,
@@ -106,6 +108,90 @@ test("Files MCP distinguishes a verified owner from delegated subject labels", a
   expect(result.isError).not.toBe(true);
   expect(JSON.stringify(result)).toContain("https://storage.invalid/private");
   expect(signed).toBe(1);
+});
+
+test("Files tool uses its transport surface for source chat authorization", async () => {
+  const suffix = crypto.randomUUID();
+  const fileId = crypto.randomUUID();
+  const subjectId = `user:surface-${suffix}`;
+  const access = await bootstrapWorkspace(database.db, {
+    accountExternalSource: "test",
+    accountExternalId: `account-${suffix}`,
+    accountName: "Surface account",
+    workspaceExternalSource: "test",
+    workspaceExternalId: `workspace-${suffix}`,
+    workspaceName: "Surface workspace",
+    subjectId,
+  });
+  const accountId = access.workspaceGrants[0]!.accountId;
+  const workspaceId = access.workspaceGrants[0]!.workspaceId!;
+  const source = await createSession(database.db, {
+    accountId,
+    workspaceId,
+    initialMessage: "Example",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId },
+    createdByContext: {},
+  });
+  await createFileUpload(database.db, {
+    accountId,
+    workspaceId,
+    fileId,
+    sourceSessionId: source.id,
+    filename: "example.txt",
+    safeFilename: "example.txt",
+    contentType: "text/plain",
+    sizeBytes: 4,
+    bucket: "test",
+    objectKey: fileId,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  await shared.admin`UPDATE files SET status='ready' WHERE id=${fileId}`;
+  const seen: string[] = [];
+  const deps = {
+    db: database.db,
+    objectStorage: {
+      createGetUrl: async () => ({
+        url: "https://storage.example.test/example",
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+    },
+    sessionAuthorization: {
+      authorizeSession: async ({ surface }: { surface: string }) => {
+        seen.push(surface);
+        return surface === "http"
+          ? ({ allowed: true } as const)
+          : ({ allowed: false, reason: "revoked" } as const);
+      },
+      resolveListScope: async () => ({ kind: "all" as const }),
+    },
+  } as ApiRouteDeps;
+  const grant: AccessGrant = {
+    accountId,
+    workspaceId,
+    subjectId,
+    principalKind: "human_session",
+    permissions: ["files:read"],
+  };
+  const authority: AccessGrantAuthorization = {
+    grant,
+    accountGrant: null,
+    contextIntegrity: true,
+    authenticatedSubjectId: subjectId,
+    canonicalManagedHumanSession: true,
+  };
+  const call = (surface?: "http") =>
+    withClient(buildFilesMcpServer(deps, authority, surface), (client) =>
+      client.callTool({ name: "files_get_download_url", arguments: { fileId } }),
+    );
+  expect((await call()).isError).toBe(true);
+  expect((await call("http")).isError).not.toBe(true);
+  expect(seen).toEqual(["first_party_mcp", "http"]);
 });
 
 test("the delegated docs gateway exposes canonical Knowledge without private or review authority", async () => {

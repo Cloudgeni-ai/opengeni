@@ -793,7 +793,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           (payload as Record<string, unknown>).visibility = "private";
       }
       const create = () =>
-        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+        createSessionForRequest(deps, grant, workspaceId, payload, authorization, {
+          authorizationSurface: "http",
+        });
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
         origin ? withSiteSessionOrigin(origin, create) : create(),
       );
@@ -4039,6 +4041,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             : {}),
           authorization,
           delivery: "steer",
+          authorizationSurface: "http",
           origin: "human",
           ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
           ...(payload.expectedDraftRevision !== undefined
@@ -4129,6 +4132,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               ? { personalResourceAttachment: event.payload.personalResourceAttachment }
               : {}),
             authorization,
+            authorizationSurface: "http",
             ...(event.payload.controlEtag !== undefined
               ? { controlEtag: event.payload.controlEtag }
               : {}),

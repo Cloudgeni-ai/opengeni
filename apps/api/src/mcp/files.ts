@@ -1,4 +1,4 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, SessionAuthorizationSurface } from "@opengeni/contracts";
 import { recordAuditEvent, requireFileForSubject, withSessionRlsActorContext } from "@opengeni/db";
 import {
   hasPermission,
@@ -16,6 +16,7 @@ import { userContentSignedGetUrlOptions } from "../http/user-content";
 export function buildFilesMcpServer(
   deps: ApiRouteDeps,
   authority: AccessGrant | AccessGrantAuthorization,
+  authorizationSurface: SessionAuthorizationSurface = "first_party_mcp",
 ): McpServer {
   const access = "grant" in authority ? authority : undefined;
   const grant = access ? access.grant : (authority as AccessGrant);
@@ -71,7 +72,7 @@ export function buildFilesMcpServer(
             false,
             grant.subjectId,
             undefined,
-            "first_party_mcp",
+            authorizationSurface,
           ))
         ) {
           throw new Error("file not found");

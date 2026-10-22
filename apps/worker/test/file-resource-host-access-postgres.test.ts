@@ -66,9 +66,12 @@ test("a host revocation blocks an already selected File before worker materializ
     permissions: ["files:read"],
   };
   let allowed = true;
+  let mcpAllowed = true;
   const port = {
-    authorizeSession: async () =>
-      allowed ? ({ allowed: true } as const) : ({ allowed: false, reason: "revoked" } as const),
+    authorizeSession: async ({ surface }: { surface: string }) =>
+      allowed && (surface !== "first_party_mcp" || mcpAllowed)
+        ? ({ allowed: true } as const)
+        : ({ allowed: false, reason: "revoked" } as const),
     resolveListScope: async () => ({ kind: "all" as const }),
   };
   const check = () =>
@@ -78,9 +81,12 @@ test("a host revocation blocks an already selected File before worker materializ
       workspaceId,
       subjectId,
       [{ kind: "file" as const, fileId }],
-      { grant, port },
+      { grant, port, requireMcpSurface: true },
     );
   await expect(check()).resolves.toBeUndefined();
+  mcpAllowed = false;
+  await expect(check()).rejects.toThrow("no longer authorized");
+  mcpAllowed = true;
   allowed = false;
   await expect(check()).rejects.toThrow("no longer authorized");
 }, 180_000);

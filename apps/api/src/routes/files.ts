@@ -1,4 +1,5 @@
 import { readSessionAttachmentFiles } from "@opengeni/core";
+import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { ZodError } from "zod";
 import {
   CompleteFileUploadResponse,
@@ -67,6 +68,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { buildFilesMcpServer } from "../mcp/files";
+import { fileListCursorCodec } from "../file-list-cursor";
 import { userContentResponseHeaders, userContentSignedGetUrlOptions } from "../http/user-content";
 import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
@@ -483,13 +485,27 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Host-denied rows must not appear in a reversible position cursor.
     const limit = parsed.data.limit ?? 30;
+    const secret = resolveFirstPartyDelegationSecret(deps.settings);
+    if (!secret) throw new HTTPException(503, { message: "File cursor signing is unavailable" });
+    const codec = fileListCursorCodec(
+      secret,
+      JSON.stringify({
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        principalKind: grant.principalKind,
+        metadata: grant.metadata,
+        permissions: [...grant.permissions].sort(),
+        scope: parsed.data.scope ?? "all",
+      }),
+    );
     const files: FileAsset[] = [];
-    let cursor = parsed.data.cursor;
+    let cursor = parsed.data.cursor ? codec.decode(parsed.data.cursor) : undefined;
     let lastVisibleCursor: string | null = null;
     let moreVisible = false;
     // Bound host callbacks even when every row in a large catalog is hidden.
-    // A partial page without a visible continuation cannot expose a cursor
-    // for the hidden position, so ask the caller to narrow the listing.
+    // The encrypted continuation can cross a long run of denied rows without
+    // revealing the hidden File position or making later visible rows unreachable.
     for (let scannedPages = 0; scannedPages < 4; scannedPages++) {
       const page = await listPage(50, cursor).catch(onInvalidCursor);
       const visible = await Promise.all(
@@ -506,15 +522,17 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (moreVisible || !page.nextCursor) {
         return c.json(
-          FileListResponse.parse({ files, nextCursor: moreVisible ? lastVisibleCursor : null }),
+          FileListResponse.parse({
+            files,
+            nextCursor: moreVisible && lastVisibleCursor ? codec.encode(lastVisibleCursor) : null,
+          }),
         );
       }
       cursor = page.nextCursor;
     }
-    if (files.length === limit) {
-      return c.json(FileListResponse.parse({ files, nextCursor: lastVisibleCursor }));
-    }
-    throw new HTTPException(503, { message: "File listing requires narrower selection" });
+    return c.json(
+      FileListResponse.parse({ files, nextCursor: cursor ? codec.encode(cursor) : null }),
+    );
   });
 
   const readRequestedFile = async (
