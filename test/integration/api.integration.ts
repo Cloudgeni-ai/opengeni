@@ -840,8 +840,13 @@ describe("API component integration", () => {
       id: string;
       tools: Array<{ kind: string; id: string }>;
     };
-    // Goal-bearing sessions force the first-party MCP server so goal tools are reachable.
-    expect(session.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
+    // Goal-bearing sessions force the first-party MCP server so goal tools are
+    // reachable; new sessions keep its Knowledge search eager.
+    expect(session.tools).toContainEqual({
+      kind: "mcp",
+      id: "opengeni",
+      eager: ["knowledge_search"],
+    });
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
