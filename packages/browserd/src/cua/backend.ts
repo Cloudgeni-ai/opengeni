@@ -314,19 +314,16 @@ export class CuaComputerBackend implements ComputerBackend {
                 ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
                 : null) ?? error
             );
-          // macOS answers AXOpen with "cannot complete" (-25205) even when a
-          // file dialog went into the folder or chose the file. The window
-          // read afterwards says whether it did.
-          if (operation.args.action === "open" && cannotComplete(error)) {
-            const after = await this.observeAfter(command.targetId, acted, known, report);
-            if (after && !sameReading(after, observed)) return after;
-            throw new ComputerBackendError(
-              "outcome_unknown",
-              "macOS did not confirm opening the element, and the window reads the same as before; observe it before trying again",
-              false,
-              true,
-            );
-          }
+          // macOS answers an accessibility action with "cannot complete"
+          // (-25205) even when it pressed the button or opened the item, often
+          // because the window changed or closed meanwhile. The windows read
+          // afterwards say whether it did.
+          if (
+            operation.name === "click" &&
+            operation.args.element_token !== undefined &&
+            cannotComplete(error)
+          )
+            return await this.afterUnconfirmed(command.targetId, acted, known, observed);
           throw error;
         }
       }
@@ -357,6 +354,43 @@ export class CuaComputerBackend implements ComputerBackend {
     } catch {
       return null;
     }
+  }
+
+  /** After an element action macOS did not confirm: the window's reading if
+   * it changed, or the one window the app opened if the action closed it.
+   * Otherwise the outcome stays unknown, and the failure says what is known. */
+  private async afterUnconfirmed(
+    targetId: string,
+    acted: Target,
+    known: ReadonlySet<string>,
+    observed: ComputerBackendObservation | undefined,
+  ): Promise<ComputerBackendObservation> {
+    const unknown = (message: string) =>
+      new ComputerBackendError("outcome_unknown", message, false, true);
+    const after = await this.observeTarget(targetId).catch(() => null);
+    if (after) {
+      if (!sameReading(after, observed)) return after;
+      throw unknown(
+        "macOS did not confirm the action, and the window reads the same as before; observe it before trying again",
+      );
+    }
+    await this.discover().catch(() => undefined);
+    if (this.targetsById.has(targetId))
+      throw unknown(
+        "macOS did not confirm the action, and the window could not be read after it; observe it before trying again",
+      );
+    const opened = [...this.targetsById.entries()]
+      .filter(([id, target]) => !known.has(id) && target.pid === acted.pid)
+      .map(([id]) => id);
+    if (opened.length === 1) {
+      const reading = await this.observeTarget(opened[0]!).catch(() => null);
+      if (reading) return reading;
+    }
+    throw unknown(
+      `macOS did not confirm the action, but ${targetId} has closed since${
+        opened.length ? ` and ${opened.slice(0, 5).join(", ")} opened` : ""
+      }, so it likely took effect; list the app's windows and observe the one to act on`,
+    );
   }
 
   /** Each action of a batch as its CUA step. Every one is checked against the
