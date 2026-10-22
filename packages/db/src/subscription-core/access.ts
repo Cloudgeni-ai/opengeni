@@ -504,6 +504,12 @@ export async function updateSubscriptionCoreConnectionAccess(
     const shared = await organizationSharedWorkspaceIds(tx, target.accountId);
     if (policy.allowedWorkspaces?.some((workspaceId) => !shared.has(workspaceId)))
       throw new SubscriptionCoreAccessWorkspaceNotInOrganizationError();
+    // A workspace's own account can be given to workspaces (which makes it the
+    // organization's), but not to chosen people (peopleSupported is false).
+    if (people !== null && current.managed_by_workspace_id !== null)
+      throw new SubscriptionCoreAccessInvalidError(
+        "An account a workspace manages cannot be limited to people",
+      );
     if (people !== null) {
       // A person already chosen who has since left may stay listed (people
       // scope admits only active memberships); anyone added must be active.

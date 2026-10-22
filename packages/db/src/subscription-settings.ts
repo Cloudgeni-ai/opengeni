@@ -27,7 +27,10 @@ import { sql } from "drizzle-orm";
 
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
-import { readSubscriptionEffectiveSettings } from "./subscription-core-repository";
+import {
+  readSubscriptionEffectiveSettings,
+  withoutRetiredProviderKeys,
+} from "./subscription-core-repository";
 import { readSubscriptionCorePrimaryConnectionId } from "./subscription-core/administration";
 import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
@@ -840,7 +843,10 @@ export async function readSubscriptionSettingsOverview(
     return {
       organization,
       workspaces: page.map((row) => ({
-        ...settingsViewFromEffective(seededWhenMissing(row.effective, row.id), organization.locked),
+        ...settingsViewFromEffective(
+          seededWhenMissing(withoutRetiredProviderKeys(row.effective), row.id),
+          organization.locked,
+        ),
         workspaceId: row.id,
         name: row.name,
       })),

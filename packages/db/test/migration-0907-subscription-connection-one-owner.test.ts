@@ -265,7 +265,9 @@ test("folds pool rows and the source preference into one owner and reach per con
       values (${accountId}, ${betaOwn}, ${alpha})`),
   ).rejects.toThrow(/serves only that workspace/);
   await expect(
-    settle(admin`update subscription_connections set managed_by_workspace_id = ${alpha} where id = ${unused}`),
+    settle(
+      admin`update subscription_connections set managed_by_workspace_id = ${alpha} where id = ${unused}`,
+    ),
   ).rejects.toThrow(/serves only that workspace/);
   await expect(
     fixture(async (tx) => {

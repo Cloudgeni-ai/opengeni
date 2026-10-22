@@ -65,10 +65,7 @@ export type SubscriptionCoreServingConnection = {
   modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
-type ModelPolicy = Pick<
-  SubscriptionCoreServingConnection,
-  "allowedModelIds" | "excludedModelIds"
->;
+type ModelPolicy = Pick<SubscriptionCoreServingConnection, "allowedModelIds" | "excludedModelIds">;
 
 /** Placement's static model admission for one connection (allowlists and exclusions). */
 export function subscriptionCoreConnectionAllowsModel(
@@ -188,7 +185,11 @@ export async function listSubscriptionCoreServingConnections(
       const exclusions =
         sharedIds.length === 0
           ? []
-          : await rawRows<{ id: string; excluded_models: string[] | null; plan_type: string | null }>(
+          : await rawRows<{
+              id: string;
+              excluded_models: string[] | null;
+              plan_type: string | null;
+            }>(
               tx,
               sql`select connection.id::text as id, connection.excluded_models, connection.plan_type
                 from subscription_connections connection
@@ -200,29 +201,28 @@ export async function listSubscriptionCoreServingConnections(
             );
       const excludedById = new Map(exclusions.map((row) => [row.id, row.excluded_models ?? []]));
       const servingShared = shared.map((candidate) => ({
-          connectionId: candidate.id,
-          ownership: "shared" as const,
-          planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
-          allowedModelIds:
-            candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
-          excludedModelIds: excludedById.get(candidate.id) ?? [],
-          pools: [
-            candidate.ownership.kind === "shared" &&
-            candidate.ownership.managedByWorkspaceId === input.workspaceId
-              ? ("workspace" as const)
-              : ("organization" as const),
-          ],
-          cooledDownModelIds: [],
-          modelCatalog:
-            candidate.observedModelSlugs != null &&
-            candidate.modelCatalogObservedAt != null &&
-            candidate.modelCatalogExpiresAt != null
-              ? {
-                  slugs: [...candidate.observedModelSlugs],
-                  observedAt: candidate.modelCatalogObservedAt,
-                  expiresAt: candidate.modelCatalogExpiresAt,
-                }
-              : null,
+        connectionId: candidate.id,
+        ownership: "shared" as const,
+        planType: exclusions.find((row) => row.id === candidate.id)?.plan_type ?? null,
+        allowedModelIds: candidate.allowedModelIds === null ? null : [...candidate.allowedModelIds],
+        excludedModelIds: excludedById.get(candidate.id) ?? [],
+        pools: [
+          candidate.ownership.kind === "shared" &&
+          candidate.ownership.managedByWorkspaceId === input.workspaceId
+            ? ("workspace" as const)
+            : ("organization" as const),
+        ],
+        cooledDownModelIds: [],
+        modelCatalog:
+          candidate.observedModelSlugs != null &&
+          candidate.modelCatalogObservedAt != null &&
+          candidate.modelCatalogExpiresAt != null
+            ? {
+                slugs: [...candidate.observedModelSlugs],
+                observedAt: candidate.modelCatalogObservedAt,
+                expiresAt: candidate.modelCatalogExpiresAt,
+              }
+            : null,
       }));
       if (
         !personalWorkspace ||

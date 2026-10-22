@@ -36,7 +36,24 @@ export async function readSubscriptionEffectiveSettings(
     sql`select subscription_effective_settings(${accountId}::uuid, ${workspaceId}::uuid) as effective`,
   );
   if (!row) throw new Error("Subscription settings were not found");
-  return row.effective;
+  return withoutRetiredProviderKeys(row.effective);
+}
+
+/**
+ * The resolver still reports the retired per-workspace source keys
+ * (`useOrganizationAccounts`, `inferenceSource`) for binaries that straddle
+ * 0907. Every account that reaches a workspace serves it now (D-50), so a
+ * provider carries only its switch. Null (no settings row yet) stays null.
+ */
+export function withoutRetiredProviderKeys<T>(effective: T): T {
+  const providers = (effective as { values?: { providers?: unknown } } | null)?.values?.providers;
+  if (!providers || typeof providers !== "object") return effective;
+  for (const entry of Object.values(providers as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    delete (entry as Record<string, unknown>).useOrganizationAccounts;
+    delete (entry as Record<string, unknown>).inferenceSource;
+  }
+  return effective;
 }
 
 /**

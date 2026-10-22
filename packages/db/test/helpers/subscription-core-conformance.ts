@@ -2685,13 +2685,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         },
       );
       expect(workspacePool.connections.map((entry) => entry.row.id).sort()).toEqual([a, b].sort());
-      // Rename through the workspace route (which resolves through the pool)
-      // and the organization route; the foreign provider's rows are not found.
+      // An organization account that reaches the workspace is managed on the
+      // organization's route only; the workspace route does not find it. The
+      // foreign provider's rows are found on neither route.
       expect(
         await renameSubscriptionCoreConnection(db(), provider, {
           ...workspaceRoute,
           connectionId: b,
           label: "renamed in workspace",
+        }),
+      ).toBeNull();
+      expect(
+        await renameSubscriptionCoreConnection(db(), provider, {
+          ...organizationRoute,
+          connectionId: b,
+          label: "renamed by the organization",
         }),
       ).toBe(b);
       for (const route of [workspaceRoute, organizationRoute])

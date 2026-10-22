@@ -1363,23 +1363,16 @@ describe.skipIf(!realDb)(
       });
 
       test("the core compatibility projection matches the legacy workspace view", async () => {
+        // 0907 (withheld here) folds the per-workspace source preference and
+        // policy rows into each connection's reach; the projection reads the
+        // connection alone, so a workspace's source is automatic or disabled.
         const w2 = await getSubscriptionCoreCodexWorkspaceProjection(client.db, {
           accountId: a.account,
           workspaceId: a.w2,
         });
-        expect(w2.source).toMatchObject({
-          mode: "workspace",
-          effectiveSource: "workspace",
-          workspaceAvailable: true,
-        });
+        expect(w2.source).toMatchObject({ mode: "automatic", workspaceSetAside: false });
         expect(w2.rotation).toMatchObject({ activeCredentialId: a.c1, rotationEnabled: false });
         const w2Accounts = new Map(w2.accounts.map((account) => [account.id, account]));
-        expect(w2Accounts.get(a.c1)).toMatchObject({
-          source: "workspace",
-          allocatorEnabled: false,
-        });
-        // The workspace source lists only the workspace pool (legacy parity).
-        expect(w2Accounts.has(a.c4)).toBe(false);
         // Plan history and the plan-entitlement cooldown survive as projections.
         expect(w2Accounts.get(a.c1)).toMatchObject({
           planPreviousType: "plus",
@@ -1390,11 +1383,8 @@ describe.skipIf(!realDb)(
           accountId: a.account,
           workspaceId: a.w3,
         });
-        expect(w3.source).toMatchObject({ mode: "organization", effectiveSource: "organization" });
-        // The organization source lists organization accounts, not W3's local one.
-        const w3Ids = w3.accounts.map((account) => account.id);
-        expect(w3Ids).toContain(a.c3);
-        expect(w3Ids).not.toContain(a.c6);
+        expect(w3.source).toMatchObject({ mode: "automatic" });
+        expect(w3.accounts.map((account) => account.id)).toContain(a.c3);
         const w4 = await getSubscriptionCoreCodexWorkspaceProjection(client.db, {
           accountId: a.account,
           workspaceId: a.w4,

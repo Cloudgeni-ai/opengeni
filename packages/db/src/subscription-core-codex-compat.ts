@@ -328,7 +328,7 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
       ...projectAccount(row, {
         source: "organization",
         primaryConnectionId: pool.primaryConnectionId,
-        }),
+      }),
       ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
     })),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),

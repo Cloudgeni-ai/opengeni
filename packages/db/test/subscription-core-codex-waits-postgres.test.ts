@@ -166,23 +166,25 @@ async function sharedConnection(
   label: string,
   options: { managedBy?: string } = {},
 ): Promise<string> {
+  // A workspace's own connection reaches only that workspace.
+  const managed = options.managedBy ?? null;
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id
+      allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+      managed_by_workspace_id
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
-      'shared', 'organization', ${`chatgpt-${label}`}, 'pro',
+      'shared', ${managed ? "workspaces" : "organization"}, ${!managed},
+      ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
-      ${options.managedBy ?? null}::uuid
+      ${managed}::uuid
     ) returning id::text as id`;
-  for (const workspaceId of [org.personalWorkspaceId, org.sharedWorkspaceId]) {
+  if (managed)
     await shared!.admin`
-      insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool
-      ) values (${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid, 'organization')`;
-  }
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${managed}::uuid)`;
   return row!.id;
 }
 

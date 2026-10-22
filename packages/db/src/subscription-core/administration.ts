@@ -665,7 +665,13 @@ async function visibleSharedConnection(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreAdministration,
   rawId: string,
-  options: { organizationPoolOnly?: boolean } = {},
+  /**
+   * `organizationPoolOnly`: on the organization's route, only the
+   * organization's own accounts. `anyReaching`: on a workspace's route, any
+   * account that reaches the workspace (a workspace setting such as its
+   * primary may name the organization's accounts), not only its own.
+   */
+  options: { organizationPoolOnly?: boolean; anyReaching?: boolean } = {},
 ): Promise<{
   id: string;
   allocatorEnabled: boolean;
@@ -697,7 +703,11 @@ async function visibleSharedConnection(
         and disconnected_at is null
         and ${
           input.workspaceId !== null
-            ? sql`true`
+            ? options.anyReaching
+              ? sql`true`
+              : // A workspace's route manages only the workspace's own
+                // accounts; the organization's are managed on its route (D-50).
+                sql`managed_by_workspace_id = ${input.workspaceId}::uuid`
             : options.organizationPoolOnly
               ? sql`managed_by_workspace_id is null`
               : organizationAdministeredConnection()
@@ -1193,6 +1203,7 @@ export async function setSubscriptionCorePrimary(
     // workspace-managed account keeps its workspace classification (5.4).
     const current = await visibleSharedConnection(tx, provider, input, input.connectionId, {
       organizationPoolOnly: true,
+      anyReaching: true,
     });
     if (!current) return { activated: null, wake: null };
     const written = await writeSettingsRow(tx, provider, input, {

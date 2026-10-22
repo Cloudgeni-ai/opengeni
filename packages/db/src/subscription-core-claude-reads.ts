@@ -526,8 +526,7 @@ export async function readSubscriptionCoreClaudeCatalogReadiness(
     restrictions: {
       "organization-claude-subscription/":
         organization.length > 0 ? allowlistUnion(organization) : [],
-      "workspace-claude-subscription/":
-        workspace.length > 0 ? allowlistUnion(workspace) : [],
+      "workspace-claude-subscription/": workspace.length > 0 ? allowlistUnion(workspace) : [],
     },
   };
 }
