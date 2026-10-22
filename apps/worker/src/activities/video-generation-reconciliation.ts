@@ -13,7 +13,7 @@ import {
   markVideoGenerationSubmissionUncertain,
   markVideoGenerationTerminalUpdate,
   markVideoGenerationTerminalUpdateInTransaction,
-  mediaGenerationResultForStoredOperation,
+  mediaGenerationResultForWorkerOperation,
   withSessionRlsActorContext,
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
@@ -632,7 +632,7 @@ async function terminalPayload(
       subjectId: "service:video-generation-reconciliation",
       privateFileOwnerSubjectId: operation.privateFileOwnerSubjectId ?? null,
     },
-    () => mediaGenerationResultForStoredOperation(service.db, operation),
+    () => mediaGenerationResultForWorkerOperation(service.db, operation),
   );
 }
 

@@ -10,6 +10,7 @@ import {
   markVideoGenerationRetaining,
   markVideoGenerationSubmissionIntent,
   mediaGenerationResultForStoredOperation,
+  mediaGenerationResultForWorkerOperation,
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
   settleVideoGenerationReady,
@@ -258,6 +259,8 @@ describe("durable video generation operation", () => {
           },
           fn,
         );
+      const withReconciler = <T>(fn: () => Promise<T>) =>
+        withSessionRlsActorContext({ subjectId: "service:video-generation-reconciliation" }, fn);
       const first = await withOwner(() => admitVideoGenerationOperation(client.db, common));
       const replay = await admitVideoGenerationOperation(client.db, {
         ...common,
@@ -382,7 +385,7 @@ describe("durable video generation operation", () => {
       expect(settled.artifact.id).not.toBe(fileId);
       expect(settled.operation.lastError).toBeNull();
       expect((await withOwner(() => getFile(client.db, grant.workspaceId, fileId)))?.scope).toBe(
-        personal ? "personal" : "workspace",
+        personal ? "personal" : undefined,
       );
       if (personal) {
         expect(await getFile(client.db, grant.workspaceId, fileId)).toBeNull();
@@ -393,9 +396,17 @@ describe("durable video generation operation", () => {
       const retained = await withOwner(() =>
         getGeneratedVideoArtifact(client.db, grant.workspaceId, artifactId),
       );
-      expect(retained?.file.id).toBe(fileId);
-      const terminal = await withOwner(() =>
-        mediaGenerationResultForStoredOperation(client.db, settled.operation),
+      expect(retained?.file.id).toBe(personal ? fileId : undefined);
+      if (!personal) {
+        await expect(
+          withOwner(() => mediaGenerationResultForStoredOperation(client.db, settled.operation)),
+        ).rejects.toThrow("lost its retained artifact");
+      }
+      await expect(
+        withOwner(() => mediaGenerationResultForWorkerOperation(client.db, settled.operation)),
+      ).rejects.toThrow("lost its retained artifact");
+      const terminal = await withReconciler(() =>
+        mediaGenerationResultForWorkerOperation(client.db, settled.operation),
       );
       expect(terminal.status).toBe("ready");
       if (terminal.status === "ready") {
@@ -410,7 +421,7 @@ describe("durable video generation operation", () => {
             getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
           )
         )?.status,
-      ).toBe("completed");
+      ).toBe(personal ? "completed" : undefined);
       expect(
         (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
       ).toBe("completed");

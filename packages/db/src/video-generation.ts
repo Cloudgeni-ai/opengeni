@@ -1220,16 +1220,58 @@ export async function mediaGenerationResultForStoredOperation(
   if (!retained || retained.artifact.deletedAt) {
     throw new Error("Completed video generation lost its retained artifact");
   }
+  return readyVideoGenerationResult(operation, retained.artifact, retained.file);
+}
+
+/** Reconcile a completed operation using its exact durable receipt metadata.
+ * This never returns File storage coordinates or grants a generic File read. */
+export async function mediaGenerationResultForWorkerOperation(
+  db: Database,
+  operation: VideoGenerationOperation,
+): Promise<MediaGenerationResult> {
+  if (operation.status !== "completed") return mediaGenerationResultForOperation({ operation });
+  const [artifact] = await withWorkspaceRls(db, operation.workspaceId, (scopedDb) =>
+    scopedDb
+      .select()
+      .from(schema.generatedVideoArtifacts)
+      .where(
+        and(
+          eq(schema.generatedVideoArtifacts.accountId, operation.accountId),
+          eq(schema.generatedVideoArtifacts.workspaceId, operation.workspaceId),
+          eq(schema.generatedVideoArtifacts.id, operation.expectedArtifactId),
+          eq(schema.generatedVideoArtifacts.primaryFileId, operation.expectedFileId),
+          eq(schema.generatedVideoArtifacts.operationId, operation.id),
+          sql`current_setting('opengeni.subject_id', true) = 'service:video-generation-reconciliation'`,
+        ),
+      )
+      .limit(1),
+  );
+  if (!artifact || artifact.deletedAt) {
+    throw new Error("Completed video generation lost its retained artifact");
+  }
+  return readyVideoGenerationResult(operation, artifact, {
+    status: "ready",
+    contentType: artifact.contentType,
+    sizeBytes: artifact.sizeBytes,
+    sha256: artifact.sha256,
+  });
+}
+
+function readyVideoGenerationResult(
+  operation: VideoGenerationOperation,
+  retained: GeneratedVideoArtifact,
+  file: Pick<typeof schema.files.$inferSelect, "status" | "contentType" | "sizeBytes" | "sha256">,
+): MediaGenerationResult {
   const artifact = retainedGeneratedVideoReferenceFromFile({
-    id: retained.artifact.id,
-    workspaceId: retained.artifact.workspaceId,
-    status: retained.file.status,
-    contentType: retained.file.contentType,
-    sizeBytes: retained.file.sizeBytes,
-    sha256: retained.file.sha256,
-    updatedAt: retained.artifact.readyAt.toISOString(),
-    width: retained.artifact.width,
-    height: retained.artifact.height,
+    id: retained.id,
+    workspaceId: retained.workspaceId,
+    status: file.status,
+    contentType: file.contentType,
+    sizeBytes: file.sizeBytes,
+    sha256: file.sha256,
+    updatedAt: retained.readyAt.toISOString(),
+    width: retained.width,
+    height: retained.height,
   });
   if (!artifact) throw new Error("Generated video receipt could not be constructed");
   const receipt = GeneratedVideoReceipt.parse({
@@ -1238,15 +1280,15 @@ export async function mediaGenerationResultForStoredOperation(
     operationId: operation.id,
     artifact,
     video: {
-      durationSeconds: retained.artifact.durationMillis / 1_000,
-      width: retained.artifact.width,
-      height: retained.artifact.height,
-      fps: retained.artifact.fpsMilli / 1_000,
-      hasAudio: retained.artifact.hasAudio,
-      videoCodec: retained.artifact.videoCodec,
-      audioCodec: retained.artifact.audioCodec,
+      durationSeconds: retained.durationMillis / 1_000,
+      width: retained.width,
+      height: retained.height,
+      fps: retained.fpsMilli / 1_000,
+      hasAudio: retained.hasAudio,
+      videoCodec: retained.videoCodec,
+      audioCodec: retained.audioCodec,
     },
-    sandboxPath: `/workspace/generated-videos/${retained.artifact.sandboxFilename}`,
+    sandboxPath: `/workspace/generated-videos/${retained.sandboxFilename}`,
   });
   return mediaGenerationResultForOperation({
     operation,
@@ -1270,15 +1312,21 @@ export async function getVideoGenerationOperationSummary(
     );
     if (context?.owner !== operation.privateFileOwnerSubjectId) return null;
   }
-  const terminal = inArrayValue(operation.status, [
-    "completed",
-    "provider_failed",
-    "cancelled_before_submit",
-    "outcome_unknown",
-    "retention_failed",
-  ])
-    ? await mediaGenerationResultForStoredOperation(db, operation)
-    : null;
+  let terminal: MediaGenerationResult | null = null;
+  if (operation.status === "completed") {
+    const retained = await getGeneratedVideoArtifact(db, workspaceId, operation.expectedArtifactId);
+    if (!retained || retained.artifact.deletedAt) return null;
+    terminal = readyVideoGenerationResult(operation, retained.artifact, retained.file);
+  } else if (
+    inArrayValue(operation.status, [
+      "provider_failed",
+      "cancelled_before_submit",
+      "outcome_unknown",
+      "retention_failed",
+    ])
+  ) {
+    terminal = mediaGenerationResultForOperation({ operation });
+  }
   return VideoGenerationOperationSummary.parse({
     schemaVersion: 1,
     operationId: operation.id,

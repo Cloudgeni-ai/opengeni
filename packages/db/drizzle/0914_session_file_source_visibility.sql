@@ -726,6 +726,63 @@ CREATE POLICY files_source_reader_upgrade_0914 ON files AS RESTRICTIVE FOR SELEC
   current_setting('opengeni.file_provenance_reader_v1', true) = '1'
 );
 
+-- Maintenance owns a random claim and deletes its File only after the object
+-- was erased. Keep this exact cleanup transaction separate from user File RLS.
+CREATE FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(
+  p_account uuid, p_workspace uuid, p_artifact uuid, p_claim uuid
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+DECLARE held record;
+DECLARE quota record;
+DECLARE deleted_count integer;
+BEGIN
+  IF opengeni_private.workspace_rls_visible(p_account, p_workspace) IS NOT TRUE THEN
+    RETURN false;
+  END IF;
+  SELECT status, quota_state, size_bytes, maintenance_claim_id INTO held
+    FROM retained_screenshot_artifacts
+    WHERE account_id = p_account AND workspace_id = p_workspace
+      AND artifact_id = p_artifact FOR UPDATE;
+  IF NOT FOUND THEN RETURN true; END IF;
+  IF held.status <> 'cleanup_pending' OR held.maintenance_claim_id IS DISTINCT FROM p_claim
+  THEN RETURN false; END IF;
+  SELECT reserved_bytes, ready_bytes INTO quota FROM workspace_screenshot_quotas
+    WHERE account_id = p_account AND workspace_id = p_workspace FOR UPDATE;
+  IF NOT FOUND THEN RETURN false; END IF;
+  PERFORM 1 FROM files WHERE account_id = p_account
+    AND workspace_id = p_workspace AND id = p_artifact FOR UPDATE;
+  IF NOT FOUND THEN RETURN false; END IF;
+  IF (held.quota_state = 'ready' AND quota.ready_bytes < held.size_bytes)
+    OR (held.quota_state = 'reserved' AND quota.reserved_bytes < held.size_bytes)
+  THEN RAISE EXCEPTION 'Retained screenshot quota invariant failed' USING ERRCODE='55000'; END IF;
+  UPDATE workspace_screenshot_quotas SET
+    ready_bytes = ready_bytes - CASE WHEN held.quota_state = 'ready' THEN held.size_bytes ELSE 0 END,
+    reserved_bytes = reserved_bytes - CASE WHEN held.quota_state = 'reserved' THEN held.size_bytes ELSE 0 END,
+    updated_at = clock_timestamp()
+    WHERE account_id = p_account AND workspace_id = p_workspace;
+  DELETE FROM retained_screenshot_artifacts WHERE account_id = p_account
+    AND workspace_id = p_workspace AND artifact_id = p_artifact;
+  DELETE FROM files WHERE account_id = p_account AND workspace_id = p_workspace
+    AND id = p_artifact;
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  IF deleted_count <> 1 THEN
+    RAISE EXCEPTION 'Claimed screenshot File disappeared during cleanup' USING ERRCODE='55000';
+  END IF;
+  RETURN true;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+REVOKE ALL ON FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid)
+  FROM PUBLIC;
+DO $screenshot_cleanup_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.complete_claimed_screenshot_delete_0914(uuid,uuid,uuid,uuid)
+      TO opengeni_app;
+  END IF;
+END $screenshot_cleanup_grant$;
+
 CREATE POLICY documents_file_source_visible ON documents AS RESTRICTIVE FOR SELECT USING (
   NOT source_file_has_inherited_audience OR EXISTS (
     SELECT 1 FROM files source_file WHERE source_file.account_id = documents.account_id

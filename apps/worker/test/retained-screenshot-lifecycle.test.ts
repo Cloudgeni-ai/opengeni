@@ -476,6 +476,18 @@ describe("retained screenshot lifecycle fences", () => {
         sessionId: null,
         cleanupReason: "session_deleted",
       });
+      const wrongClaim = await appSql.begin(async (sql) => {
+        await sql`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
+        await sql`select set_config('opengeni.workspace_id', ${fixture.workspaceId}, true)`;
+        const [result] = await sql<{ completed: boolean }[]>`
+          select opengeni_private.complete_claimed_screenshot_delete_0914(
+            ${fixture.accountId}::uuid, ${fixture.workspaceId}::uuid,
+            ${prepared.artifactId}::uuid, ${crypto.randomUUID()}::uuid
+          ) as completed`;
+        return result?.completed;
+      });
+      expect(wrongClaim).toBe(false);
+      expect(await fileCount(fixture.workspaceId, prepared.artifactId)).toBe(1);
       await memory.storage.deleteObject(prepared.objectKey);
       const completion = {
         ...fixture,

@@ -9141,6 +9141,22 @@ async function completeRetainedScreenshotMaintenanceInOwnerScope(
     outcome: "ready" | "failed" | "expired" | "deleted";
   },
 ): Promise<boolean> {
+  if (input.outcome === "deleted") {
+    return withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (tx) => {
+        const [result] = await rawRows<{ completed: boolean }>(
+          tx,
+          sql`select opengeni_private.complete_claimed_screenshot_delete_0914(
+            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+            ${input.artifactId}::uuid, ${input.claimId}::uuid
+          ) as completed`,
+        );
+        return result?.completed === true;
+      },
+    );
+  }
   if (input.outcome === "ready") {
     const current = await getRetainedScreenshotArtifactByWorkspace(
       db,
@@ -9175,37 +9191,9 @@ async function completeRetainedScreenshotMaintenanceInOwnerScope(
           .for("update")
           .limit(1);
         if (!artifact) {
-          if (input.outcome !== "deleted") return false;
-          const [file] = await tx
-            .select({ id: schema.files.id })
-            .from(schema.files)
-            .where(
-              and(
-                eq(schema.files.workspaceId, input.workspaceId),
-                eq(schema.files.id, input.artifactId),
-              ),
-            )
-            .limit(1);
-          return file === undefined;
+          return false;
         }
         if (artifact.status === input.outcome && artifact.quotaState === "released") {
-          if (input.outcome !== "deleted") return true;
-          await tx
-            .delete(schema.retainedScreenshotArtifacts)
-            .where(
-              and(
-                eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
-                eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
-              ),
-            );
-          await tx
-            .delete(schema.files)
-            .where(
-              and(
-                eq(schema.files.workspaceId, input.workspaceId),
-                eq(schema.files.id, input.artifactId),
-              ),
-            );
           return true;
         }
         if (
@@ -9274,34 +9262,15 @@ async function completeRetainedScreenshotMaintenanceInOwnerScope(
             updatedAt: now,
           })
           .where(eq(schema.workspaceScreenshotQuotas.workspaceId, input.workspaceId));
-        if (input.outcome === "deleted") {
-          await tx
-            .delete(schema.retainedScreenshotArtifacts)
-            .where(
-              and(
-                eq(schema.retainedScreenshotArtifacts.workspaceId, input.workspaceId),
-                eq(schema.retainedScreenshotArtifacts.artifactId, input.artifactId),
-              ),
-            );
-          await tx
-            .delete(schema.files)
-            .where(
-              and(
-                eq(schema.files.workspaceId, input.workspaceId),
-                eq(schema.files.id, input.artifactId),
-              ),
-            );
-        } else {
-          await tx
-            .update(schema.files)
-            .set({ status: input.outcome, updatedAt: now })
-            .where(
-              and(
-                eq(schema.files.workspaceId, input.workspaceId),
-                eq(schema.files.id, input.artifactId),
-              ),
-            );
-        }
+        await tx
+          .update(schema.files)
+          .set({ status: input.outcome, updatedAt: now })
+          .where(
+            and(
+              eq(schema.files.workspaceId, input.workspaceId),
+              eq(schema.files.id, input.artifactId),
+            ),
+          );
         return true;
       }),
   );
