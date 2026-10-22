@@ -162,7 +162,7 @@ const shots: Shot[] = [
   {
     name: "usage-platform-credits",
     scenario: "usage-credits",
-    ready: (page) => text(page, "charged this month"),
+    ready: (page) => text(page, /charged so far/),
   },
   {
     name: "usage-platform-brake",

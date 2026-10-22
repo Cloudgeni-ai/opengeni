@@ -3,7 +3,6 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { SitePlatformUsage } from "@opengeni/contracts";
-import { OpenGeniApiError } from "@opengeni/sdk";
 
 let module: typeof import("./site-platform-usage-section");
 let ownsDom = false;
@@ -24,7 +23,7 @@ afterAll(async () => {
   else Reflect.deleteProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT");
 });
 
-const usage = (patch: Partial<SitePlatformUsage> = {}): SitePlatformUsage => ({
+const platformUsage = (patch: Partial<SitePlatformUsage> = {}): SitePlatformUsage => ({
   workspaceId: "00000000-0000-4000-8000-000000000001",
   periodStart: "2026-10-01",
   billingMode: "usage_only",
@@ -73,32 +72,43 @@ async function render(node: React.ReactNode) {
   };
 }
 
-test("shows metered usage without implying an allowance is a cap in usage_only", async () => {
-  const view = await render(<module.SitePlatformUsageView usage={usage()} />);
-  const text = view.container.textContent ?? "";
-  expect(text).toContain("Platform activity");
-  expect(text).toContain("Not charged.");
-  expect(text).toContain("Requests");
-  expect(text).toContain("Rows written");
-  expect(text).not.toContain(" of ");
+function tiles(container: HTMLElement): string[] {
+  return [...container.querySelectorAll('[data-slot="stat-tile"]')].map((tile) =>
+    [...tile.querySelectorAll("p")].map((line) => line.textContent ?? "").join("|"),
+  );
+}
+
+test("usage_only shows plain values like the KPI tiles, with no bars or limits", async () => {
+  const view = await render(<module.SitePlatformUsageView usage={platformUsage()} />);
+  const { container } = view;
+  expect(container.querySelector('[data-slot="stat-group"]')).not.toBeNull();
+  expect(tiles(container)).toEqual([
+    "Requests|250K",
+    "Rows read|1.2M",
+    "Rows written|4K",
+    "Storage|350 MB",
+  ]);
+  expect(container.querySelector('[data-slot="usage-meter"], [role="progressbar"]')).toBeNull();
+  const text = container.textContent ?? "";
+  expect(text).toContain("Platform activity this month. Not charged.");
+  expect(text).not.toContain("included");
   expect(text).not.toContain("Sites are paused");
-  expect(text).not.toContain("charged this month");
   await view.unmount();
 });
 
-test("credits mode shows what was charged and an engaged brake explains the pause", async () => {
+test("credits mode shows what's included and charged, and an engaged brake explains the pause", async () => {
   const view = await render(
     <module.SitePlatformUsageView
-      usage={usage({
+      usage={platformUsage({
         billingMode: "credits",
         chargedMicros: 1_500_000,
         brake: { engaged: true, engagedAt: "2026-10-14T10:00:00.000Z" },
       })}
     />,
   );
+  expect(tiles(view.container)[0]).toBe("Requests|250K|of 1M included");
   const text = view.container.textContent ?? "";
-  expect(text).toContain("Use above it is paid with credits.");
-  expect(text).toContain("charged this month");
+  expect(text).toContain("Use above what's included is paid with credits; $1.50 charged so far.");
   expect(text).toContain("Sites are paused");
   await view.unmount();
 });
@@ -106,39 +116,15 @@ test("credits mode shows what was charged and an engaged brake explains the paus
 test("shadow mode shows what would have been charged", async () => {
   const view = await render(
     <module.SitePlatformUsageView
-      usage={usage({ billingMode: "shadow", shadowMicros: 400_000 })}
+      usage={platformUsage({ billingMode: "shadow", shadowMicros: 400_000 })}
     />,
   );
-  expect(view.container.textContent).toContain("would have been charged this month");
+  expect(view.container.textContent).toContain("Not charged yet; $0.40 would have been charged.");
   await view.unmount();
 });
 
-test("the section hides where Sites aren't published and loads the usage otherwise", async () => {
-  const hidden = await render(
-    <module.SitePlatformUsageSection
-      workspaceId="ws"
-      client={{
-        getSitePlatformUsage: async () => {
-          throw new OpenGeniApiError(404, "missing", {});
-        },
-      }}
-    />,
-  );
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  expect(hidden.container.textContent).toBe("");
-  await hidden.unmount();
-
-  const shown = await render(
-    <module.SitePlatformUsageSection
-      workspaceId="ws"
-      client={{ getSitePlatformUsage: async () => usage() }}
-    />,
-  );
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  expect(shown.container.textContent).toContain("Rows read");
-  await shown.unmount();
+test("no meters draws no empty tile frame", async () => {
+  const view = await render(<module.SitePlatformUsageView usage={platformUsage({ meters: [] })} />);
+  expect(view.container.querySelector('[data-slot="stat-group"]')).toBeNull();
+  await view.unmount();
 });

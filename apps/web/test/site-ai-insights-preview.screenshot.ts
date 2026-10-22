@@ -29,12 +29,15 @@ try {
           const sites = page
             .locator("section")
             .filter({ has: page.getByRole("heading", { name: "Sites", exact: true, level: 2 }) });
+          // One flat section like Breakdown: a table and the KPI-style tiles, no sub-cards.
+          await sites.getByRole("table", { name: "Model costs by Site", exact: true }).waitFor();
           await sites
-            .getByRole("heading", { name: "Model costs", exact: true, level: 3 })
+            .getByRole("group", { name: "Site platform activity this month", exact: true })
             .waitFor();
-          await sites
-            .getByRole("heading", { name: "Platform activity", exact: true, level: 3 })
-            .waitFor();
+          if (await sites.getByRole("heading", { level: 3 }).count())
+            failures.push(`${name}: nested Sites subsection headings remain`);
+          if (await sites.locator('[data-slot="usage-meter"]').count())
+            failures.push(`${name}: platform progress bars remain`);
           if (await page.getByRole("heading", { name: "Site AI", exact: true }).count())
             failures.push(`${name}: narrowed Site AI heading remains`);
           if (await page.locator('a[href*="/sessions/"]').count())
