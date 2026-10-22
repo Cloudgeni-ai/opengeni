@@ -17,9 +17,11 @@ import {
  * killed outright, as a service stop does, and recovers in a second one. */
 export async function openManagedRecoverySupervisor(
   rootDirectory: string,
+  settings: { idleReleaseMs?: number; now?: () => number } = {},
 ): Promise<BrowserSupervisor> {
   return await BrowserSupervisor.open({
     rootDirectory,
+    ...settings,
     createDriver: async (context) => {
       // Launch exactly what the production driver launches, including after
       // recovery, while applying the same container launch flags as the

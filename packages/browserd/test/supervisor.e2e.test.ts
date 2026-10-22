@@ -326,6 +326,79 @@ recoveryE2e(
   90_000,
 );
 
+recoveryE2e(
+  "an idle browser stops and its next use relaunches the same profile with its tabs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-idle-release-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        new Response(
+          `<!doctype html><title>Idle ${new URL(request.url).pathname}</title><h1>Idle page</h1>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/first`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let relaunchedPid: number | undefined;
+    try {
+      await supervisor.createSession(options);
+      await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+      await expect(supervisor.listTargets(options)).rejects.toMatchObject({
+        code: "resource_not_found",
+      });
+
+      const { initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      // Chrome restored both tabs from the profile it shut down cleanly.
+      const urls = (await supervisor.listTargets(options)).map((target) => target.url);
+      expect(urls).toEqual(
+        expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
   const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY

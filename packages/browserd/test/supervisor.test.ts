@@ -3128,6 +3128,69 @@ describe("same-working-directory controller restart", () => {
       expect({ closes, detaches }).toEqual({ closes: 0, detaches: 2 });
     });
   });
+
+  test("an idle browser is closed with its profile kept and relaunches on its next use", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const contexts: BrowserSupervisorDriverContext[] = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => {
+          contexts.push(context);
+          return {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              closes++;
+              processState = "exited";
+            },
+            detach: async () => {
+              detaches++;
+            },
+          };
+        },
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const session = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        clock += 59_000;
+        await supervisor.listTargets(session);
+        clock += 59_000;
+        // Used 59 s ago: still within the idle time.
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock += 2_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+        // Closed, not detached: the browser process stopped.
+        expect({ closes, detaches }).toEqual({ closes: 1, detaches: 0 });
+        await expect(supervisor.listTargets(session)).rejects.toMatchObject({
+          code: "resource_not_found",
+        });
+        // The control plane's recovery relaunches the same profile.
+        const recovered = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        expect(recovered.browserSessionId).toBe(options.browserSessionId);
+        expect(contexts).toHaveLength(2);
+        expect(contexts[1]!.profileDirectory).toBe(contexts[0]!.profileDirectory);
+        // Its recorded browser has exited, so the runner launches a new one on
+        // the same profile (with --restore-last-session) instead of reattaching.
+        expect(contexts[1]!.allowOwnedProcessLaunch).toBe(true);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
 });
 
 function syntheticOwnedProcess(context: BrowserSupervisorDriverContext) {
