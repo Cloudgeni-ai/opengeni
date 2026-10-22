@@ -66,10 +66,15 @@ describe("browser network isolation", () => {
         trailingArguments: ["--disable-features=A,B"],
         stderrFifo: "/state/chrome-launch/id.stderr.fifo",
         stderrLog: "/state/chrome-launch/chrome-stderr.log",
+        stderrDone: "/state/chrome-launch/id.stderr.done",
         tail: "/usr/bin/tail",
         stderrBytes: 65_536,
       }),
     });
+    // The drain marks its log complete only after writing it.
+    expect(script).toContain(
+      ">'/state/chrome-launch/chrome-stderr.log' 2>/dev/null; : >'/state/chrome-launch/id.stderr.done'; } &",
+    );
     // The scope prologue runs before any namespace is entered.
     expect(script.indexOf("# scope entry")).toBeLessThan(script.indexOf("--map-root-user"));
     expect(script).toContain("'/usr/bin/unshare' --user --map-root-user --net --mount --");

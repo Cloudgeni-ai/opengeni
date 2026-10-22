@@ -427,6 +427,7 @@ describe("managed browser profile cryptography", () => {
       await mkdir(launch, { recursive: true, mode: 0o700 });
       await writeFile(join(launch, `${id}.sh`), "stale");
       await writeFile(join(launch, `${id}.stderr.fifo`), "stale");
+      await writeFile(join(launch, `${id}.stderr.done`), "");
       await writeFile(join(launch, "chrome-stderr.log"), "bounded diagnostic");
       try {
         await reapManagedBrowserProcesses(root);

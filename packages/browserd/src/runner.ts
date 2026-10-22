@@ -37,6 +37,10 @@ const MAX_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const DEVTOOLS_PORT_POLL_MS = 20;
 /** The Chrome stderr tail quoted when a launch fails. */
 const LAUNCH_FAILURE_STDERR_BYTES = 2 * 1024;
+/** How long a failed launch waits for the stderr drain to finish writing its
+ * log. The drain writes only once Chrome's stderr closes, which a loaded
+ * machine can schedule after this controller has already seen Chrome exit. */
+const LAUNCH_FAILURE_STDERR_DRAIN_MS = 2_000;
 /** Chrome refuses to start on a smaller /dev/shm unless told to use disk. */
 const MIN_DEV_SHM_AVAILABLE_BYTES = 256 * 1024 * 1024;
 const DAEMON_STOP_TIMEOUT_MS = 3_000;
@@ -201,6 +205,8 @@ export class ManagedBrowserRunner {
   private managedBrowserExecutable: string | null;
   private readonly chromeStderrDrainPaths: readonly string[];
   private readonly chromeStderrLog: string | null;
+  /** Created by the stderr drain once it has written chromeStderrLog. */
+  private readonly chromeStderrDone: string | null;
   private readonly browserScope: LinuxBrowserScope | null;
   private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
   /** The launcher daemon of a browser an earlier release started, if it
@@ -249,6 +255,7 @@ export class ManagedBrowserRunner {
         : (launch?.executable ?? options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
     this.chromeStderrLog = browserLaunch?.stderrLog ?? null;
+    this.chromeStderrDone = browserLaunch?.stderrDone ?? null;
     this.browserScope = browserLaunch?.scope ?? null;
     this.networkNotice = browserLaunch?.networkNotice ?? null;
   }
@@ -422,6 +429,8 @@ export class ManagedBrowserRunner {
     const activePort = join(this.profileDirectory, "DevToolsActivePort");
     // A port file left by an earlier run names a browser that is gone.
     await rm(activePort, { force: true });
+    // So is an earlier launch's finished stderr drain.
+    if (this.chromeStderrDone) await rm(this.chromeStderrDone, { force: true });
     const child = spawn(this.launchExecutable, this.launchArguments, {
       cwd: this.workingDirectory,
       env: this.environment,
@@ -500,6 +509,8 @@ export class ManagedBrowserRunner {
       );
     }
     const status = exit.error ?? exit.signal ?? String(exit.code);
+    if (this.chromeStderrDone)
+      await waitForFile(this.chromeStderrDone, LAUNCH_FAILURE_STDERR_DRAIN_MS);
     const stderr = this.chromeStderrLog ? await fileTail(this.chromeStderrLog) : "";
     return new AgentBrowserCommandError(
       "driver_rejected",
@@ -663,6 +674,19 @@ function stopLaunchedProcessGroup(pid: number | undefined): void {
   }
 }
 
+/** Wait until a file exists, for at most timeoutMs. */
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await access(path);
+      return;
+    } catch {}
+    if (Date.now() >= deadline) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+}
+
 async function fileTail(path: string): Promise<string> {
   let file;
   try {
@@ -727,7 +751,7 @@ async function cleanupStaleChromeLaunchers(directory: string): Promise<void> {
     throw error;
   }
   for (const name of names) {
-    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo|d|resolv\.conf)$/iu.test(name)) {
+    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo|stderr\.done|d|resolv\.conf)$/iu.test(name)) {
       await rm(join(directory, name), { force: true, recursive: true });
     }
   }
@@ -746,6 +770,8 @@ type ManagedBrowserLaunch = {
   cleanupPaths?: readonly string[];
   /** Where the launch wrapper keeps Chrome's last stderr bytes. */
   stderrLog?: string;
+  /** Created once the wrapper has finished writing stderrLog for a launch. */
+  stderrDone?: string;
   scope?: LinuxBrowserScope | null;
   networkNotice?: string | null;
 };
@@ -881,6 +907,7 @@ async function chromeStderrDrainWrapper(
   const id = randomUUID();
   const fifo = join(directory, `${id}.stderr.fifo`);
   const log = join(directory, "chrome-stderr.log");
+  const done = join(directory, `${id}.stderr.done`);
   const wrapper = join(directory, `${id}.sh`);
   const scope = scopeLauncher
     ? { unit: `opengeni-browser-${id}.scope`, busctl: scopeLauncher.busctl }
@@ -891,10 +918,14 @@ async function chromeStderrDrainWrapper(
   const trailing = ` ${shellQuote(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT)}`;
   const state = join(directory, `${id}.d`);
   const resolvOverride = join(directory, `${id}.resolv.conf`);
-  const cleanupPaths = isolation ? [wrapper, fifo, state, resolvOverride] : [wrapper, fifo];
+  const cleanupPaths = isolation
+    ? [wrapper, fifo, done, state, resolvOverride]
+    : [wrapper, fifo, done];
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
-    let script = `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`;
+    // tail writes the log only once Chrome's stderr closes; the done marker
+    // tells a failed launch when the log is complete.
+    let script = `#!/bin/sh\numask 077\n${scopeEntry}{ ${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null; : > ${shellQuote(done)}; } &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`;
     if (isolation) {
       await mkdir(state, { mode: 0o700 });
       const resolv = await hostNamespaceResolvConf();
@@ -915,6 +946,7 @@ async function chromeStderrDrainWrapper(
           trailingArguments: [MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT],
           stderrFifo: fifo,
           stderrLog: log,
+          stderrDone: done,
           tail,
           stderrBytes: CHROME_STDERR_DIAGNOSTIC_BYTES,
         }),
@@ -927,6 +959,7 @@ async function chromeStderrDrainWrapper(
       actualExecutablePath,
       cleanupPaths,
       stderrLog: log,
+      stderrDone: done,
       scope,
     };
   } catch (error) {
