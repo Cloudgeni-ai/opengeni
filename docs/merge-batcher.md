@@ -273,8 +273,17 @@ rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
 even if a higher legacy max-inflight planner setting is present.
 Full-main CI retains explicit reserved capacity, but its mere presence does not
 block progress. Before publication/retry/landing, the reader scans current
-repository runs and their latest jobs (at most 32 runs, 100 entries per response;
-incomplete observations hold). Demand counts runner-holding jobs: `queued`,
+repository runs and their latest jobs (one complete page of at most 100 entries
+per response; incomplete observations hold). Every distinct active run's complete
+latest-job page is read, up to an absolute bound of 64 runs per observation (at
+most 5 run-list plus 64 job requests) and a 120-second scan deadline; a larger
+backlog, an overrun deadline or a provider error holds. A run is **approval-only**
+only when GitHub reports the run as `waiting` and its complete job page has at
+least one `waiting` job and otherwise only `pending` or `completed` jobs. Such
+runs have zero runner demand and are excluded from the **32 runner-relevant
+runs** cap; every other run, including waiting runs with any `queued`,
+`in_progress` or `requested` job and waiting runs without jobs, counts toward
+that cap, and exceeding it holds. Demand counts runner-holding jobs: `queued`,
 `in_progress` and `requested` (created but not yet queued; counted
 conservatively). Jobs waiting for environment approval (`waiting`) or a job
 concurrency group (`pending`), completed jobs, and runs without materialized jobs

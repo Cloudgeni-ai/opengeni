@@ -15,9 +15,25 @@ import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
-import { digest, runnerJobDemand } from "./model";
+import {
+  digest,
+  MAX_RUNNER_RELEVANT_RUNS,
+  MAX_SCANNED_ACTIVE_RUNS,
+  scanRunnerDemand,
+  type RunnerScanHold,
+} from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
+const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
+  "incomplete-runs": "Incomplete or oversized active workflow observation",
+  "invalid-run": "Invalid active run identity",
+  "batch-slot": "Another Batch CI run occupies the single candidate slot",
+  "scan-bound": `Active workflows exceed the bounded ${MAX_SCANNED_ACTIVE_RUNS}-run job scan`,
+  "runner-run-bound": `Active workflows exceed bounded ${MAX_RUNNER_RELEVANT_RUNS}-run observation (excluding proven approval-only runs)`,
+  "incomplete-jobs": "Incomplete or oversized current job observation",
+  "unknown-job-status": "Unrecognized job status in current job observation",
+  deadline: "Active workflow observation exceeded its scan deadline",
+};
 export function isControlPlanePath(path: unknown): boolean {
   return (
     typeof path === "string" &&
@@ -253,49 +269,15 @@ export class GitHubReader {
       candidateSlots: 18,
     };
     if (!this.config.runnerBudget || !this.config.mainReserve) return result;
-    const runs = new Map<number, Json>();
-    for (const status of ["in_progress", "queued", "waiting", "pending", "requested"]) {
-      const page = (await this.get(`actions/runs?status=${status}&per_page=100&page=1`)) as Json;
-      if (
-        !Array.isArray(page.workflow_runs) ||
-        !Number.isSafeInteger(page.total_count) ||
-        page.total_count > 100 ||
-        page.total_count !== page.workflow_runs.length
-      )
-        return { ...result, reason: "Incomplete or oversized active workflow observation" };
-      for (const run of page.workflow_runs) {
-        if (!Number.isSafeInteger(run.id) || run.id < 1)
-          return { ...result, reason: "Invalid active run identity" };
-        if (run.status !== "completed") runs.set(run.id, run);
-      }
-    }
-    if (runs.size > 32)
-      return { ...result, reason: "Active workflows exceed bounded 32-run observation" };
-    if ([...runs.values()].some((run) => run.path === this.config.workflow))
-      return { ...result, reason: "Another Batch CI run occupies the single candidate slot" };
-    let mainDemand = 0,
-      otherDemand = 0;
-    for (const run of runs.values()) {
-      const page = (await this.get(
-        `actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=1`,
-      )) as Json;
-      if (
-        !Array.isArray(page.jobs) ||
-        !Number.isSafeInteger(page.total_count) ||
-        page.total_count > 100 ||
-        page.total_count !== page.jobs.length
-      )
-        return { ...result, reason: "Incomplete or oversized current job observation" };
-      const isMain =
-        run.path === ".github/workflows/ci.yml" &&
-        run.head_branch === this.config.baseBranch &&
-        run.event === "push";
-      const demand = runnerJobDemand(page.jobs);
-      if (demand === null)
-        return { ...result, reason: "Unrecognized job status in current job observation" };
-      if (isMain) mainDemand += demand;
-      else otherDemand += demand;
-    }
+    const scan = await scanRunnerDemand({
+      get: (path) => this.get(path),
+      batchWorkflow: this.config.workflow,
+      baseBranch: this.config.baseBranch,
+    });
+    result.scannedRuns = scan.scannedRuns;
+    result.approvalOnlyRuns = scan.approvalOnlyRuns;
+    if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
+    const { mainDemand, otherDemand } = scan;
     result.occupied = mainDemand + otherDemand;
     result.reservedMain = Math.max(this.config.mainReserve, mainDemand);
     result.allowed = otherDemand + result.reservedMain + 18 <= this.config.runnerBudget;

@@ -11,7 +11,10 @@ import {
   config,
   digest,
   emptyLedger,
-  runnerJobDemand,
+  MAX_RUNNER_RELEVANT_RUNS,
+  MAX_SCANNED_ACTIVE_RUNS,
+  scanRunnerDemand,
+  type RunnerScanHold,
   type Config,
   type Ledger,
   type Manifest,
@@ -867,11 +870,25 @@ export interface Headroom {
   reservedMain: number;
   candidateSlots: number;
   budget: number | null;
+  scannedRuns?: number;
+  approvalOnlyRuns?: number;
 }
+const TRAFFIC_HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
+  "incomplete-runs": "Runner observation exceeds bounded scan or is incomplete",
+  // Unreachable with the throwing validator below; kept for exhaustiveness.
+  "invalid-run": "Invalid active run identity",
+  "batch-slot": "Another Batch CI run already occupies hosted headroom",
+  "scan-bound": `Runner observation exceeds bounded scan of ${MAX_SCANNED_ACTIVE_RUNS} active runs`,
+  "runner-run-bound": `Too many active workflows for bounded runner observation (over ${MAX_RUNNER_RELEVANT_RUNS} excluding proven approval-only runs)`,
+  "incomplete-jobs": "Active job scan incomplete; no publication",
+  "unknown-job-status": "Unrecognized job status in active job scan; no publication",
+  deadline: "Runner observation exceeded its scan deadline; no publication",
+};
 export async function readHeadroom(
   reader: Pick<CachedTrafficReader, "fresh">,
   runnerBudget: number | undefined,
   mainReserve: number | undefined,
+  now?: () => number,
 ): Promise<Headroom> {
   const result: Headroom = {
     allowed: false,
@@ -889,48 +906,18 @@ export async function readHeadroom(
     mainReserve < 1
   )
     return result;
-  const runs = new Map<number, Record<string, any>>();
-  for (const status of ["in_progress", "queued", "waiting", "pending", "requested"]) {
-    const page = await reader.fresh(`actions/runs?status=${status}&per_page=100&page=1`);
-    if (
-      Array.isArray(page) ||
-      !Array.isArray(page.workflow_runs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      page.total_count > 100 ||
-      page.workflow_runs.length !== page.total_count
-    )
-      return { ...result, reason: "Runner observation exceeds bounded scan or is incomplete" };
-    for (const run of page.workflow_runs) runs.set(positive(run.id), run);
-  }
-  if ([...runs.values()].some((run) => run.path === ".github/workflows/batch-ci.yml"))
-    return { ...result, reason: "Another Batch CI run already occupies hosted headroom" };
-  if (runs.size > 32)
-    return { ...result, reason: "Too many active workflows for bounded runner observation" };
-  let mainBusy = 0,
-    otherBusy = 0;
-  for (const run of runs.values()) {
-    const page = await reader.fresh(
-      `actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=1`,
-    );
-    if (
-      Array.isArray(page) ||
-      !Array.isArray(page.jobs) ||
-      !Number.isSafeInteger(page.total_count) ||
-      page.total_count > 100 ||
-      page.jobs.length !== page.total_count
-    )
-      return { ...result, reason: "Active job scan incomplete; no publication" };
-    const demand = runnerJobDemand(page.jobs);
-    if (demand === null)
-      return { ...result, reason: "Unrecognized job status in active job scan; no publication" };
-    if (
-      run.path === ".github/workflows/ci.yml" &&
-      run.head_branch === "main" &&
-      run.event === "push"
-    )
-      mainBusy += demand;
-    else otherBusy += demand;
-  }
+  const scan = await scanRunnerDemand({
+    get: (path) => reader.fresh(path),
+    batchWorkflow: ".github/workflows/batch-ci.yml",
+    baseBranch: "main",
+    // Malformed provider run identities remain a hard error, as before.
+    runId: positive,
+    ...(now ? { now } : {}),
+  });
+  result.scannedRuns = scan.scannedRuns;
+  result.approvalOnlyRuns = scan.approvalOnlyRuns;
+  if (!scan.ok) return { ...result, reason: TRAFFIC_HEADROOM_HOLD_REASONS[scan.hold] };
+  const { mainDemand: mainBusy, otherDemand: otherBusy } = scan;
   result.occupied = mainBusy + otherBusy;
   result.reservedMain = Math.max(mainReserve, mainBusy);
   result.allowed = otherBusy + result.reservedMain + result.candidateSlots <= runnerBudget;
