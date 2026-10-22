@@ -32,7 +32,26 @@ export type DesktopCapability =
   /** A shortcut sends the window the person is looking at into the composer. */
   | "appShots"
   /** The web app lists its actions and keys; the shell builds the menu bar from them. */
-  | "menuActions";
+  | "menuActions"
+  /** The app reports a new version it found, and installs it on request. */
+  | "updates";
+
+/**
+ * The app's own updates as the web app shows them. `downloading` means a new
+ * version was found and is on its way; `ready` means it is downloaded and
+ * installs on restart. `restartWhenReady` is set once the person asked to
+ * update, so the app restarts by itself when the download ends.
+ */
+export type DesktopUpdateState =
+  | { kind: "none" }
+  | {
+      kind: "downloading";
+      version: string;
+      /** 0 to 100, or null before the download reports progress. */
+      percent: number | null;
+      restartWhenReady: boolean;
+    }
+  | { kind: "ready"; version: string; restartWhenReady: boolean };
 
 /** Which menu bar section shows an action. */
 export type DesktopMenuSection = "file" | "view" | "go" | "chat" | "help";
@@ -239,6 +258,16 @@ export interface DesktopBridge {
     /** Settings, permissions or the shortcut's state changed. */
     onChange(listener: () => void): Unsubscribe;
   };
+  /** The app's own updates. With the `updates` capability. */
+  readonly updates?: {
+    state(): Promise<DesktopUpdateState>;
+    /**
+     * Install the update the app found: restart into it now when it is
+     * downloaded, otherwise finish the download and then restart.
+     */
+    install(): Promise<void>;
+    onChange(listener: (state: DesktopUpdateState) => void): Unsubscribe;
+  };
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
@@ -282,6 +311,9 @@ export const DESKTOP_IPC = {
   appShotsRequestPermission: "og:app-shots:request-permission",
   appShotsCaptured: "og:app-shots:captured",
   appShotsChanged: "og:app-shots:changed",
+  updatesState: "og:updates:state",
+  updatesInstall: "og:updates:install",
+  updatesChanged: "og:updates:changed",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",

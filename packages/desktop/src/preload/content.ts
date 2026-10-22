@@ -15,6 +15,7 @@ import {
   type DesktopCommand,
   type DesktopMenuAction,
   type DesktopPlatform,
+  type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
 
@@ -86,6 +87,7 @@ if (origin && window.location.origin === origin) {
       "commands",
       "appShots",
       "menuActions",
+      "updates",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -151,6 +153,11 @@ if (origin && window.location.origin === origin) {
         };
       },
       onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+    },
+    updates: {
+      state: () => ipcRenderer.invoke(DESKTOP_IPC.updatesState) as Promise<DesktopUpdateState>,
+      install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
+      onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
     },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
