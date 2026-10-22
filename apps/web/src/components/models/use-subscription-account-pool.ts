@@ -52,6 +52,24 @@ export function managesSubscriptionAccount(
   );
 }
 
+/**
+ * A workspace pool's accounts, split by who they belong to. The pool's
+ * `source` names the pool new work prefers, not who owns each account: under
+ * the automatic source a workspace with an account of its own also lists the
+ * organization's shared accounts that serve it, each with scope
+ * `organization`. Those are the organization's, never this workspace's own.
+ */
+export function splitSubscriptionPool<T extends Pick<SubscriptionPoolAccount, "scope">>(pool: {
+  accounts: readonly T[];
+  inherited: boolean;
+}): { shared: T[]; own: T[] } {
+  if (pool.inherited) return { shared: [...pool.accounts], own: [] };
+  return {
+    shared: pool.accounts.filter((account) => account.scope === "organization"),
+    own: pool.accounts.filter((account) => account.scope !== "organization"),
+  };
+}
+
 /** Shared-cache key prefix for one provider's subscription pools (every scope). */
 export const subscriptionPoolQueryPrefix = (providerName: string) =>
   ["subscription-pool", providerName] as SharedQueryKey;

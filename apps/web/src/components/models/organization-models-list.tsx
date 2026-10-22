@@ -6,7 +6,7 @@ import {
   SubscriptionAccountRow,
 } from "@/components/models/subscription-account-ui";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
-import { subscriptionAccountName } from "./use-subscription-account-pool";
+import { splitSubscriptionPool, subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -198,8 +198,17 @@ async function readWorkspaceModels(
   ]);
   const codexAccounts = codex.status === "fulfilled" ? codex.value.accounts : [];
   const grokData = grok.status === "fulfilled" ? grok.value : null;
-  const grokInherited = grokData?.source === "organization";
   const claudeData = claude.status === "fulfilled" ? claude.value : null;
+  // Who owns each account is its own scope: a workspace with an account of its
+  // own also lists the organization's that serve it (scope `organization`).
+  const grokPool = splitSubscriptionPool({
+    accounts: grokData?.accounts ?? [],
+    inherited: grokData?.source === "organization",
+  });
+  const claudePool = splitSubscriptionPool({
+    accounts: claudeData?.accounts ?? [],
+    inherited: claudeData?.source === "organization",
+  });
   const models = catalog.status === "fulfilled" ? catalog.value.models : [];
   const own = (connections.status === "fulfilled" ? connections.value : []) as ConnectionMetadata[];
   const gateways = GATEWAYS.filter((id) => claudeEnabled || id !== "claude_subscription");
@@ -218,10 +227,10 @@ async function readWorkspaceModels(
     codexOwn: codexAccounts.filter((account) => account.source !== "organization"),
     codexShared: codexAccounts.filter((account) => account.source === "organization"),
     codexOff: codex.status === "fulfilled" && codex.value.source?.effectiveSource === "disabled",
-    grokOwn: grokInherited ? [] : (grokData?.accounts ?? []),
-    grokShared: grokInherited ? (grokData?.accounts ?? []) : [],
-    claudeOwn: claudeData?.source === "organization" ? [] : (claudeData?.accounts ?? []),
-    claudeShared: claudeData?.source === "organization" ? (claudeData?.accounts ?? []) : [],
+    grokOwn: grokPool.own,
+    grokShared: grokPool.shared,
+    claudeOwn: claudePool.own,
+    claudeShared: claudePool.shared,
     keysOwn: gateways.filter(
       (id): id is WorkspaceGatewayId =>
         id !== "openai" &&
@@ -371,6 +380,16 @@ export function OrganizationModelsList({
   const organizationCodexIds = new Set(
     administrator ? orgCodex.accounts.map((account) => account.id) : [],
   );
+  // The same for Claude and SuperGrok: an organization account a workspace
+  // manages is listed once, with the organization's.
+  const organizationAccountIds = new Set(
+    administrator
+      ? [
+          ...(claudeEnabled ? orgClaude.accounts : []),
+          ...(orgGrok.unavailable ? [] : orgGrok.accounts),
+        ].map((account) => account.id)
+      : [],
+  );
   /* For a workspace admin: where else their workspace's own account is used,
      once the organization shares it. It stays one row, opened as their own. */
   const sharedCodexWhere = new Map<string, string[]>();
@@ -414,43 +433,47 @@ export function OrganizationModelsList({
             onOpen={() => onOpenWorkspace(workspace.id, accountKey("codex", account.id))}
           />
         )),
-      ...snapshot.grokOwn.map((account) => (
-        <ListRow
-          key={`${workspace.id}:supergrok:${account.id}`}
-          leading={<ProviderTile provider="supergrok" size="lg" />}
-          title={superGrokAccountName(account)}
-          meta={[account.scope === "user" ? yours : tag, superGrokPlan(account)]}
-          indicator={
-            account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-          }
-          onOpen={() => onOpenWorkspace(workspace.id, accountKey("supergrok", account.id))}
-        />
-      )),
-      ...snapshot.claudeOwn.map((account) => (
-        <SubscriptionAccountRow
-          key={`${workspace.id}:claude:${account.id}`}
-          provider="claude_subscription"
-          title={subscriptionAccountName(account)}
-          email={account.email}
-          primary={account.active}
-          meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
-          cells={{
-            usage: (
-              <ClaudeAccountUsageReadout
-                client={client}
-                scope="workspace"
-                scopeId={workspace.id}
-                account={account}
-                canManage={workspace.canManage && account.scope !== "organization"}
-              />
-            ),
-          }}
-          indicator={
-            account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-          }
-          onOpen={() => onOpenWorkspace(workspace.id, accountKey("claude", account.id))}
-        />
-      )),
+      ...snapshot.grokOwn
+        .filter((account) => !organizationAccountIds.has(account.id))
+        .map((account) => (
+          <ListRow
+            key={`${workspace.id}:supergrok:${account.id}`}
+            leading={<ProviderTile provider="supergrok" size="lg" />}
+            title={superGrokAccountName(account)}
+            meta={[account.scope === "user" ? yours : tag, superGrokPlan(account)]}
+            indicator={
+              account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+            }
+            onOpen={() => onOpenWorkspace(workspace.id, accountKey("supergrok", account.id))}
+          />
+        )),
+      ...snapshot.claudeOwn
+        .filter((account) => !organizationAccountIds.has(account.id))
+        .map((account) => (
+          <SubscriptionAccountRow
+            key={`${workspace.id}:claude:${account.id}`}
+            provider="claude_subscription"
+            title={subscriptionAccountName(account)}
+            email={account.email}
+            primary={account.active}
+            meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
+            cells={{
+              usage: (
+                <ClaudeAccountUsageReadout
+                  client={client}
+                  scope="workspace"
+                  scopeId={workspace.id}
+                  account={account}
+                  canManage={workspace.canManage && account.scope !== "organization"}
+                />
+              ),
+            }}
+            indicator={
+              account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+            }
+            onOpen={() => onOpenWorkspace(workspace.id, accountKey("claude", account.id))}
+          />
+        )),
       ...snapshot.keysOwn.map((id) => (
         <ListRow
           key={`${workspace.id}:gateway:${id}`}
@@ -600,7 +623,9 @@ export function OrganizationModelsList({
           ...snapshot.codexOwn.filter((account) => !organizationCodexIds.has(account.id)),
           ...snapshot.grokOwn,
           ...snapshot.claudeOwn,
-        ].filter((account) => account.status !== "active").length,
+        ].filter(
+          (account) => account.status !== "active" && !organizationAccountIds.has(account.id),
+        ).length,
       0,
     );
   const accountCountsKnown =

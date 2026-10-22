@@ -99,6 +99,45 @@ test("Enter submits; success calls onSubmitted", async () => {
   expect(submitted).toHaveBeenCalledTimes(1);
 });
 
+test("a save that finishes after the person left the form doesn't close it again", async () => {
+  // Closing a form page navigates back to it: a late success must not.
+  const submitted = mock();
+  let finish!: () => void;
+  const onSubmit = mock(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await act(async () =>
+    root.render(
+      <FormFrame
+        title="Where it can be used"
+        submitLabel="Save"
+        onSubmit={onSubmit}
+        onSubmitted={submitted}
+      >
+        <Field label="Name">
+          <TextInput defaultValue="Team plan" />
+        </Field>
+      </FormFrame>,
+    ),
+  );
+  await act(async () => {
+    container.querySelector("form")!.requestSubmit();
+    await flush();
+  });
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  // The person navigates elsewhere while the save runs.
+  await act(async () => root.render(<p>Another page</p>));
+  await act(async () => {
+    finish();
+    await flush();
+  });
+  expect(submitted).not.toHaveBeenCalled();
+  expect(container.textContent).toBe("Another page");
+});
+
 test("returning false keeps the form open and focuses the first invalid field", async () => {
   const submitted = mock();
   function Invalid() {
