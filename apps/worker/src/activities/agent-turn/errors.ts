@@ -64,7 +64,7 @@ import {
   RetainedAttachmentTransportLimitError,
   RetainedAttachmentUnavailableError,
 } from "../run-input";
-import type { CodexAccountStatus } from "@opengeni/db";
+import type { CodexAccountStatus, SafeDatabaseErrorFacts } from "@opengeni/db";
 import {
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CODEX_USAGE_LIMIT_ERROR_TYPE,
@@ -1861,7 +1861,7 @@ function baseAgentRunFailurePayload(
   sqlState?: string | null;
   attempts?: number;
   retryOutcome?: string;
-  database?: Record<string, string>;
+  database?: SafeDatabaseErrorFacts;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
