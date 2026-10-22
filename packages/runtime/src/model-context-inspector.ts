@@ -8,7 +8,7 @@ import type {
   ModelContextTool,
 } from "@opengeni/contracts";
 import { MODEL_CONTEXT_SNAPSHOT_VERSION } from "@opengeni/contracts";
-import { estimateSerializedValueTokens, estimateTextTokens } from "./context-compaction";
+import { estimateTextTokens } from "./context-compaction";
 import { lazyToolRuntimeForAgent } from "./lazy-tool-transport";
 import type { EffectiveSkillSelection } from "./runtime-skills";
 
@@ -25,7 +25,7 @@ export type PersistentAgentInstructionLayerDraft = {
   joinBefore?: string;
 };
 
-function contextTextEstimate(value: unknown): number | null {
+function contextTextEstimate(value: unknown, serialized?: string): number | null {
   const containsNonText = (part: unknown): boolean => {
     if (Array.isArray(part)) return part.some(containsNonText);
     if (!part || typeof part !== "object") return false;
@@ -39,7 +39,13 @@ function contextTextEstimate(value: unknown): number | null {
       return true;
     return Object.values(record).some(containsNonText);
   };
-  return containsNonText(value) ? null : estimateSerializedValueTokens(value);
+  if (containsNonText(value)) return null;
+  // Provider parts are parsed JSON. Reuse the representation already needed
+  // for byte accounting rather than traversing that tree again for its length
+  // and then again for its non-ASCII count. Strings retain the raw-text rule.
+  return estimateTextTokens(
+    typeof value === "string" ? value : (serialized ?? JSON.stringify(value)),
+  );
 }
 
 export function buildProviderRequestSnapshot(input: {
@@ -70,12 +76,17 @@ export function buildProviderRequestSnapshot(input: {
     body = null;
     unavailableReason = "The provider body is not a JSON object.";
   }
-  const parts = Object.entries(payload).map(([key, value]) => ({
-    key,
-    estimatedTokens: contextTextEstimate(value),
-    utf8Bytes: Buffer.byteLength(JSON.stringify(value), "utf8"),
-    ...(Array.isArray(value) ? { itemEstimatedTokens: value.map(contextTextEstimate) } : {}),
-  }));
+  const parts = Object.entries(payload).map(([key, value]) => {
+    const serialized = JSON.stringify(value);
+    return {
+      key,
+      estimatedTokens: contextTextEstimate(value, serialized),
+      utf8Bytes: Buffer.byteLength(serialized, "utf8"),
+      ...(Array.isArray(value)
+        ? { itemEstimatedTokens: value.map((item) => contextTextEstimate(item)) }
+        : {}),
+    };
+  });
   const instructionsTokens =
     parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
   const wireInstructions = typeof payload.instructions === "string" ? payload.instructions : null;
@@ -364,16 +375,14 @@ function countedTool(input: {
   schema?: unknown;
 }): ModelContextTool {
   const schema = input.schema;
-  const utf8Bytes = Buffer.byteLength(
-    JSON.stringify({
-      name: input.name,
-      type: input.type,
-      description: input.description,
-      namespace: input.namespace,
-      schema,
-    }),
-    "utf8",
-  );
+  const serialized = JSON.stringify({
+    name: input.name,
+    type: input.type,
+    description: input.description,
+    namespace: input.namespace,
+    schema,
+  });
+  const utf8Bytes = Buffer.byteLength(serialized, "utf8");
   return {
     name: input.name,
     type: input.type,
@@ -382,13 +391,7 @@ function countedTool(input: {
     ...(input.namespace ? { namespace: input.namespace } : {}),
     ...(schema !== undefined ? { schema } : {}),
     utf8Bytes,
-    estimatedTokens: estimateSerializedValueTokens({
-      name: input.name,
-      type: input.type,
-      description: input.description,
-      namespace: input.namespace,
-      schema,
-    }),
+    estimatedTokens: estimateTextTokens(serialized),
   };
 }
 
