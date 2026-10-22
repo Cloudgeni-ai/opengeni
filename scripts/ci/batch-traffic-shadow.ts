@@ -875,7 +875,7 @@ export interface Headroom {
 }
 const TRAFFIC_HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
   "incomplete-runs": "Runner observation exceeds bounded scan or is incomplete",
-  // Unreachable with the throwing validator below; kept for exhaustiveness.
+  // A non-object run entry; malformed run IDs throw in the validator below.
   "invalid-run": "Invalid active run identity",
   "batch-slot": "Another Batch CI run already occupies hosted headroom",
   "scan-bound": `Runner observation exceeds bounded scan of ${MAX_SCANNED_ACTIVE_RUNS} active runs`,

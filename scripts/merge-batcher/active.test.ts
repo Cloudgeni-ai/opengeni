@@ -1017,8 +1017,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 37,
         approvalOnlyRuns: 12,
       });
-      // Every run's complete job page is read: 5 run-list pages plus 37 job pages.
-      expect(fits.requests.length).toBe(5 + 37);
+      // Every run's complete job page is read: 2 x 5 run-list pages plus 37 job pages.
+      expect(fits.requests.length).toBe(10 + 37);
       // Budget arithmetic is unchanged: one more busy runner exceeds 4 + 30 + 18 = 52.
       nextId = 1;
       const tight = reader([
@@ -1055,19 +1055,19 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         scannedRuns: 40,
         approvalOnlyRuns: 40,
       });
-      // The absolute scan bound admits exactly MAX_SCANNED_ACTIVE_RUNS runs with 5 + 64 requests.
+      // The absolute scan bound admits exactly MAX_SCANNED_ACTIVE_RUNS runs with 10 + 64 requests.
       nextId = 1;
       const bound = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS));
       expect(await bound.github.mainBusy()).toBe(false);
       expect(bound.github.lastHeadroom?.approvalOnlyRuns).toBe(64);
-      expect(bound.requests.length).toBe(5 + MAX_SCANNED_ACTIVE_RUNS);
+      expect(bound.requests.length).toBe(10 + MAX_SCANNED_ACTIVE_RUNS);
       // One more distinct active run holds before any job page is read.
       nextId = 1;
       const over = reader(approvalMain(MAX_SCANNED_ACTIVE_RUNS + 1));
       expect(await over.github.mainBusy()).toBe(true);
       expect(over.github.lastHeadroom).toMatchObject({ allowed: false, scannedRuns: 0 });
       expect(over.github.lastHeadroom?.reason).toContain("64-run job scan");
-      expect(over.requests.length).toBe(5);
+      expect(over.requests.length).toBe(10);
     });
     test("an approval-waiting run that becomes queued counts toward demand and the cap", async () => {
       nextId = 1;
@@ -1178,6 +1178,175 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       );
       await expect(listError.mainBusy()).rejects.toThrow();
     });
+    // A run whose status flips once during the inventory listing, served by a
+    // transport that changes the run after the first listing of `flipAfter`.
+    const flipping = (
+      from: string,
+      to: string,
+      flipAfter: string,
+      base: object,
+      jobPage: WirePage,
+      budget = "52",
+      reserve = "30",
+      others: Fixture[] = [],
+    ) => {
+      const subject = { id: 5000, status: from, ...base };
+      let flipped = false;
+      const requests: string[] = [];
+      const transport = (async (url: string | URL | Request) => {
+        const text = String(url);
+        requests.push(text);
+        const jobsMatch = /\/runs\/(\d+)\/jobs\?/.exec(text);
+        if (jobsMatch) {
+          if (Number(jobsMatch[1]) === subject.id) return Response.json(jobPage);
+          const other = others.find((entry) => entry.id === Number(jobsMatch[1]))!;
+          return Response.json(other.jobs);
+        }
+        const status = new URL(text).searchParams.get("status")!;
+        const current = { ...subject, status: flipped ? to : from };
+        const listed = [
+          ...others.map((entry) => entry.run).filter((run) => run.status === status),
+          ...(current.status === status ? [current] : []),
+        ];
+        if (status === flipAfter) flipped = true;
+        return Response.json({ total_count: listed.length, workflow_runs: listed });
+      }) as typeof fetch;
+      const github = new GitHubReader(
+        config({
+          BATCHER_MODE: "active",
+          BATCHER_RUNNER_BUDGET: budget,
+          BATCHER_MAIN_RESERVE: reserve,
+        }),
+        new GitHubAuth({}),
+        transport,
+      );
+      return { github, requests };
+    };
+    test("a run moving backwards between page reads is listed by the second pass", async () => {
+      // in_progress -> waiting right after the waiting page: one pass would miss
+      // the run entirely (waiting read too early, in_progress read too late).
+      const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
+      const other = flipping("in_progress", "waiting", "waiting", OTHER, running);
+      expect(await other.github.mainBusy()).toBe(true);
+      expect(other.github.lastHeadroom).toMatchObject({
+        allowed: false,
+        occupied: 20,
+        reservedMain: 30,
+        scannedRuns: 1,
+        approvalOnlyRuns: 0,
+      });
+      expect(other.requests.length).toBe(10 + 1);
+      // Main demand above the reserve is likewise observed: max(30, 35) + 18 > 52.
+      const mainRun = flipping(
+        "in_progress",
+        "waiting",
+        "waiting",
+        MAIN,
+        page(jobs(...Array(35).fill("in_progress"), "waiting")),
+      );
+      expect(await mainRun.github.mainBusy()).toBe(true);
+      expect(mainRun.github.lastHeadroom).toMatchObject({ occupied: 35, reservedMain: 35 });
+      // queued -> waiting and in_progress -> queued flips are observed too.
+      for (const [from, to] of [
+        ["queued", "waiting"],
+        ["in_progress", "queued"],
+      ] as const) {
+        const flip = flipping(from, to, to, OTHER, running);
+        expect([from, to, await flip.github.mainBusy()]).toEqual([from, to, true]);
+        expect(flip.github.lastHeadroom).toMatchObject({ occupied: 20, scannedRuns: 1 });
+      }
+      // Approval to queued during the listing: demand is counted.
+      const approved = flipping(
+        "waiting",
+        "queued",
+        "waiting",
+        OTHER,
+        page(jobs(...Array(5).fill("queued"), "completed")),
+      );
+      expect(await approved.github.mainBusy()).toBe(true);
+      expect(approved.github.lastHeadroom).toMatchObject({ occupied: 5, approvalOnlyRuns: 0 });
+      // A run listed with a non-waiting status in any listing is never
+      // approval-only, even when its later listing and job page look idle.
+      nextId = 1;
+      const settling = flipping(
+        "in_progress",
+        "waiting",
+        "in_progress",
+        OTHER,
+        page(jobs("waiting", "completed")),
+        "1000",
+        "30",
+        idleOther(32),
+      );
+      expect(await settling.github.mainBusy()).toBe(true);
+      expect(settling.github.lastHeadroom?.reason).toContain("32-run");
+      nextId = 1;
+      const steady = flipping(
+        "waiting",
+        "waiting",
+        "waiting",
+        OTHER,
+        page(jobs("waiting", "completed")),
+        "1000",
+        "30",
+        idleOther(32),
+      );
+      expect(await steady.github.mainBusy()).toBe(false);
+      expect(steady.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 1, scannedRuns: 33 });
+    });
+    test("a response arriving after the deadline holds, including the last one", async () => {
+      const oneRun = (slowPath: RegExp, delay: number) => {
+        let clock = 0;
+        const get = async (path: string) => {
+          if (slowPath.test(path)) clock += delay;
+          if (/\/jobs\?/.test(path)) return page(jobs("in_progress"));
+          const status = new URLSearchParams(path.split("?")[1]).get("status");
+          const list = status === "queued" ? [{ id: 1, status: "queued", ...OTHER }] : [];
+          return { total_count: list.length, workflow_runs: list };
+        };
+        return scanRunnerDemand({
+          get,
+          batchWorkflow: "batch.yml",
+          baseBranch: "main",
+          now: () => clock,
+        });
+      };
+      // The only (last) job page arrives late.
+      expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS + 1)).toMatchObject({
+        ok: false,
+        hold: "deadline",
+        scannedRuns: 1,
+      });
+      expect(await oneRun(/\/jobs\?/, ACTIVE_RUN_SCAN_DEADLINE_MS)).toMatchObject({ ok: true });
+      // With no active runs, the last run-list page arriving late also holds.
+      let clock = 0,
+        lists = 0;
+      const zero = await scanRunnerDemand({
+        get: async () => {
+          if (++lists === 10) clock += ACTIVE_RUN_SCAN_DEADLINE_MS + 1;
+          return { total_count: 0, workflow_runs: [] };
+        },
+        batchWorkflow: "batch.yml",
+        baseBranch: "main",
+        now: () => clock,
+      });
+      expect(zero).toMatchObject({ ok: false, hold: "deadline", scannedRuns: 0 });
+      expect(lists).toBe(10);
+      // A slow middle run-list page holds before the next request.
+      clock = 0;
+      lists = 0;
+      const middle = await scanRunnerDemand({
+        get: async () => {
+          if (++lists === 3) clock += ACTIVE_RUN_SCAN_DEADLINE_MS + 1;
+          return { total_count: 0, workflow_runs: [] };
+        },
+        batchWorkflow: "batch.yml",
+        baseBranch: "main",
+        now: () => clock,
+      });
+      expect(middle).toMatchObject({ ok: false, hold: "deadline" });
+      expect(lists).toBe(3);
+    });
     test("pure scan enforces separate request, scan and deadline bounds", async () => {
       const listed = (statusRuns: Record<string, unknown[]>) => {
         const requests: string[] = [];
@@ -1213,7 +1382,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         hold: "scan-bound",
         scannedRuns: 0,
       });
-      expect(bounded.requests.length).toBe(5);
+      expect(bounded.requests.length).toBe(10);
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
       const slow = listed({ waiting });
@@ -1226,14 +1395,14 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       );
       expect(timed).toMatchObject({ ok: false, hold: "deadline" });
       expect(clock).toBeLessThanOrEqual(ACTIVE_RUN_SCAN_DEADLINE_MS + 20_000);
-      expect(slow.requests.length).toBeLessThan(5 + waiting.length);
+      expect(slow.requests.length).toBeLessThan(10 + waiting.length);
       // Duplicate listings of one run (status changed between pages) are scanned once.
       expect(await scan(listed({ queued: [waiting[0]], waiting }).get)).toMatchObject({
         ok: true,
         scannedRuns: 10,
       });
-      // Lifecycle-ordered pages catch a run approved between the waiting and
-      // queued page reads; its later queued listing and jobs are demand.
+      // A run approved between the waiting and queued page reads is listed as
+      // queued; its jobs are demand and it is not approval-only.
       let approvedAfterWaitingPage = false;
       const order: string[] = [];
       const raced = await scan(async (path) => {
@@ -1246,7 +1415,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         if (status === "waiting") approvedAfterWaitingPage = true;
         return { total_count: list.length, workflow_runs: list };
       });
-      expect(order).toEqual(["requested", "pending", "waiting", "queued", "in_progress"]);
+      const statuses = ["requested", "pending", "waiting", "queued", "in_progress"];
+      expect(order).toEqual([...statuses, ...statuses]);
       expect(raced).toEqual({
         ok: true,
         mainDemand: 1,

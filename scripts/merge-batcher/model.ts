@@ -208,10 +208,11 @@ export function runnerJobDemand(jobs: readonly unknown[]): number | null {
   return demand;
 }
 
-// Run-level statuses scanned for runner demand, one bounded page each, in
-// lifecycle order: a run that advances between page reads (for example an
-// approved `waiting` run becoming `queued`) is listed by the later page
-// instead of slipping between them, and its later listing wins.
+// Run-level statuses scanned for runner demand, one bounded page each. No
+// single-pass page order observes every status change made between page reads
+// (a run can move backwards, for example `in_progress` to `waiting` while its
+// other jobs still run), so the scan lists every status twice; see
+// RUN_LIST_PASSES.
 export const ACTIVE_RUN_STATUSES = [
   "requested",
   "pending",
@@ -219,14 +220,24 @@ export const ACTIVE_RUN_STATUSES = [
   "queued",
   "in_progress",
 ] as const;
+/**
+ * Complete status listings per observation. With two passes, a run whose status
+ * changes once while the inventory is listed is still listed: the second read
+ * of its new status follows the first read of its old one. More changes within
+ * one listing, or provider snapshot lag, are not excluded; demand and the
+ * approval-only proof come from each run's job page, read after the listing,
+ * and callers re-read before publication.
+ */
+export const RUN_LIST_PASSES = 2;
 /** Runs that hold or may imminently request runners; above this the scan holds. */
 export const MAX_RUNNER_RELEVANT_RUNS = 32;
 /**
  * Absolute per-observation job-scan bound, independent of the runner-relevant
  * cap: at most this many distinct active runs have their jobs read, so a
  * backlog of approval-waiting runs cannot turn one observation into an
- * unbounded scan. Worst case is 5 run-list requests plus this many job
- * requests per observation. Larger backlogs hold.
+ * unbounded scan. Worst case is 10 run-list requests (5 statuses, 2 passes)
+ * plus this many job requests, 74 in total, per observation. Larger backlogs
+ * hold.
  */
 export const MAX_SCANNED_ACTIVE_RUNS = 64;
 /** Wall-clock bound for one scan; exceeding it holds instead of admitting. */
@@ -276,11 +287,13 @@ export type RunnerScan =
 /**
  * Shared bounded runner-demand scan for the batcher and traffic-shadow
  * readers. It keeps the complete run inventory (every status page must be a
- * complete single page) and reads the complete latest-job page of every
+ * complete single page, and every status is listed `RUN_LIST_PASSES` times)
+ * and reads the complete latest-job page of every
  * active run up to `MAX_SCANNED_ACTIVE_RUNS`. Only runs proven
  * approval-only are excluded from `MAX_RUNNER_RELEVANT_RUNS`; their demand is
  * still computed from their jobs (and is zero by construction). Mixed,
- * job-less, queued or otherwise unproven runs count toward the cap. Incomplete
+ * job-less, queued, otherwise unproven runs, and runs listed with any
+ * non-waiting status during the listing count toward the cap. Incomplete
  * pages, unknown statuses, a second Batch CI run, the scan bound and the
  * deadline hold. Provider errors propagate to the caller, which holds.
  * Approval can still be granted after observation; callers re-read before
@@ -315,7 +328,11 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
   });
   const runs = new Map<number, Record<string, unknown>>();
-  for (const status of ACTIVE_RUN_STATUSES) {
+  // Runs listed with a non-waiting status in any listing of this observation;
+  // they cannot be approval-only even if their latest listing is waiting.
+  const listedNotWaiting = new Set<number>();
+  const listings = Array.from({ length: RUN_LIST_PASSES }, () => ACTIVE_RUN_STATUSES).flat();
+  for (const status of listings) {
     if (now() - started > deadline) return hold("deadline");
     const page = (await input.get(`actions/runs?status=${status}&per_page=100&page=1`)) as {
       workflow_runs?: unknown;
@@ -336,8 +353,12 @@ export async function scanRunnerDemand(input: {
       const id = runId((run as { id?: unknown }).id);
       if (id === null) return hold("invalid-run");
       const record = run as Record<string, unknown>;
-      // A run that completed between list pages holds no runner.
-      if (record.status !== "completed") runs.set(id, record);
+      // A run listed as completed holds no runner and is not added; an earlier
+      // active listing of the same run is kept (conservative).
+      if (record.status === "completed") continue;
+      if (record.status !== "waiting") listedNotWaiting.add(id);
+      // The latest active listing wins for the run record.
+      runs.set(id, record);
     }
   }
   if ([...runs.values()].some((run) => run.path === input.batchWorkflow)) return hold("batch-slot");
@@ -365,7 +386,7 @@ export async function scanRunnerDemand(input: {
     const jobs = page.jobs as unknown[];
     const demand = runnerJobDemand(jobs);
     if (demand === null) return hold("unknown-job-status");
-    if (approvalOnlyRun(run, jobs)) approvalOnlyRuns++;
+    if (!listedNotWaiting.has(id) && approvalOnlyRun(run, jobs)) approvalOnlyRuns++;
     else if (++runnerRelevantRuns > maxRelevant) return hold("runner-run-bound");
     const isMain =
       run.path === ".github/workflows/ci.yml" &&
@@ -374,6 +395,8 @@ export async function scanRunnerDemand(input: {
     if (isMain) mainDemand += demand;
     else otherDemand += demand;
   }
+  // The final response can itself arrive after the deadline.
+  if (now() - started > deadline) return hold("deadline");
   return { ok: true, mainDemand, otherDemand, scannedRuns, approvalOnlyRuns, runnerRelevantRuns };
 }
 export const emptyLedger = (): Ledger => ({

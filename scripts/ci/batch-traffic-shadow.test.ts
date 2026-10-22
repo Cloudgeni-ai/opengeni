@@ -860,7 +860,7 @@ describe("traffic recovery and bounded reads", () => {
           scannedRuns: 37,
           approvalOnlyRuns: 12,
         });
-        expect(reader.requests.length).toBe(5 + 37);
+        expect(reader.requests.length).toBe(10 + 37);
         nextId = 1;
         const tight = combine(approvalMain(10), approvalOther(2), busyOther(5), idleOther(20));
         expect(await readHeadroom(tight, 52, 30)).toMatchObject({ allowed: false, occupied: 5 });
@@ -885,7 +885,100 @@ describe("traffic recovery and bounded reads", () => {
           scannedRuns: 0,
           reason: expect.stringContaining("bounded scan of 64"),
         });
-        expect(over.requests.length).toBe(5);
+        expect(over.requests.length).toBe(10);
+      });
+      const flipping = (
+        from: string,
+        to: string,
+        flipAfter: string,
+        base: object,
+        jobPage: WirePage,
+      ) => {
+        let flipped = false;
+        const requests: string[] = [];
+        return {
+          requests,
+          fresh: async (path: string): Promise<WirePage> => {
+            requests.push(path);
+            if (/^actions\/runs\/\d+\/jobs\?/.test(path)) return jobPage;
+            const status = new URLSearchParams(path.split("?")[1]).get("status");
+            const subject = { id: 9, status: flipped ? to : from, ...base };
+            const list = subject.status === status ? [subject] : [];
+            if (status === flipAfter) flipped = true;
+            return { total_count: list.length, workflow_runs: list };
+          },
+        };
+      };
+      test("runs flipping status during the listing are observed by the second pass", async () => {
+        const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
+        const backwards = flipping("in_progress", "waiting", "waiting", OTHER, running);
+        expect(await readHeadroom(backwards, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 20,
+          scannedRuns: 1,
+          approvalOnlyRuns: 0,
+        });
+        expect(backwards.requests.length).toBe(10 + 1);
+        const mainRun = flipping(
+          "in_progress",
+          "waiting",
+          "waiting",
+          MAIN,
+          page(jobs(...Array(35).fill("in_progress"), "waiting")),
+        );
+        expect(await readHeadroom(mainRun, 52, 30)).toMatchObject({
+          allowed: false,
+          reservedMain: 35,
+        });
+        const approved = flipping(
+          "waiting",
+          "queued",
+          "waiting",
+          OTHER,
+          page(jobs(...Array(5).fill("queued"))),
+        );
+        expect(await readHeadroom(approved, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 5,
+          approvalOnlyRuns: 0,
+        });
+      });
+      test("responses arriving after the scan deadline hold", async () => {
+        let clock = 0;
+        nextId = 1;
+        const one = combine(busyOther(1));
+        const slowJob = await readHeadroom(
+          {
+            fresh: async (path: string) => {
+              if (path.includes("/jobs?")) clock += 120_001;
+              return one.fresh(path);
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowJob).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
+        clock = 0;
+        let lists = 0;
+        const slowEmpty = await readHeadroom(
+          {
+            fresh: async () => {
+              if (++lists === 10) clock += 120_001;
+              return { total_count: 0, workflow_runs: [] };
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowEmpty).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
       });
       test("mixed waiting runs, transitions and unknown statuses are not approval-only", async () => {
         for (const statuses of [["waiting", "queued"], ["waiting", "in_progress"], []]) {
