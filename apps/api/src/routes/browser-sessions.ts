@@ -6126,6 +6126,26 @@ export function parseBrowserScreenshotOptions(
 export function browserTabDiagnosisError(error: unknown): unknown {
   if (!(error instanceof BrowserControlRequestError)) return error;
   const code = error.error.code;
+  // A controller that says a resource is gone for good (for example, the
+  // person's Chrome profile reconnected and this session no longer controls
+  // it) answers 503 but not retryable. As a 503 it would reach the agent as
+  // "temporarily unavailable, retry", and every retry fails the same way, so
+  // keep the controller's guidance and present it as the conflict it is.
+  if (
+    code === "resource_unavailable" &&
+    error.status >= 500 &&
+    !error.retryable &&
+    !legacyInteractionCapacityFailure(error, "browser")
+  ) {
+    const failure = new ApiHttpError(409, {
+      code: "conflict",
+      message: error.error.message,
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
   if (code !== "tab_not_responding" && code !== "tab_crashed") return error;
   const failure = new ApiHttpError(409, {
     code,
