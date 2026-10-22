@@ -226,19 +226,84 @@ export function isRedMain(run: Run): boolean {
 }
 
 type Api = (path: string, method?: string, body?: unknown) => any;
-const gh: Api = (path, method, body) =>
-  JSON.parse(
-    execFileSync(
-      "gh",
-      ["api", path, ...(method ? ["--method", method] : []), ...(body ? ["--input", "-"] : [])],
-      {
-        encoding: "utf8",
-        ...(body ? { input: JSON.stringify(body) } : {}),
-      },
-    ),
-  );
 
-function paginated(api: Api, path: string, key?: string): any[] {
+/** One 100-row workflow-runs page is ~1.5 MB (each run embeds its commit and
+ * repository objects), beyond execFileSync's 1 MiB default. Pages stay
+ * per_page=100, so this per-call bound is generous; overflowing it still fails
+ * the report rather than truncating it. */
+export const GH_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const GH_STDERR_DIAGNOSTIC_CHARS = 2000;
+
+/** Provider failures name the call and keep gh's own message, but never carry
+ * the response body: error stdout can be megabytes of JSON. */
+export function ghFailure(
+  path: string,
+  method: string | undefined,
+  error: unknown,
+  maxBuffer = GH_MAX_BUFFER_BYTES,
+): Error {
+  const failed = (error ?? {}) as {
+    code?: unknown;
+    status?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+    stdout?: unknown;
+    message?: unknown;
+  };
+  const stdoutBytes =
+    typeof failed.stdout === "string"
+      ? Buffer.byteLength(failed.stdout)
+      : failed.stdout instanceof Uint8Array
+        ? failed.stdout.byteLength
+        : 0;
+  const facts = [
+    failed.code ? `code=${String(failed.code)}` : null,
+    typeof failed.status === "number" ? `exit=${failed.status}` : null,
+    failed.signal ? `signal=${String(failed.signal)}` : null,
+    `stdoutBytes=${stdoutBytes}`,
+  ].filter(Boolean);
+  const clip = (text: string) =>
+    text.length > GH_STDERR_DIAGNOSTIC_CHARS
+      ? `${text.slice(0, GH_STDERR_DIAGNOSTIC_CHARS)}… [${text.length - GH_STDERR_DIAGNOSTIC_CHARS} more chars]`
+      : text;
+  const stderr = clip(String(failed.stderr ?? "").trim());
+  const reason =
+    failed.code === "ENOBUFS"
+      ? `response exceeded the ${maxBuffer}-byte gh output bound; refusing a partial report`
+      : stderr
+        ? `gh stderr: ${stderr}`
+        : `no gh stderr: ${clip(String(failed.message ?? "unknown error"))}`;
+  return new Error(`gh api ${method ?? "GET"} ${path} failed (${facts.join(", ")}): ${reason}`);
+}
+
+export function ghApi(command = "gh", maxBuffer = GH_MAX_BUFFER_BYTES): Api {
+  return (path, method, body) => {
+    let stdout: string;
+    try {
+      stdout = execFileSync(
+        command,
+        ["api", path, ...(method ? ["--method", method] : []), ...(body ? ["--input", "-"] : [])],
+        {
+          encoding: "utf8",
+          maxBuffer,
+          ...(body ? { input: JSON.stringify(body) } : {}),
+        },
+      );
+    } catch (error) {
+      throw ghFailure(path, method, error, maxBuffer);
+    }
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      throw new Error(
+        `gh api ${method ?? "GET"} ${path} returned malformed JSON (${Buffer.byteLength(stdout)} bytes)`,
+      );
+    }
+  };
+}
+const gh = ghApi();
+
+export function paginated(api: Api, path: string, key?: string): any[] {
   const rows: any[] = [];
   for (let page = 1; page <= 20; page++) {
     const result = api(`${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${page}`);
