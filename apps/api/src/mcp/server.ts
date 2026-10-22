@@ -4326,13 +4326,15 @@ function registerFleetTools(
   // A refusal that only the owner's permission can resolve posts the Connected
   // Machine card right away, in the agent's own turn, so the person can allow
   // the machine without the agent having to find and call the card tool. Only
-  // exact agent attempts post it. A repeated machine refusal in the same turn
-  // reuses that turn's machine card (it lists every machine); the lookup and
+  // exact agent attempts post it. The card names the machine the agent asked
+  // for, so it can lead with allowing that machine. A repeated refusal for the
+  // same machine in the same turn reuses that turn's card; the lookup and
   // append run atomically under the attempt fence so parallel refusals cannot
   // stack copies. Cards for every other capability are never limited.
   const machinePermissionCard =
-    (toolName: string): MachinePermissionCardPost =>
+    (toolName: string, target: string): MachinePermissionCardPost =>
     async () => {
+      const requestedSandboxId = UUID_TARGET.test(target) ? target.toLowerCase() : null;
       if (!exactAgentAttemptClaims(grant)) return null;
       const claims = exactAgentCommandContext(grant, sessionId);
       const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
@@ -4348,12 +4350,16 @@ function registerFleetTools(
         item.id,
         {
           type: "tool.auth_needed",
-          payload: capabilityCardPayload(item, {
-            action: "connect",
-            rationale: "Allow this chat to use your computer.",
-            toolName,
-          }),
+          payload: {
+            ...capabilityCardPayload(item, {
+              action: "connect",
+              rationale: "Allow this chat to use your computer.",
+              toolName,
+            }),
+            ...(requestedSandboxId ? { requestedSandboxId } : {}),
+          },
         },
+        requestedSandboxId,
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
       if (!appended.accepted) {
@@ -4394,7 +4400,7 @@ function registerFleetTools(
       json(
         await withMachinePermissionCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_attach"),
+          machinePermissionCard("sandbox_attach", target),
         ),
       ),
   );
@@ -4410,7 +4416,7 @@ function registerFleetTools(
       json(
         await withMachinePermissionCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_swap"),
+          machinePermissionCard("sandbox_swap", target),
         ),
       ),
   );
@@ -4457,7 +4463,7 @@ function registerFleetTools(
             ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
             ...(secretResolver ? { secretResolver } : {}),
           }),
-          machinePermissionCard("run_on"),
+          machinePermissionCard("run_on", target),
         ),
       );
     },
@@ -7429,6 +7435,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
 
 const SESSION_DISCOVERY_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
 const SESSION_DISCOVERY_REVISION = /^(?:0|[1-9]\d*)$/;
+/** A machine target given by its sandboxes_list id (not "session"/"default"). */
+const UUID_TARGET = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const SESSION_DISCOVERY_REVISION_MAX = (1n << 65n) - 1n;
 const SESSION_DISCOVERY_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

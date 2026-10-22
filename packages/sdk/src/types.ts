@@ -2858,6 +2858,8 @@ export type ToolAuthNeededPayload = {
         rationale: string;
       }
     | undefined;
+  /** The Connected Machine the agent asked for; names the request, grants nothing. */
+  requestedSandboxId?: string | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is

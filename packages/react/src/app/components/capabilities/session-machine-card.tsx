@@ -7,6 +7,7 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   ArrowUpRightIcon,
   CheckIcon,
+  ChevronRightIcon,
   LaptopIcon,
   Loader2Icon,
   MonitorIcon,
@@ -119,6 +120,7 @@ export function SessionMachineCapabilityCard({
   const [useError, setUseError] = useState<{ name: string; reason: string | null } | null>(null);
   const [outcome, setOutcome] = useState<{ sandboxId: string; text: string } | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [othersOpen, setOthersOpen] = useState(false);
   const cardRef = useRef<HTMLElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const setupOpener = useRef<HTMLElement | null>(null);
@@ -143,6 +145,16 @@ export function SessionMachineCapabilityCard({
   );
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const reachable = machines.filter((machine) => isMachineComputeSelectable(machine.state));
+  // The machine the agent asked for, while this chat doesn't run on it yet.
+  const requested =
+    (item.requestedSandboxId
+      ? machines.find((machine) => machine.sandboxId === item.requestedSandboxId)
+      : undefined) ?? null;
+  const asking = requested !== null && !requested.active;
+  const requestedName = requested ? machineDisplayName(t, requested) : "";
+  // The person can allow it right here: lead with that, other machines fold away.
+  const allowHere =
+    asking && fleet.canAttach && isMachineComputeSelectable(requested.state) ? requested : null;
   const personalWorkspace =
     context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
@@ -170,12 +182,14 @@ export function SessionMachineCapabilityCard({
           : isMachineComputeSelectable(machine.state)
             ? 2
             : 3;
-    return [...machines].sort(
-      (left, right) =>
-        rank(left) - rank(right) ||
-        machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
-    );
-  }, [justConnected, machines]);
+    return [...machines]
+      .filter((machine) => machine.sandboxId !== allowHere?.sandboxId)
+      .sort(
+        (left, right) =>
+          rank(left) - rank(right) ||
+          machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
+      );
+  }, [allowHere?.sandboxId, justConnected, machines]);
 
   const use = useCallback(
     async (machine: MachineView) => {
@@ -234,19 +248,21 @@ export function SessionMachineCapabilityCard({
   // this chat" is primary and connecting another is a quiet secondary action.
   const actionUnavailable = unavailableOnDeployment
     ? "Connected Machines aren't available on this deployment."
-    : !fleet.canRead
-      ? "You don't have access to this workspace's machines."
-      : fresh && fleet.canAttach && !fresh.active
-        ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
-        : reachable.length > 0 && fleet.canAttach
-          ? "Choose where this chat runs."
-          : reachable.length > 0
-            ? "You can't change where this chat runs."
-            : fleet.canManage
-              ? null
-              : machines.length > 0
-                ? "Turn on one of the machines below to use it here."
-                : "Ask a workspace admin to connect a machine.";
+    : asking && !isMachineComputeSelectable(requested.state)
+      ? `Turn on ${requestedName} to allow it here.`
+      : !fleet.canRead
+        ? "You don't have access to this workspace's machines."
+        : fresh && fleet.canAttach && !fresh.active
+          ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
+          : reachable.length > 0 && fleet.canAttach
+            ? "Choose where this chat runs."
+            : reachable.length > 0
+              ? "You can't change where this chat runs."
+              : fleet.canManage
+                ? null
+                : machines.length > 0
+                  ? "Turn on one of the machines below to use it here."
+                  : "Ask a workspace admin to connect a machine.";
   // Inside the desktop app, the computer it runs on is one click away.
   const desktop = useDesktopThisComputer();
   const desktopReady =
@@ -261,15 +277,30 @@ export function SessionMachineCapabilityCard({
   const connectAnother = fleet.canManage && (reachable.length > 0 || activeMachine !== null);
   const visibleDetails =
     useError !== null || ordered.length > 0 || chromeMachine !== null || connectAnother;
+  // While the agent's request can be allowed here, everything else is one
+  // click away instead of competing with it.
+  const folded = allowHere !== null && !othersOpen;
+  const foldable =
+    allowHere !== null && (ordered.length > 0 || chromeMachine !== null || connectAnother);
 
   return (
     <>
       <SessionCapabilityFrame
-        name={recommendation.name || "Connected Machine"}
-        subtitle="Your computer or server"
+        name={asking ? requestedName : recommendation.name || "Connected Machine"}
+        subtitle={
+          asking
+            ? `${stateLabel(requested)} · ${machineScopeLabel(t, requested.scope)}`
+            : "Your computer or server"
+        }
         logo={CONNECTED_MACHINE_LOGO}
         typeLabel="Machine"
-        description={recommendation.rationale}
+        description={
+          allowHere
+            ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
+            : asking
+              ? `The agent asked to use ${requestedName}.`
+              : recommendation.rationale
+        }
         skill={false}
         expanded={false}
         complete={activeMachine !== null || desktopReady}
@@ -283,23 +314,30 @@ export function SessionMachineCapabilityCard({
               : undefined
         }
         actionLabel={
-          offerThisComputer
-            ? desktop.computer.acting
-              ? "Connecting…"
-              : "Use this computer"
-            : "Connect a computer"
+          allowHere
+            ? using === allowHere.sandboxId
+              ? "Allowing…"
+              : "Allow"
+            : offerThisComputer
+              ? desktop.computer.acting
+                ? "Connecting…"
+                : "Use this computer"
+              : "Connect a computer"
         }
-        busy={offerThisComputer && desktop.computer.acting}
-        actionUnavailable={offerThisComputer ? null : actionUnavailable}
+        busy={allowHere ? using !== null : offerThisComputer && desktop.computer.acting}
+        actionUnavailable={allowHere || offerThisComputer ? null : actionUnavailable}
         opensDialog={false}
         note={
-          offerThisComputer
-            ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
-            : fleet.canManage
-              ? "You can remove a connected machine anytime from Machines."
-              : ""
+          allowHere
+            ? ""
+            : offerThisComputer
+              ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
+              : fleet.canManage
+                ? "You can remove a connected machine anytime from Machines."
+                : ""
         }
         onOpen={() => {
+          if (allowHere) return void use(allowHere);
           if (!offerThisComputer) return openSetup();
           if (desktop.computer.acting) return;
           if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
@@ -343,7 +381,25 @@ export function SessionMachineCapabilityCard({
                       }`}
                     </Notice>
                   ) : null}
-                  {ordered.length > 0 ? (
+                  {foldable ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="-ml-2 text-fg-muted"
+                      aria-expanded={othersOpen}
+                      onClick={() => setOthersOpen((open) => !open)}
+                    >
+                      <ChevronRightIcon
+                        aria-hidden
+                        className={
+                          othersOpen ? "rotate-90 transition-transform" : "transition-transform"
+                        }
+                      />
+                      Use a different machine
+                    </Button>
+                  ) : null}
+                  {!folded && ordered.length > 0 ? (
                     <RowList label="Connected machines" flush>
                       {ordered.map((machine) => (
                         <MachineRow
@@ -358,7 +414,7 @@ export function SessionMachineCapabilityCard({
                       ))}
                     </RowList>
                   ) : null}
-                  {chromeMachine ? (
+                  {!folded && chromeMachine ? (
                     <ScreenControlStep
                       key={chromeMachine.sandboxId}
                       machine={chromeMachine}
@@ -368,13 +424,13 @@ export function SessionMachineCapabilityCard({
                       onReconnect={() => openSetup(chromeMachine)}
                     />
                   ) : null}
-                  {chromeMachine ? (
+                  {!folded && chromeMachine ? (
                     <ChromeStep
                       chrome={chrome}
                       machineName={machineDisplayName(t, chromeMachine)}
                     />
                   ) : null}
-                  {connectAnother ? (
+                  {!folded && connectAnother ? (
                     <Button
                       type="button"
                       variant="ghost"
@@ -415,6 +471,19 @@ export function SessionMachineCapabilityCard({
         />
       ) : null}
     </>
+  );
+}
+
+/**
+ * An earlier Connected Machine card whose request the agent made again further
+ * down. The newer card is the live one, so this stays a single quiet line.
+ */
+export function RepeatedMachineRequestNote() {
+  return (
+    <p className="flex items-center gap-2 text-xs text-fg-muted">
+      <LaptopIcon aria-hidden className="size-3.5 shrink-0" />
+      The agent asked to use a machine. It asked again below.
+    </p>
   );
 }
 

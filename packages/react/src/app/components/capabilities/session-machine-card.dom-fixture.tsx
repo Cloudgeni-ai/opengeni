@@ -206,7 +206,7 @@ type SendContext = {
   personalMachineIntent?: Record<string, unknown> | undefined;
   extras: Record<string, unknown>;
 };
-async function render(sendContext?: () => SendContext) {
+async function render(sendContext?: () => SendContext, item: AuthNeededItem = notice) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -215,7 +215,7 @@ async function render(sendContext?: () => SendContext) {
     await act(async () => {
       root.render(
         <SessionCapabilityCard
-          item={notice}
+          item={item}
           workspaceId="workspace"
           sessionId="session"
           sendContext={sendContext as never}
@@ -781,6 +781,75 @@ describe("Connected Machine conversation card", () => {
       expect(input.text).toBe("Use the machine “Studio Mac” for this chat.");
       expect(input.model).toBe("model-a");
       expect(input.personalResourceAttachment).toEqual(consent);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a refused machine leads with allowing the machine the agent asked for", async () => {
+    const consent = {
+      mode: "session",
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1,
+    };
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user" }),
+      machine("pc", "Build box", { scope: "workspace" }),
+    ];
+    const h = await render(
+      () => ({ blocked: null, awaitingHuman: false, personalMachineIntent: consent, extras: {} }),
+      { ...notice, requestedSandboxId: "mac" } as AuthNeededItem,
+    );
+    try {
+      expect(h.container.querySelector("h3")?.textContent).toBe("Studio Mac");
+      expect(h.text()).toContain("The agent asked to use this machine.");
+      // Other machines wait behind one quiet toggle.
+      expect(h.text()).not.toContain("Build box");
+      expect(h.button("Connect a computer")).toBeNull();
+      const toggle = h.button("Use a different machine");
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+      await click(toggle);
+      expect(h.text()).toContain("Build box");
+      expect(h.button("Use Studio Mac in this chat")).toBeNull();
+
+      await click(h.button("Allow"));
+      expect(attach).toHaveBeenCalledWith("mac");
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+      const input = sendMessage.mock.calls[0]![2] as Record<string, unknown>;
+      expect(input.text).toBe("Use the machine “Studio Mac” for this chat.");
+      expect(input.personalResourceAttachment).toEqual(consent);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a requested machine that is offline says to turn it on", async () => {
+    fleet.machines = [
+      sessionBox,
+      machine("mac", "Studio Mac", { scope: "user", state: "offline" }),
+    ];
+    const h = await render(undefined, { ...notice, requestedSandboxId: "mac" } as AuthNeededItem);
+    try {
+      expect(h.text()).toContain("The agent asked to use Studio Mac.");
+      expect(h.text()).toContain("Turn on Studio Mac to allow it here.");
+      expect(h.button("Allow")).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("an earlier card asked again below is one quiet line", async () => {
+    fleet.machines = [sessionBox, machine("mac", "Studio Mac", { scope: "user" })];
+    const h = await render(undefined, {
+      ...notice,
+      requestedSandboxId: "mac",
+      askedAgainLater: true,
+    } as AuthNeededItem);
+    try {
+      expect(h.text()).toBe("The agent asked to use a machine. It asked again below.");
+      expect(h.container.querySelector("button")).toBeNull();
     } finally {
       await h.close();
     }

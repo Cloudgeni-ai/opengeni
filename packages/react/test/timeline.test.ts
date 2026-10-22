@@ -3582,6 +3582,47 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("only the newest Connected Machine card for the same request stays a full card", () => {
+    reset();
+    const machineCard = (turnId: string, requestedSandboxId?: string) =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "sandbox_swap",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Allow this chat to use your computer.",
+            requiredVariables: [],
+          },
+          ...(requestedSandboxId ? { requestedSandboxId } : {}),
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      machineCard("turn-1", "11111111-1111-4111-8111-111111111111"),
+      machineCard("turn-2", "22222222-2222-4222-8222-222222222222"),
+      machineCard("turn-3", "11111111-1111-4111-8111-111111111111"),
+      machineCard("turn-4"),
+      machineCard("turn-5"),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.requestedSandboxId, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "11111111-1111-4111-8111-111111111111", true],
+      ["turn-2", "22222222-2222-4222-8222-222222222222", false],
+      ["turn-3", "11111111-1111-4111-8111-111111111111", false],
+      ["turn-4", null, true],
+      ["turn-5", null, false],
+    ]);
+  });
+
   test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {
     reset();
     const items = buildTimeline(englishText, [

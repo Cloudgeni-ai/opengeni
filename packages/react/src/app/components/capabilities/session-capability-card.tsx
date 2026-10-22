@@ -29,7 +29,7 @@ import { hasWorkspacePermission } from "../../lib/permissions";
 import type { CapabilityCatalogItem, ResourceRef } from "../../types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
-import { SessionMachineCapabilityCard } from "./session-machine-card";
+import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { usePage } from "../../lib/navigation";
 
 /** The built-in card for connecting a person's own computer to this chat. */
@@ -89,6 +89,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
     : props.item;
   const capability = item.capability;
   if (capability?.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    // The same request was made again further down, where its card is live.
+    if (item.askedAgainLater) return <RepeatedMachineRequestNote />;
     return (
       <SessionMachineCapabilityCard
         key={`${props.workspaceId}:${props.sessionId}`}
