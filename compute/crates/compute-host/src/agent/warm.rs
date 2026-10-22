@@ -11,7 +11,7 @@ use compute_engine::Engine;
 use tokio::time::Instant;
 
 use crate::layout::{Images, templates_dir};
-use crate::pool::{self, Build, Built, Held, Pool, Shape, Sources, Template, Uses};
+use crate::pool::{self, Build, Built, Hashes, Held, Pool, Shape, Sources, Template, Uses};
 use crate::protocol::{Id, ImageId};
 use crate::rootfs::Cache;
 use crate::store::Store;
@@ -58,7 +58,7 @@ impl Warm {
             networked: host.network.is_some(),
             memory: format!("{:?}", engine.memory_profile()),
             ready_port,
-            hashes: std::sync::Mutex::default(),
+            hashes: Hashes::load(&templates_dir(root)),
         });
         let held = pool::end_leftover_builds(engine, root, &sources, images.first_uid).await;
         let Some(config) = config else {
