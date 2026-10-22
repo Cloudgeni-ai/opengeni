@@ -811,11 +811,18 @@ Candidate-only CI shadow permission is not permission to control main or change
 rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
 does not activate anything; keep main control inactive until the release hold is
 cleared and the rollout owner gives a separate explicit go.
-Merge mode follows the rollout owner's **current verified ruleset receipt**, not
-whether a controller happens to be running. Before activation or after a complete
-verified OFF restoration, use the repository's normal squash merge after the same
-local-test and independent-review evidence. A partial transition or unknown mode
-is **hold**: do not merge. Once the exclusive-main rules are applied, the batcher
+Merge mode follows **readable current GitHub rules**, not an owner-local receipt
+or whether a controller happens to be running. Read
+`gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
+inventory/details (including inherited rules and bypass actors), as described in
+the [agent readback procedure](docs/merge-batcher-admin/README.md#agent-readable-merge-mode).
+Before activation or after a complete verified OFF restoration, the original
+squash-only PR admission plus non-FF/deletion protection, with no batcher writer
+restriction or partial guard transition, means normal reviewed squash after the
+same local-test and independent-review evidence. A private receipt is not a
+prerequisite for that read-only determination. A partial transition, inaccessible
+required readback or unknown mode is **hold**: do not merge. Once the complete
+exclusive-main rules are verified, the batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
 ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and
@@ -824,8 +831,10 @@ merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
 create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
 Stopping the controller alone does **not** restore the manual merge path. The
 authorized operator's one-command OFF must prove writer stop and restore the exact
-prior rules, then publish its verified manual-mode receipt. This section switches
-back to the normal reviewed squash path only on that receipt. Organization-admin
+prior rules, then publish its verified manual-mode receipt for the audit. Agents
+independently confirm restoration through the same readable GitHub rules; the
+owner's local receipt is not their only source. A ruleset name alone is never
+proof of mode, identity or bypass scope. Organization-admin
 policy changes are emergency/turn-off operations, never routine queue bypass;
 there is no standing admin writer bypass on active main. Do not rebase merely
 because main advanced: the batcher tests the

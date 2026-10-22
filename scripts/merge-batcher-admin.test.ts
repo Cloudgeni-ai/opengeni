@@ -182,7 +182,30 @@ describe("offline batcher administration contract", () => {
     expect(agents).toContain("manually rerun/cancel Batch CI");
     expect(agents).toContain("create/update/delete queue or batcher-state refs");
     expect(agents).toContain("Stopping the controller alone does **not** restore");
-    expect(agents).toContain("complete\nverified OFF restoration");
+    expect(agents).toContain("complete verified OFF restoration");
+    expect(agents).toContain("gh api repos/Cloudgeni-ai/opengeni/rules/branches/main");
+    expect(agents).toContain("A private receipt is not a");
+    expect(agents).toContain("A ruleset name alone is never");
+    expect(agents).not.toContain("current verified ruleset receipt");
+    const readback = await readFile(
+      new URL("../docs/merge-batcher-admin/README.md", import.meta.url),
+      "utf8",
+    );
+    const section = readback.split("### Agent-readable merge mode")[1]!.split("For a timeout")[0]!;
+    for (const required of [
+      "includes_parents=true&per_page=100",
+      "orgs/ORG/rulesets/ID",
+      "hasNextPage",
+      "**Manual:**",
+      "**Queue-only:**",
+      "**Hold:**",
+      "no bypass actors",
+      "update_allows_fetch_and_merge=false",
+      "owner-local",
+      "not an atomic fence",
+    ])
+      expect(section).toContain(required);
+    expect(section).not.toMatch(/gh api[^\n]*(?:--method|-X)\s+(?:POST|PUT|DELETE|PATCH)/);
   });
   test("restore preserves exact original writable fields, not API metadata", () => {
     const before = fixture();

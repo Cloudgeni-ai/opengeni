@@ -235,10 +235,56 @@ those refs exist. Absence of refs is not proof the patterns fail or succeed.
 
 Land the conditional AGENTS instructions before this transition. Full-inventory
 checks print `manual` for original/restored, `hold` for partial guard/namespace
-stages, and `queue-only` for applied. The rollout owner publishes that current
-receipt to agents as part of the same activation/OFF action. Instructions become
-queue-only when applied, and do not revert merely because the runtime stops.
-Until a fresh exact receipt is available, agents hold rather than guess a mode.
+stages, and `queue-only` for applied. The rollout owner retains the current
+receipt for audit. Ordinary agents use the readable procedure below, not access
+to the operator's private `ADMIN_DIR`. Instructions become queue-only when the
+complete active rules are observed, and do not revert merely because runtime stops.
+
+### Agent-readable merge mode
+
+These are read-only calls; no administrator token or local rollout receipt is
+required merely to decide the merge path. Use the agent's authorized repository
+read access. Fetch fresh effective main rules and the full inventory:
+
+```sh
+gh api repos/Cloudgeni-ai/opengeni/rules/branches/main
+gh api --paginate 'repos/Cloudgeni-ai/opengeni/rulesets?includes_parents=true&per_page=100'
+gh api repos/Cloudgeni-ai/opengeni
+```
+
+For every inventory entry, read its actual source-specific details: repository
+rules at `repos/OWNER/REPO/rulesets/ID`, organization rules at
+`orgs/ORG/rulesets/ID`. IDs/source come from the inventory, never guessed from a
+name. Follow pagination; an unsupported/inaccessible inherited source is unknown,
+not absent. Check classic branch protections using the read-only GraphQL query
+in `read.sh` (including `hasNextPage`); effective rules alone do not establish
+classic protection or reveal every bypass. Read rule types, active enforcement,
+main/ref conditions, parameters and full bypass actors—not names alone.
+
+- **Manual:** original/restored main protection is squash-only PR admission plus
+  non-fast-forward and deletion protection; repository squash merging is enabled,
+  all original PR requirements still apply, and there is no main creation/update
+  writer restriction or partially installed batcher guard/namespace. Before first
+  activation, this original policy is sufficient: do not demand an owner-local
+  OFF receipt that cannot yet exist. Respect all other required checks/protections
+  and use normal head-pinned squash, never an admin bypass.
+- **Queue-only:** the complete intended split is present: PR-only admission with
+  the dedicated App's Integration bypass; a separate non-FF/deletion guard with
+  **no bypass actors**; and main/live-queue/state creation/update restriction with
+  only the same App bypass (`update_allows_fetch_and_merge=false`). Check the
+  assigned App identity against the rollout's readable exact-head PR/evidence,
+  including owner and actor ID, not a matching name. Full conditions/ref scope,
+  enforcement and unchanged other protections must agree with the reviewed plan.
+- **Hold:** mixed/partial rules, missing/inaccessible required readbacks, unknown
+  sources, unexpected actors or configuration drift. Ask the rollout owner for
+  the missing evidence; do not infer manual from a failed read or queue-only from
+  the presence of a named ruleset. A stopped controller does not change this mode.
+
+The rollout owner still uses exact original snapshots and the full `verify`
+routine for mutations/OFF. This agent readback is observational and grants no
+ruleset, queue/state-ref, controller, rerun or cancellation authority. Recheck
+before a manual merge; a readback is not an atomic fence against a later policy
+transition, so normal GitHub enforcement remains authoritative.
 
 For a timeout or failed post-write readback, use these **read-only remote** stages:
 
