@@ -382,8 +382,11 @@ export default defineConfig({
               // The chat page sends the keyboard actions' events and focuses the
               // new-chat composer; both leaves are shared with the lazy command
               // menu, so keep them here instead of beside the action registry.
+              // The keyboard action provider also requests composer focus and
+              // reads the rail context, so those leaves (and the icons both
+              // sides draw) stay here rather than in the lazy action chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|actions[\\/]events)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|session-focus|conversation-find-event|session-ui-features|actions[\\/]events)\.tsx?|packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/]rail[\\/]rail-context\.tsx|packages[\\/]react[\\/]src[\\/]model-policy\.ts|packages[\\/]contracts[\\/]src[\\/]model-picker-order\.ts|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:archive-restore|arrow-down|arrow-up|building-2|calendar-clock|chevron-up|command|gauge|git-branch|git-fork|inbox|keyboard|link|mail-open|menu|message-square-text|panel-left|panel-right|pin|pin-off|plus|rotate-ccw|rotate-cw|save|server|text-search)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
