@@ -1273,9 +1273,13 @@ describe("readable timeline browser regression", () => {
           await nextPaint(page);
           expect(await header.textContent()).toContain("Working");
           expect(await page.locator("[data-og-wide-table-message]").count()).toBe(4);
+          // ShimmerText keeps a decorative copy of the row's label in its beam
+          // (shown only while running); match the label itself, so a real
+          // duplicate still fails strict mode.
           await page
             .locator("[data-og-exchange-preview]")
             .getByText("record-analysis-metadata", { exact: false })
+            .and(page.locator(":not(.og-shimmer-beam *)"))
             .waitFor({ state: "visible" });
           await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.total);
           await nextPaint(page);
