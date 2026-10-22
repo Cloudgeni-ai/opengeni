@@ -19,6 +19,10 @@ import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createWorkerServiceLifecycle } from "../../apps/worker/src/worker-service-lifecycle";
 import { createWorkerWorkflowSignaler } from "../../apps/worker/src/index";
+import {
+  resolveWorkerShutdownTiming,
+  temporalWorkerShutdownOptions,
+} from "../../apps/worker/src/worker-shutdown";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createTurnToolCancellationController } from "../../packages/runtime/src/sandbox/turn-tool-cancellation";
 import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
@@ -991,8 +995,16 @@ async function restartTestWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      shutdownGraceTime: "5s",
-      shutdownForceTime: "100s",
+      // A short configured natural-drain grace, as with
+      // OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS=5000: these restart tests must
+      // reach the WORKER_SHUTDOWN checkpoint and recovery path, which the
+      // 90-second production default reserves for turns outlasting the drain.
+      ...temporalWorkerShutdownOptions(
+        resolveWorkerShutdownTiming("turn", {
+          turnWorkerShutdownGraceMs: 5_000,
+          turnWorkerShutdownForceMs: 100_000,
+        }),
+      ),
       tuner: integrationTurnTuner(),
     }),
   ]);

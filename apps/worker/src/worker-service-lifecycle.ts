@@ -81,12 +81,30 @@ export function createWorkerServiceLifecycle(input: {
   observability: Observability;
   closeOwnedResources: () => Promise<void>;
   onReady?: () => void;
+  now?: () => number;
 }): WorkerServiceLifecycle {
+  const now = input.now ?? (() => performance.now());
   let state: WorkerLifecycleState = "starting";
   let runPromise: Promise<void> | undefined;
   let resourcesClosed: Promise<void> | undefined;
+  let drainStartedAt: number | undefined;
+  // Shutdown phase markers. Each says how long after the drain request the
+  // phase ended, so a slow rollout shows whether Temporal (natural drain,
+  // checkpoint, force stop) or resource teardown held the process.
+  const shutdownPhase = (message: string, outcome: string) =>
+    safeLifecycleLog(() =>
+      input.observability.info(message, {
+        surface: "worker_shutdown",
+        outcome,
+        ...(drainStartedAt === undefined
+          ? {}
+          : { durationMs: Math.max(0, Math.round(now() - drainStartedAt)) }),
+      }),
+    );
   const closeOwnedResources = () => {
-    resourcesClosed ??= input.closeOwnedResources();
+    resourcesClosed ??= input
+      .closeOwnedResources()
+      .finally(() => shutdownPhase("Opengeni worker resources closed", "closed"));
     return resourcesClosed;
   };
 
@@ -111,8 +129,17 @@ export function createWorkerServiceLifecycle(input: {
         try {
           await input.worker.run();
           state = "stopped";
+          shutdownPhase("Opengeni worker stopped polling; in-flight activities settled", "stopped");
         } catch (error) {
           state = "failed";
+          shutdownPhase(
+            "Opengeni worker stopped polling; in-flight activities settled",
+            // The SDK force time expired with activities still running. Their
+            // JavaScript may continue; the host must exit the process.
+            error instanceof Error && error.name === "GracefulShutdownPeriodExpiredError"
+              ? "force_stopped"
+              : "failed",
+          );
           throw error;
         } finally {
           await closeOwnedResources();
@@ -125,6 +152,7 @@ export function createWorkerServiceLifecycle(input: {
         return true;
       }
       const previousState = state;
+      drainStartedAt = now();
       safeLifecycleLog(() =>
         input.observability.info("Opengeni worker draining (graceful shutdown)", {
           role: input.role,
@@ -139,6 +167,7 @@ export function createWorkerServiceLifecycle(input: {
         return true;
       } catch {
         state = previousState;
+        drainStartedAt = undefined;
         safeLifecycleLog(() =>
           input.observability.warn("worker shutdown request failed", {
             errorClass: "WorkerLifecycleOperationError",

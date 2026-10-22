@@ -4283,9 +4283,12 @@ writers first. A live `opengeni_app` session rejects activation with SQLSTATE
 old writer is permitted only before activation; after activation no old writer
 may restart, because there is no mixed-version or down-migration path.
 
-**Worker restarts are survivable.** A graceful worker shutdown (a deploy or
-rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
-reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
+**Worker restarts are survivable.** A draining turn worker (a deploy or
+rollout restart delivers SIGTERM) stops polling at once and lets in-flight
+turns finish naturally for its shutdown grace (default 90 seconds,
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS`); those turns complete normally. For a
+turn that outlasts the grace, Temporal cancels the activity with reason
+`WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an

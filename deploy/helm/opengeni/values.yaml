@@ -366,11 +366,27 @@ worker:
   turns:
     replicaCount: 4
     priorityClassName: ""
+    # Surge a replacement before removing an old pod, so turn capacity never
+    # drops while old pods drain their in-flight turns.
     strategy:
       type: RollingUpdate
       rollingUpdate:
-        maxSurge: 0
-        maxUnavailable: 1
+        maxSurge: 1
+        maxUnavailable: 0
+    # Kubernetes grace for turn pods; null uses worker.terminationGracePeriodSeconds.
+    # A draining turn worker stops polling at once, lets in-flight turns finish
+    # naturally for shutdown.graceSeconds, then cancels the rest with
+    # WORKER_SHUTDOWN (recoverable checkpoint), force-stops at
+    # shutdown.forceSeconds and exits within 10s of that, before this grace.
+    terminationGracePeriodSeconds: null
+    shutdown:
+      # null derives both from the pod grace, keeping 15s between each phase:
+      # force = grace period - 15, natural drain = force - 15 (90s / 105s at
+      # the default 120s). Explicit values must keep the natural drain at least
+      # 10s before the force time and the force time more than 10s before the
+      # pod grace. A key in `config` owns that variable instead.
+      graceSeconds: null
+      forceSeconds: null
     resources:
       requests:
         cpu: 500m
@@ -419,10 +435,12 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  # Worker shutdown starts a recoverable checkpoint path, but does not prove
-  # writer quiescence. The SDK currently allows 5s natural completion before
-  # cancellation and forces shutdown at 100s, inside this 120s Kube grace.
-  # Forced termination may leave uncertain writers and delayed receipt-gated
+  # Worker shutdown stops polling at once. Turn workers then let in-flight
+  # turns finish naturally (default 90s, worker.turns.shutdown) before the
+  # recoverable WORKER_SHUTDOWN checkpoint and force-stop at 105s; control
+  # workers keep 5s natural completion and a 100s force time. Both exit before
+  # this 120s Kube grace. The checkpoint does not prove writer quiescence:
+  # forced termination may leave uncertain writers and delayed receipt-gated
   # recovery. See docs/worker-autoscaling.md before enabling downscale.
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:

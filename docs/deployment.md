@@ -777,14 +777,25 @@ seconds after admission, falling back to whole-host `MemAvailable` only when no
 finite cgroup exists. Process RSS pressure first receives a bounded asynchronous
 GC opportunity. If the authoritative scope remains at or above the distinct 90%
 emergency threshold for 30 seconds, it
-requests the ordinary graceful worker drain so
-in-flight turns checkpoint and recover on replacement capacity. Override the
+requests the ordinary graceful worker drain: the worker stops polling, lets
+in-flight turns finish naturally for its shutdown grace, and checkpoints the
+rest for recovery on replacement capacity. Override the
 emergency threshold, cadence, and sustained window with
 `OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE`,
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS` and
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS`; do not replace this protection
 with a turn-duration limit or a blind hard kill. Managed profiles may combine a
 hard per-process maximum with resource-based admission and HPA.
+
+A draining turn worker (rollout, scale-down, eviction or the memory guard)
+stops polling at once, lets in-flight turns finish naturally for
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` (default 90000), then cancels the rest
+with the recoverable `WORKER_SHUTDOWN` checkpoint; the Temporal SDK force-stops
+at `OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS` (default 105000) and the process
+exits at most 10 seconds later. Keep that exit inside the pod's termination
+grace. The Helm chart renders both from `worker.turns.shutdown` (derived from
+`worker.turns.terminationGracePeriodSeconds`, default 120, when unset); see
+[worker autoscaling](worker-autoscaling.md#deletion-and-shutdown-limitations).
 
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
@@ -2707,7 +2718,7 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
-The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
+The chart defaults API, web, control-worker and turn-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`), so capacity does not drop while old pods drain; turn pods may take up to their termination grace to finish in-flight turns. One-node smoke clusters without spare capacity can select zero-surge updates (`maxSurge: 0`, `maxUnavailable: 1`), as the local Kubernetes and preview examples do.
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 

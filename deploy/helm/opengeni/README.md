@@ -134,6 +134,17 @@ when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
 never scales a Deployment back to `replicaCount` and kills pods with in-flight
 turns. `replicaCount` applies only when autoscaling is off.
 
+Turn pods drain in-flight turns before they exit. The chart surges one
+replacement turn pod before removing an old one, and renders
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` / `_FORCE_MS` from
+`worker.turns.shutdown.graceSeconds` / `forceSeconds`. Unset, they derive from
+`worker.turns.terminationGracePeriodSeconds` (default
+`worker.terminationGracePeriodSeconds`, 120): 90 seconds of natural completion,
+then the recoverable `WORKER_SHUTDOWN` checkpoint and an SDK force stop at 105
+seconds, with process exit by 115. Rendering fails for explicit values that do
+not fit. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md#deletion-and-shutdown-limitations).
+
 `worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
 source contract, not a production acceptance flag. It adds Namespace demand,
 queue-only and busy-pod metrics to CPU, memory and agent-only inflight. The

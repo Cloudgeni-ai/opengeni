@@ -260,13 +260,46 @@ an idle worker. Deployment/ReplicaSet chooses deletion victims independently
 and may remove a busy worker even when other workers are idle. PDBs govern
 voluntary eviction, not HPA/Deployment scale-down deletion.
 
-The worker currently uses SDK `shutdownGraceTime: "5s"` (natural completion
-before cancellation) and `shutdownForceTime: "100s"`, inside the chart's
-120-second Kubernetes termination grace. The 120-second setting does not
-provide 120 seconds of natural activity completion. Force-stop or SIGKILL can
-leave uncertain physical writers and delay exact-receipt-gated recovery;
-recoverability is not the same as accepted disruption-free downscale. Keep
+Every deletion (rolling update, scale-down, eviction, memory-guard drain) runs
+the same turn-worker shutdown sequence:
+
+| Phase | Default | Setting |
+| --- | --- | --- |
+| Stop polling | At once | None; new and recovered turns go to other workers |
+| Natural completion of in-flight turns | 90 s | `OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` |
+| `WORKER_SHUTDOWN` cancellation and checkpoint of the rest, SDK force stop | 105 s | `OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS` |
+| Standalone process exit, at the latest | Force time + 10 s (115 s) | Derived |
+| Kubernetes termination grace | 120 s | `worker.turns.terminationGracePeriodSeconds` |
+
+The chart renders both settings from `worker.turns.shutdown` and, when unset,
+derives them from the turn pod grace with 15 seconds between phases. It
+refuses explicit values that would leave less than a 10-second checkpoint
+window or let the kubelet kill the process before its exit margin. The worker
+also keeps a 10-second checkpoint window itself, shortening an oversized grace.
+Control workers keep 5 seconds of natural completion and a 100-second force
+time. The turn rollout strategy surges one replacement before removing an old
+pod (`maxSurge: 1`, `maxUnavailable: 0`), so capacity does not drop while old
+pods drain.
+
+A turn that finishes within the natural window completes normally, without
+recovery. A turn that outlasts it takes the unchanged `WORKER_SHUTDOWN`
+checkpoint path, now with 15 seconds before the SDK force stop instead of 95,
+so the 10-second minimum and the derived 15-second default are a floor for the
+checkpoint, not natural-completion budget. Measured staging cancellations
+finished in about one second. A sandbox establish still running past the force
+time is left to the lease reaper, as after a crash. Force-stop or SIGKILL can
+still leave uncertain physical writers and delay exact-receipt-gated recovery;
+recoverability is not the same as accepted disruption-free downscale. A
+memory-guard drain also waits the natural window, so under sustained memory
+pressure a worker may hold its in-flight turns longer before restarting. Keep
 downscale disabled and production bounds intact until this is demonstrated.
+
+Once the drain and owned resource closes finish, the standalone worker exits
+explicitly. It no longer waits for the event loop to empty: a third-party
+handle left referenced after a turn (observed after turns that held a sandbox
+lease) kept old pods `Terminating` until the kubelet's SIGKILL. Each resource
+close is bounded, and an exit deadline at the force time plus 10 seconds
+backs up the whole sequence.
 
 ## Local source verification
 

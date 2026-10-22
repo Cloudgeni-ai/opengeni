@@ -164,8 +164,11 @@ export async function waitForTurnOperation<T>(
 
 /**
  * Upper bound for joining a cancelled attempt's in-flight provider establish.
- * Worker shutdown cancels activities 5s after SIGTERM and force-stops 100s
- * after it; this leaves room for the remaining finalization steps.
+ * Ordinary user or replacement cancellation has no worker deadline. During a
+ * turn-worker shutdown, turns cancelled with WORKER_SHUTDOWN after the natural
+ * drain (default 90s) have only the checkpoint window before the SDK force
+ * time (default 105s) and process exit (115s); an establish still running past
+ * that is left to the lease reaper, as after a crash.
  */
 export const PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS = 60_000;
 

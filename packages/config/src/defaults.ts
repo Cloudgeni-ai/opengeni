@@ -12,6 +12,16 @@ export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 1
 export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
 
 /**
+ * Turn-worker graceful shutdown. A draining turn worker lets in-flight turns
+ * finish naturally for the grace, then cancels the rest with WORKER_SHUTDOWN
+ * (recoverable checkpoint), and the Temporal SDK force-stops at the force time.
+ * With the standalone process exit ten seconds after the force time, these fit
+ * inside the 120-second Kubernetes termination grace used by the Helm chart.
+ */
+export const DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS = 90_000;
+export const DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS = 105_000;
+
+/**
  * Placeholder token inside an agent-instructions persona template. The runtime
  * substitutes the non-bypassable CORE (goal-loop ownership + the dynamic
  * workspace-environment block) at this marker. A template that omits the
