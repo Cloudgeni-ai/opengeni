@@ -646,9 +646,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(
           model.requests.filter((request) => {
             const serialized = JSON.stringify(request);
-            return (
-              serialized.includes(session.id) && !serialized.includes(goalContinuationMarker)
-            );
+            return serialized.includes(session.id) && !serialized.includes(goalContinuationMarker);
           }),
         ).toHaveLength(1);
         expect(
