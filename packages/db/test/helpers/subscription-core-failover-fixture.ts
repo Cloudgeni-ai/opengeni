@@ -259,33 +259,39 @@ export function failoverFixture(
     onlyThisModel = false,
     choice: "automatic" | "explicit" = "explicit",
   ) {
-    await withWorkspaceSubjectSessionActivityRls(
-      client.db,
-      work.identity.workspaceId,
-      org.subjectId,
-      async (scoped) => {
-        await scoped.execute(
-          sql`select set_config('opengeni.initiating_human_subject_id', ${org.subjectId}, true)`,
-        );
-        const current = await readSubscriptionSessionBinding(scoped, {
-          ...work.identity,
-          provider,
-          forUpdate: true,
-        });
-        const written = await writeSubscriptionSessionBinding(scoped, {
-          ...work.identity,
-          provider,
-          connectionId,
-          modelId,
-          onlyThisModel,
-          choice,
-          expectedVersion: current?.version ?? null,
-          lastModelCallAt: new Date(),
-          lastSwitchReason: null,
-        });
-        if (written === null) throw new Error("Pin conflict");
-      },
-    );
+    // Like the product's session choice, retry a lost compare-and-swap: with no
+    // binding yet there is no row to lock, so a racing placement can write the
+    // first binding between this read and write.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const written = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        work.identity.workspaceId,
+        org.subjectId,
+        async (scoped) => {
+          await scoped.execute(
+            sql`select set_config('opengeni.initiating_human_subject_id', ${org.subjectId}, true)`,
+          );
+          const current = await readSubscriptionSessionBinding(scoped, {
+            ...work.identity,
+            provider,
+            forUpdate: true,
+          });
+          return await writeSubscriptionSessionBinding(scoped, {
+            ...work.identity,
+            provider,
+            connectionId,
+            modelId,
+            onlyThisModel,
+            choice,
+            expectedVersion: current?.version ?? null,
+            lastModelCallAt: new Date(),
+            lastSwitchReason: null,
+          });
+        },
+      );
+      if (written !== null) return;
+    }
+    throw new Error("Pin conflict");
   }
   async function release(work: Awaited<ReturnType<typeof turn>>) {
     const [lease] = await admin<
