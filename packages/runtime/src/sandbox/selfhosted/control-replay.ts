@@ -139,90 +139,77 @@ export class ControlReplyRecovery {
       );
       return pool.tokens.shift();
     };
-    let reissued = false;
-    for (;;) {
-      let token = take();
-      while (!token) {
-        const invalid = await this.refill(
-          conn,
-          subject,
-          pool,
-          timeoutMs,
-          lifetimeMs,
-          readySubject,
-          connectionCurrent,
-        );
-        if (invalid) {
-          try {
-            const response = ControlResponse.decode(invalid.data);
-            response.requestId = ControlRequest.decode(payload).requestId;
-            return { data: ControlResponse.encode(response).finish() };
-          } catch {
-            return invalid;
-          }
-        }
-        if (pool.legacy) {
-          // Negotiation and the request share one deadline.
-          return await attempt(
-            conn,
-            subject,
-            payload,
-            Math.max(1, Math.min(timeoutMs, deadline - performance.now())),
-            connectionCurrent,
-          );
-        }
-        token = take();
-        if (performance.now() >= deadline)
-          throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
-      }
-      // A warm call does not await replenishment. Concurrent callers share one
-      // refill; only a cold/expired/exhausted pool needs a negotiation round trip.
-      if (pool.tokens.length <= 16) {
-        void this.refill(
-          conn,
-          subject,
-          pool,
-          timeoutMs,
-          lifetimeMs,
-          readySubject,
-          connectionCurrent,
-        ).catch(() => {});
-      }
-      const ageMs = Math.max(0, Math.floor(performance.now() - token.receivedAt));
-      const delivery = `${subject}.replay.${token.id}.${ageMs}.${lifetimeMs}`;
-      const outcome = { uncertain: true };
-      const reply = await this.retry(
+    let token = take();
+    while (!token) {
+      const invalid = await this.refill(
         conn,
         subject,
-        delivery,
-        payload,
+        pool,
         timeoutMs,
-        deadline,
+        lifetimeMs,
         readySubject,
         connectionCurrent,
-        outcome,
       );
-      let expired = false;
-      try {
-        expired =
-          ControlResponse.decode(reply.data).error?.detail.failure_code ===
-          "control_delivery_expired";
-      } catch {
-        /* The normal response decoder owns malformed reply handling. */
+      if (invalid) {
+        try {
+          const response = ControlResponse.decode(invalid.data);
+          response.requestId = ControlRequest.decode(payload).requestId;
+          return { data: ControlResponse.encode(response).finish() };
+        } catch {
+          return invalid;
+        }
       }
-      if (!expired) return reply;
-      // The process no longer knows this token: it lapsed (a suspended caller
-      // may not observe elapsed sleep in performance.now()), or a successor
-      // process (an agent self-update) took over the subject and never issued
-      // it. Discard every prefetched token either way.
-      pool.tokens = [];
-      // The agent refuses an unknown or lapsed lease before executing anything.
-      // When this transmission was the token's only one, nothing ran, so the
-      // call is sent once more with a token from the current process. After an
-      // uncertain earlier transmission the refusal proves nothing; return it.
-      if (reissued || outcome.uncertain || performance.now() >= deadline) return reply;
-      reissued = true;
+      if (pool.legacy) {
+        // Negotiation and the request share one deadline.
+        return await attempt(
+          conn,
+          subject,
+          payload,
+          Math.max(1, Math.min(timeoutMs, deadline - performance.now())),
+          connectionCurrent,
+        );
+      }
+      token = take();
+      if (performance.now() >= deadline)
+        throw Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
     }
+    // A warm call does not await replenishment. Concurrent callers share one
+    // refill; only a cold/expired/exhausted pool needs a negotiation round trip.
+    if (pool.tokens.length <= 16) {
+      void this.refill(
+        conn,
+        subject,
+        pool,
+        timeoutMs,
+        lifetimeMs,
+        readySubject,
+        connectionCurrent,
+      ).catch(() => {});
+    }
+    const ageMs = Math.max(0, Math.floor(performance.now() - token.receivedAt));
+    const delivery = `${subject}.replay.${token.id}.${ageMs}.${lifetimeMs}`;
+    const reply = await this.retry(
+      conn,
+      subject,
+      delivery,
+      payload,
+      timeoutMs,
+      deadline,
+      readySubject,
+      connectionCurrent,
+    );
+    // A suspended caller may not observe elapsed sleep in performance.now().
+    // Never reissue this call, but discard stale prefetched tokens for the next.
+    try {
+      if (
+        ControlResponse.decode(reply.data).error?.detail.failure_code === "control_delivery_expired"
+      ) {
+        pool.tokens = [];
+      }
+    } catch {
+      /* The normal response decoder owns malformed reply handling. */
+    }
+    return reply;
   }
 
   private refill(
@@ -332,8 +319,6 @@ export class ControlReplyRecovery {
     deadline: number,
     readySubject: string | undefined,
     connectionCurrent?: () => Promise<boolean>,
-    /** Set to whether an earlier transmission of this delivery may have run. */
-    outcome?: { uncertain: boolean },
   ): ReturnType<NatsRequestConnection["request"]> {
     let uncertain: unknown;
     for (;;) {
@@ -342,7 +327,7 @@ export class ControlReplyRecovery {
         throw uncertain ?? Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
       }
       try {
-        const reply = await attempt(
+        return await attempt(
           conn,
           subject,
           payload,
@@ -350,8 +335,6 @@ export class ControlReplyRecovery {
           connectionCurrent,
           readySubject,
         );
-        if (outcome) outcome.uncertain = uncertain !== undefined;
-        return reply;
       } catch (error) {
         // Replaced while this attempt waited: it may have reached the old agent.
         if (error instanceof ControlConnectionReplacedError) throw error;
