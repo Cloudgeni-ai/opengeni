@@ -16,6 +16,7 @@ import {
   type ComputerBackendCaptureOptions,
   type ComputerBackendActionCommand,
   type ComputerBackendClipboard,
+  type ComputerBackendErrorCode,
 } from "../computer-backend";
 import {
   callDesktop,
@@ -27,7 +28,7 @@ import {
   type CuaDesktopRuntime,
   type ListedWindow,
 } from "./wire";
-import { locate, projectElements, unindexedTextByElement } from "./projection";
+import { locate, opensOnInvoke, projectElements, unindexedTextByElement } from "./projection";
 import type { MacWindowPresence, MacWindows } from "./macos-windows";
 
 type Target = {
@@ -80,6 +81,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * accepts only the tokens of a window's latest snapshot; a ref outlives
    * readings for as long as its element stays (see stabilizeRefs). */
   private readonly tokens = new Map<string, Map<string, string>>();
+  /** Per window, the CUA tokens of its latest reading whose invoke opens the
+   * element (AXOpen) instead of pressing it. */
+  private readonly openingTokens = new Map<string, Set<string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -305,7 +309,24 @@ export class CuaComputerBackend implements ComputerBackend {
               false,
             );
           if (error instanceof CuaFailure && !error.dispatched)
-            throw this.keyboardRefusal(command, error, observed) ?? error;
+            throw (
+              (command.action.type === "keyboard"
+                ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
+                : null) ?? error
+            );
+          // macOS answers AXOpen with "cannot complete" (-25205) even when a
+          // file dialog went into the folder or chose the file. The window
+          // read afterwards says whether it did.
+          if (operation.args.action === "open" && cannotComplete(error)) {
+            const after = await this.observeAfter(command.targetId, acted, known, report);
+            if (after && !sameReading(after, observed)) return after;
+            throw new ComputerBackendError(
+              "outcome_unknown",
+              "macOS did not confirm opening the element, and the window reads the same as before; observe it before trying again",
+              false,
+              true,
+            );
+          }
           throw error;
         }
       }
@@ -372,6 +393,7 @@ export class CuaComputerBackend implements ComputerBackend {
     command: ComputerBackendActionCommand,
   ): Promise<ComputerBackendObservation | null> {
     const steps = await this.batchSteps(command);
+    const observed = this.observations.get(command.targetId);
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
     const known = new Set(this.targetsById.keys());
@@ -390,7 +412,20 @@ export class CuaComputerBackend implements ComputerBackend {
         known,
         openedWindowsReport(outcome.windowChanges),
       );
-    const message = `CUA stopped the batch at action ${outcome.completed + 1}: ${outcome.message}`;
+    const stoppedAction =
+      command.action.type === "batch" ? command.action.actions[outcome.completed] : undefined;
+    const refusal =
+      outcome.definite && stoppedAction?.type === "keyboard"
+        ? this.keyboardRefusal(
+            command.targetId,
+            outcome.cuaCode,
+            outcome.code ?? "invalid_action",
+            observed,
+          )
+        : null;
+    const message = `CUA stopped the batch at action ${outcome.completed + 1}: ${
+      refusal?.message ?? outcome.message
+    }`;
     if (outcome.completed === 0 && outcome.definite)
       throw new ComputerBackendError(outcome.code ?? "driver_failed", message, false, false);
     const stopped = new ComputerBackendError(
@@ -720,22 +755,17 @@ export class CuaComputerBackend implements ComputerBackend {
   /** CUA's refusals of background input name CUA's own options (a foreground
    * delivery mode the caller does not have). Say what the caller can do. */
   private keyboardRefusal(
-    command: ComputerBackendActionCommand,
-    error: CuaFailure,
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
     observed: ComputerBackendObservation | undefined,
   ): ComputerBackendError | null {
-    const target = this.targetsById.get(command.targetId);
-    if (
-      !target ||
-      this.identity.platform !== "macos" ||
-      error.cuaCode !== "window_not_key" ||
-      command.action.type !== "keyboard"
-    )
-      return null;
+    const target = this.targetsById.get(targetId);
+    if (!target || this.identity.platform !== "macos" || cuaCode !== "window_not_key") return null;
     if (observed?.roots.some((node) => node.role === "AXSheet"))
       return new ComputerBackendError(
-        error.code,
-        "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: set_value on a text field's ref, invoke on a button's ref",
+        code,
+        "Keys cannot reach the sheet open in this window while its app is in the background, so none were sent. Use the sheet's controls from this window's observation instead: in a file dialog invoke a sidebar place or a folder to go into it and invoke a file to choose it; set_value on a text field, invoke on a button",
         false,
         false,
       );
@@ -743,7 +773,7 @@ export class CuaComputerBackend implements ComputerBackend {
       .filter((other) => other !== target && other.pid === target.pid)
       .map((other) => other.native.id);
     return new ComputerBackendError(
-      error.code,
+      code,
       `Keys reach only the focused window of a background app, and another of its windows has focus${
         others.length ? ` (one of ${others.slice(0, 5).join(", ")})` : ""
       }, so none were sent: act on that window, or close it first`,
@@ -821,6 +851,19 @@ export class CuaComputerBackend implements ComputerBackend {
         unindexedTextByElement(state.tree_markdown, this.identity.platform),
       ),
     );
+    this.openingTokens.delete(targetId);
+    this.openingTokens.set(
+      targetId,
+      new Set(
+        this.identity.platform === "macos"
+          ? state.elements
+              .filter((element) => element.element_token && opensOnInvoke(element))
+              .map((element) => element.element_token!)
+          : [],
+      ),
+    );
+    while (this.openingTokens.size > 32)
+      this.openingTokens.delete(this.openingTokens.keys().next().value!);
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
@@ -1217,15 +1260,21 @@ export class CuaComputerBackend implements ComputerBackend {
           },
         ];
       }
+      const token = this.elementToken(command.targetId, node.ref);
       return [
         {
           name: "click",
           args: {
             ...args,
-            element_token: this.elementToken(command.targetId, node.ref),
+            element_token: token,
             // Both the pinned SDK and the current typed click contract use
             // right for a semantic context menu; invoke uses the default left.
             button: action.action === "show_menu" ? "right" : "left",
+            // A folder or file of a file dialog opens instead of pressing:
+            // into the folder, or choosing the file.
+            ...(action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token)
+              ? { action: "open" }
+              : {}),
             delivery_mode: "background",
           },
         },
@@ -1513,6 +1562,24 @@ const LAUNCH_WINDOW_SLOW_POLL_MS = 500;
  * open, as `App ("Title", …); Other` (an untitled window by its app only).
  * A window the previous action opened late is reported separately and is
  * not this action's. */
+/** macOS's "cannot complete" (kAXErrorCannotComplete, -25205): an AX action
+ * whose effect macOS did not confirm, which may still have happened. */
+function cannotComplete(error: unknown): boolean {
+  return error instanceof ComputerBackendError && /-25205|cannot complete/i.test(error.message);
+}
+
+/** Whether a reading after an action shows the same window, elements and
+ * values as the one before it. */
+function sameReading(
+  after: ComputerBackendObservation,
+  before: ComputerBackendObservation | undefined,
+): boolean {
+  if (!before || after.target.id !== before.target.id) return false;
+  const shape = (nodes: readonly InteractionSemanticNodeValue[]): string =>
+    JSON.stringify(nodes, (key, value) => (key === "ref" ? undefined : value));
+  return shape(after.roots) === shape(before.roots);
+}
+
 function openedWindowsReport(text: string): string {
   const match = /(?:^|\n)🪟 Action opened new window\(s\): (.*)\.$/mu.exec(text);
   return match ? `${match[1]}; ` : "";
