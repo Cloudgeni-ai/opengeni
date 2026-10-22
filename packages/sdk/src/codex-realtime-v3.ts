@@ -35,6 +35,13 @@ export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
 export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
 const REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES = 65_536;
 const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
+/**
+ * Tells the session agent who wrote each part of a voice delegation. The voice
+ * model relays the request; the transcript holds what was actually said, so
+ * the person's words win over anything the relay added.
+ */
+const REALTIME_DELEGATION_NOTE =
+  "Relayed by the voice assistant, which has no tools or workspace instructions. input is its relay of the request. transcript_delta, when present, is the voice conversation since the previous relay (user is the person, assistant is the voice assistant). The person's own words take precedence; details that appear only in input are the voice assistant's guesses, not the person's requirements.";
 const REALTIME_MODEL_CONTEXT_MAX_CHARACTERS = 32_768;
 
 export type CodexRealtimeV3BridgeFatal = {
@@ -634,6 +641,7 @@ function renderRealtimeDelegationInput(
   const transcriptDelta = transcript.map((entry) => `${entry.role}: ${entry.text}`).join("\n");
   return [
     "<realtime_delegation>",
+    `  <note>${REALTIME_DELEGATION_NOTE}</note>`,
     `  <input>${escapeXmlText(input)}</input>`,
     ...(transcriptDelta
       ? [`  <transcript_delta>${escapeXmlText(transcriptDelta)}</transcript_delta>`]

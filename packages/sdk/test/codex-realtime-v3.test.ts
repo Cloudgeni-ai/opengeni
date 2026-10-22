@@ -577,6 +577,13 @@ describe("Codex realtime V3 bridge", () => {
       },
     });
     expect(call.text).toContain("<input>Do it &lt;safely&gt;</input>");
+    expect(call.text).toContain(
+      "<note>Relayed by the voice assistant, which has no tools or workspace instructions.",
+    );
+    expect(call.text).toContain(
+      "The person's own words take precedence; details that appear only in input are the voice assistant's guesses",
+    );
+    expect(call.text?.indexOf("<note>")).toBeLessThan(call.text?.indexOf("<input>") ?? -1);
     expect(call.text).toContain("user: Please inspect &lt;this&gt; &amp; report");
     expect(call.text).toContain("assistant: I can inspect it.");
     expect(call.text).not.toContain("user: Do it &lt;safely&gt;");
@@ -609,10 +616,8 @@ describe("Codex realtime V3 bridge", () => {
     );
 
     const call = requests.flatMap((request) => request.entries ?? []).at(-1)!;
-    expect(call.text).toBe(
-      ["<realtime_delegation>", "  <input>Run   the checks</input>", "</realtime_delegation>"].join(
-        "\n",
-      ),
+    expect(call.text).toMatch(
+      /^<realtime_delegation>\n {2}<note>Relayed by the voice assistant[^<]*<\/note>\n {2}<input>Run {3}the checks<\/input>\n<\/realtime_delegation>$/,
     );
     expect(call.payload).toMatchObject({ transcriptFenceTurnIds: ["turn-1"] });
     bridge.close();
