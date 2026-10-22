@@ -43,7 +43,7 @@ afterAll(async () => {
 
 type Pool = "workspace" | "organization";
 
-test("folds pool rows and the source preference into one owner and reach per connection", async () => {
+test("SUB-OWN-01 folds pool rows and the source preference into one owner and reach per connection", async () => {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('org') returning id`;
   const accountId = account!.id;

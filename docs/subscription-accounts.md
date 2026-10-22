@@ -99,7 +99,8 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   serves wherever it reaches and nowhere else; there is no second, hidden
   per-workspace copy of it and no per-workspace preference between the
   workspace's own connections and the organization's. Verification:
-  `packages/db/test/subscription-core-one-owner-postgres.test.ts`.
+  `packages/db/test/migration-0907-subscription-connection-one-owner.test.ts`,
+  `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`.
 - **SUB-OWN-02** A connection's scope is one of: the whole organization,
   a set of chosen workspaces (with a separate switch for Personal workspaces),
   or a set of chosen people. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
@@ -111,7 +112,8 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   and is managed by that workspace's administrators. Organization
   administrators see it, labelled as that workspace's, and can make it the
   organization's; only an organization connection reaches other workspaces
-  or chosen people. Verification: `packages/db/test/subscription-core-one-owner-postgres.test.ts`.
+  or chosen people. Verification: `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`,
+  `packages/db/test/subscription-core-codex-writers-postgres.test.ts`.
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe

@@ -2925,7 +2925,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("organization access and reach are edited for exactly this provider's connections of its kind", async () => {
+    test("SUB-SET-07 organization access and reach are edited for exactly this provider's connections of its kind", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `access-${crypto.randomUUID()}`);
       const route = (connectionId: string) => ({

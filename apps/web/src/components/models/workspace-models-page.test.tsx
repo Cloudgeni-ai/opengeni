@@ -2367,7 +2367,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("each account has one owner: a workspace's own opens on that workspace's page", async () => {
+  test("SUB-SET-07 each account has one owner: a workspace's own opens on that workspace's page", async () => {
     organizationAdmin = true;
     organizationList = true;
     client.requestJson.mockImplementation(async (method: string, path: string) => {

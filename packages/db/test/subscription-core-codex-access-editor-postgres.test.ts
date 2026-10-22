@@ -326,7 +326,7 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
   });
 
-  test("widening a workspace's own account makes it the organization's; its own reach keeps it the workspace's", async () => {
+  test("SUB-OWN-04 widening a workspace's own account makes it the organization's; its own reach keeps it the workspace's", async () => {
     const org = await organization();
     const id = await connection(org, "own", { managedByWorkspaceId: org.sharedWorkspaceId });
     const manager = await member(org, "member", "admin");
@@ -432,7 +432,7 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(refused).toMatch(/only organization administrators/);
   });
 
-  test("one switch per account: off stops it everywhere it reaches, on resumes it", async () => {
+  test("SUB-OWN-01 one switch per account: off stops it everywhere it reaches, on resumes it", async () => {
     const org = await organization();
     const id = await connection(org, "org-switch");
     const target = organizationTarget(org, id);
@@ -471,7 +471,7 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(policies?.count).toBe(0);
   });
 
-  test("a workspace's own account is switched on its workspace's route, not another's", async () => {
+  test("SUB-OWN-04 a workspace's own account is switched on its workspace's route, not another's", async () => {
     const org = await organization();
     const id = await connection(org, "own-switch", { managedByWorkspaceId: org.sharedWorkspaceId });
     const manager = await member(org, "member", "admin");
@@ -652,7 +652,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
   });
 
-  test("a workspace's own account reads as its reach and serves only that workspace", async () => {
+  test("SUB-SET-07 a workspace's own account reads as its reach and serves only that workspace", async () => {
     const org = await organization();
     const id = await connection(org, "former", { managedByWorkspaceId: org.sharedWorkspaceId });
     const access = await readSubscriptionCoreCodexModelConnectionAccess(
