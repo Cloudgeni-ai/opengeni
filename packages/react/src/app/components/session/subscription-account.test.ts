@@ -225,6 +225,19 @@ describe("one menu for every subscription provider", () => {
 });
 
 describe("usage readings", () => {
+  test("a limit whose end has passed no longer reads as reached", () => {
+    const ended = snapshot([], {
+      exhaustedUntil: "2026-10-22T10:00:00Z",
+      exhaustedKind: "quota",
+    });
+    expect(subscriptionAccountUsage(ended, Date.parse("2026-10-22T11:00:00Z")).message).toBe(
+      "No usage reading yet",
+    );
+    expect(subscriptionAccountUsage(ended, Date.parse("2026-10-22T09:00:00Z")).message).toStartWith(
+      "Limit reached until ",
+    );
+  });
+
   test("missing readings and empty snapshots say there is no reading yet", () => {
     expect(subscriptionAccountUsage(undefined).message).toBe("No usage reading yet");
     expect(subscriptionAccountUsage(null).message).toBe("No usage reading yet");
@@ -262,6 +275,7 @@ describe("usage readings", () => {
   test("an account-wide limit without windows names when it ends", () => {
     const view = subscriptionAccountUsage(
       snapshot([], { exhaustedKind: "rate_limit", exhaustedUntil: "2020-01-01T09:00:00Z" }),
+      Date.parse("2020-01-01T08:00:00Z"),
     );
     expect(view.message).toStartWith("Limit reached until ");
     expect(view.windows).toEqual([]);

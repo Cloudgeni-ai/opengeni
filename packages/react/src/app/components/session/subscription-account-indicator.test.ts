@@ -205,11 +205,20 @@ describe("Codex usage", () => {
     const usage = codexUsage(
       { ...base, fiveHour: null, weekly: null, exhaustedUntil: RESET_5H } as CodexAccount,
       undefined,
+      Date.parse(RESET_5H) - 1,
     );
     expect(usage).toMatchObject({ windows: [], exhaustedUntil: RESET_5H, exhaustedKind: "quota" });
     expect(codexUsage({ ...base, fiveHour: null, weekly: null } as CodexAccount, undefined)).toBe(
       null,
     );
+    // An ended cooldown is not a limit.
+    expect(
+      codexUsage(
+        { ...base, fiveHour: null, weekly: null, exhaustedUntil: RESET_5H } as CodexAccount,
+        undefined,
+        Date.parse(RESET_5H) + 1,
+      ),
+    ).toBe(null);
   });
 
   test("an account with no label, email or plan is named by its ChatGPT id", () => {

@@ -188,11 +188,15 @@ export function subscriptionAccountUsage(
     };
   });
   const exhaustedTime = time(usage.exhaustedUntil);
+  // A limit whose end has passed no longer applies.
+  const exhausted =
+    usage.exhaustedKind !== null &&
+    !(usage.exhaustedUntil && Date.parse(usage.exhaustedUntil) <= now);
   return {
     windows,
     ...(windows.length === 0
       ? {
-          message: usage.exhaustedKind
+          message: exhausted
             ? `Limit reached${exhaustedTime ? ` until ${exhaustedTime}` : ""}`
             : "No usage reading yet",
         }

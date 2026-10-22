@@ -176,7 +176,13 @@ function SharedAccountSource(props: IndicatorProps) {
     <SubscriptionAccountControl
       state={state}
       onChoose={(id) => {
-        if (id === null ? state.automatic : !state.automatic && state.chosenId === id) return;
+        // After a failed read the selection is unknown, so Automatic is sent.
+        if (
+          !state.unavailable &&
+          (id === null ? state.automatic : !state.automatic && state.chosenId === id)
+        ) {
+          return;
+        }
         void account.choose(id);
       }}
     />
@@ -193,6 +199,7 @@ const LIVE_USAGE_REUSE_MS = 30_000;
 export function codexUsage(
   account: CodexAccount,
   live: CodexUsageMap[string] | undefined,
+  now = Date.now(),
 ): SubscriptionAccountUsage | null {
   const window = (
     id: string,
@@ -225,7 +232,11 @@ export function codexUsage(
     ...window("five_hour", account.fiveHour),
     ...window("seven_day", account.weekly),
   ];
-  const exhaustedUntil = account.exhaustedUntil ?? null;
+  // The endpoint reports a cooldown even after it ended; only a future one applies.
+  const exhaustedUntil =
+    account.exhaustedUntil && Date.parse(account.exhaustedUntil) > now
+      ? account.exhaustedUntil
+      : null;
   if (windows.length === 0 && !exhaustedUntil) return null;
   return {
     observedAt: live?.usage?.fetchedAt ?? account.usageCheckedAt ?? null,
@@ -324,7 +335,8 @@ function CodexAccountSource(props: IndicatorProps) {
       state={state}
       onChoose={(id) => {
         // Choosing again while a turn waits retries it on that account.
-        if (codex.pinnedAccountId === id && !waiting) return;
+        // After a failed read the selection is unknown, so the choice is sent.
+        if (codex.pinnedAccountId === id && !waiting && !state.unavailable) return;
         void codex.pin(id ?? AUTO);
       }}
       onOpenChange={(open) => {
