@@ -209,15 +209,25 @@ spec:
     {{- end }}
 {{- end }}
 {{- $webAssets := .Values.ingress.webAssetsIngress | default dict }}
-{{- $webAssetRules := list }}
+{{- /* ingress-nginx merges every entry for one host, so judge each host as a whole. */}}
+{{- $webAssetHosts := list }}
+{{- $webAssetHostPaths := dict }}
 {{- range .Values.ingress.hosts }}
-  {{- $host := . }}
+  {{- $hostName := toString .host }}
+  {{- if not (hasKey $webAssetHostPaths $hostName) }}
+    {{- $webAssetHosts = append $webAssetHosts $hostName }}
+    {{- $_ := set $webAssetHostPaths $hostName list }}
+  {{- end }}
+  {{- $_ := set $webAssetHostPaths $hostName (concat (get $webAssetHostPaths $hostName) (.paths | default list)) }}
+{{- end }}
+{{- $webAssetRules := list }}
+{{- range $hostName := $webAssetHosts }}
   {{- $assetPaths := list }}
   {{- range $assetPath := list "/assets" "/office/assets" "/react-demo/assets" }}
     {{- /* The longest prefix route that matches this asset path today. */}}
     {{- $winner := dict }}
     {{- $winnerLength := -1 }}
-    {{- range $host.paths }}
+    {{- range (get $webAssetHostPaths $hostName) }}
       {{- $prefix := trimSuffix "/" (toString .path) }}
       {{- if and (has (toString .pathType) (list "Prefix" "ImplementationSpecific")) (hasPrefix (printf "%s/" $prefix) (printf "%s/" $assetPath)) (gt (len $prefix) $winnerLength) }}
         {{- $winner = . }}
@@ -230,13 +240,18 @@ spec:
     {{- end }}
   {{- end }}
   {{- if $assetPaths }}
-    {{- $webAssetRules = append $webAssetRules (dict "host" $host.host "paths" $assetPaths) }}
+    {{- $webAssetRules = append $webAssetRules (dict "host" $hostName "paths" $assetPaths) }}
   {{- end }}
 {{- end }}
-{{- if and .Values.ingress.enabled .Values.web.enabled $webAssets.enabled (or (not $webAssets.requireNginxClassName) (contains "nginx" (toString .Values.ingress.className))) (gt (len $webAssetRules) 0) }}
+{{- $primaryIngressAnnotations := .Values.ingress.annotations | default dict }}
+{{- /* The class may also come from the legacy kubernetes.io/ingress.class annotation, which is copied below. */}}
+{{- $webAssetsClass := .Values.ingress.className | default (get $primaryIngressAnnotations "kubernetes.io/ingress.class") | toString }}
+{{- if and .Values.ingress.enabled .Values.web.enabled $webAssets.enabled (or (not $webAssets.requireNginxClassName) (contains "nginx" $webAssetsClass)) (gt (len $webAssetRules) 0) }}
 {{- $webAssetAnnotations := dict }}
-{{- range $key, $value := .Values.ingress.annotations | default dict }}
-  {{- if not (or (hasPrefix "cert-manager.io/" $key) (hasPrefix "acme.cert-manager.io/" $key) (eq $key "kubernetes.io/tls-acme")) }}
+{{- range $key, $value := $primaryIngressAnnotations }}
+  {{- /* Certificates and DNS stay owned by the primary Ingress; rewrites, canaries and server-level settings would change or duplicate what the asset paths do today. */}}
+  {{- $skip := or (hasPrefix "cert-manager.io/" $key) (hasPrefix "acme.cert-manager.io/" $key) (eq $key "kubernetes.io/tls-acme") (hasPrefix "external-dns.alpha.kubernetes.io/" $key) (hasPrefix "nginx.ingress.kubernetes.io/canary" $key) (has $key (list "nginx.ingress.kubernetes.io/rewrite-target" "nginx.ingress.kubernetes.io/app-root" "nginx.ingress.kubernetes.io/server-snippet" "nginx.ingress.kubernetes.io/server-alias")) }}
+  {{- if not $skip }}
     {{- $_ := set $webAssetAnnotations $key $value }}
   {{- end }}
 {{- end }}
@@ -250,7 +265,7 @@ spec:
 # ingress-nginx balances every request separately, so a page from one build can
 # ask a pod of the other build for a content-hashed asset it does not have. This
 # Ingress takes over only the hashed asset paths that the primary Ingress already
-# sends to the web service, with the same class, TLS and annotations, and retries
+# sends to the web service, with the same class, TLS and most annotations, and retries
 # a 404 on another web pod. Non-asset paths keep their primary routing.
 apiVersion: networking.k8s.io/v1
 kind: Ingress

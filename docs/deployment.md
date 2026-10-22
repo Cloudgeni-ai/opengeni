@@ -2710,7 +2710,7 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
-The chart defaults the API, web, relay and control-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`), and API and web pods drain for `preStopDrainSeconds` before SIGTERM. Turn workers default to zero-surge (`maxSurge: 0`, `maxUnavailable: 1`). One-node smoke clusters without spare capacity can set zero surge for the others too.
+The chart defaults the API, web, relay and control-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`), and API, web and relay pods drain for `preStopDrainSeconds` before SIGTERM. Turn workers default to zero-surge (`maxSurge: 0`, `maxUnavailable: 1`). One-node smoke clusters without spare capacity can set zero surge for the others too.
 
 ### Web assets across rollouts
 
@@ -2735,36 +2735,85 @@ finds the previous images with a `lookup` of the live web Deployment: its
 current image followed by the images it already carried, which the chart
 records in the Deployment annotation `opengeni.ai/previous-web-images`. The
 list is de-duplicated and never contains the image being deployed. A
-config-only upgrade keeps the chain, and deploying an older image keeps the
-newer build's assets. Offline renders (`helm template`, client dry runs) cannot
-look up, so they carry nothing and render the web Deployment exactly as before
-unless `web.previousAssets.images` lists the previous image references
-explicitly; a non-empty list replaces the lookup. The copy script never fails
-the pod, but a previous image the registry no longer serves blocks the new
-pods in `Init:ImagePullBackOff`. Keep at least the last `maxImages` web images
-in the registry, or set `maxImages: 0` to turn carrying off. An optional
-`sizeLimit` bounds the emptyDir.
+config-only upgrade keeps the chain, and a `helm upgrade` to an older image
+keeps the newer build's assets. `helm rollback` does not render again: it
+re-applies the earlier revision's stored manifest, including that revision's
+chain, so tabs already on the newer build lose its assets and rely on the
+reload described below. When asset continuity matters, prefer `helm upgrade`
+with the older tag over `helm rollback`.
+
+Offline renders (`helm template`, client dry runs) cannot look up, so they
+carry nothing and render the web Deployment exactly as before unless
+`web.previousAssets.images` lists the previous image references explicitly; a
+non-empty list replaces the lookup. A pipeline that renders and applies can
+either render with `helm template --dry-run=server` (Helm 3.13 or later, with
+permission to read Deployments in the namespace), so the lookup works, or
+build the list from the live Deployment:
+
+```bash
+web=$(kubectl -n <namespace> get deployment <release>-web -o json)
+previous=$(printf '%s' "$web" | jq -r '[(.spec.template.spec.containers[]
+  | select(.name == "web") | .image)] + ((.metadata.annotations["opengeni.ai/previous-web-images"]
+  // "") | split(",")) | map(select(. != "")) | join(",")')
+helm template ... --set-string "web.previousAssets.images={$previous}"
+```
+
+The chart still de-duplicates the list, drops the image being deployed and
+caps it at `maxImages`.
+
+Carried images stay in the web Deployment for its lifetime, not only for the
+rollout: every new web pod pulls them before it starts, including pods created
+by autoscaling, evictions, node drains and node-pool replacement. A carried
+image the registry no longer serves leaves those pods in
+`Init:ImagePullBackOff`, which can take web down once the running pods are
+replaced. Keep at least the last `maxImages` deployed web images in the
+registry, or set `maxImages: 0` to turn carrying off. The copy script itself
+always exits 0 (a missing dist copies nothing), but a pull failure, an image
+without Bun or an init container killed for memory still fails the pod. The
+init containers run one after another with the web container's resources and
+security context, so a new pod starts later by up to `maxImages` pulls and
+copies. They also work with a read-only root filesystem. An optional
+`sizeLimit` bounds the emptyDir, which counts toward the node's ephemeral
+storage; only the three asset directories are ever copied.
 
 `ingress.webAssetsIngress` (on by default) adds a second Ingress,
 `<release>-web-assets`, for the same hashed asset paths. It renders only when
-`ingress.className` contains `nginx`; set `requireNginxClassName: false` for an
-ingress-nginx controller with another class name. It sets
+the ingress class (`ingress.className`, or the legacy
+`kubernetes.io/ingress.class` annotation) contains `nginx`; set
+`requireNginxClassName: false` for an ingress-nginx controller with another
+class name. It sets
 `nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_404"` and
-`proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so a 404 from a
-pod of the other build is retried on another web pod. It covers only hosts and
-asset paths whose longest matching primary route already goes to the web
-service, and it copies the primary class, TLS and annotations, including edge
-auth. cert-manager issuance annotations stay on the primary Ingress so that
-only one Ingress owns each certificate. `webAssetsIngress.annotations` are
-applied last. Other paths keep their primary routing.
+`proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so ingress-nginx
+retries a 404 on another web pod. This is best effort: the controller's
+balancer can pick the same pod again for a retry (reported upstream as
+[ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852),
+and certain with `upstream-hash-by`), so it raises the chance of reaching a pod
+that has the asset without guaranteeing it. An asset that no pod has costs up to
+`nextUpstreamTries` upstream requests before the 404.
+
+The asset Ingress covers only hosts and asset paths whose longest matching
+primary route (`Prefix` or `ImplementationSpecific`) already goes to the web
+service; entries for the same host are judged together, as ingress-nginx merges
+them. Hosts served only by `ingress.publicIngress`, and regex routes, get no
+asset Ingress. It uses the primary class and TLS and copies the primary
+annotations as rendered by the chart, including edge auth. It leaves out
+cert-manager issuance and external-dns annotations, so that the primary Ingress
+alone owns each certificate and DNS name, and `canary*`, `rewrite-target`,
+`app-root`, `server-snippet` and `server-alias`, which would change or
+duplicate what the asset paths do today. Annotations added to the primary
+Ingress after rendering (for example by a post-renderer) are not copied.
+`webAssetsIngress.annotations` are applied last. Other paths keep their primary
+routing. ingress-nginx metrics and logs label asset requests with the
+`<release>-web-assets` Ingress.
 
 The first upgrade that ships this replaces pods without it. The new pods carry
 the live pre-upgrade image, so tabs on the old build keep working after the
-rollout. A page served by a new pod that asks an old pod for a new asset gets
+rollout. A page served by a new pod that asks an old pod for a new asset has
 that 404 retried on another pod. The console's one-time automatic reload on a
 failed chunk load (`apps/web/src/lib/vite-preload-recovery.ts`) remains the last
-resort. For example, it still applies when only one pod is serving, or when
-every carried build is older than the tab's build.
+resort. For example, it still applies when only one pod is serving, when a
+retry lands on the same pod, after a `helm rollback`, or when every carried
+build is older than the tab's build.
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 

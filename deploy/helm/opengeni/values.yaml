@@ -671,8 +671,10 @@ web:
   # upgrade` finds the previous images by looking up the live web Deployment:
   # its image plus the images it already carried (annotation
   # opengeni.ai/previous-web-images). Offline renders (`helm template`) cannot
-  # look up, so they carry nothing unless `images` is set. During the rollout
-  # itself see ingress.webAssetsIngress.
+  # look up, so they carry nothing unless `images` is set; `helm rollback`
+  # restores the earlier revision's chain. Every new web pod (scale-ups, node
+  # replacement) pulls the carried images, so keep them in the registry. During
+  # the rollout itself see ingress.webAssetsIngress.
   previousAssets:
     enabled: true
     # Most previous builds carried, newest first. 0 disables carrying.
@@ -1205,9 +1207,10 @@ ingress:
   # routes only the hashed asset paths (/assets, /office/assets,
   # /react-demo/assets) of hosts that already send them to the web service, and
   # has ingress-nginx retry a 404, connection error or timeout on another web
-  # pod. It keeps the primary Ingress class, TLS and annotations (except
-  # cert-manager issuance annotations, which stay on the primary Ingress so one
-  # Ingress owns each certificate); `annotations` here are applied last.
+  # pod (best effort: a retry can land on the same pod). It keeps the primary
+  # Ingress class, TLS and rendered annotations, except cert-manager,
+  # external-dns, canary, rewrite-target, app-root, server-snippet and
+  # server-alias annotations; `annotations` here are applied last.
   webAssetsIngress:
     enabled: true
     # Render only when ingress.className contains "nginx". Set false to render

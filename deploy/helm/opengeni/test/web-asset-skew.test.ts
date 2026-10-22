@@ -233,17 +233,18 @@ describe.skipIf(!helm)("previous web assets", () => {
     ).toEqual([image("v3"), image("v2"), image("v1")]);
   });
 
-  test("config-only upgrades keep the chain and rollbacks keep the newer build", async () => {
+  test("config-only upgrades keep the chain and upgrading to an older image keeps the newer build", async () => {
     const sameImage = webDeployment(
       await render(webImage("v3"), liveWeb(image("v3"), `${image("v2")},${image("v1")}`)),
     );
     expect(carriedImages(sameImage)).toEqual([image("v2"), image("v1")]);
 
-    // Deploying v2 over v3: v3's assets stay available to tabs already on v3.
-    const rollback = webDeployment(
+    // `helm upgrade` to v2 over v3 (not `helm rollback`, which re-applies the
+    // stored manifest without a lookup): v3's assets stay available to v3 tabs.
+    const olderImage = webDeployment(
       await render(webImage("v2"), liveWeb(image("v3"), `${image("v2")},${image("v1")}`)),
     );
-    expect(carriedImages(rollback)).toEqual([image("v3"), image("v1")]);
+    expect(carriedImages(olderImage)).toEqual([image("v3"), image("v1")]);
   });
 
   test("ignores empty or malformed carried annotations and other containers", async () => {
@@ -329,7 +330,7 @@ describe("previous web asset copy script", () => {
     }
   });
 
-  test("never fails the pod when the image has no dist or the copy fails", async () => {
+  test("exits 0 when the image has no dist or the copy fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-copy-assets-"));
     try {
       const missing = await runScript({
@@ -473,6 +474,99 @@ describe.skipIf(!helm)("web asset ingress", () => {
         "/react-demo/assets Prefix skew-opengeni-web:http",
       ],
     });
+  });
+
+  test("judges a host listed in several entries as ingress-nginx merges it", async () => {
+    const assets = ingress(
+      await render(
+        ingressValues({
+          hosts: [
+            {
+              host: "app.example.test",
+              paths: [{ path: "/", pathType: "Prefix", service: "web" }],
+            },
+            {
+              host: "app.example.test",
+              paths: [{ path: "/assets", pathType: "Prefix", service: "api" }],
+            },
+            {
+              host: "split.example.test",
+              paths: [{ path: "/v1", pathType: "Prefix", service: "api" }],
+            },
+            {
+              host: "split.example.test",
+              paths: [{ path: "/", pathType: "Prefix", service: "web" }],
+            },
+          ],
+        }),
+      ),
+      "skew-opengeni-web-assets",
+    );
+    expect(rulePaths(assets)).toEqual({
+      "app.example.test": [
+        "/office/assets Prefix skew-opengeni-web:http",
+        "/react-demo/assets Prefix skew-opengeni-web:http",
+      ],
+      "split.example.test": [
+        "/assets Prefix skew-opengeni-web:http",
+        "/office/assets Prefix skew-opengeni-web:http",
+        "/react-demo/assets Prefix skew-opengeni-web:http",
+      ],
+    });
+    expect(assets?.spec.rules).toHaveLength(2);
+  });
+
+  test("keeps rewrites, canaries, server-level settings and DNS ownership off the asset Ingress", async () => {
+    const assets = ingress(
+      await render(
+        ingressValues({
+          annotations: {
+            "nginx.ingress.kubernetes.io/auth-url": "https://auth.example.test/check",
+            "nginx.ingress.kubernetes.io/whitelist-source-range": "10.0.0.0/8",
+            "nginx.ingress.kubernetes.io/rewrite-target": "/$1",
+            "nginx.ingress.kubernetes.io/app-root": "/console",
+            "nginx.ingress.kubernetes.io/canary": "true",
+            "nginx.ingress.kubernetes.io/canary-weight": "10",
+            "nginx.ingress.kubernetes.io/server-snippet": "location /x { return 404; }",
+            "nginx.ingress.kubernetes.io/server-alias": "www.example.test",
+            "external-dns.alpha.kubernetes.io/hostname": "app.example.test",
+            "cert-manager.io/cluster-issuer": "letsencrypt",
+          },
+        }),
+      ),
+      "skew-opengeni-web-assets",
+    );
+    expect(assets?.metadata.annotations).toEqual({
+      "nginx.ingress.kubernetes.io/auth-url": "https://auth.example.test/check",
+      "nginx.ingress.kubernetes.io/whitelist-source-range": "10.0.0.0/8",
+      "nginx.ingress.kubernetes.io/proxy-next-upstream": "error timeout http_404",
+      "nginx.ingress.kubernetes.io/proxy-next-upstream-tries": "3",
+    });
+  });
+
+  test("accepts the legacy ingress class annotation as the class", async () => {
+    const legacy = ingress(
+      await render(
+        ingressValues({
+          className: "",
+          annotations: { "kubernetes.io/ingress.class": "nginx" },
+        }),
+      ),
+      "skew-opengeni-web-assets",
+    );
+    expect(legacy?.spec.ingressClassName).toBeUndefined();
+    expect(legacy?.metadata.annotations?.["kubernetes.io/ingress.class"]).toBe("nginx");
+    expect(
+      ingress(
+        await render(
+          ingressValues({
+            className: "",
+            annotations: { "kubernetes.io/ingress.class": "traefik" },
+          }),
+        ),
+        "skew-opengeni-web-assets",
+      ),
+    ).toBeUndefined();
   });
 
   test("renders only for ingress-nginx unless configured otherwise", async () => {

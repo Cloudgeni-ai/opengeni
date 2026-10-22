@@ -125,6 +125,7 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+
 ## Web assets across rollouts
 
 `web.previousAssets` carries the hashed assets of up to `maxImages` (default 2)
@@ -134,7 +135,9 @@ them into an emptyDir that the server reads when an asset is missing locally.
 its `opengeni.ai/previous-web-images` annotation. Offline renders carry only an
 explicit `web.previousAssets.images` list. `ingress.webAssetsIngress` adds an
 ingress-nginx Ingress for the hashed asset paths that retries a 404 on another
-web pod during the rollout. Test both with
+web pod during the rollout (best effort). Carried images must stay in the
+registry for as long as the Deployment carries them, and `helm rollback`
+restores the earlier revision's chain. Test both with
 `bun test ./deploy/helm/opengeni/test/web-asset-skew.test.ts`. See
 [`docs/deployment.md`](../../../docs/deployment.md#web-assets-across-rollouts).
 

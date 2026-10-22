@@ -179,6 +179,8 @@ export function createWebHandler(
     if (!HASHED_ASSET_DIRECTORIES.some((directory) => distRelative.startsWith(`${directory}/`))) {
       return null;
     }
+    // A previous build only ever supplies code, styles and media, never a page.
+    if (/\.html?$/i.test(distRelative)) return null;
     const pathname = `/${distRelative}`;
     for (const previousRoot of previousAssetRoots) {
       const candidate = safePath(previousRoot, pathname);

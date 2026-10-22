@@ -580,6 +580,7 @@ describe("previous web build assets", () => {
   test("covers the Excel add-in and React demo asset directories with their usual caching", async () => {
     const previous = await previousBuild({
       "office/assets/taskpane-old.js": "office\n",
+      "office/assets/taskpane-old.js.gz": Bun.gzipSync("office\n"),
       "react-demo/assets/demo-old.js": "demo\n",
     });
     const handler = createWebHandler(await fixture(), { previousAssetRoots: [previous] });
@@ -592,6 +593,16 @@ describe("previous web build assets", () => {
       expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
       expect(await response.text()).toBe(body);
     }
+    const compressed = await handler(
+      new Request("https://example.test/office/assets/taskpane-old.js", {
+        headers: { "accept-encoding": "gzip" },
+      }),
+    );
+    expect(compressed.headers.get("content-encoding")).toBe("gzip");
+    expect(compressed.headers.get("cache-control")).toBe("public, max-age=3600");
+    expect(
+      await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+    ).toBe("office\n");
   });
 
   test("still answers a missing asset with 404, never the SPA shell", async () => {
@@ -613,6 +624,8 @@ describe("previous web build assets", () => {
       "secret.js": "outside the asset directories\n",
       "office/taskpane.html": "<!doctype html><title>previous office</title>",
       "assets/route-old111.js": "old\n",
+      "assets/stray-old111.html": "<!doctype html><title>stray page</title>",
+      "office/assets/stray.HTM": "<!doctype html><title>stray office page</title>",
     });
     await Bun.write(join(previous, "..", "beside-previous.js"), "beside\n");
     const handler = createWebHandler(root, { previousAssetRoots: [previous] });
@@ -636,6 +649,12 @@ describe("previous web build assets", () => {
     const officePage = await request("/office/taskpane.html");
     expect(officePage.status).toBe(404);
     expect(await officePage.text()).toBe("Not Found");
+    // Even inside an asset directory, a previous build never supplies a page.
+    for (const path of ["/assets/stray-old111.html", "/office/assets/stray.HTM"]) {
+      const page = await request(path);
+      expect(page.status).toBe(404);
+      expect(await page.text()).toBe("Not Found");
+    }
     expect(await (await request("/")).text()).not.toContain("previous shell");
     expect((await request("/secret.js")).status).toBe(404);
     // A dot segment that stays inside the asset directory is still an asset.
