@@ -81,7 +81,7 @@ function afterEvents(): SessionEvent[] {
         error: {
           code: "attached_browser_unavailable",
           message:
-            "No Chrome profile is connected through the Opengeni Browser extension. A Chrome setup card is now in this chat…",
+            "No Chrome profile is connected through the browser extension. A card that fixes this is now posted in this chat…",
         },
       },
       error: true,
@@ -111,7 +111,7 @@ function afterEvents(): SessionEvent[] {
   log.push(
     "agent.message.completed",
     {
-      text: "Your Chrome isn't connected yet. Use the card above, then tell me and I'll open LinkedIn.",
+      text: "Your Chrome isn't connected yet. Use the card above and I'll open LinkedIn once it is.",
     },
     turn,
   );

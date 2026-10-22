@@ -34,7 +34,7 @@ export const adminModule: AgentPromptModule = {
           "A card is for an integration required by the authorized design, including established or delegated choices.",
         setupCards && "Resolve out-of-scope architecture choices before requesting setup.",
         setupCards && "After setup, rediscover tools and verify access.",
-        "If blocked or a setup tool is unavailable, explain the specific gap.",
+        "If a setup tool is unavailable, give the user the exact next step instead.",
       ),
     );
   },

@@ -18,11 +18,7 @@ import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
-import {
-  sessionChatUrl,
-  withMachinePermissionCard,
-  type MachinePermissionCardPost,
-} from "./machine-permission-card";
+import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
@@ -215,6 +211,7 @@ import {
   CONNECTED_MACHINE_CAPABILITY_ID,
   EXCEL_ADDIN_CAPABILITY_ID,
   nativeConnectionCapabilityRecommendations,
+  userSetupCardPayload,
   OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
@@ -4323,23 +4320,23 @@ function registerFleetTools(
     };
   };
 
-  // A refusal that only the owner's permission can resolve posts the Connected
-  // Machine card right away, in the agent's own turn, so the person can allow
-  // the machine without the agent having to find and call the card tool. Only
-  // exact agent attempts post it. The card names the machine the agent asked
-  // for, so it can lead with allowing that machine. A repeated refusal for the
-  // same machine in the same turn reuses that turn's card; the lookup and
-  // append run atomically under the attempt fence so parallel refusals cannot
-  // stack copies. Cards for every other capability are never limited.
-  const machinePermissionCard =
-    (toolName: string, target: string): MachinePermissionCardPost =>
-    async () => {
+  // A refusal the person can fix themselves (USER_SETUP_BLOCKERS, for example
+  // the owner not having allowed this chat to use their machine yet) posts the
+  // setup card right away, in the agent's own turn, so the person sees the fix
+  // without the agent having to find and call the card tool. Only exact agent
+  // attempts post it. A machine card names the machine the agent asked for, so
+  // it can lead with allowing that machine. A repeated refusal for the same
+  // machine in the same turn reuses that turn's card; the lookup and append run
+  // atomically under the attempt fence so parallel refusals cannot stack
+  // copies. Cards for every other capability are never limited.
+  const userSetupCard =
+    (toolName: string, target: string): UserSetupCardPost =>
+    async (blocker) => {
       const requestedSandboxId = UUID_TARGET.test(target) ? target.toLowerCase() : null;
       if (!exactAgentAttemptClaims(grant)) return null;
       const claims = exactAgentCommandContext(grant, sessionId);
-      const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
-        (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
-      )!;
+      const payload = userSetupCardPayload(blocker, { toolName, requestedSandboxId });
+      if (!payload) return null;
       const appended = await appendTurnCapabilityCardOnce(
         deps.db,
         grant.workspaceId,
@@ -4347,23 +4344,13 @@ function registerFleetTools(
         claims.callerTurnId,
         claims.callerExecutionGeneration,
         claims.callerAttemptId,
-        item.id,
-        {
-          type: "tool.auth_needed",
-          payload: {
-            ...capabilityCardPayload(item, {
-              action: "connect",
-              rationale: "Allow this chat to use your computer.",
-              toolName,
-            }),
-            ...(requestedSandboxId ? { requestedSandboxId } : {}),
-          },
-        },
+        blocker.capabilityId,
+        { type: "tool.auth_needed", payload },
         requestedSandboxId,
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, appended.events);
       if (!appended.accepted) {
-        throw new Error("The calling turn was replaced before the machine card committed.");
+        throw new Error("The calling turn was replaced before the setup card committed.");
       }
       return {
         eventId: appended.existingEventId ?? appended.events[0]?.id ?? null,
@@ -4398,9 +4385,9 @@ function registerFleetTools(
     },
     async ({ target }) =>
       json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_attach", target),
+          userSetupCard("sandbox_attach", target),
         ),
       ),
   );
@@ -4414,9 +4401,9 @@ function registerFleetTools(
     },
     async ({ target }) =>
       json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await swapActiveSandbox(services, await fleetContext(), target),
-          machinePermissionCard("sandbox_swap", target),
+          userSetupCard("sandbox_swap", target),
         ),
       ),
   );
@@ -4458,12 +4445,12 @@ function registerFleetTools(
             )
           : null;
       return json(
-        await withMachinePermissionCard(
+        await withUserSetupCard(
           await runOnSandbox(services, await fleetContext(), target, typedOp, {
             ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
             ...(secretResolver ? { secretResolver } : {}),
           }),
-          machinePermissionCard("run_on", target),
+          userSetupCard("run_on", target),
         ),
       );
     },

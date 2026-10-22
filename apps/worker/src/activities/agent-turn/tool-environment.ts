@@ -1,5 +1,5 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
-import { chromeSetupCardPoster } from "./chrome-setup-card";
+import { userSetupCardPoster } from "./user-setup-card";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -934,10 +934,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
-      postChromeSetupCard: chromeSetupCardPoster({
+      postSetupCard: userSetupCardPoster({
         db,
         bus,
-        enabled: runSettings.sandboxSelfhostedEnabled,
+        connectedMachinesEnabled: runSettings.sandboxSelfhostedEnabled,
+        webBaseUrl: runSettings.webBaseUrl ?? runSettings.publicBaseUrl,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: turn.id,

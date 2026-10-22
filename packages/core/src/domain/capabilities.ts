@@ -26,6 +26,7 @@ import {
   assertOrganizationIntegrationAllowed,
   type SocialConnection,
   ToolAuthNeededPayload,
+  type UserSetupBlocker,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -1891,18 +1892,23 @@ export function nativeConnectionCapabilityRecommendations(
 }
 
 /**
- * The `tool.auth_needed` payload for the Connected Machine card set up for the
- * person's own Chrome. A tool that finds no connected Chrome profile posts it
- * itself, so the person sees how to connect on the first attempt instead of
- * only reading that Chrome isn't connected.
+ * The `tool.auth_needed` payload of the setup card that fixes a person-fixable
+ * tool refusal (see USER_SETUP_BLOCKERS). Every tool and route that hits such a
+ * refusal posts this same card in the calling turn, so the person sees the fix
+ * on the first attempt. Null when the blocker's capability is not a native
+ * card this deployment can show.
  */
-export function chromeSetupCardPayload(toolName: string): ToolAuthNeededPayload {
+export function userSetupCardPayload(
+  blocker: UserSetupBlocker,
+  options: { toolName: string; requestedSandboxId?: string | null },
+): ToolAuthNeededPayload | null {
   const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
-    (candidate) => candidate.id === CONNECTED_MACHINE_CAPABILITY_ID,
-  )!;
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
+  if (!item) return null;
   return ToolAuthNeededPayload.parse({
     serverId: "opengeni",
-    toolName,
+    toolName: options.toolName,
     providerDomain: item.providerDomain,
     reason: "missing_connection",
     capability: {
@@ -1911,10 +1917,11 @@ export function chromeSetupCardPayload(toolName: string): ToolAuthNeededPayload 
       kind: item.kind,
       source: item.source,
       action: "connect",
-      rationale: "Connect your Chrome so the agent can use it.",
+      rationale: blocker.rationale,
       requiredVariables: [],
     },
-    purpose: "chrome",
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
+    ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
   });
 }
 
