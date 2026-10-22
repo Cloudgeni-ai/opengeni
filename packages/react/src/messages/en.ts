@@ -879,6 +879,7 @@ export const englishMessages = {
   "connectSetup.account": "Account",
   "connectSetup.accountLabel": "Account: {label}",
   "connectSetup.addingSelectedTools": "Adding selected tools…",
+  "connectSetup.finishingSetup": "Finishing setup…",
   "connectSetup.addSelectedTools": "Add selected tools",
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
