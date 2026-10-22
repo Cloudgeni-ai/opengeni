@@ -1,5 +1,40 @@
 # @opengeni/desktop
 
+## 4.4.1
+
+### Minor Changes
+
+- da48573: `@opengeni/desktop` is published to npm, so a product can build its own branded desktop app on the kit without copying it from this repository. The package ships compiled JavaScript and types for its entry points (`@opengeni/desktop`, `/contract`, `/mac-login-agent`, `/preload` and `/preload/welcome`), and the welcome pages sit next to the contract entry as before. It joins the other packages' shared version line.
+- b58a428: The desktop kit now fits a product whose web app has its own routes and its own server.
+
+  - `webPaths` in the desktop kit's config says where the product's web app shows a workspace, a session, the inbox and settings. The app reads links, reopens the last page and opens notifications and menu commands with it. `parseAppLink`, `parseComputerConnectLink` and `computerConnectUrl` take the same `AppWebPaths`; `OPENGENI_WEB_PATHS` is Opengeni's own web app and stays the default.
+  - The "Open in app" handoff uses the app's own scheme: `parseAppLink(url, { scheme })`, `appHandoffUrl(url, scheme)` and `openInAppUrl(url, scheme)`.
+  - `allowOtherServers: false` hides "Use another server" on the first-run page, and the app then signs in to its own server only. Its messages name the configured server instead of Opengeni's.
+  - `agentPath`, `agentConfigDir` and `adoptStandaloneAgent` pass through to `ThisComputer`, so an app can keep its own agent apart from a separately installed one.
+
+- a1a907c: A product can let its own branded build of the Opengeni Browser Chrome extension reach the person's agent. Set `browserExtensionIds` (Chrome's 32-letter extension IDs) in the desktop kit's config, or in `ThisComputer`'s options; the agent then lists those extensions next to Opengeni Browser in the Chrome Native Messaging host it registers. Standalone installs read the same list from `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` when running `opengeni-agent service install`. This needs an agent built from this release or later.
+
+### Patch Changes
+
+- 335e275: Handle Open app and connect inside the desktop window through the existing account authorization and local consent flow instead of silently dropping the app link.
+- 524ddde: The desktop app shows an Update button at the bottom of the sidebar as soon as it finds a new version. One click installs it: a downloaded update restarts the app at once, otherwise the download finishes and the app restarts by itself. The app now checks for updates every hour, and the desktop bridge gains an `updates` capability (state, install and change events).
+- 0e3434e: The package entry is now `src/index.ts` (built to `dist/index.js`), like every other published Opengeni package, so the kit passes the publish checks. Imports from `@opengeni/desktop` are unchanged.
+- 6e37e50: The desktop app reopens any page the product's `webPaths.match` recognizes, including pages whose address names no workspace (`match` returns `{ workspaceId: null, sessionId: null }`); the account keeps its last known workspace. Links to such pages still open in the browser.
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [a1a907c]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [84c8b32]
+- Updated dependencies [84b1a18]
+  - @opengeni/sdk@4.4.0
+  - @opengeni/agent-host@4.4.0
+
 ## 0.3.0
 
 ### Minor Changes

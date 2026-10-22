@@ -1,5 +1,54 @@
 # @opengeni/sdk
 
+## 4.4.1
+
+### Minor Changes
+
+- b58a428: The desktop kit now fits a product whose web app has its own routes and its own server.
+
+  - `webPaths` in the desktop kit's config says where the product's web app shows a workspace, a session, the inbox and settings. The app reads links, reopens the last page and opens notifications and menu commands with it. `parseAppLink`, `parseComputerConnectLink` and `computerConnectUrl` take the same `AppWebPaths`; `OPENGENI_WEB_PATHS` is Opengeni's own web app and stays the default.
+  - The "Open in app" handoff uses the app's own scheme: `parseAppLink(url, { scheme })`, `appHandoffUrl(url, scheme)` and `openInAppUrl(url, scheme)`.
+  - `allowOtherServers: false` hides "Use another server" on the first-run page, and the app then signs in to its own server only. Its messages name the configured server instead of Opengeni's.
+  - `agentPath`, `agentConfigDir` and `adoptStandaloneAgent` pass through to `ThisComputer`, so an app can keep its own agent apart from a separately installed one.
+
+- 25d1500: Infrastructure-only session events, such as the idle sandbox reaper terminating a shared box, no longer move a session's `updatedAt`, so stopped sessions keep their real last-activity time in the sidebar and session lists (migration 0904). Sessions and session list entries now carry `hasUpcomingSchedules`, and the sidebar schedule icon only appears for schedules that can still fire. A session whose schedules are all paused or expired keeps a distinct "No upcoming runs" schedule button in its header. Editing only a schedule's timing now refreshes open session lists (migration 0905).
+- d295544: Products that embed Opengeni can ship their own branded Excel add-in. The new `@opengeni/sdk/office` entry point has the add-in kit Opengeni's own add-in is built from: the manifest, the workbook link that lets agents run Office.js in the open workbook, Excel theme and selection watchers, per-message workbook and selection context, and a sign-in dialog helper. `createOfficeWorkbookTicket` and `listOfficeWorkbooks` connect and list workbooks per workspace.
+
+  A connected workbook now belongs to one person in one workspace, so agents reach it only from that workspace, and products whose users share one credential stay isolated. The ticket and list routes moved under `/v1/workspaces/{workspaceId}/office/`. `OPENGENI_OFFICE_ADDIN_NAME` and `OPENGENI_OFFICE_ADDIN_INSTALL_URL` set the add-in name and install link agents give when no workbook is connected.
+
+- 614c744: The session proxy can serve a product's Excel add-in: with `office: true`, `createSessionProxyHandler` mints workbook tickets and lists open workbooks as the signed-in user in the resolved workspace.
+- 81a516c: Organizations and workspaces can choose the default voice model. Organization → Models → Voice and a workspace's Voice settings gain a "Default voice model" choice: the model a new voice conversation starts with. A workspace follows its organization's choice unless it picks its own, and "Automatic" keeps the previous behaviour (GPT Realtime when available, otherwise the first available model). People can still pick another model when they talk, and a model someone already picked on their device stays their choice while it remains available.
+
+  API: `OrganizationModelDefaults.realtimeDefaultModel` and `UpdateWorkspaceSettingsRequest.realtimeDefaultModel` (a voice model id, or null for automatic or to follow the organization), and the realtime model catalog marks `workspaceDefault` and `organizationDefault`. The packaged voice control starts with the person's own usable pick, then the workspace default, then the organization default. Rolling migration 0903 adds one nullable column.
+
+- 9c0c6d1: Keep the public sandbox recovery response compatible now that every managed backend recovers a lost sandbox. `SandboxRecoverySelection.artifactId` is a required native checkpoint id again, as it was before, so existing SDK readers never receive null there. A portable checkpoint that an automatic Retry restores is named by the new optional `SandboxRecoveryProjection.automaticCheckpoint` (`SandboxCheckpointSelection`, whose `artifactId` is null for a portable archive); `checkpoint` is set as well only when that checkpoint is native. The packaged recovery actions read `automaticCheckpoint` first. Older clients still recover these sessions when the next message is sent; they only lack the Retry shortcut for a portable checkpoint.
+- 84c8b32: `createSessionProxyHandler` accepts `sessionApp: true`, so the packaged `SessionApp` runs behind a product's session proxy with no Opengeni credential in the browser (`<SessionApp apiBaseUrl="/api/opengeni" …/>`). The app sees only the resolved workspace and the resolved user's access to it. Its other reads in that workspace, and in chats `authorizeSession` admits, pass through as that user, so Opengeni's permissions decide what they see. A short list of the app's own writes passes too: pinning a chat, moving it to a project, managing projects, the new-chat draft and a chat's tool approval settings. Every other write is refused. Rosters, keys, budgets and administration stay closed even for reads. All existing proxy routes keep their rules, including the host's `createSession` and message hooks.
+
+  Startup error screens no longer name Opengeni, so a product that embeds the app shows neutral text ("Couldn't start", "Under maintenance").
+
+- 84b1a18: Every subscription account now has exactly one owner: the organization, one workspace, or one person, and it is used wherever it reaches and nowhere else. The per-workspace split between a workspace's own copy of an account and the organization's copy, the preference that chose between them, and "Set aside" are gone; each account has one on/off switch. A migration keeps everyone's access exactly as it was.
+
+  The organization's account lists now include `reach` (who each account reaches), and the organization's Models page lists every account once, grouped by provider, with its owner and a summary of how many are on and how many need reconnecting. Accounts that are turned off fold away when a provider has several, and the page no longer reads every workspace's accounts or each account's access one by one.
+
+### Patch Changes
+
+- 524ddde: The desktop app shows an Update button at the bottom of the sidebar as soon as it finds a new version. One click installs it: a downloaded update restarts the app at once, otherwise the download finishes and the app restarts by itself. The app now checks for updates every hour, and the desktop bridge gains an `updates` capability (state, install and change events).
+- dbc847f: When an agent is refused a personal (Only me) machine, the Connected Machine card now names the machine it asked for and leads with Allow; other machines and setup fold under "Use a different machine". The card event carries the requested machine as `requestedSandboxId`. If the agent asks again in a later turn, only the newest card stays a full card and earlier ones become one short line, so a chat no longer piles up copies of the same card.
+- 60e031c: Voice conversations now pass on what the person said instead of writing their own task for the agent. The voice model is told to relay requests in the person's own words and language, without adding tools, methods or details they didn't say, and to answer directly when the answer is already in the conversation. Each voice request the agent receives now notes that it was relayed and that the person's own words in the transcript take precedence over the relay.
+
+  A voice call that reconnects no longer loses track of things. What was said since the last request carries over to the next request after a reconnect or a same-browser reload. The agent's progress and results for a request made before the reconnect reach the voice model as session context, labelled as work requested earlier in the call, instead of being sent to a conversation item the new connection doesn't have and being dropped. The voice model is also told to pass instructions on to the agent rather than answer them with a promise, and never to state a result, status, name, number or time the agent hasn't reported.
+
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/connect@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

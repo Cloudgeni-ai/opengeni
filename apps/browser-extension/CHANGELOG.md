@@ -1,5 +1,11 @@
 # @opengeni/browser-extension
 
+## 0.1.7
+
+### Patch Changes
+
+- 0ac4e98: A product can build the extension under its own name and icons: `scripts/build.ts --brand <file>` takes a brand file (names, summary, homepage, icons, optional manifest key), and `brand:icons` makes the icons from one mark. Every name a person sees comes from the brand; Opengeni Browser's own build is unchanged.
+
 ## 0.1.6
 
 ### Patch Changes

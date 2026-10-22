@@ -1,5 +1,92 @@
 # @opengeni/api-router
 
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+- 84b1a18: Every subscription account now has exactly one owner: the organization, one workspace, or one person, and it is used wherever it reaches and nowhere else. The per-workspace split between a workspace's own copy of an account and the organization's copy, the preference that chose between them, and "Set aside" are gone; each account has one on/off switch. A migration keeps everyone's access exactly as it was.
+
+  The organization's account lists now include `reach` (who each account reaches), and the organization's Models page lists every account once, grouped by provider, with its owner and a summary of how many are on and how many need reconnecting. Accounts that are turned off fold away when a provider has several, and the page no longer reads every workspace's accounts or each account's access one by one.
+
+### Patch Changes
+
+- 5c113c6: Managed browsers are now started by the browser controller itself instead of through the separate agent-browser daemon, so the controller is the browser's only DevTools client. This removes launch settings that set managed browsers apart from an ordinary Chrome (hidden scrollbars in headless mode and disabled popup blocking), a second DevTools client attached to every page, one extra process per browser with its launch overhead, and the agent-browser companion from sandbox images and agent installs. It also fixes problems the daemon had been hiding: dedicated web workers on headless pages stayed paused and never ran, a click that opened a JavaScript dialog from an upload control was reported as a completed upload, a network-idle wait could hang on unfinished requests of the page that was replaced, and a full-page overlay was mistaken for a sticky bar when the page showed scrollbars.
+- 7c8a57d: Avoid unused Skill preparation for turns with Skills disabled or no bundled Skills selected, reuse caller-scoped metadata within full-detail session MCP reads, and repair stranded reasoning runs in one pass. Existing tool selection, live authority checks, model inputs and recoverable tool-call pairing remain unchanged.
+- e59b801: The `excel_run` tool description now names the Office.js reads that most often fail with PropertyNotLoaded: each `get…()` call returns a new unloaded object, a sheet's `name` must be loaded too, and range properties are plural.
+- 25d1500: Infrastructure-only session events, such as the idle sandbox reaper terminating a shared box, no longer move a session's `updatedAt`, so stopped sessions keep their real last-activity time in the sidebar and session lists (migration 0904). Sessions and session list entries now carry `hasUpcomingSchedules`, and the sidebar schedule icon only appears for schedules that can still fire. A session whose schedules are all paused or expired keeps a distinct "No upcoming runs" schedule button in its header. Editing only a schedule's timing now refreshes open session lists (migration 0905).
+- 12d13b6: Resolve the current database and workspace model catalog for published Sites, including member model admission and guest credit-model fallback. Models available in the console are no longer rejected solely because the Site used the startup fallback catalog.
+- 60e031c: Voice conversations now pass on what the person said instead of writing their own task for the agent. The voice model is told to relay requests in the person's own words and language, without adding tools, methods or details they didn't say, and to answer directly when the answer is already in the conversation. Each voice request the agent receives now notes that it was relayed and that the person's own words in the transcript take precedence over the relay.
+
+  A voice call that reconnects no longer loses track of things. What was said since the last request carries over to the next request after a reconnect or a same-browser reload. The agent's progress and results for a request made before the reconnect reach the voice model as session context, labelled as work requested earlier in the call, instead of being sent to a conversation item the new connection doesn't have and being dropped. The voice model is also told to pass instructions on to the agent rather than answer them with a promise, and never to state a result, status, name, number or time the agent hasn't reported.
+
+- f7f7987: Show an actionable error when a connector account was removed while a chat was open. Refresh account choices without replacing explicit selections or retrying a failed message with different credentials.
+- Updated dependencies [6930cf0]
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [d948555]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [7c8a57d]
+- Updated dependencies [9ba6486]
+- Updated dependencies [005c442]
+- Updated dependencies [9c25110]
+- Updated dependencies [926e0b8]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [a9a54f4]
+- Updated dependencies [f1a619f]
+- Updated dependencies [9979e45]
+- Updated dependencies [d295544]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [81e817c]
+- Updated dependencies [2581842]
+- Updated dependencies [ea21aa0]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [9850b5b]
+- Updated dependencies [84b1a18]
+- Updated dependencies [47dbfdf]
+- Updated dependencies [aa280c9]
+  - @opengeni/core@4.4.0
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/artifact-tool@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/github@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/vaults-keeper@4.4.0
+  - @opengeni/vaults-onepassword@4.4.0
+  - @opengeni/vaults-protonpass@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

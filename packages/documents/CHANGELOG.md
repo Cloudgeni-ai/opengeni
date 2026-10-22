@@ -1,5 +1,35 @@
 # @opengeni/documents
 
+## 4.4.1
+
+### Patch Changes
+
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [9ba6486]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [d295544]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [84b1a18]
+- Updated dependencies [aa280c9]
+  - @opengeni/db@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/storage@4.4.0
+
 ## 4.3.1
 
 ### Patch Changes

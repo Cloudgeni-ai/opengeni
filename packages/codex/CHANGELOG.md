@@ -1,5 +1,20 @@
 # @opengeni/codex
 
+## 4.4.1
+
+### Patch Changes
+
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84b1a18]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/network@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes
