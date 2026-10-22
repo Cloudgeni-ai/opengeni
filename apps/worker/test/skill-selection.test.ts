@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   configuredBundledSkillNames,
   loadConfiguredBundledSkills,
@@ -201,4 +202,22 @@ test("secrets guidance follows the selected secret_search tool and host selectio
       bundledSkillIds: ["builtin:secrets"],
     }).map((entry) => entry.id),
   ).toEqual(["builtin:secrets"]);
+});
+
+test("empty or unavailable bundled selections do not read bundled files", () => {
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    for (const bundledSkillIds of [[], ["builtin:video-generation"]] as const) {
+      expect(
+        loadConfiguredBundledSkills({
+          firstPartyTools: [],
+          videoGenerationEnabled: false,
+          bundledSkillIds,
+        }),
+      ).toEqual([]);
+    }
+    expect(reads.mock.calls.filter(([path]) => String(path).includes("bundled_"))).toEqual([]);
+  } finally {
+    reads.mockRestore();
+  }
 });

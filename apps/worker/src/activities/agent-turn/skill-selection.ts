@@ -43,6 +43,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
 
 export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) {
   const names = new Set(configuredBundledSkillNames(context));
+  if (names.size === 0) return [];
   const artifacts = loadNativeToolSkillArtifacts({
     projects: names.has("projects"),
     schedules: names.has("schedules"),

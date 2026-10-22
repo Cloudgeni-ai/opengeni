@@ -136,6 +136,7 @@ import {
   recordSyncedSocialPosts,
   getScheduledTaskIncludingDeleted,
   requireSession,
+  requireWorkspace,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -303,8 +304,7 @@ import {
   setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionToolPolicyContext,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -7938,15 +7938,23 @@ async function withMcpEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session]),
+  // Share projection metadata only within this authorized full-detail response.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  void workspaceRead.catch(() => undefined);
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, [session], workspaceRead),
   ]);
   return sessionWithEffectiveToolPolicy(
     session,
-    workspaceServerIds,
-    workspaceDefaultServerIds,
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
     effectiveToolsContext,
   );
 }
