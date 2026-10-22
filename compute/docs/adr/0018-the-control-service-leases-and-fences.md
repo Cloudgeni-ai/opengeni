@@ -37,8 +37,9 @@ can be built and tested.
   restarted agent goes on from it. An agent renews from the moment its
   process starts, before it has taken back its sandboxes, however long
   that takes, until the process exits, after whatever its stop has to
-  finish: so a restart leaves the lease unrenewed only between one
-  process and the next. While it does not serve, its renewals carry no
+  finish; work still on a blocking thread then is abandoned, as a crash
+  would abandon it. So a restart leaves the lease unrenewed only between
+  one process and the next. While it does not serve, its renewals carry no
   capacity, so the service keeps the last one the host sent, and it
   refuses every request as unavailable, so the service places elsewhere
   meanwhile. It registers only while it serves, since a registration

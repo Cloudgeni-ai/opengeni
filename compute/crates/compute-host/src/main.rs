@@ -508,7 +508,7 @@ fn main() -> std::process::ExitCode {
         .build();
     let result = runtime
         .map_err(anyhow::Error::from)
-        .and_then(|runtime| runtime.block_on(agent_main(cli)));
+        .and_then(|runtime| run_to_end(runtime, agent_main(cli)));
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -516,6 +516,18 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Runs `command` on `runtime` to its end, then stops the runtime
+/// without waiting for work still on its blocking threads, such as a
+/// template's disk copy: the process exits and ends it, as a crash
+/// would, which costs the agent nothing (ADR 10). Waiting would hold the
+/// process up after its lease's renewals have stopped, and the next
+/// agent's start with them. A client command has awaited all it needs.
+fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output = T>) -> T {
+    let output = runtime.block_on(command);
+    runtime.shutdown_background();
+    output
 }
 
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
@@ -1195,6 +1207,33 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// Work left on a blocking thread when the command ends does not hold
+    /// the process up: an agent's lease is no longer renewed by then.
+    #[test]
+    fn the_runtime_stops_without_waiting_for_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let began = std::time::Instant::now();
+        let output = run_to_end(runtime, async {
+            let (started, running) = std::sync::mpsc::channel();
+            drop(tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(5));
+            }));
+            running.recv().unwrap();
+            7
+        });
+        assert_eq!(output, 7);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "waited {:?} for blocking work",
+            began.elapsed()
+        );
+    }
 
     /// A host keeps a sixteenth of its processors back, at least half of
     /// one, unless told otherwise.
