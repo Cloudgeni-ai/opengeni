@@ -164,7 +164,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-start.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-machines.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-machines-list.ts"))).toBe(true);
-    expect(reactSources.length).toBe(50);
+    // Dependency-free unsent-answer store the pending-question read prunes.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-draft-store.ts"))).toBe(true);
+    expect(reactSources.length).toBe(51);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

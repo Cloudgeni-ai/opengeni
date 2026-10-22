@@ -9,6 +9,7 @@ import {
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
 import { isActionableHumanInputRequest } from "../human-input";
+import { pruneHumanInputDrafts } from "../human-input-draft-store";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   projectionReadThrough,
@@ -62,13 +63,25 @@ export function useHumanInputRequests(
 ): UseHumanInputRequestsResult {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedHumanInputSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const load = useCallback(
-    async (): Promise<SessionHumanInputRequest[]> =>
-      sessionId
-        ? await client.listHumanInputRequests(workspaceId, sessionId, { status: "pending" })
-        : [],
-    [client, sessionId, workspaceId],
-  );
+  const load = useCallback(async (): Promise<SessionHumanInputRequest[]> => {
+    if (!sessionId) return [];
+    const readStartedAt = Date.now();
+    const requests = await client.listHumanInputRequests(workspaceId, sessionId, {
+      status: "pending",
+    });
+    // Unsent answers belong only to requests that are still answerable here:
+    // forget drafts for requests answered elsewhere, skipped, or expired.
+    const now = Date.now();
+    pruneHumanInputDrafts(
+      workspaceId,
+      sessionId,
+      requests
+        .filter((request) => isActionableHumanInputRequest(request, now))
+        .map((request) => request.id),
+      readStartedAt,
+    );
+    return requests;
+  }, [client, sessionId, workspaceId]);
   const state = usePolledValue(load, {
     enabled,
     pollIntervalMs: options.pollIntervalMs,
