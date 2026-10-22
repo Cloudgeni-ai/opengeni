@@ -421,7 +421,7 @@ test.each([false, true])(
       await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect Claude subscription");
-      await act(async () => button(view.container, /Use a setup token/)!.click());
+      await act(async () => button(view.container, /^Setup token$/)!.click());
       await flush();
       const input = view.container.querySelector<HTMLInputElement>(
         'input[aria-label="Claude subscription setup token"]',

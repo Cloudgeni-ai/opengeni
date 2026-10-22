@@ -5,13 +5,18 @@ import {
   type IntegrationConnectTracker,
 } from "@opengeni/react/app/lib/integration-connect-analytics";
 import { OpenGeniApiError, type ClaudeSubscriptionOAuthStartResponse } from "@opengeni/sdk";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { LoaderCircleIcon } from "lucide-react";
 import type { ProviderConnectionView } from "../ai-gateway-connection";
 import { Button } from "@opengeni/react/ui/button";
-import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SecretInput } from "@/components/ui/secret-field";
-import { ModelsFormPage, ProviderTile } from "@opengeni/react/app/components/models/models-ui";
+import {
+  errorText,
+  ModelsFormPage,
+  ProviderTile,
+} from "@opengeni/react/app/components/models/models-ui";
 import { ClaudeTokenInstructions } from "./claude-setup";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
 
@@ -85,6 +90,8 @@ export function ClaudeSignInPage({
   const [token, setToken] = useState("");
   const [legacy, setLegacy] = useState(false);
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const statusId = useId();
   const active = useRef(true);
   const popup = useRef<{ close(): void } | null>(null);
   // Consent-gated connect journey for the Claude subscription sign-in.
@@ -117,135 +124,174 @@ export function ClaudeSignInPage({
   };
   const reset = () => {
     remember(null);
-    if (active.current) setCode("");
+    if (active.current) {
+      setCode("");
+      setError(null);
+    }
     popup.current?.close();
     popup.current = null;
   };
+  const submitLabel = legacy
+    ? "Connect Claude"
+    : attempt
+      ? "Complete sign-in"
+      : "Sign in to Claude";
+  const pendingLabel = legacy || attempt ? "Connecting…" : "Starting sign-in…";
+  const submitDisabled =
+    !state.canManageConnection ||
+    Boolean(blockedReason) ||
+    (legacy ? !token.trim() : Boolean(attempt && !code.trim()));
   return (
     <ModelsFormPage
       backLabel={state.connected ? "Claude subscription" : undefined}
       headerAside={<ProviderTile provider="claude_subscription" />}
       title={state.connected ? "Reconnect Claude subscription" : "Connect Claude subscription"}
-      description="Use your Claude plan, with usage limits and reset times available here."
+      description="Use your Claude plan to pay for models."
       onClose={() => {
         reset();
         onClose();
       }}
-      submitLabel={
-        legacy ? "Connect Claude subscription" : attempt ? "Complete sign-in" : "Sign in to Claude"
-      }
-      pendingLabel={attempt && !legacy ? "Connecting…" : "Starting sign-in…"}
+      submitLabel={submitLabel}
       onPendingChange={(value) => {
         if (!active.current) return;
         setPending(value);
         onPendingChange?.(value);
       }}
-      submitDisabled={
-        !state.canManageConnection ||
-        Boolean(blockedReason) ||
-        (legacy ? !token.trim() : Boolean(attempt && !code.trim()))
-      }
-      disabledReason={
-        blockedReason ??
-        (state.canManageConnection
-          ? undefined
-          : "Only people who can manage connections can connect Claude.")
-      }
-      footerStart={
-        footerStart ??
-        (state.organization
-          ? "Shared with your organization’s workspaces. You can limit access on the account page."
-          : undefined)
+      submitDisabled={submitDisabled}
+      footer={
+        <div className="flex w-full flex-wrap items-center justify-end gap-2">
+          {attempt && !legacy ? (
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={pending}
+              onClick={reset}
+              className="mr-auto pointer-coarse:h-11"
+            >
+              Start again
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending}
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+            className="pointer-coarse:h-11"
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={submitDisabled}
+            aria-disabled={pending || undefined}
+            aria-describedby={statusId}
+            className="w-52 pointer-coarse:h-11 max-[420px]:order-first max-[420px]:w-full"
+          >
+            {pending ? (
+              <LoaderCircleIcon aria-hidden="true" className="motion-safe:animate-spin" />
+            ) : null}
+            {pending ? pendingLabel : submitLabel}
+          </Button>
+        </div>
       }
       onSubmit={async () => {
-        if (legacy) {
-          const connected = accountPool
-            ? await (state.organization
-                ? target.client.connectOrganizationClaudeSubscriptionSetupToken(scopeId, {
-                    token,
-                    ...(reconnectAccountId
-                      ? {
-                          reconnectAccountId,
-                          expectedCredentialVersion: reconnectCredentialVersion,
-                        }
-                      : {}),
-                  })
-                : target.client.connectClaudeSubscriptionSetupToken(scopeId, {
-                    token,
-                    scope: connectionScope,
-                    ...(reconnectAccountId
-                      ? {
-                          reconnectAccountId,
-                          expectedCredentialVersion: reconnectCredentialVersion,
-                        }
-                      : {}),
-                  }))
-            : null;
-          if (connected) savedAccountId.current = connected.accountId;
-          const saved = connected ? true : await state.saveKey(token);
-          if (!active.current) return false;
-          if (saved) {
-            reset();
-            if (accountPool) await state.refreshConnection();
-            await afterSave?.(savedAccountId.current);
-          }
-          return saved;
-        }
-        if (!attempt) {
-          const navigation = reserveBrowserConnectNavigation(window);
-          try {
-            const started = state.organization
-              ? await target.client.startOrganizationClaudeSubscriptionOAuth(
-                  scopeId,
-                  reconnectAccountId ? { reconnectAccountId } : {},
-                )
-              : await target.client.startWorkspaceClaudeSubscriptionOAuth(
-                  scopeId,
-                  accountPool
-                    ? {
-                        scope: connectionScope,
-                        ...(reconnectAccountId ? { reconnectAccountId } : {}),
-                      }
-                    : {},
-                );
-            if (!active.current) {
-              navigation.close();
-              return false;
+        setError(null);
+        try {
+          if (legacy) {
+            const connected = accountPool
+              ? await (state.organization
+                  ? target.client.connectOrganizationClaudeSubscriptionSetupToken(scopeId, {
+                      token,
+                      ...(reconnectAccountId
+                        ? {
+                            reconnectAccountId,
+                            expectedCredentialVersion: reconnectCredentialVersion,
+                          }
+                        : {}),
+                    })
+                  : target.client.connectClaudeSubscriptionSetupToken(scopeId, {
+                      token,
+                      scope: connectionScope,
+                      ...(reconnectAccountId
+                        ? {
+                            reconnectAccountId,
+                            expectedCredentialVersion: reconnectCredentialVersion,
+                          }
+                        : {}),
+                    }))
+              : null;
+            if (connected) savedAccountId.current = connected.accountId;
+            const saved = connected ? true : await state.saveKey(token);
+            if (!active.current) return false;
+            if (saved) {
+              reset();
+              if (accountPool) await state.refreshConnection();
+              await afterSave?.(savedAccountId.current);
             }
-            remember(started);
-            journey.current?.finish("abandoned");
-            journey.current = beginIntegrationConnect("claude_subscription", "oauth");
-            popup.current = navigation.navigation.openPopup(started.authorizationUrl);
-            return false;
+            return saved;
+          }
+          if (!attempt) {
+            const navigation = reserveBrowserConnectNavigation(window);
+            try {
+              const started = state.organization
+                ? await target.client.startOrganizationClaudeSubscriptionOAuth(
+                    scopeId,
+                    reconnectAccountId ? { reconnectAccountId } : {},
+                  )
+                : await target.client.startWorkspaceClaudeSubscriptionOAuth(
+                    scopeId,
+                    accountPool
+                      ? {
+                          scope: connectionScope,
+                          ...(reconnectAccountId ? { reconnectAccountId } : {}),
+                        }
+                      : {},
+                  );
+              if (!active.current) {
+                navigation.close();
+                return false;
+              }
+              remember(started);
+              journey.current?.finish("abandoned");
+              journey.current = beginIntegrationConnect("claude_subscription", "oauth");
+              popup.current = navigation.navigation.openPopup(started.authorizationUrl);
+              return false;
+            } catch (error) {
+              navigation.close();
+              throw error;
+            }
+          }
+          if (Date.parse(attempt.expiresAt) <= Date.now()) {
+            reset();
+            throw new Error("Claude sign-in expired. Start again.");
+          }
+          const request = { attemptId: attempt.attemptId, code: code.trim() };
+          try {
+            const connected = await (state.organization
+              ? target.client.completeOrganizationClaudeSubscriptionOAuth(scopeId, request)
+              : target.client.completeWorkspaceClaudeSubscriptionOAuth(scopeId, request));
+            savedAccountId.current = connected.accountId;
           } catch (error) {
-            navigation.close();
+            if (error instanceof OpenGeniApiError && [403, 409, 410, 502].includes(error.status))
+              reset();
+            journey.current?.finish(integrationConnectErrorOutcome(error));
+            journey.current = null;
             throw error;
           }
-        }
-        if (Date.parse(attempt.expiresAt) <= Date.now()) {
-          reset();
-          throw new Error("Claude sign-in expired. Start again.");
-        }
-        const request = { attemptId: attempt.attemptId, code: code.trim() };
-        try {
-          const connected = await (state.organization
-            ? target.client.completeOrganizationClaudeSubscriptionOAuth(scopeId, request)
-            : target.client.completeWorkspaceClaudeSubscriptionOAuth(scopeId, request));
-          savedAccountId.current = connected.accountId;
-        } catch (error) {
-          if (error instanceof OpenGeniApiError && [403, 409, 410, 502].includes(error.status))
-            reset();
-          journey.current?.finish(integrationConnectErrorOutcome(error));
+          journey.current?.finish("connected");
           journey.current = null;
-          throw error;
+          reset();
+          if (!active.current) return false;
+          await state.refreshConnection();
+          await afterSave?.(savedAccountId.current);
+          return true;
+        } catch (caught) {
+          if (active.current) setError(errorText(caught, "Couldn't connect Claude. Try again."));
+          return false;
         }
-        journey.current?.finish("connected");
-        journey.current = null;
-        reset();
-        if (!active.current) return false;
-        await state.refreshConnection();
-        await afterSave?.(savedAccountId.current);
-        return true;
       }}
       onSubmitted={() => {
         if (active.current) onConnected(savedAccountId.current);
@@ -261,65 +307,114 @@ export function ClaudeSignInPage({
             disabled={pending || Boolean(attempt)}
           />
         ) : null}
-        {!legacy ? (
-          <>
-            <p className="text-sm text-fg-muted">
-              Sign in on Claude’s page and approve access. Copy the authorization code, close that
-              window, and paste it here. No terminal command is needed.
-            </p>
-            {attempt ? (
+        <Field label="Sign-in method" group>
+          <SegmentedControl
+            aria-label="Sign-in method"
+            className="self-start"
+            value={legacy ? "token" : "browser"}
+            options={[
+              { value: "browser", label: "Browser" },
+              { value: "token", label: "Setup token" },
+            ]}
+            disabled={pending}
+            onValueChange={(method) => {
+              setLegacy(method === "token");
+              setCode("");
+              setToken("");
+              setError(null);
+            }}
+          />
+        </Field>
+        {/* Reserve the code step, not the whole page. Only an explicit method
+            change reveals a differently sized form; auth and errors stay put. */}
+        <div className={legacy ? "min-h-60" : "min-h-44"}>
+          <FieldStack className="gap-4">
+            {!legacy ? (
               <>
-                <Button asChild variant="outline" size="sm">
-                  <a href={attempt.authorizationUrl} target="_blank" rel="noopener noreferrer">
-                    Open Claude sign-in
-                  </a>
-                </Button>
+                <p className="m-0 text-sm leading-5 text-fg-muted">
+                  {attempt
+                    ? "Approve access on Claude’s page, then paste the authorization code here."
+                    : "Claude opens in a new window. Sign in and approve access, then return here with the authorization code."}
+                </p>
                 <Field
                   label="Authorization code"
-                  hint="Copy the full code shown after you approve access in Claude."
+                  aside={
+                    attempt ? (
+                      <Button asChild variant="link" size="sm">
+                        <a
+                          href={attempt.authorizationUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open Claude sign-in
+                        </a>
+                      </Button>
+                    ) : (
+                      <span aria-hidden="true" className="inline-block h-8" />
+                    )
+                  }
+                  hint={
+                    attempt
+                      ? "Paste the full code, including any # suffix."
+                      : "Start sign-in to get an authorization code."
+                  }
                 >
                   <SecretInput
                     ref={codeInput}
                     value={code}
                     autoComplete="off"
                     aria-label="Claude authorization code"
-                    disabled={pending}
-                    onChange={(event) => setCode(event.target.value)}
+                    disabled={pending || !attempt}
+                    onChange={(event) => {
+                      setCode(event.target.value);
+                      setError(null);
+                    }}
                   />
                 </Field>
-                <Button type="button" variant="ghost" size="sm" disabled={pending} onClick={reset}>
-                  Start again
-                </Button>
               </>
-            ) : null}
-          </>
-        ) : null}
-        <Disclosure
-          title="Use a setup token"
-          summary="Usage readings update after model calls"
-          open={legacy}
-          onOpenChange={(open) => {
-            if (!pending) {
-              setLegacy(open);
-              setCode("");
-              setToken("");
-            }
-          }}
-          disabled={pending}
-        >
-          <FieldStack>
-            <ClaudeTokenInstructions />
-            <Field label="Setup token" hint="Stored encrypted. Connecting makes no model calls.">
-              <SecretInput
-                value={token}
-                autoComplete="off"
-                aria-label="Claude subscription setup token"
-                disabled={pending}
-                onChange={(event) => setToken(event.target.value)}
-              />
-            </Field>
+            ) : (
+              <>
+                <ClaudeTokenInstructions />
+                <Field
+                  label="Setup token"
+                  hint="Stored encrypted. Connecting makes no model calls."
+                >
+                  <SecretInput
+                    value={token}
+                    autoComplete="off"
+                    aria-label="Claude subscription setup token"
+                    disabled={pending}
+                    onChange={(event) => {
+                      setToken(event.target.value);
+                      setError(null);
+                    }}
+                  />
+                </Field>
+              </>
+            )}
           </FieldStack>
-        </Disclosure>
+        </div>
+        <div id={statusId} className="min-h-12 text-sm leading-5">
+          {error ? (
+            <p role="alert" className="m-0 text-danger">
+              {error}
+            </p>
+          ) : null}
+          {!error && blockedReason ? <p className="m-0 text-fg-muted">{blockedReason}</p> : null}
+          {!error && !state.canManageConnection ? (
+            <p className="m-0 text-fg-muted">
+              Only people who can manage connections can connect Claude.
+            </p>
+          ) : null}
+          {!error && !blockedReason && state.canManageConnection && footerStart !== false ? (
+            <div className="text-xs text-fg-muted">
+              {footerStart ??
+                (state.organization
+                  ? "You can change workspace access on the account page."
+                  : null)}
+            </div>
+          ) : null}
+        </div>
       </FieldStack>
     </ModelsFormPage>
   );
