@@ -517,11 +517,7 @@ export function useChatComposerController({
         delivery.requestAnnotationReview?.();
         return false;
       }
-      // Hosts may render typed text in a transition, so right after a
-      // keystroke `canSend` can still describe the previous text. Send checks
-      // the live draft itself.
-      const hostBehind = liveValueRef.current !== delivery.value;
-      if (!delivery.canSend && !(hostBehind && liveValueRef.current.trim())) return false;
+      if (!delivery.canSend) return false;
       submittingRef.current = true;
       setSubmitting(true);
       setSubmittingMode(mode);

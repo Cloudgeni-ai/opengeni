@@ -129,38 +129,14 @@ export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLT
   };
 
   measure();
-  // Measuring clones the table and forces layout, so it runs only when the
-  // answer can change: the column or panel gets wider or narrower, the table's
-  // own box changes size, or its cells change. Height changes elsewhere (the
-  // composer growing, messages streaming in) and re-renders that leave the
-  // table's DOM as it was do not measure again.
-  const widths = new WeakMap<Element, number>();
-  const resized =
-    typeof ResizeObserver === "undefined"
-      ? undefined
-      : new ResizeObserver((entries) => {
-          let changed = false;
-          for (const entry of entries) {
-            const size =
-              entry.target === table
-                ? entry.contentRect.width * 1e6 + entry.contentRect.height
-                : entry.contentRect.width;
-            if (widths.get(entry.target) !== size) changed = true;
-            widths.set(entry.target, size);
-          }
-          if (changed) measure();
-        });
-  resized?.observe(scroller);
-  resized?.observe(body);
-  resized?.observe(table);
-  const edited =
-    typeof MutationObserver === "undefined" ? undefined : new MutationObserver(() => measure());
-  edited?.observe(table, { childList: true, subtree: true, characterData: true });
+  const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+  observer?.observe(scroller);
+  observer?.observe(body);
+  observer?.observe(table);
   return {
     measure,
     disconnect: () => {
-      resized?.disconnect();
-      edited?.disconnect();
+      observer?.disconnect();
       reset();
     },
   };
