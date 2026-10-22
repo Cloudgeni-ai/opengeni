@@ -9,7 +9,7 @@
  *
  * Two scopes, each with its own authority and nothing borrowed:
  * - `organization_administrator`: the organization context (no workspace),
- *   the organization membership lifecycle lock, the caller's subject and the
+ *   a shared organization membership lifecycle lock, the caller's subject and the
  *   organization administrator check (the predicate the connection policies
  *   use), in every transaction. Only a shared, organization-managed
  *   connection (not one a workspace manages) of the provider's registered
@@ -200,15 +200,17 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               { accountId: scope.accountId, workspaceId: null },
               async (tx) => {
                 // The organization membership lifecycle key, before the
-                // administrator check, so a demotion cannot commit while
-                // this transaction acts on its result. A bounded wait: a
-                // busy organization refuses the read rather than queueing.
+                // administrator check, shared between inspections of independent
+                // connections. Lifecycle writers remain exclusive, so a demotion
+                // cannot commit while this transaction acts on its result. The
+                // bounded wait refuses a busy organization rather than queueing
+                // indefinitely.
                 await tx.execute(
                   sql`select set_config('lock_timeout', ${ORGANIZATION_MEMBERSHIP_LOCK_TIMEOUT}, true)`,
                 );
                 try {
                   await tx.execute(
-                    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`}, 0))`,
+                    sql`select pg_advisory_xact_lock_shared(hashtextextended(${`organization-membership:${scope.accountId}`}, 0))`,
                   );
                 } catch (error) {
                   if (nestedPostgresSqlState(error) === "55P03") throw new NotVisible();
