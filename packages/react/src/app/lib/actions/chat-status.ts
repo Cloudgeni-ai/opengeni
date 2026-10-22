@@ -32,15 +32,6 @@ export function chatRowStatus(row: SessionListRow, now: Date = new Date()): Chat
   };
 }
 
-/** Changes when anything the status marks show changes. */
-export function chatStatusKey(row: SessionListRow | null): string {
-  if (!row) return "";
-  const { summary, scheduled, creator } = chatRowStatus(row);
-  return `${summary.kind}|${summary.label}|${summary.attentionSince ?? ""}|${scheduled}|${
-    creator?.subjectId ?? ""
-  }`;
-}
-
 /**
  * Whether the record's row says how the chat is now: the sidebar on screen
  * holds it (and keeps it live), or it was read moments ago.

@@ -7,7 +7,6 @@
  */
 import { useSyncExternalStore } from "react";
 import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
-import { chatStatusKey } from "./chat-status";
 
 export type ChatRecord = {
   id: string;
@@ -160,6 +159,28 @@ export function chatRecordFromRow(row: SessionListRow, readAt: number = Date.now
     row,
     readAt,
   };
+}
+
+/**
+ * Changes when a row's status marks could change (working, waiting, needs you,
+ * failed, unread, scheduled, creator), so a status-only change re-renders the
+ * lists. Raw fields only: the marks themselves are drawn by the lazy lists.
+ */
+export function chatStatusKey(row: SessionListRow | null): string {
+  if (!row) return "";
+  return JSON.stringify([
+    row.status,
+    row.unread ?? null,
+    row.activelyWorking ?? null,
+    row.requiresActionSince ?? null,
+    row.treeStats ?? null,
+    row.hasUpcomingSchedules ?? null,
+    row.hasSchedules ?? null,
+    row.effectiveControl?.state ?? null,
+    "inputWait" in row ? Boolean(row.inputWait) : null,
+    row.createdBy?.subjectId ?? null,
+    row.parentSessionId,
+  ]);
 }
 
 /** Remember rows the app has read (sidebar pages, search results, the open chat). */
