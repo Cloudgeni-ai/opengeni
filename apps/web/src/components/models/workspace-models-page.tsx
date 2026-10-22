@@ -1374,14 +1374,17 @@ export function WorkspaceModelsPageBody({
       <div ref={root} className="min-w-0">
         {!key && !view ? <ModelsRefreshControl client={client} /> : null}
         {organizationAdmin
-          ? orgCodex.accounts.map((candidate) => (
-              <OrganizationCodexDetailPrefetch
-                key={candidate.id}
-                client={client}
-                organizationId={orgId}
-                account={candidate}
-              />
-            ))
+          ? orgCodex.accounts
+              // A workspace's own account opens on that workspace's page.
+              .filter((candidate) => !candidate.reach?.ownerWorkspaceId)
+              .map((candidate) => (
+                <OrganizationCodexDetailPrefetch
+                  key={candidate.id}
+                  client={client}
+                  organizationId={orgId}
+                  account={candidate}
+                />
+              ))
           : null}
         {page}
       </div>

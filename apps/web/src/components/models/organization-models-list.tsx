@@ -427,6 +427,13 @@ export function OrganizationModelsList({
   );
   const reachLabel = (reach: AccountReach | undefined) =>
     reach ? accountReachLabel(labels, reach, workspaceName) : undefined;
+  /* A workspace's own account is only read live in that workspace: the
+     organization route never touches its credential. A viewer in that
+     workspace sees its live reading there; anyone else its last stored one. */
+  const ownerWorkspace = (reach: AccountReach | undefined) =>
+    reach?.ownerWorkspaceId
+      ? (workspaces.find((workspace) => workspace.id === reach.ownerWorkspaceId) ?? null)
+      : undefined;
   const openShared = (
     provider: "codex" | "claude" | "supergrok",
     id: string,
@@ -446,6 +453,7 @@ export function OrganizationModelsList({
             account={account}
             scopeLabel={reachLabel(account.reach)}
             usage={liveCodexUsage[account.id] ?? cachedCodexUsage(account)}
+            workspaceOwned={Boolean(account.reach?.ownerWorkspaceId)}
             onOpen={() => openShared("codex", account.id, account.reach)}
           />,
         ),
@@ -460,7 +468,8 @@ export function OrganizationModelsList({
       backToList: onConnect,
     };
     if (claudeEnabled)
-      for (const account of orgClaude.accounts)
+      for (const account of orgClaude.accounts) {
+        const owner = ownerWorkspace(account.reach);
         groups.claude.push(
           groupEntry(
             `org:claude:${account.id}`,
@@ -470,10 +479,26 @@ export function OrganizationModelsList({
               account={account}
               places={claudePlaces}
               {...(account.reach ? { scopeLabel: reachLabel(account.reach) } : {})}
+              {...(owner === undefined
+                ? {}
+                : {
+                    usage: owner ? (
+                      <ClaudeAccountUsageReadout
+                        client={client}
+                        scope="workspace"
+                        scopeId={owner.id}
+                        account={account}
+                        canManage={false}
+                      />
+                    ) : (
+                      claudeUsageCell(account)
+                    ),
+                  })}
               onOpen={() => openShared("claude", account.id, account.reach)}
             />,
           ),
         );
+      }
     const grokPlaces: SuperGrokPlaces = {
       scopeName: labels.everyone,
       organizationName: labels.organization,
@@ -1157,6 +1182,7 @@ function OrganizationCodexRow({
   account,
   scopeLabel,
   usage,
+  workspaceOwned,
   onOpen,
 }: {
   codex: OrganizationCodexSubscriptions;
@@ -1164,9 +1190,16 @@ function OrganizationCodexRow({
   /** Whose it is and who it reaches; empty while that is still loading. */
   scopeLabel: string | undefined;
   usage: ReactNode;
+  /** A workspace's own account: never read live on the organization route. */
+  workspaceOwned: boolean;
   onOpen: () => void;
 }) {
-  const live = useOrganizationCodexUsage(codex.client, codex.organizationId, account);
+  const live = useOrganizationCodexUsage(
+    codex.client,
+    codex.organizationId,
+    account,
+    !workspaceOwned,
+  );
   const readings = codexUsageReadings(live.data?.usage, Date.now());
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const reconnect = account.status !== "active";
@@ -1183,6 +1216,8 @@ function OrganizationCodexRow({
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
           <StatusBadge status="disabled" variant="dot" />
+        ) : workspaceOwned ? (
+          usage
         ) : live.loading ? (
           <UsageReadout percent={null} window="this week" loading />
         ) : live.error || live.data?.status === "error" ? (
