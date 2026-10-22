@@ -39,7 +39,12 @@ async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
   const runtime = join(h.root, "runtime");
   await mkdir(runtime);
   await writeFile(join(runtime, "deployment-receipt.json"), JSON.stringify(deployment));
-  for (const file of ["cloud-auth.ts", "service-config.ts", "service-limits.ts"])
+  for (const file of [
+    "cloud-auth.ts",
+    "service-config.ts",
+    "service-limits.ts",
+    "stopped-reconciliation.ts",
+  ])
     await writeFile(join(runtime, file), "export {};\n");
   await writeFile(
     join(runtime, "control.ts"),
@@ -789,6 +794,13 @@ test("OFF binds exact STOP dependency bytes and runtime UID; old plans require f
     expect(await h.events()).toEqual([]);
     await writeFile(join(operator.runtime, "service-config.ts"), "export {};\n");
     await writeFile(
+      join(operator.runtime, "stopped-reconciliation.ts"),
+      "export const weakened = true;\n",
+    );
+    expect((await operator.run()).code).not.toBe(0);
+    expect(await h.events()).toEqual([]);
+    await writeFile(join(operator.runtime, "stopped-reconciliation.ts"), "export {};\n");
+    await writeFile(
       join(operator.runtime, "deployment-receipt.json"),
       JSON.stringify({ ...deployment, uid: "other" }),
     );
@@ -848,4 +860,114 @@ test("STOP proof verifier rejects partial/stale evidence and accepts reviewed al
     ),
   ).toThrow();
   expect(() => verifyStop(stopped, { ...deployment, uid: "wrong" }, deployment)).toThrow();
+});
+
+test("reconciled-disabled requires complete matching exit and ledger witnesses, not a status string", () => {
+  const witness = {
+    uid: deployment.uid,
+    generation: 8,
+    mode: "active",
+    instance: "instance-1",
+    controlGeneration: "stop-12345678-1234-4234-8234-123456789abc",
+  };
+  const proof = {
+    outcome: "stable-state-observed",
+    stateSha: "a".repeat(40),
+    mainSha: "b".repeat(40),
+    candidateRefs: [{ ref: `refs/heads/queue/live/${"c".repeat(64)}`, sha: "d".repeat(40) }],
+    effects: 1,
+  };
+  const result = {
+    ...stopped,
+    outcome: "reconciled-disabled",
+    drainProven: false,
+    writer: null,
+    idempotent: true,
+    drainWitness: witness,
+    stoppedReconciliation: proof,
+  };
+  const receipt = {
+    ...deployment,
+    drainWitness: witness,
+    stoppedReconciliation: { uid: deployment.uid, generation: 8, mode: "active", proof },
+  };
+  expect(() => verifyStop(result, receipt, deployment)).not.toThrow();
+  expect(() =>
+    verifyStop(
+      {
+        ...result,
+        writer: {
+          ...stopped.writer,
+          instance: witness.instance,
+          control: { generation: witness.controlGeneration },
+          uncertainOutcome: true,
+          reconciliationRequired: true,
+        },
+        drainProven: true,
+        idempotent: false,
+      },
+      receipt,
+      deployment,
+    ),
+  ).not.toThrow();
+  for (const patch of [
+    { drainWitness: null },
+    { stoppedReconciliation: null },
+    { priorDrainProof: true },
+    { idempotent: false },
+    { drainProven: true },
+    { forced: true },
+    { stateAfter: "e".repeat(40) },
+    { writer: { ...stopped.writer, writerActive: true }, drainProven: true },
+    {
+      writer: {
+        ...stopped.writer,
+        instance: "forged",
+        control: { generation: witness.controlGeneration },
+      },
+      drainProven: true,
+    },
+    {
+      writer: { ...stopped.writer, instance: witness.instance, control: { generation: "stale" } },
+      drainProven: true,
+    },
+    { writer: { ...stopped.writer, unprovenWriterPid: 42 }, drainProven: true },
+  ])
+    expect(() => verifyStop({ ...result, ...patch }, receipt, deployment)).toThrow();
+  for (const patch of [
+    { uid: "forged" },
+    { generation: 7 },
+    { mode: "ci-shadow" },
+    { instance: "" },
+    { controlGeneration: "invented" },
+  ])
+    expect(() =>
+      verifyStop(result, { ...receipt, drainWitness: { ...witness, ...patch } }, deployment),
+    ).toThrow();
+  for (const patch of [{ uid: "other" }, { generation: 7 }, { mode: "read-only" }])
+    expect(() =>
+      verifyStop(
+        result,
+        { ...receipt, stoppedReconciliation: { ...receipt.stoppedReconciliation, ...patch } },
+        deployment,
+      ),
+    ).toThrow();
+  for (const patch of [
+    { outcome: "unknown" },
+    { effects: -1 },
+    { effects: 0.5 },
+    { stateSha: "b".repeat(40) },
+    { mainSha: "bad" },
+    { candidateRefs: [...proof.candidateRefs, ...proof.candidateRefs] },
+    { candidateRefs: [{ ref: "refs/heads/main", sha: "d".repeat(40) }] },
+  ]) {
+    const altered = { ...proof, ...patch };
+    expect(() =>
+      verifyStop(
+        { ...result, stoppedReconciliation: altered },
+        { ...receipt, stoppedReconciliation: { ...receipt.stoppedReconciliation, proof: altered } },
+        deployment,
+      ),
+    ).toThrow();
+  }
 });

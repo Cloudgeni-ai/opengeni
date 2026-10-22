@@ -353,8 +353,9 @@ bun docs/merge-batcher-admin/off.ts bind-stop "$ADMIN_DIR" "$REVIEWED_CONTROL_DI
 ```
 
 That directory must contain the deployment owner's reviewed `control.ts`,
-`cloud-auth.ts`, `service-config.ts`, `service-limits.ts` and
-`deployment-receipt.json`. The binding records all four source hashes and the exact
+`cloud-auth.ts`, `service-config.ts`, `service-limits.ts`,
+`stopped-reconciliation.ts` and `deployment-receipt.json`. The binding records all
+five source hashes and the exact
 service UID/image/URI in `stop-contract.json`. It never guesses a service identity.
 Review the source/dependency closure and binding together; if the runtime owner
 adds imports or changes the STOP interface, qualify a new adapter rather than
@@ -371,8 +372,21 @@ the writer and emits a JSON receipt. GitHub reads happen **after STOP** so a Git
 outage cannot prevent stopping the already-bound runtime. Restoration requires a
 confirmed drained or previously proven disabled outcome, persistent STOP,
 manual-zero, no tagged revision uncertainty, no forced outcome, stable state SHA
-and a matching deployment stop proof. Unknown/forced/reconciliation-required
-results retain STOP and protections; they do not claim the manual path works.
+and a matching deployment stop proof. The existing clean `verified-disabled`
+path remains unchanged. An explicit `reconciled-disabled` alternative requires
+the pinned operator's complete read-only reconciliation proof, matching retained
+exit witness (UID, provider generation, mode, instance and STOP generation),
+matching receipt/proof, stable state SHA, valid main/candidate refs and bounded
+completed-effect count. A status string or desired instance count alone is not
+proof. The operator checks the same current provider generation/routing and
+reads the exact durable ledger/main/refs twice; the wrapper validates that
+bound result against its deployment receipt. Pending/submitting/uncertain/blocked
+effects, missing exit witness, changed state/generation or incomplete reads still
+hold. This path neither restarts a writer nor cancels hosted CI, replays effects,
+or fabricates clean runtime flags. Old four-file bindings require a newly reviewed
+five-file binding, not editing a saved hash to bypass the check.
+Unknown/forced results retain STOP and protections; they do not claim the manual path works.
+These proofs cover the observed interval, not a later administrator's actions.
 The real active STOP contract, including uninitialized state behavior, must be
 qualified by the runtime owner before the live drill. If local source/identity
 binding drift prevents the wrapper from starting, use that owner's emergency STOP

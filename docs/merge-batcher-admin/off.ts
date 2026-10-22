@@ -9,12 +9,34 @@ const controlFiles = [
   "cloud-auth.ts",
   "service-config.ts",
   "service-limits.ts",
+  "stopped-reconciliation.ts",
 ] as const;
+type DrainWitness = {
+  uid: string;
+  generation: string | number;
+  mode: string;
+  instance: string;
+  controlGeneration: string;
+};
+type Reconciliation = {
+  outcome: string;
+  stateSha: string;
+  mainSha: string;
+  candidateRefs: { ref: string; sha: string }[];
+  effects: number;
+};
 type Deployment = {
   uid: string;
   image: string;
   uri: string;
   stopProof?: { uid: string; stateSha: string; outcome: string };
+  drainWitness?: DrainWitness;
+  stoppedReconciliation?: {
+    uid: string;
+    generation: string | number;
+    mode: string;
+    proof: Reconciliation;
+  };
 };
 type Contract = {
   schemaVersion: 1;
@@ -34,7 +56,12 @@ type Stop = {
   outcome: string;
   stateBefore: string | null;
   stateAfter: string | null;
+  idempotent?: boolean;
+  drainWitness?: DrainWitness | null;
+  stoppedReconciliation?: Reconciliation | null;
   writer?: {
+    instance?: string;
+    control?: { generation?: string };
     state: string;
     writerActive: boolean;
     writerPid: unknown;
@@ -113,6 +140,12 @@ export function verifyStop(result: Stop, receipt: Deployment, expected: Deployme
     result.writer.uncertainOutcome === false &&
     result.writer.reconciliationRequired === false;
   const prior = result.outcome === "verified-disabled" && result.priorDrainProof === true;
+  const reconciled = verifyReconciliation(result, receipt, expected);
+  const oldProof =
+    (drained || prior) &&
+    receipt.stopProof?.uid === expected.uid &&
+    receipt.stopProof.stateSha === result.stateBefore &&
+    receipt.stopProof.outcome === "drained-state-observed";
   if (
     result.command !== "stop" ||
     result.disabled !== true ||
@@ -121,15 +154,83 @@ export function verifyStop(result: Stop, receipt: Deployment, expected: Deployme
     result.stopPersisted !== true ||
     result.forced !== false ||
     !stableState ||
-    (!drained && !prior) ||
-    receipt.stopProof?.uid !== expected.uid ||
-    receipt.stopProof.stateSha !== result.stateBefore ||
-    receipt.stopProof.outcome !== "drained-state-observed"
+    (!oldProof && !reconciled)
   ) {
     throw new Error(
       "STOP is not proven drained/reconciled; keep protections and hold manual merges",
     );
   }
+}
+function verifyReconciliation(result: Stop, receipt: Deployment, expected: Deployment): boolean {
+  if (result.outcome !== "reconciled-disabled") return false;
+  const witness = result.drainWitness,
+    saved = receipt.drainWitness;
+  const proof = result.stoppedReconciliation,
+    retained = receipt.stoppedReconciliation;
+  const sha = (s: unknown) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s);
+  if (
+    !witness ||
+    !saved ||
+    !proof ||
+    !retained ||
+    witness.uid !== expected.uid ||
+    !["active", "ci-shadow", "read-only"].includes(witness.mode) ||
+    !(typeof witness.generation === "string"
+      ? /^[1-9][0-9]*$/.test(witness.generation)
+      : Number.isSafeInteger(witness.generation) && witness.generation > 0) ||
+    typeof witness.instance !== "string" ||
+    !witness.instance ||
+    typeof witness.controlGeneration !== "string" ||
+    !/^stop-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
+      witness.controlGeneration,
+    ) ||
+    JSON.stringify(witness) !== JSON.stringify(saved) ||
+    retained.uid !== expected.uid ||
+    retained.generation !== witness.generation ||
+    retained.mode !== witness.mode ||
+    JSON.stringify(proof) !== JSON.stringify(retained.proof) ||
+    proof.outcome !== "stable-state-observed" ||
+    !sha(proof.stateSha) ||
+    !sha(proof.mainSha) ||
+    proof.stateSha !== result.stateBefore ||
+    proof.stateSha !== result.stateAfter ||
+    !Number.isSafeInteger(proof.effects) ||
+    proof.effects < 0 ||
+    proof.effects > 10000 ||
+    !Array.isArray(proof.candidateRefs) ||
+    proof.candidateRefs.length > 10000 ||
+    result.priorDrainProof !== false ||
+    (result.drainProven !== true && result.idempotent !== true)
+  )
+    return false;
+  const prefix =
+    witness.mode === "active" ? "refs/heads/queue/live/" : "refs/heads/queue/shadow-traffic/";
+  const refs = new Set<string>();
+  for (const candidate of proof.candidateRefs) {
+    if (
+      !candidate ||
+      typeof candidate.ref !== "string" ||
+      !candidate.ref.startsWith(prefix) ||
+      !/^[a-f0-9]{64}$/.test(candidate.ref.slice(prefix.length)) ||
+      !sha(candidate.sha) ||
+      refs.has(candidate.ref)
+    )
+      return false;
+    refs.add(candidate.ref);
+  }
+  // A fresh witness still requires an observed exited writer. Effect flags may
+  // remain true: the separate pinned read-only reconciliation proves settlement.
+  if (result.writer)
+    return (
+      result.drainProven === true &&
+      result.writer.state === "stopped" &&
+      result.writer.instance === witness.instance &&
+      result.writer.control?.generation === witness.controlGeneration &&
+      result.writer.writerActive === false &&
+      result.writer.writerPid === null &&
+      !result.writer.unprovenWriterPid
+    );
+  return result.drainProven === false && result.idempotent === true;
 }
 async function command(args: string[], directory: string, name: string): Promise<string> {
   const child = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
