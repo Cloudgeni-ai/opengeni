@@ -95,7 +95,9 @@ export type SessionProxyContext = {
 };
 
 /**
- * The only fields a browser may send when creating a session through the proxy.
+ * The only fields a browser may send when creating a session through the proxy,
+ * besides `modelContext`, which the proxy appends after any context the hook
+ * and `messageExtras` return, as it does for follow-up messages.
  * After the `createSession` hook returns, the proxy adds the attached files to
  * the created request (deduplicated by file id) and, when `modelSelection` is
  * not `false`, applies the browser's explicit model choices over the hook's,
@@ -358,6 +360,9 @@ export type SessionProxyHandlerOptions = {
    *   pinning a chat, moving it to a project, managing projects and a chat's
    *   tool approval settings. Every other write is refused.
    * - Catalog logos are served from the Opengeni API.
+   * - Creating a chat also takes the app's own create fields: the id of its
+   *   first message and the new-chat draft revision it sent. It sends
+   *   `visibility` and `connectionAccounts` too; the server chooses both.
    */
   sessionApp?: boolean | undefined;
   /**
@@ -406,6 +411,14 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "idempotencyKey",
   "resources",
   "startMode",
+  "modelContext",
+]);
+/** Extra fields the packaged session app sends on create (see `browserCreateFields`). */
+const SESSION_APP_CREATE_FIELDS: ReadonlySet<string> = new Set([
+  "visibility",
+  "clientEventId",
+  "connectionAccounts",
+  "expectedNewSessionDraftRevision",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 /** The API's single-recording ceiling (25 MiB) plus multipart framing. */
@@ -1148,7 +1161,9 @@ export function createSessionProxyHandler(
         if (method !== "POST" || !options.createSession) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
-        const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
+        const body = await readJsonBody(request, maxBodyBytes);
+        const input = createInput(body, modelSelection, sessionAppEnabled);
+        const browser = browserCreateFields(body, sessionAppEnabled);
         if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
@@ -1157,13 +1172,18 @@ export function createSessionProxyHandler(
         const created = withBrowserCreateChoices(
           toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
           input,
+          browser,
         );
         const extras = await messageExtras({
           delivery: "create",
           ...(input.startMode ? { startMode: input.startMode } : {}),
         });
         if (extras instanceof Response) return extras;
-        const modelContext = joinContext(extras?.modelContext, created.modelContext);
+        const modelContext = joinContext(
+          extras?.modelContext,
+          created.modelContext,
+          browser.modelContext,
+        );
         return json(
           await client.createSession(workspaceId, {
             ...created,
@@ -2015,9 +2035,14 @@ function pick(
 function createInput(
   body: Record<string, unknown> | undefined,
   modelSelection: boolean,
+  sessionApp: boolean,
 ): SessionProxyCreateInput {
   for (const key of Object.keys(body ?? {})) {
-    if (!CREATE_FIELDS.has(key) && !(modelSelection && isModelField(key))) {
+    if (
+      !CREATE_FIELDS.has(key) &&
+      !(modelSelection && isModelField(key)) &&
+      !(sessionApp && SESSION_APP_CREATE_FIELDS.has(key))
+    ) {
       reject(
         400,
         "create_field_not_allowed",
@@ -2097,9 +2122,68 @@ function createResources(value: unknown): FileResourceRef[] {
 }
 
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
+type BrowserCreateFields = {
+  modelContext?: string | undefined;
+  clientEventId?: string | undefined;
+  expectedNewSessionDraftRevision?: number | undefined;
+};
+
+/**
+ * The browser's own context and the session app's create bookkeeping. Message
+ * context is appended after the server's, as on follow-up messages. The session
+ * app also sends the id of its first message event and the revision of the
+ * new-chat draft it sent, so the API can clear that draft. It sends `visibility`
+ * and an empty `connectionAccounts` too: the server chooses both, so those are
+ * dropped, and any account selection is refused.
+ */
+function browserCreateFields(
+  body: Record<string, unknown> | undefined,
+  sessionApp: boolean,
+): BrowserCreateFields {
+  const fields: BrowserCreateFields = {};
+  const modelContext = body?.modelContext;
+  if (modelContext !== undefined && typeof modelContext !== "string") {
+    reject(400, "invalid_model_context", "modelContext must be a string.");
+  }
+  if (modelContext?.trim()) fields.modelContext = modelContext;
+  if (!sessionApp) return fields;
+  const visibility = body?.visibility;
+  if (visibility !== undefined && visibility !== "workspace" && visibility !== "private") {
+    reject(400, "invalid_visibility", "visibility must be workspace or private.");
+  }
+  const accounts = body?.connectionAccounts;
+  if (accounts !== undefined && (!Array.isArray(accounts) || accounts.length > 0)) {
+    reject(
+      403,
+      "connection_account_not_allowed",
+      "The server chooses which connected accounts a chat uses.",
+    );
+  }
+  const clientEventId = body?.clientEventId;
+  if (clientEventId !== undefined) {
+    if (typeof clientEventId !== "string" || !clientEventId) {
+      reject(400, "invalid_client_event_id", "clientEventId must be a non-empty string.");
+    }
+    fields.clientEventId = clientEventId;
+  }
+  const revision = body?.expectedNewSessionDraftRevision;
+  if (revision !== undefined) {
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+      reject(
+        400,
+        "invalid_draft_revision",
+        "expectedNewSessionDraftRevision must be a non-negative integer.",
+      );
+    }
+    fields.expectedNewSessionDraftRevision = revision;
+  }
+  return fields;
+}
+
 function withBrowserCreateChoices(
   created: CreateSessionRequest,
   input: SessionProxyCreateInput,
+  browser: BrowserCreateFields = {},
 ): CreateSessionRequest {
   const existing = created.resources ?? [];
   const attached = new Set(
@@ -2118,6 +2202,13 @@ function withBrowserCreateChoices(
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+    ...(created.clientEventId === undefined && browser.clientEventId
+      ? { clientEventId: browser.clientEventId }
+      : {}),
+    ...(created.expectedNewSessionDraftRevision === undefined &&
+    browser.expectedNewSessionDraftRevision !== undefined
+      ? { expectedNewSessionDraftRevision: browser.expectedNewSessionDraftRevision }
+      : {}),
   };
 }
 
