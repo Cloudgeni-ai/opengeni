@@ -1,7 +1,6 @@
--- deployment-mode: rolling
--- online-safety-exception: explicit-lock: production applies this rolling migration live, with clients serving; SHARE ROW EXCLUSIVE excludes writers without blocking readers, then ACCESS EXCLUSIVE on the four subscription tables whose row security the owner window relaxes, each LOCK bounded to 5s in total by statement_timeout, so a busy table fails the migration rather than waiting longer; once granted, the set-based fold holds those locks until commit, so readers then wait for the whole fold, measured at 0.44s for 3k connections, 1.2s for 9k and 5.2s to 6.1s for 30k connections with 100k workspaces on PostgreSQL 18; writers can be excluded for the two acquisitions (up to 5s each) plus that hold
--- online-safety-exception: unbatched-data: every UPDATE, DELETE and INSERT here is one set-based statement over the subscription connection, reach, policy, auto-assignment and settings rows, never a per-connection loop; the whole migration measured 0.07s at 300 connections, 0.44s at 3k, 1.2s at 9k and 5.2s at 30k connections with 100k workspaces on PostgreSQL 18, growing linearly
--- online-safety-exception: constraint-validation: the workspace-owner CHECK is validated by one scan of subscription_connections under the ACCESS EXCLUSIVE lock this migration already holds, under 40ms at 30k connections on PostgreSQL 18
+-- deployment-mode: maintenance
+-- maintenance-justification: The fold holds ACCESS EXCLUSIVE on the four subscription tables until commit, measured at 6.1s for 30k connections with 100k workspaces on PostgreSQL 18, and serving clients would wait that long behind it; production counts are not yet known, so the release parks clients for it. An expand/contract split would need a binary that reads both the pool-row model and the one-owner model, which this release does not ship; shrinking this window is a follow-up.
+-- online-safety-exception: maintenance-unbatched-data: every UPDATE, DELETE and INSERT here is one set-based statement over the subscription connection, reach, policy, auto-assignment and settings rows, never a per-connection loop; the whole migration measured 0.07s at 300 connections, 0.44s at 3k, 1.2s at 9k and 5.2s at 30k connections with 100k workspaces on PostgreSQL 18, growing linearly
 -- contract-step: nothing in this release reads or writes subscription_connection_assignment_policies; a later contract migration drops it. A previous binary that straddles the commit reads no policy rows, so it classifies every shared connection by its manager and the stripped settings (automatic source), which is exactly the reach written here.
 --
 -- Migration 0907: every subscription connection has one owner and serves
@@ -41,16 +40,20 @@
 -- memberships are read through the organization-lifecycle marker branch.
 -- No advisory fence is taken.
 --
--- Locks: production applies this migration live (deployment-mode rolling; the
--- release parks clients only for a maintenance-mode migration). Each LOCK
--- statement waits at most 5s in total, by statement_timeout (not 5s per
--- table). First SHARE ROW EXCLUSIVE on the five tables: it waits only for
+-- Locks: this is a maintenance migration, so the production release parks
+-- database clients before it runs. Each LOCK statement still waits at most 5s
+-- in total, by statement_timeout (not 5s per table), for anything left
+-- running. First SHARE ROW EXCLUSIVE on the five tables: it waits only for
 -- writers and never blocks readers. Then ACCESS EXCLUSIVE on the four whose
 -- row security the owner window relaxes (ALTER ... NO FORCE needs it anyway):
 -- with writers already excluded it waits only for reads in progress, and
 -- readers that arrive meanwhile queue behind it for at most those 5s. Once
 -- granted, the locks are held until commit, for as long as the set-based fold
--- below takes, and readers and writers wait for that too.
+-- below takes (6.1s measured at 30k connections and 100k workspaces), and any
+-- reader or writer still connected waits for that too. SHARE ROW EXCLUSIVE
+-- then ACCESS EXCLUSIVE can exclude writers for two acquisitions (up to 5s
+-- each) plus that hold. The workspace-owner CHECK added below is validated by
+-- one scan under the same lock, under 40ms at 30k connections.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5s';
 LOCK TABLE subscription_connections, subscription_connection_workspaces,
