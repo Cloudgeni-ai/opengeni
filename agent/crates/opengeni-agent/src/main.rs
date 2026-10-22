@@ -968,7 +968,11 @@ fn register_hosted_native_host() {
         warn!("no home directory; the attached-browser bridge is not registered");
         return;
     };
-    match browser_bridge::install_native_host_manifests(binary, &home) {
+    match browser_bridge::install_native_host_manifests(
+        binary,
+        &home,
+        &browser_bridge::extension_ids_from_env(),
+    ) {
         Ok(manifests) => {
             for manifest in manifests {
                 info!(path = %manifest.display(), "registered Chrome Native Messaging host");

@@ -33,6 +33,13 @@ export interface DesktopAppConfig {
   /** Let people connect this computer, running the connected-machine agent. */
   thisComputer: boolean;
   /**
+   * IDs of the product's own Chrome extensions (its branded build of the
+   * Opengeni Browser extension) that may reach this computer's agent, so
+   * agents can work in the person's own Chrome through them. Each is Chrome's
+   * 32-letter extension ID. Opengeni Browser itself is always allowed.
+   */
+  browserExtensionIds?: readonly string[];
+  /**
    * The minisign public key (the `RW…` line) that signs the agent's releases.
    * The app downloads the agent from the server and runs it only with this
    * key's signature.

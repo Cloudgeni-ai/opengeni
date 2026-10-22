@@ -236,6 +236,7 @@ export class DesktopShell {
       home: homedir(),
       env: process.env,
       agentSigningKey: config.agentSigningKey,
+      ...(config.browserExtensionIds ? { browserExtensionIds: config.browserExtensionIds } : {}),
       fetch: (url) => net.fetch(url),
       dataDir: app.getPath("userData"),
       systemLanguages: () => app.getPreferredSystemLanguages(),
