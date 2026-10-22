@@ -4,7 +4,7 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: [
-    "src/main/index.ts",
+    "src/index.ts",
     "src/contract.ts",
     "src/main/mac-login-agent.ts",
     "src/preload/content.ts",

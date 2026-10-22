@@ -13,12 +13,13 @@
     "dist"
   ],
   "type": "module",
-  "main": "./src/main/index.ts",
-  "types": "./src/main/index.ts",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./src/main/index.ts",
-      "default": "./src/main/index.ts"
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
     },
     "./contract": {
       "types": "./src/contract.ts",
