@@ -3,10 +3,7 @@ import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Page } from "playwright";
 import { resolveSiteClientScript } from "../../packages/sdk/src/site-document";
-import type {
-  OpenGeniSiteClient,
-  OpenGeniSiteClientOptions,
-} from "../../packages/sdk/src/site";
+import type { OpenGeniSiteClient, OpenGeniSiteClientOptions } from "../../packages/sdk/src/site";
 
 describe("Site conversation navigation", () => {
   let browser: Browser;
@@ -32,11 +29,7 @@ describe("Site conversation navigation", () => {
       {
         cwd: `${new URL("../..", import.meta.url).pathname}/apps/web`,
         ready: async () =>
-          (
-            await fetch(`${baseUrl}/test/site-conversations.html`).catch(
-              () => null,
-            )
-          )?.ok === true,
+          (await fetch(`${baseUrl}/test/site-conversations.html`).catch(() => null))?.ok === true,
         timeoutMs: 45_000,
       },
     );
@@ -52,16 +45,12 @@ describe("Site conversation navigation", () => {
       waitUntil: "networkidle",
     });
     await page.setContent(
-      resolveSiteClientScript(
-        '<script src="/__opengeni/site-tools/client.js"></script>',
-      ),
+      resolveSiteClientScript('<script src="/__opengeni/site-tools/client.js"></script>'),
     );
     const result = await page.evaluate(async () => {
       const create = (
         globalThis as unknown as {
-          createOpenGeniSiteClient: (
-            options: OpenGeniSiteClientOptions,
-          ) => OpenGeniSiteClient;
+          createOpenGeniSiteClient: (options: OpenGeniSiteClientOptions) => OpenGeniSiteClient;
         }
       ).createOpenGeniSiteClient;
       const paths: string[] = [];
@@ -132,24 +121,14 @@ describe("Site conversation navigation", () => {
             })
             .getAttribute("aria-expanded"),
         ).toBe("true");
-        await page
-          .getByRole("link", { name: "Review conversion trends" })
-          .waitFor();
-        await page
-          .getByRole("button", { name: "Load older conversations" })
-          .click();
-        await page
-          .getByRole("link", { name: "Investigate onboarding drop-off" })
-          .waitFor();
-        await page
-          .getByRole("searchbox", { name: "Search Site conversations" })
-          .fill("conversion");
+        await page.getByRole("link", { name: "Review conversion trends" }).waitFor();
+        await page.getByRole("button", { name: "Load older conversations" }).click();
+        await page.getByRole("link", { name: "Investigate onboarding drop-off" }).waitFor();
+        await page.getByRole("searchbox", { name: "Search Site conversations" }).fill("conversion");
         await page
           .getByRole("link", { name: "Explain last week’s activity" })
           .waitFor({ state: "hidden" });
-        await page
-          .getByRole("radio", { name: "Archived", exact: true })
-          .click();
+        await page.getByRole("radio", { name: "Archived", exact: true }).click();
         await page.getByText("No matching conversations.").waitFor();
         expect(errors).toEqual([]);
       } finally {
