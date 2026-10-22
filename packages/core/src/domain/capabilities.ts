@@ -213,7 +213,10 @@ export async function buildCapabilityCatalog(input: {
             }
           : projected;
       return applyCapabilityLifecycle(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+        applyGoogleConnectorSetupAvailability(
+          applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+          input.settings,
+        ),
       );
     })
     .sort(compareCatalogItems);
@@ -237,7 +240,33 @@ function operatorOAuthClientResolver(settings: Settings): (issuer: string) => bo
   } catch {
     // Startup validates this setting; a malformed value can configure nothing.
   }
-  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+  return (issuer) =>
+    (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
+    findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyGoogleConnectorSetupAvailability(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+): CapabilityCatalogItem {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
+  const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  if (
+    item.kind !== "mcp" ||
+    (!drive && !gmail) ||
+    (settings.googleConnectorSetupEnabled && (!drive || settings.googleDriveMcpEnabled))
+  )
+    return item;
+  return {
+    ...item,
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until Google data-access verification and provider setup are complete.",
+    },
+  };
 }
 
 export function applyOperatorOAuthClientRequirement(
@@ -395,12 +424,14 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
     if (
-      item.endpointUrl?.replace(/\/+$/u, "") === "https://gmailmcp.googleapis.com/mcp/v1" &&
+      ["https://gmailmcp.googleapis.com/mcp/v1", "https://drivemcp.googleapis.com/mcp/v1"].includes(
+        item.endpointUrl?.replace(/\/+$/u, "") ?? "",
+      ) &&
       (input.payload.connectionRef?.subjectScope !== "subject" ||
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {
       throw new HTTPException(422, {
-        message: "Gmail requires a personal-owned connection reference",
+        message: "Google connector requires a personal-owned connection reference",
       });
     }
     // This generic, potentially workspace-authored catalog is not proof of a
@@ -1023,6 +1054,7 @@ export async function settingsWithEnabledCapabilityMcpServers(
       readCodexAppsDesignation(),
     ]);
   }
+  apiIntegrations = apiIntegrations.filter(apiIntegrationIsExecutable);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(
@@ -1066,9 +1098,9 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     })
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
-  const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
-    ...serverIds,
-  ]);
+  const apiIntegrations = (
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter(apiIntegrationIsExecutable);
   options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
@@ -1134,6 +1166,12 @@ async function listInstalledApiIntegrationsForDelegations(
   return [...byServerId.values()];
 }
 
+function apiIntegrationIsExecutable(integration: ApiIntegrationRuntime): boolean {
+  return !(
+    integration.definitionProvenance === "curated" && integration.definitionId === "google-drive"
+  );
+}
+
 export function settingsWithApiIntegrationServers(
   settings: Settings,
   integrations: readonly ApiIntegrationRuntime[],
@@ -1141,7 +1179,10 @@ export function settingsWithApiIntegrationServers(
   if (integrations.length === 0) return settings;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = integrations
-    .filter((integration) => !existingIds.has(integration.serverId))
+    .filter(
+      (integration) =>
+        apiIntegrationIsExecutable(integration) && !existingIds.has(integration.serverId),
+    )
     .map((integration) => ({
       id: integration.serverId,
       name: integration.name,

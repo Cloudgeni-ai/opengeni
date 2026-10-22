@@ -45,6 +45,8 @@ import {
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
+  isOfficialDriveMcpConfig,
+  mergeDriveMcpTools,
   sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
@@ -345,7 +347,8 @@ async function listTools(
         throw legacyMcpClientError(error);
       }),
   );
-  return tools.filter(
+  const completeTools = isOfficialDriveMcpConfig(target.server) ? mergeDriveMcpTools(tools) : tools;
+  return completeTools.filter(
     (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
   );
 }

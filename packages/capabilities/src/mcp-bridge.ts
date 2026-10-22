@@ -3,7 +3,7 @@ import type { MCPServer } from "@openai/agents";
 export const LOCAL_MCP_BRIDGE_CONTRACT_VERSION = 1 as const;
 
 export type LocalMcpBridgeAuthority = "connection" | "host" | "none";
-export type LocalMcpBridgeToolSurface = "static_reviewed";
+export type LocalMcpBridgeToolSurface = "static_reviewed" | "remote_with_reviewed_extensions";
 
 export type LocalMcpBridgeDestination = Readonly<{
   origin: string;

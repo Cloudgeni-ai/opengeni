@@ -577,6 +577,9 @@ const SettingsSchema = z.object({
     )
     .optional(),
   integrationsEnabled: EnvBoolean.default(false),
+  // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
+  googleConnectorSetupEnabled: EnvBoolean.default(true),
+  googleDriveMcpEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
@@ -5091,6 +5094,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
     protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
+    googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
+    googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",

@@ -83,7 +83,7 @@ function ScopedCard({
   onConfigured,
   dialogOnly = false,
   onClose,
-  personalOnly = false,
+  personalOnly: configuredPersonalOnly = false,
   connectLabel,
   dialogSubtitle,
   description: hostDescription,
@@ -96,6 +96,9 @@ function ScopedCard({
   );
   const view = useConnect(controller);
   const [item, setItem] = useState<CapabilityCatalogItem | null>(null);
+  const personalOnly =
+    configuredPersonalOnly ||
+    (item?.mcpUrl ?? item?.endpointUrl) === "https://drivemcp.googleapis.com/mcp/v1";
   const [logo, setLogo] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
@@ -151,7 +154,9 @@ function ScopedCard({
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
     else if (
       !item &&
-      (personalOnly || resolved.metadata?.defaultConnectionOwnership === "personal")
+      (personalOnly ||
+        (resolved.mcpUrl ?? resolved.endpointUrl) === "https://drivemcp.googleapis.com/mcp/v1" ||
+        resolved.metadata?.defaultConnectionOwnership === "personal")
     )
       setOwnership("personal");
     let accountReady = false;
@@ -399,7 +404,8 @@ function ScopedCard({
         }
         startInput.current = input;
         let attempt = await controller.begin({
-          providerId: "mcp-oauth",
+          providerId:
+            mcpUrl === "https://drivemcp.googleapis.com/mcp/v1" ? "google-drive" : "mcp-oauth",
           ownership,
           returnUrl,
           idempotencyKey: startKey.current,
@@ -409,7 +415,10 @@ function ScopedCard({
         remember(attempt.id);
         if (attempt.state === "credential_input")
           attempt = await controller.advance(
-            { type: "credentials", values: { mcpUrl } },
+            {
+              type: "credentials",
+              values: mcpUrl === "https://drivemcp.googleapis.com/mcp/v1" ? {} : { mcpUrl },
+            },
             advanceKey.current,
           );
         if (!active()) return;

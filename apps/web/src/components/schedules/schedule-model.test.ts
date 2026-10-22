@@ -493,7 +493,7 @@ describe("schedule requests", () => {
     });
   });
 
-  test("editing one account group retains hidden and first-party choices", () => {
+  test("editing one account group retains hidden and active first-party choices", () => {
     const saved = [
       { serverId: "example", connectionId: "old-choice" },
       { serverId: "unavailable", connectionId: "retained-choice" },
@@ -517,7 +517,7 @@ describe("schedule requests", () => {
           },
         ],
       }),
-    ).toEqual([saved[1]!, saved[2]!, saved[3]!, selection]);
+    ).toEqual([saved[1]!, saved[2]!, selection]);
   });
 
   test("a materialized chat keeps only pins its current tools can use; an existing-chat schedule has none", () => {
@@ -618,7 +618,7 @@ describe("schedule requests", () => {
           firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
         },
       }),
-    ).toEqual(saved);
+    ).toEqual([saved[0]!]);
     expect(
       mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
@@ -660,7 +660,7 @@ describe("schedule requests", () => {
           firstPartyMcpPermissions: null,
         },
       }),
-    ).toEqual(saved);
+    ).toEqual([saved[0]!]);
   });
 
   test("removing the last reusable message repository removes its account during a picker edit", () => {

@@ -1,3 +1,5 @@
+export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
@@ -895,11 +897,17 @@ export type {
 
 ensureReadableStreamFrom();
 
-type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
+  SlackRestMcpBridgeContext &
+  DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
   BuiltInMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
+>[] = Object.freeze([
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  DRIVE_MCP_BRIDGE_ADAPTER,
+]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -5463,6 +5471,28 @@ export async function prepareAgentTools(
         // auth misses are logged, not published: Apps is discovered on every
         // turn, so a setup card would repeat on each one (see codexAppsAuthFetch).
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
+        const remoteRequestInit = await mcpServerRequestInit(settings, config);
+        const createRemoteServer = () =>
+          new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            // This logger spans tool invocation as well as setup. Only the
+            // connect/list lifecycle wrappers may add setup-safe recovery facts.
+            logger: mcpTransportLogger(config.id),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
+            ...remoteRequestInit,
+            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
+            ...mcpSessionTimeoutOptions(config),
+          });
         // First-party bridges are ordinary in-process MCP servers selected by
         // adapter-owned matchers. Adding another provider extends this registry;
         // generic transport/catalog code never branches on provider identity.
@@ -5476,6 +5506,7 @@ export async function prepareAgentTools(
             ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
           },
           {
+            createRemoteServer,
             workspaceId: options.workspaceId ?? "",
             ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
             serverId: config.id,
@@ -5507,28 +5538,7 @@ export async function prepareAgentTools(
               : {}),
           },
         );
-        const innerServer =
-          bridge ??
-          new MCPServerStreamableHttp({
-            url,
-            name: config.name ?? config.id,
-            cacheToolsList: config.cacheToolsList,
-            // The upstream transport logger receives raw thrown errors, whose
-            // messages may contain response bodies, URLs, headers, or echoed
-            // credentials. Keep its diagnostic surface structural only.
-            // This logger spans tool invocation as well as setup. Only the
-            // connect/list lifecycle wrappers may add setup-safe recovery facts.
-            logger: mcpTransportLogger(config.id),
-            // codex_apps returns connector tools with empty `outputSchema: {}` that the
-            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-            // sanitize the response on the wire before validation. The namespace Set
-            // also captures each tool's original connector namespace (P4 Part B.1).
-            fetch: fetchImpl,
-            ...mcpStreamableHttpClientOptions({ firstParty }),
-            ...(await mcpServerRequestInit(settings, config)),
-            ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
-            ...mcpSessionTimeoutOptions(config),
-          });
+        const innerServer = bridge ?? createRemoteServer();
         if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
           new PrefixedMcpServer(

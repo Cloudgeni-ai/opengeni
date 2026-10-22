@@ -41,6 +41,7 @@ export function integrationSourceForOrganizationPolicy(
 
 const dedicated = [
   { key: "gmail", label: "Gmail" },
+  { key: "google-drive", label: "Google Drive" },
   { key: "atlassian", label: "Atlassian (Jira and Confluence)" },
   { key: "slack-personal", label: "Slack personal accounts" },
   { key: "slack-bot", label: "Slack workspace bots" },

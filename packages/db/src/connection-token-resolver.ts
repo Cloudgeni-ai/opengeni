@@ -206,6 +206,30 @@ function isOfficialGmailRestDestination(
   );
 }
 
+/** The reviewed Drive extensions share one personal MCP grant and exact Google API routes. */
+function isOfficialDriveRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain !== "drivemcp.googleapis.com" ||
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
+  )
+    return false;
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://www.googleapis.com" &&
+    !url.username &&
+    !url.password &&
+    !url.hash &&
+    (/^\/drive\/v3\/(?:files\/[a-zA-Z0-9_-]+(?:\/permissions(?:\/[a-zA-Z0-9_-]+)?)?|changes(?:\/startPageToken)?)$/u.test(
+      url.pathname,
+    ) ||
+      /^\/upload\/drive\/v3\/files\/[a-zA-Z0-9_-]+$/u.test(url.pathname))
+  );
+}
+
 /**
  * Adapts the public embedding credential port to the runtime's connection
  * resolver contract. Scope echoes are checked before credential headers can
@@ -860,6 +884,10 @@ function connectionBindingMatches(
     if (
       !binding ||
       (destination !== binding &&
+        !(
+          binding === "https://drivemcp.googleapis.com/mcp/v1" &&
+          isOfficialDriveRestDestination(destination, ref)
+        ) &&
         !(
           binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
           isOfficialGmailRestDestination(destination, ref)

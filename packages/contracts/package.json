@@ -273,6 +273,10 @@
     "./workspace-control-event": {
       "types": "./src/workspace-control-event.ts",
       "default": "./src/workspace-control-event.ts"
+    },
+    "./google-drive-native-retirement": {
+      "types": "./src/google-drive-native-retirement.ts",
+      "default": "./src/google-drive-native-retirement.ts"
     }
   },
   "publishConfig": {

@@ -755,3 +755,130 @@ test("personal setup reads sender accounts without conversation grants or consen
     await view.unmount();
   }
 });
+
+test("Drive card connects through its dedicated provider and enables only the completed personal account", async () => {
+  sessionStorage.clear();
+  const driveUrl = "https://drivemcp.googleapis.com/mcp/v1";
+  let enabled = false;
+  let committed = false;
+  const begins: unknown[] = [];
+  const advances: unknown[] = [];
+  const enabledRefs: unknown[] = [];
+  const drive = {
+    ...item,
+    id: "drive-dedicated",
+    name: "Google Drive",
+    enabled: false,
+    mcpUrl: driveUrl,
+    providerDomain: "drivemcp.googleapis.com",
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  const account = {
+    ...connection,
+    id: "drive-account",
+    subjectId: "user:drive",
+    providerDomain: "drivemcp.googleapis.com",
+    metadata: { mcpUrl: driveUrl },
+  };
+  const attempt = {
+    id: "drive-attempt",
+    workspaceId: "workspace",
+    providerId: "google-drive",
+    ownership: "personal",
+    revision: 1,
+    state: "credential_input",
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "credentials", fields: [] },
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  const client = {
+    listCapabilities: async () => ({
+      items: [
+        {
+          ...drive,
+          enabled,
+          connectionRef: enabled
+            ? { providerDomain: account.providerDomain, kind: "oauth2", subjectScope: "subject" }
+            : null,
+        },
+      ],
+    }),
+    listConnections: async () => (committed ? [account] : []),
+    listOwnConnectionAccounts: async () => (committed ? [account] : []),
+    enableCapability: async (_workspaceId: string, _capabilityId: string, input: unknown) => {
+      enabledRefs.push(input);
+      enabled = true;
+    },
+    connectTransport: () => ({
+      begin: async (_workspaceId: string, input: unknown) => {
+        begins.push(input);
+        return attempt;
+      },
+      advance: async (...input: unknown[]) => {
+        advances.push(input);
+        committed = true;
+        return {
+          ...attempt,
+          revision: 2,
+          state: "complete",
+          credentialsCommitted: true,
+          nextAction: { type: "none" },
+          account: {
+            id: account.id,
+            providerId: "google-drive",
+            ownership: "personal",
+            status: "connected",
+            label: "Google Drive",
+            version: 1,
+          },
+        };
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => ({
+    opener: null,
+    closed: false,
+    location: { replace() {} },
+    close() {},
+  })) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={drive.id}
+      name="Google Drive"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    expect(document.querySelector('input[type="radio"]')).toBeNull();
+    const button = [...document.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue to Google Drive",
+    );
+    expect(button).toBeDefined();
+    await actRun(() => button!.click());
+    await flush();
+    expect(begins).toEqual([
+      expect.objectContaining({ providerId: "google-drive", ownership: "personal" }),
+    ]);
+    expect(JSON.stringify(advances)).toContain('"values":{}');
+    expect(enabledRefs).toEqual([
+      {
+        connectionRef: {
+          providerDomain: "drivemcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      },
+    ]);
+    expect(document.querySelector('[role="alert"]')?.textContent ?? null).toBeNull();
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});

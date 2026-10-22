@@ -24,18 +24,12 @@ import {
   type OpenGeniRuntime,
   type RunMcpCredentials,
   selectedSessionRemoteMcpTargets,
-  type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
   mcpToolDisplayMetadata,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
-import {
-  createGoogleDrivePublicationAttemptTool,
-  googleDrivePublicationConnectorCall,
-  resolveGoogleDrivePublicationTarget,
-} from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
   accountRouteAuthNeededPayload,
@@ -303,7 +297,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     bus,
     runtime,
-    objectStorage,
     observability,
     cancellationSignal,
     eventing,
@@ -326,7 +319,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     activeSandboxBackend,
     groupBoxBackend,
     routingOn,
-    runtimeCancellationSignal,
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
@@ -402,25 +394,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       subjectId: turn.initiator.subjectId,
     },
   } as const;
-  const googleDrivePublicationTarget = objectStorage
-    ? await resolveGoogleDrivePublicationTarget(
-        db,
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-        personalConnectionDelegations,
-      )
-    : null;
-  const googleDrivePublicationTool =
-    objectStorage && googleDrivePublicationTarget
-      ? createGoogleDrivePublicationAttemptTool({
-          db,
-          objectStorage,
-          identity: connectorActionIdentity,
-          subjectId: googleDrivePublicationTarget.ownerSubjectId,
-          target: googleDrivePublicationTarget,
-          resolveCredential,
-          ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-        })
-      : null;
   const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
@@ -539,35 +512,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
-  const googleDrivePublicationAllowed =
-    selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
-    selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
-    hasPermission(
-      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
-      "artifacts:read",
-    ) &&
-    hasPermission(
-      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
-      "artifacts:publish",
-    );
-  const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
-    googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
-      ? [
-          {
-            modelName: googleDrivePublicationTool.modelName,
-            call: (approvalId, arguments_) =>
-              googleDrivePublicationConnectorCall(
-                googleDrivePublicationTarget,
-                arguments_,
-                approvalId,
-              ),
-          },
-        ]
-      : [];
-  const attemptConnectorActionBindings = [
-    ...googleDriveConnectorBindings,
-    ...githubRestMcp.connectorBindings,
-  ];
+  const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
   const connectorActionPolicy: ConnectorActionPolicyHooks = {
     preview: async (call) =>
       await previewConnectorActionApproval(db, connectorActionIdentity, call),
@@ -946,9 +891,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
       }),
     }),
-    ...(googleDrivePublicationTool && googleDrivePublicationAllowed
-      ? [googleDrivePublicationTool]
-      : []),
     ...codeSearchTools,
     ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));

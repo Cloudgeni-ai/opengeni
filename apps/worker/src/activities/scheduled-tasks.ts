@@ -1,3 +1,7 @@
+import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -368,6 +372,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
+        if (
+          priorRun.status === "queued" &&
+          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
+        ) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+          );
+          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
+        }
         if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
           await markScheduledTaskRunFailedIfQueued(
             db,
@@ -445,6 +461,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
+      if (isRetiredNativeGoogleDriveTask(task))
+        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
       if (isRetiredNativeAtlassianTask(task))
         return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
@@ -2424,6 +2442,8 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
+    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
   if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
     return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {
