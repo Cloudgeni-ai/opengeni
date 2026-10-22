@@ -3036,8 +3036,9 @@ operating system: a 32 GiB server with 8 GiB of `shared_buffers` has roughly
 estimate per-backend memory for your own workload, divide the server's used
 memory minus its idle baseline by the connection count.
 
-The pools bound how long a backend can accumulate, for the API, worker and
-editable-artifact service pools alike:
+The application pools (API runtime, worker, readiness and editable-artifact
+service pools) bound how long a backend can accumulate. The API's managed-auth
+pool keeps its own fixed settings.
 
 - `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` (default 30) closes idle
   connections, so the backend count follows actual concurrency. A longer
@@ -3045,15 +3046,17 @@ editable-artifact service pools alike:
   idle backend's memory: at five minutes, staging's backends averaged about
   65 MB and its 32 GiB server ran out of memory at about 340 connections.
 - `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` (default 600) bounds each
-  connection's age. Each connection draws its lifetime from the top quarter
-  below the bound (450-600 s by default), so pools opened together do not
-  reconnect together. A pool reuses its most recently idle connection first, so
+  connection's age. Each connection slot draws its lifetime once from the top
+  quarter below the bound (450-600 s by default) and keeps it for the life of
+  the process, so pools opened together do not reconnect together. A pool reuses its most recently idle connection first, so
   a busy one never reaches the idle timeout; the lifetime stops it collecting
   new statements, generic plans and every arity of statements whose text varies
   with a list's length. A replacement backend spends well under a second of
   extra query time re-warming. An expiring connection finishes its current
   query or transaction first.
-- `0` turns either timer off.
+- `0` turns either timer off; use it rather than a very large number. Values
+  above 2,147,483 s (about 24.8 days, the longest timer the runtime can arm)
+  are rejected.
 - If backends still do not fit, add memory, reduce pool sizes or replicas, or
   set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`. Most of the growth after
   the first pass is generic plans, which the server's default

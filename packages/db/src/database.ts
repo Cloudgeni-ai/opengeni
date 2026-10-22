@@ -478,9 +478,18 @@ export const DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS = 30;
  */
 export const DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS = 600;
 
+/**
+ * The longest timer the runtime can arm (2^31 - 1 ms). A longer delay does not
+ * wait longer: Node and Bun fire it after 1 ms, which would close every
+ * connection right after it opens or goes idle. Use 0 to turn a timer off.
+ */
+export const MAX_DATABASE_POOL_TIMER_SECONDS = 2_147_483;
+
 function poolSeconds(name: string, value: number): number {
-  if (!Number.isFinite(value) || value < 0) {
-    throw new TypeError(`createDb: ${name} must be a non-negative number of seconds`);
+  if (!Number.isFinite(value) || value < 0 || value > MAX_DATABASE_POOL_TIMER_SECONDS) {
+    throw new TypeError(
+      `createDb: ${name} must be between 0 and ${MAX_DATABASE_POOL_TIMER_SECONDS} seconds (0 turns it off)`,
+    );
   }
   return value;
 }

@@ -1347,6 +1347,7 @@ export {
   databaseReconnectBackoffSeconds,
   DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS,
   DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS,
+  MAX_DATABASE_POOL_TIMER_SECONDS,
   defaultDatabasePreparedStatements,
   isTransactionHandle,
   registerDbBinding,

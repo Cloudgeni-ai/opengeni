@@ -6,6 +6,7 @@ import {
   DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS,
   DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS,
   jitteredDatabaseMaxLifetime,
+  MAX_DATABASE_POOL_TIMER_SECONDS,
   type DbClient,
 } from "../src/database";
 
@@ -66,11 +67,27 @@ describe("configured pool recycling", () => {
     expect(new Set(lifetimes(options.max_lifetime, 10))).toEqual(new Set([0]));
   });
 
-  test.each([-1, Number.NaN, Number.POSITIVE_INFINITY])("refuses %p seconds", (seconds) => {
-    expect(() => createDb(url, { idleTimeoutSeconds: seconds })).toThrow(TypeError);
-    expect(() => createDb(url, { maxLifetimeSeconds: seconds })).toThrow(TypeError);
-    expect(() => jitteredDatabaseMaxLifetime(seconds)).toThrow(TypeError);
+  test("accepts the longest timer the runtime can arm", () => {
+    expect(MAX_DATABASE_POOL_TIMER_SECONDS).toBe(Math.floor((2 ** 31 - 1) / 1000));
+    const options = driverOptions({
+      idleTimeoutSeconds: MAX_DATABASE_POOL_TIMER_SECONDS,
+      maxLifetimeSeconds: MAX_DATABASE_POOL_TIMER_SECONDS,
+    });
+    expect(options.idle_timeout).toBe(MAX_DATABASE_POOL_TIMER_SECONDS);
+    expect(Math.max(...lifetimes(options.max_lifetime))).toBeLessThanOrEqual(
+      MAX_DATABASE_POOL_TIMER_SECONDS,
+    );
   });
+
+  // A longer timer would not wait longer: the runtime fires it after 1 ms.
+  test.each([-1, Number.NaN, Number.POSITIVE_INFINITY, MAX_DATABASE_POOL_TIMER_SECONDS + 1])(
+    "refuses %p seconds",
+    (seconds) => {
+      expect(() => createDb(url, { idleTimeoutSeconds: seconds })).toThrow(TypeError);
+      expect(() => createDb(url, { maxLifetimeSeconds: seconds })).toThrow(TypeError);
+      expect(() => jitteredDatabaseMaxLifetime(seconds)).toThrow(TypeError);
+    },
+  );
 
   test("leaves prepared statements to their own option", () => {
     expect(driverOptions({ maxLifetimeSeconds: 60 }).prepare).toBe(true);

@@ -6,7 +6,8 @@ import { createDb, rawRows, type Database } from "../src/database";
 
 // Every PostgreSQL backend keeps its catalog cache and prepared plans until the
 // connection closes, so the pool must close idle connections and recycle busy
-// ones. These run against a real server with second-scale timers.
+// ones. These run against a real server with second-scale timers. A lifetime
+// of N seconds is drawn from 0.75N-N, and starts when the TCP connection opens.
 
 let shared: SharedTestDatabase;
 
@@ -69,9 +70,10 @@ describe("pool connection recycling", () => {
     const pool = createDb(shared.appUrl, { max: 1, idleTimeoutSeconds: 0, maxLifetimeSeconds: 1 });
     try {
       const pids = new Set<number>();
-      const deadline = Date.now() + 2_500;
+      // The lifetime is at most 1 s; the deadline only guards a stalled server.
+      const deadline = Date.now() + 20_000;
       let queries = 0;
-      while (Date.now() < deadline) {
+      while (pids.size < 2 && Date.now() < deadline) {
         const [row] = await rawRows<{ pid: number; value: number }>(
           pool.db,
           sql`select pg_backend_pid() as pid, ${queries}::int as value`,
@@ -80,29 +82,44 @@ describe("pool connection recycling", () => {
         pids.add(row!.pid);
         queries += 1;
       }
-      expect(pids.size).toBeGreaterThanOrEqual(2);
+      expect(pids.size).toBe(2);
       const [retired] = [...pids];
       expect(await waitUntilGone(retired!, 5_000)).toBe(true);
+    } finally {
+      await pool.close();
+    }
+  }, 60_000);
+
+  test("a query that outlives the connection's lifetime still completes", async () => {
+    const pool = createDb(shared.appUrl, { max: 1, idleTimeoutSeconds: 0, maxLifetimeSeconds: 2 });
+    try {
+      const [row] = await rawRows<{ pid: number; value: number }>(
+        pool.db,
+        sql`select pg_backend_pid() as pid, ${7}::int as value from pg_sleep(${2.2})`,
+      );
+      expect(row!.value).toBe(7);
+      expect(await waitUntilGone(row!.pid, 5_000)).toBe(true);
+      expect(await backendPid(pool.db)).not.toBe(row!.pid);
     } finally {
       await pool.close();
     }
   }, 30_000);
 
   test("recycling waits for an open transaction and starts with no prepared statements", async () => {
-    const pool = createDb(shared.appUrl, { max: 1, idleTimeoutSeconds: 0, maxLifetimeSeconds: 1 });
+    const pool = createDb(shared.appUrl, { max: 1, idleTimeoutSeconds: 0, maxLifetimeSeconds: 2 });
     try {
-      const [warm] = await rawRows<{ value: number }>(pool.db, sql`select ${41}::int + 1 as value`);
-      expect(warm!.value).toBe(42);
-      expect(await preparedOnBackend(pool.db)).toBeGreaterThan(0);
-
       const inside = await pool.db.transaction(async (tx) => {
         const before = await backendPid(tx);
+        const [warm] = await rawRows<{ value: number }>(tx, sql`select ${41}::int + 1 as value`);
+        const prepared = await preparedOnBackend(tx);
         // Outlive the connection's whole lifetime inside the transaction.
-        await rawRows(tx, sql`select pg_sleep(${1.2})`);
+        await rawRows(tx, sql`select pg_sleep(${2.2})`);
         const after = await backendPid(tx);
         const [row] = await rawRows<{ value: number }>(tx, sql`select ${1}::int + 1 as value`);
-        return { before, after, value: row!.value };
+        return { before, after, prepared, warm: warm!.value, value: row!.value };
       });
+      expect(inside.warm).toBe(42);
+      expect(inside.prepared).toBeGreaterThan(0);
       expect(inside.after).toBe(inside.before);
       expect(inside.value).toBe(2);
 

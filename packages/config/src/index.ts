@@ -349,9 +349,10 @@ const SettingsSchema = z.object({
   // defaults in @opengeni/db: idle connections close after 30 s and each
   // connection lives at most 600 s (jittered down by up to a quarter), because
   // every PostgreSQL backend keeps its catalog cache and prepared plans until
-  // it closes. 0 disables the timer.
-  databasePoolIdleTimeoutSeconds: z.coerce.number().int().nonnegative().optional(),
-  databasePoolMaxLifetimeSeconds: z.coerce.number().int().nonnegative().optional(),
+  // it closes. 0 disables the timer. The ceiling is the longest timer the
+  // runtime can arm (2^31 - 1 ms); a longer one would fire after 1 ms.
+  databasePoolIdleTimeoutSeconds: z.coerce.number().int().nonnegative().max(2_147_483).optional(),
+  databasePoolMaxLifetimeSeconds: z.coerce.number().int().nonnegative().max(2_147_483).optional(),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth

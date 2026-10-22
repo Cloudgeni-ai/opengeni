@@ -84,12 +84,19 @@ describe("database pool recycling", () => {
     const swapped = getSettings({ [names.idle]: "0", [names.lifetime]: "900" });
     expect(swapped.databasePoolIdleTimeoutSeconds).toBe(0);
     expect(swapped.databasePoolMaxLifetimeSeconds).toBe(900);
+    // The longest timer the runtime arms; one second more would fire after 1 ms.
+    const longest = getSettings({ [names.idle]: "2147483", [names.lifetime]: "2147483" });
+    expect(longest.databasePoolIdleTimeoutSeconds).toBe(2_147_483);
+    expect(longest.databasePoolMaxLifetimeSeconds).toBe(2_147_483);
   });
 
-  test.each(["-1", "1.5", "NaN", "Infinity", "abc", "9007199254740992"])("rejects %s", (value) => {
-    expect(() => getSettings({ [names.idle]: value })).toThrow();
-    expect(() => getSettings({ [names.lifetime]: value })).toThrow();
-  });
+  test.each(["-1", "1.5", "NaN", "Infinity", "abc", "9007199254740992", "2147484"])(
+    "rejects %s",
+    (value) => {
+      expect(() => getSettings({ [names.idle]: value })).toThrow();
+      expect(() => getSettings({ [names.lifetime]: value })).toThrow();
+    },
+  );
 
   test("reach the editable-artifact services with the same names", () => {
     const source = { [names.idle]: "20", [names.lifetime]: "300" };
