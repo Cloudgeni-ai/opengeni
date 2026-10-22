@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { FileAsset } from "@opengeni/contracts";
 
 import {
   DOCUMENT_ARTIFACT_COMMAND_VERSION,
@@ -152,6 +153,10 @@ export interface EditableArtifactOfficeImportPort {
     actor: EditableArtifactActor;
     fileId: string;
     modality: EditableArtifactModality;
+    authorizeSourceFile: (
+      file: FileAsset,
+      fileAuthoritySubjectId: string | null,
+    ) => Promise<boolean>;
     signal?: AbortSignal;
   }): Promise<PreparedEditableArtifactImport>;
 }
@@ -260,6 +265,10 @@ export class EditableArtifactAgentApplication {
         fileId: string;
         modality: EditableArtifactModality;
         title: string;
+        authorizeSourceFile: (
+          file: FileAsset,
+          fileAuthoritySubjectId: string | null,
+        ) => Promise<boolean>;
         signal?: AbortSignal;
       }>,
   ): Promise<EditableArtifactAgentMetadata> {
@@ -269,6 +278,7 @@ export class EditableArtifactAgentApplication {
       actor: context.actor,
       fileId: input.fileId,
       modality: input.modality,
+      authorizeSourceFile: input.authorizeSourceFile,
       ...(input.signal ? { signal: input.signal } : {}),
     });
     const result = await this.dependencies.domain.importArtifact({

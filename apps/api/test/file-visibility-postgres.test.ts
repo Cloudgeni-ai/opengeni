@@ -2,11 +2,13 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
+  fileSourceVisibleToHost,
   sourceSessionRequiresHumanShare,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
+  type AccessGrant,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
 } from "@opengeni/contracts";
@@ -677,6 +679,34 @@ test("a host denial also hides a shared source File ID and listing", async () =>
     expiresAt: new Date(Date.now() + 60_000),
   });
   await shared.admin`update files set status = 'ready' where id = ${fileId}`;
+  const [authorizedFile] = await getFilesForSubject(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: f.other.subjectId,
+    fileIds: [fileId],
+  });
+  expect(authorizedFile?.id).toBe(fileId);
+  expect(
+    await fileSourceVisibleToHost(
+      {
+        db: db.db,
+        sessionAuthorization: {
+          authorizeSession: async () => ({ allowed: false, reason: "revoked" }),
+          resolveListScope: async () => ({ kind: "all" }),
+        },
+      },
+      {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: f.other.subjectId,
+      } as AccessGrant,
+      fileId,
+      f.workspace.id,
+      true,
+      f.other.subjectId,
+      authorizedFile,
+    ),
+  ).toBe(false);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
   expect((await f.call(f.other, "GET", `/artifacts/${fileId}`)).status).toBe(404);
   expect((await f.call(f.other, "POST", `/files/${fileId}/download-url`)).status).toBe(404);

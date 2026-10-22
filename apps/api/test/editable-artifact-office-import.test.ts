@@ -83,6 +83,27 @@ describe("editable artifact Office import adapter", () => {
     );
   });
 
+  test("rejects a source authorization denial before reading Office bytes", async () => {
+    let reads = 0;
+    const objectStorage = storage();
+    objectStorage.headFile = async () => {
+      reads += 1;
+      throw new Error("denied source must not reach storage");
+    };
+    const adapter = new EditableArtifactOfficeImportAdapter({
+      db: {} as never,
+      objectStorage,
+      runtime: runtime(),
+      sourceObjects: writer("unused", []),
+      snapshotObjects: writer("unused", []),
+      readFiles: async () => [file()],
+    });
+    await expect(
+      adapter.prepare({ ...request(), authorizeSourceFile: async () => false }),
+    ).rejects.toEqual(new EditableArtifactOfficeImportError("invalid_source"));
+    expect(reads).toBe(0);
+  });
+
   test("maps only a typed unsupported Office source to user input failure", async () => {
     const adapter = new EditableArtifactOfficeImportAdapter({
       db: {} as never,
@@ -196,6 +217,7 @@ function request() {
     actor: { kind: "human", subjectId: "user:test", replicaId: "1111111111111111" } as never,
     fileId: FILE_ID,
     modality: "spreadsheet" as const,
+    authorizeSourceFile: async () => true,
   };
 }
 

@@ -6,6 +6,7 @@ import type {
   Workspace,
 } from "@opengeni/contracts";
 import {
+  authorizedFileSourceReference,
   getManagedUserProfilesByIds,
   getFileSourceSessionReference,
   getSessionAuthorityProjection,
@@ -68,15 +69,28 @@ export async function fileSourceVisibleToHost(
   fileId: string,
   fileWorkspaceId = grant.workspaceId,
   requireFileRls = false,
+  fileRlsSubjectId = grant.subjectId,
+  authorizedFile?: FileAsset,
 ): Promise<boolean> {
   if (!deps.sessionAuthorization && !requireFileRls) return true;
-  const source = await getFileSourceSessionReference(deps.db, {
-    accountId: grant.accountId,
-    workspaceId: fileWorkspaceId,
-    subjectId: grant.subjectId,
-    fileId,
-  });
+  const authorizedSource = authorizedFile ? authorizedFileSourceReference(authorizedFile) : null;
+  const source = authorizedFile
+    ? authorizedSource
+    : await getFileSourceSessionReference(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: fileWorkspaceId,
+        subjectId: fileRlsSubjectId,
+        fileId,
+      });
   if (!source) return false;
+  if (
+    authorizedFile &&
+    authorizedSource &&
+    (authorizedSource.accountId !== grant.accountId ||
+      authorizedSource.workspaceId !== fileWorkspaceId ||
+      authorizedSource.fileId !== fileId)
+  )
+    return false;
   if (!deps.sessionAuthorization) return true;
   if (!source.sessionId || source.audienceExplicit) return true;
   const live = await getSessionAuthorityProjection(deps.db, fileWorkspaceId, source.sessionId);

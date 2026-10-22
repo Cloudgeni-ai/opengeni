@@ -70,6 +70,9 @@ export class EditableArtifactOfficeImportAdapter implements EditableArtifactOffi
     if (!file || file.status !== "ready") {
       throw new EditableArtifactOfficeImportError("invalid_source");
     }
+    if (!(await input.authorizeSourceFile(file, subjectId))) {
+      throw new EditableArtifactOfficeImportError("invalid_source");
+    }
     const expectedMimeType = officeMimeType(input.modality);
     if (
       file.contentType !== expectedMimeType ||

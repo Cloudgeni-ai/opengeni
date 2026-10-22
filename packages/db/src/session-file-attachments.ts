@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import { attachFileSourceReference } from "./file-source-reference";
 
 /** Only call during verified human initial/Send/Steer acceptance, in its transaction. */
 export async function acceptSessionFileAttachments(
@@ -75,26 +76,46 @@ export async function readSessionFileAttachments(
 ): Promise<FileAsset[]> {
   if (!input.fileIds.length) return [];
   return withRlsContext(db, input, async (tx) => {
-    const rows = await rawRows<Omit<FileAsset, "appShot"> & { appShot: unknown }>(
+    const rows = await rawRows<
+      Omit<FileAsset, "appShot"> & {
+        appShot: unknown;
+        accountId: string;
+        sourceSessionId: string | null;
+        sourceSessionAudienceExplicit: boolean;
+      }
+    >(
       tx,
       sql`
     select id,case when private_owner_subject_ids is null then 'workspace' else 'personal' end as scope,workspace_id as "workspaceId",status,filename,
       safe_filename as "safeFilename",content_type as "contentType",size_bytes::double precision as "sizeBytes",
       sha256,bucket,object_key as "objectKey",created_at::text as "createdAt",updated_at::text as "updatedAt",
-      app_shot as "appShot"
+      app_shot as "appShot",account_id as "accountId",
+      source_session_id as "sourceSessionId",
+      source_session_audience_explicit as "sourceSessionAudienceExplicit"
     from opengeni_private.read_session_file_attachments(
       ${input.accountId}::uuid,${input.workspaceId}::uuid,${input.access.sessionId}::uuid,
       ${input.access.authorityEpoch},ARRAY(select jsonb_array_elements_text(${JSON.stringify([...new Set(input.fileIds)])}::jsonb))::uuid[],
       ${JSON.stringify(input.access.actor)}::jsonb)`,
     );
-    return rows.map(({ appShot, ...row }) => {
-      const capture = appShot == null ? null : AppShotCapture.safeParse(appShot);
-      return {
-        ...row,
-        createdAt: new Date(row.createdAt).toISOString(),
-        updatedAt: new Date(row.updatedAt).toISOString(),
-        ...(capture?.success ? { appShot: capture.data } : {}),
-      };
-    });
+    return rows.map(
+      ({ appShot, accountId, sourceSessionId, sourceSessionAudienceExplicit, ...row }) => {
+        const capture = appShot == null ? null : AppShotCapture.safeParse(appShot);
+        return attachFileSourceReference(
+          {
+            ...row,
+            createdAt: new Date(row.createdAt).toISOString(),
+            updatedAt: new Date(row.updatedAt).toISOString(),
+            ...(capture?.success ? { appShot: capture.data } : {}),
+          },
+          {
+            accountId,
+            workspaceId: row.workspaceId,
+            fileId: row.id,
+            sessionId: sourceSessionId,
+            audienceExplicit: sourceSessionAudienceExplicit,
+          },
+        );
+      },
+    );
   });
 }

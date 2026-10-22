@@ -2,6 +2,8 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
+import { attachFileSourceReference } from "./file-source-reference";
+export { authorizedFileSourceReference } from "./file-source-reference";
 export { getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
@@ -89069,28 +89071,37 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
     !row.sourceSessionAudienceExplicit &&
     ((row.sourceSessionId !== null && row.sourceSessionOwnerSubjectId !== null) ||
       row.sourceSessionProvenanceMissing);
-  return {
-    scope: row.privateOwnerSubjectIds || inheritedPrivate ? "personal" : "workspace",
-    // Private files made before owners were recorded belong to their one private owner.
-    ownerSubjectId:
-      row.ownerSubjectId ??
-      (row.privateOwnerSubjectIds?.length === 1
-        ? row.privateOwnerSubjectIds[0]!
-        : row.sourceSessionOwnerSubjectId),
-    id: row.id,
-    workspaceId: row.workspaceId,
-    status: row.status as FileStatus,
-    filename: row.filename,
-    safeFilename: row.safeFilename,
-    contentType: row.contentType,
-    sizeBytes: row.sizeBytes,
-    sha256: row.sha256,
-    bucket: row.bucket,
-    objectKey: row.objectKey,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-    ...appShotOfRow(row.appShot),
-  };
+  return attachFileSourceReference(
+    {
+      scope: row.privateOwnerSubjectIds || inheritedPrivate ? "personal" : "workspace",
+      // Private files made before owners were recorded belong to their one private owner.
+      ownerSubjectId:
+        row.ownerSubjectId ??
+        (row.privateOwnerSubjectIds?.length === 1
+          ? row.privateOwnerSubjectIds[0]!
+          : row.sourceSessionOwnerSubjectId),
+      id: row.id,
+      workspaceId: row.workspaceId,
+      status: row.status as FileStatus,
+      filename: row.filename,
+      safeFilename: row.safeFilename,
+      contentType: row.contentType,
+      sizeBytes: row.sizeBytes,
+      sha256: row.sha256,
+      bucket: row.bucket,
+      objectKey: row.objectKey,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+      ...appShotOfRow(row.appShot),
+    },
+    {
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      fileId: row.id,
+      sessionId: row.sourceSessionId,
+      audienceExplicit: row.sourceSessionAudienceExplicit,
+    },
+  );
 }
 
 /** A stored capture as the contract reads it; anything malformed is left out. */

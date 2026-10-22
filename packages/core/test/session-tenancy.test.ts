@@ -28,6 +28,7 @@ import type { AccessGrantAuthorization } from "../src/access";
 import { HTTPException } from "hono/http-exception";
 import { SessionAuthorizationDeniedError } from "../src/session-authorization";
 import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
+import { fileSourceVisibleToHost } from "../src/domain/file-audience";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
@@ -120,16 +121,25 @@ describe("managed-human session tenancy application service", () => {
       resolveListScope: async () => ({ kind: "all" }),
     };
     const deps = { db: client.db, bus: new MemoryEventBus(), sessionAuthorization };
+    const viewerGrant = { ...grant, subjectId: "user:archive-viewer" };
+    const attachments = await readSessionAttachmentFiles(
+      deps,
+      viewerGrant,
+      imported.result.session.id,
+      [imported.file.id],
+    );
+    expect(attachments.map((file) => file.id)).toEqual([imported.file.id]);
     expect(
-      (
-        await readSessionAttachmentFiles(
-          deps,
-          { ...grant, subjectId: "user:archive-viewer" },
-          imported.result.session.id,
-          [imported.file.id],
-        )
-      ).map((file) => file.id),
-    ).toEqual([imported.file.id]);
+      await fileSourceVisibleToHost(
+        deps,
+        viewerGrant,
+        imported.file.id,
+        grant.workspaceId,
+        false,
+        viewerGrant.subjectId,
+        attachments[0],
+      ),
+    ).toBe(true);
     await expect(
       forkManagedHumanSession(
         deps,

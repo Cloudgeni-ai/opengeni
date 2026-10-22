@@ -400,6 +400,7 @@ describe("editable artifact agent application", () => {
       fileId: "60000000-0000-4000-8000-000000000006",
       modality: "spreadsheet",
       title: "Forecast",
+      authorizeSourceFile: async () => true,
     });
     await expect(
       application.get({

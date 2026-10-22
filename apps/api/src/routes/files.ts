@@ -518,7 +518,18 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (sessionId) {
       if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(sessionId)) return null;
       const file = (await readSessionAttachmentFiles(deps, grant, sessionId, [fileId]))[0] ?? null;
-      return file && (await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))
+      // Keep the exact attachment grant while checking any live source host.
+      // A generic File RLS re-read would discard this scoped read capability.
+      return file &&
+        (await fileSourceVisibleToHost(
+          deps,
+          grant,
+          file.id,
+          file.workspaceId,
+          false,
+          grant.subjectId,
+          file,
+        ))
         ? file
         : null;
     }

@@ -9,6 +9,7 @@ import {
   editableArtifactId,
   editableArtifactReplicaId,
   editableArtifactScope,
+  fileSourceVisibleToHost,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -421,6 +422,16 @@ export function registerEditableArtifactRoutes(
         actor,
         fileId: body.sourceFileId,
         modality: body.modality,
+        authorizeSourceFile: (file, subjectId) =>
+          fileSourceVisibleToHost(
+            deps,
+            grant,
+            file.id,
+            file.workspaceId,
+            true,
+            subjectId ?? grant.subjectId,
+            file,
+          ),
         signal: context.req.raw.signal,
       });
       const artifact = await requireEditableArtifactApplication(deps).importArtifact({

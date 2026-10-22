@@ -16,7 +16,7 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
-import type { ApiRouteDeps } from "@opengeni/core";
+import { fileSourceVisibleToHost, type ApiRouteDeps } from "@opengeni/core";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { EditableArtifactQueryRequestSchema } from "./editable-artifact-query-schema";
 
@@ -173,6 +173,16 @@ export function registerEditableArtifactAgentTools(
             fileId,
             modality,
             title,
+            authorizeSourceFile: (file, subjectId) =>
+              fileSourceVisibleToHost(
+                input.deps,
+                input.grant,
+                file.id,
+                file.workspaceId,
+                true,
+                subjectId ?? input.grant.subjectId,
+                file,
+              ),
             signal: extra.signal,
           }),
       );
