@@ -89,8 +89,8 @@ describe("AttachedChromeCdpConnection", () => {
               finds === 1
                 ? []
                 : [
-                    { id: 3, filePath: "/Users/person/Downloads/report.pdf", sizeBytes: 9 },
-                    { id: 4, filePath: "/Users/person/Downloads/report (1).pdf", sizeBytes: 5 },
+                    { id: 3, filePath: "/Users/user/Downloads/report.pdf", sizeBytes: 9 },
+                    { id: 4, filePath: "/Users/user/Downloads/report (1).pdf", sizeBytes: 5 },
                   ],
           } as T;
         }
@@ -162,7 +162,7 @@ describe("AttachedChromeCdpConnection", () => {
     expect(progress[1]).toMatchObject({
       guid: "guid-1",
       receivedBytes: 5,
-      filePath: "/Users/person/Downloads/report (1).pdf",
+      filePath: "/Users/user/Downloads/report (1).pdf",
     });
     const find = commands.find((command) => command.type === "downloads.find")!;
     expect(find.url).toBe("https://example.test/report");
