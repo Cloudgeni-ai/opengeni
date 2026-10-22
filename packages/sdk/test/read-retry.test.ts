@@ -135,6 +135,25 @@ describe("safe-read retry policy", () => {
     expect(isTransientRequestError(new DOMException("aborted", "AbortError"))).toBe(false);
     expect(isTransientRequestError(new Error("boom"))).toBe(false);
   });
+
+  test("a TypeError from application code is a bug, not a transient failure", () => {
+    for (const message of [
+      "Cannot read properties of undefined (reading 'id')",
+      "session.map is not a function",
+      "Invalid URL",
+    ]) {
+      expect(isTransientRequestError(new TypeError(message))).toBe(false);
+    }
+    for (const message of [
+      "NetworkError when attempting to fetch resource.",
+      "Load failed",
+      "network error",
+      "fetch failed",
+      "terminated",
+    ]) {
+      expect(isTransientRequestError(new TypeError(message))).toBe(true);
+    }
+  });
 });
 
 describe("OpenGeniClient safe-read retry", () => {
@@ -173,6 +192,30 @@ describe("OpenGeniClient safe-read retry", () => {
       .catch((cause: unknown) => cause);
     expect(error).toBe(failure);
     expect(calls).toHaveLength(3);
+    // Whatever its message, a transport failure the client saw stays
+    // recognizable to callers that keep retrying longer (the React hooks).
+    expect(isTransientRequestError(error)).toBe(true);
+  });
+
+  test("a TypeError raised before any request is sent is not retried", async () => {
+    const { fetch, calls } = scriptedFetch([json(SESSION)]);
+    let headerReads = 0;
+    const broken = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "key",
+      headers: () => {
+        headerReads += 1;
+        throw new TypeError("Cannot read properties of undefined (reading 'token')");
+      },
+      fetch,
+      onDeprecation: false,
+      readRetry: { initialDelayMs: 1, maxDelayMs: 5 },
+    });
+    const error = await broken.getSession("workspace-1", "session-1").catch((cause) => cause);
+    expect(error).toBeInstanceOf(TypeError);
+    expect(isTransientRequestError(error)).toBe(false);
+    expect(headerReads).toBe(1);
+    expect(calls).toHaveLength(0);
   });
 
   test("definitive errors are not retried", async () => {

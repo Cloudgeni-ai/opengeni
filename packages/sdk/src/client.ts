@@ -156,6 +156,7 @@ import {
   isSafeReadMethod,
   isTransientGatewayStatus,
   isTransientRequestError,
+  markTransportFailure,
   parseRetryAfterMs,
   readRetryDelayMs,
   resolveReadRetryPolicy,
@@ -935,7 +936,13 @@ export type WorkspaceControlEventPage = {
 };
 
 /** What one safe-read attempt observed, for the retry decision. */
-type ReadAttemptOutcome = { gatewayFailure: boolean; retryAfterMs: number | null };
+type ReadAttemptOutcome = {
+  /** `fetch` or the response body rejected (reset connection, HTTP/2 error, ...). */
+  transportFailure: boolean;
+  /** A real 502, 503 or 504 response. */
+  gatewayFailure: boolean;
+  retryAfterMs: number | null;
+};
 
 export type OpenGeniClientOptions = {
   /** Explicit compatibility for an API predating targeted tool calls. No automatic downgrade. */
@@ -11424,7 +11431,11 @@ export class OpenGeniClient {
       // backoff (or the server's Retry-After) inside a small total budget.
       const startedAt = Date.now();
       for (let retry = 1; ; retry += 1) {
-        const attempt: ReadAttemptOutcome = { gatewayFailure: false, retryAfterMs: null };
+        const attempt: ReadAttemptOutcome = {
+          transportFailure: false,
+          gatewayFailure: false,
+          retryAfterMs: null,
+        };
         try {
           return await this.requestJsonAttempt<T>(
             method,
@@ -11440,8 +11451,7 @@ export class OpenGeniClient {
           // Only the transport itself or a real 502/503/504 response is
           // transient; a malformed success response is not retried.
           const transient =
-            error instanceof TypeError ||
-            (attempt.gatewayFailure && isTransientRequestError(error));
+            attempt.transportFailure || (attempt.gatewayFailure && isTransientRequestError(error));
           if (abort.signal?.aborted || !transient) throw error;
           const delay = readRetryDelayMs(
             retryPolicy,
@@ -11492,6 +11502,8 @@ export class OpenGeniClient {
       if (isMutationMethod(method)) {
         throw mutationTransportError(correlationId);
       }
+      if (error instanceof TypeError && attempt) attempt.transportFailure = true;
+      markTransportFailure(error);
       throw error;
     }
     assertApiContractResponse(response, this.apiContractStrict);
@@ -11520,6 +11532,8 @@ export class OpenGeniClient {
       if (isMutationMethod(method)) {
         throw mutationTransportError(correlationId);
       }
+      if (error instanceof TypeError && attempt) attempt.transportFailure = true;
+      markTransportFailure(error);
       throw error;
     }
   }

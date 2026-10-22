@@ -154,7 +154,11 @@ describe("bootstrap error surface", () => {
           jest.advanceTimersByTime(500);
         });
         expect(container.textContent).toContain("No workspace access");
-        expect(counts.get(failingPath)).toBe(initialRequests + 1);
+        // The SDK retries a failed safe read (503 or transport error) once
+        // more after at most 250 ms. The access bootstrap effect ran twice and
+        // its SDK reads take no caller signal, so the superseded read also
+        // completes its one bounded retry; config reads bypass the SDK client.
+        expect(counts.get(failingPath)).toBe(initialRequests + (stage === "access" ? 2 : 1));
       } finally {
         await act(async () => root.unmount());
         globalThis.fetch = originalFetch;

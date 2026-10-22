@@ -93,17 +93,34 @@ export function isTransientGatewayStatus(status: number): boolean {
   return status === 502 || status === 503 || status === 504;
 }
 
+// Transport failures the client itself observed (`fetch` or the response body
+// rejected with a `TypeError`). Tagged so a caller can tell them apart from a
+// `TypeError` its own code threw, which is a bug, not a transient failure.
+const transportFailures = new WeakSet<object>();
+
+/** Record that `error` is a transport failure of an API request. */
+export function markTransportFailure(error: unknown): void {
+  if (error instanceof TypeError) transportFailures.add(error);
+}
+
+// Transport failure messages across browsers, Node/undici and Bun, for
+// `TypeError`s that did not pass through this client.
+const NETWORK_FAILURE_MESSAGE =
+  /failed to fetch|fetch failed|networkerror|network error|load failed|network request failed|network connection was lost|terminated|err_http2|econnreset|socket hang up/iu;
+
 /**
  * A failure a later identical safe read can plausibly succeed after: a
- * transport error (`fetch` rejects with `TypeError`) or a retryable 502, 503
- * or 504. Auth, permission, not-found, validation, rate limits, aborts and
- * other server errors are definitive and are not transient.
+ * transport error (`fetch` or the response body rejected with a `TypeError`)
+ * or a retryable 502, 503 or 504. Auth, permission, not-found, validation,
+ * rate limits, aborts, other server errors and `TypeError`s from application
+ * code are definitive and are not transient.
  */
 export function isTransientRequestError(error: unknown): boolean {
   if (error instanceof OpenGeniApiError) {
     return isTransientGatewayStatus(error.status) && error.retryable;
   }
-  return error instanceof TypeError;
+  if (!(error instanceof TypeError)) return false;
+  return transportFailures.has(error) || NETWORK_FAILURE_MESSAGE.test(error.message);
 }
 
 /** `Retry-After` as milliseconds from `now`, or `null` when absent or invalid. */
