@@ -317,12 +317,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
-  // Unsent answers to agent questions belong to the person signed in to this
-  // tab: a different person signing in forgets them; the same person keeps them.
-  const authUserId = authSession?.user.id ?? null;
-  useEffect(() => {
-    if (authUserId) claimHumanInputDraftOwner(authUserId);
-  }, [authUserId]);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const accessContextRef = useRef(accessContext);
@@ -824,6 +818,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           managedSelfContextIdentityRef.current = acceptedManagedIdentity;
         }
         accessPrincipalIdRef.current = context.subjectId;
+        // Unsent answers to agent questions belong to this tab's principal: a
+        // different one forgets them before any session route can render.
+        claimHumanInputDraftOwner(context.subjectId);
         setAccessContext(context);
         setWorkspaces(nextWorkspaces);
         setManagedSelfContext(nextManagedSelfContext);
@@ -1037,6 +1034,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return null;
+      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -1323,6 +1321,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         request: async () => await client.getAccessContext(),
       });
       if (accessRefresh.status === "stale") return false;
+      claimHumanInputDraftOwner(accessRefresh.value.subjectId);
       setAccessContext(accessRefresh.value);
     } catch {
       toast.warning("Permissions may be out of date", {
@@ -2311,6 +2310,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       return false;
     }
     accessPrincipalIdRef.current = nextAccessContext.subjectId;
+    claimHumanInputDraftOwner(nextAccessContext.subjectId);
     setAccessContext(nextAccessContext);
     setWorkspaces(nextWorkspaces);
     setManagedSelfContext(nextManagedSelfContext);

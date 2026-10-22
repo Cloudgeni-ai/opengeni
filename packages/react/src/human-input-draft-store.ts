@@ -253,7 +253,11 @@ export function claimHumanInputDraftOwner(ownerId: string): void {
       previous = null;
     }
   }
-  if (previous !== null && previous !== ownerId) forgetAllHumanInputDrafts();
+  // Drafts with no recorded owner (e.g. the owner write failed) are not
+  // assumed to be this person's.
+  const unowned =
+    previous === null && (memory.size > 0 || (storage !== null && storageKeys(storage).length > 0));
+  if (unowned || (previous !== null && previous !== ownerId)) forgetAllHumanInputDrafts();
   memoryOwner = ownerId;
   try {
     storage?.setItem(OWNER_STORAGE_KEY, ownerId);

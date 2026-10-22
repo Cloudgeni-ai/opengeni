@@ -219,9 +219,11 @@ when the request has expired, and when `useHumanInputRequests` reads a pending
 list that no longer contains it; a denied (401/403/404) pending-list read forgets
 every draft of that session. Secret answers are never stored. Drafts belong to
 the person signed in to the tab: the stock app calls
-`claimHumanInputDraftOwner(userId)` when the signed-in user is known (a
-different person forgets every draft; the same person keeps them across a
-reload or re-authentication) and `forgetAllHumanInputDrafts()` on sign-out.
+`claimHumanInputDraftOwner(subjectId)` synchronously whenever it installs the
+principal's access context, before any session route renders (a different
+principal, or drafts with no recorded owner, are forgotten; the same principal
+keeps them across a reload or re-authentication), and
+`forgetAllHumanInputDrafts()` on sign-out.
 Embedding hosts whose signed-in person can change within one tab should call
 the same two functions from `@opengeni/react`.
 

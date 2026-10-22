@@ -631,6 +631,14 @@ describe("human-input draft lifecycle edges", () => {
     expect(readHumanInputDraft(scope, { questions })).toBeNull();
   });
 
+  test("drafts with no recorded owner are not handed to the first person who claims the tab", () => {
+    writeHumanInputDraft(scope, questions, {
+      summary: { values: ["whose?"], other: "", otherSelected: false },
+    });
+    claimHumanInputDraftOwner("user-a");
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+  });
+
   test("a denied pending-list read forgets that session's drafts", async () => {
     writeHumanInputDraft(scope, questions, {
       summary: { values: ["no longer visible"], other: "", otherSelected: false },
