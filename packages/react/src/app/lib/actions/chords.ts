@@ -25,6 +25,11 @@ export type Chord = {
   only?: ActionSurface;
   /** Only on this platform. */
   platform?: ChordPlatform;
+  /**
+   * A text-formatting key (⌘B is bold): rich-text editors keep it, so the page
+   * handles it and the desktop menu bar never owns it.
+   */
+  formatting?: boolean;
 };
 
 export function currentPlatform(): ChordPlatform {

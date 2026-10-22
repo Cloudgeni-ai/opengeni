@@ -69,12 +69,14 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | New chat | ⌘N on desktop, ⇧⌘O everywhere | Ctrl+N on desktop, Ctrl+Shift+O everywhere | Browsers reserve ⌘N |
 | Copy chat link | ⇧⌘, | Ctrl+Shift+, | Linear's key for copying an issue URL |
 | Pin or unpin chat | ⌥⌘P | Ctrl+Alt+P | Clear of the common browser shortcuts |
+| Archive or restore chat | ⌃⌘A | Ctrl+Alt+A | Apple Mail's Archive key; browsers on Windows and Linux use Ctrl+Shift+A for tab search |
 | Inbox | ⇧⌘I | Ctrl+Shift+I on desktop only | Browsers on Windows and Linux use Ctrl+Shift+I for developer tools |
 | Previous or next chat | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Sidebar order, like Slack |
 | Pinned chat 1 to 9 | ⌘1 to ⌘9 on desktop | Ctrl+1 to 9 on desktop | Browsers use these for tabs |
 | Recent chat switcher | ⌃Tab on desktop | Ctrl+Tab on desktop | Browsers use these for tabs; see below |
 | Find in chat | ⌘F | Ctrl+F | Exists today |
-| Toggle sidebar | ⌃⌘S | Ctrl+Shift+S | Exists on desktop, added on web |
+| Toggle sidebar | ⌘B (⌃⌘S also works) | Ctrl+B (Ctrl+Shift+S also works) | The common editor and chat-app key. Rich-text editors keep ⌘B for bold, so the desktop menu bar shows the platform's standard key |
+| Toggle workspace panel | ⌥⌘B | Ctrl+Alt+B | The right-hand panel; VS Code's key for its second sidebar |
 | Shortcut cheat sheet | ⌘/ | Ctrl+/ | Slack's key |
 
 Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
