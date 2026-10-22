@@ -103,6 +103,8 @@ export function SiteViewRoute({
 }
 
 const PAGE_SIZE = 30;
+/** The most a session list page returns. */
+const MAX_PAGE_SIZE = 100;
 
 /** The Site's own conversations for this viewer, newest activity first. */
 function useSiteConversations(workspaceId: string, siteId: string) {
@@ -112,13 +114,18 @@ function useSiteConversations(workspaceId: string, siteId: string) {
   const [loadingMore, setLoadingMore] = useState(false);
   const request = useRef<AbortController | null>(null);
   const more = useRef<AbortController | null>(null);
+  // A refresh re-reads as many as are loaded, so "Show older" survives updates.
+  const loadedCount = useRef(0);
+  useEffect(() => {
+    loadedCount.current = page?.sessions.length ?? 0;
+  }, [page]);
   const read = useCallback(
-    (signal: AbortSignal, cursor?: string) =>
+    (signal: AbortSignal, cursor?: string, limit = PAGE_SIZE) =>
       client.listSessionPage(workspaceId, {
         originSiteId: siteId,
         parentSessionId: null,
         sortBy: "updatedAt",
-        limit: PAGE_SIZE,
+        limit,
         signal,
         ...(cursor ? { cursor } : {}),
       }),
@@ -126,12 +133,14 @@ function useSiteConversations(workspaceId: string, siteId: string) {
   );
   const refresh = useCallback(async () => {
     request.current?.abort();
-    // A fresh first page replaces older pages; a pending "Show older" is stale.
-    more.current?.abort();
     const abort = new AbortController();
     request.current = abort;
     try {
-      const next = await read(abort.signal);
+      const next = await read(
+        abort.signal,
+        undefined,
+        Math.min(MAX_PAGE_SIZE, Math.max(PAGE_SIZE, loadedCount.current)),
+      );
       if (abort.signal.aborted) return;
       setPage(next);
       setError(null);
@@ -147,7 +156,8 @@ function useSiteConversations(workspaceId: string, siteId: string) {
       more.current?.abort();
     };
   }, [refresh]);
-  useSessionListHintRefresh(refresh, error);
+  // This list shows only Site conversations, which ordinary hints never name.
+  useSessionListHintRefresh(refresh, error, { siteConversations: true });
   const loadMore = useCallback(async () => {
     const cursor = page?.nextCursor;
     if (!cursor || loadingMore) return;
@@ -158,7 +168,7 @@ function useSiteConversations(workspaceId: string, siteId: string) {
       const next = await read(abort.signal, cursor);
       if (abort.signal.aborted) return;
       setPage((current) =>
-        // Only extend the page this cursor came from.
+        // Only extend the page this cursor came from; a refresh since replaced it.
         current?.nextCursor === cursor
           ? {
               ...next,
@@ -355,6 +365,11 @@ function SiteConversationsColumn({
   useEffect(() => {
     if (handoff && selectedId !== null && selectedId !== handoff.sessionId) setHandoff(null);
   }, [handoff, selectedId]);
+  // Focus follows a new conversation once it, not the composer, is mounted.
+  const handoffId = handoff?.sessionId ?? null;
+  useEffect(() => {
+    if (handoffId !== null && selectedId === handoffId) setFocusRequest((request) => request + 1);
+  }, [handoffId, selectedId]);
   return (
     <aside
       ref={panel}
@@ -391,28 +406,24 @@ function SiteConversationsColumn({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
             {selectedId ? (
-              <DropdownMenuItem
-                onSelect={() =>
-                  void navigate({
-                    to: "/workspaces/$workspaceId/sessions/$sessionId",
-                    params: { workspaceId, sessionId: selectedId },
-                  })
-                }
-              >
-                <Maximize2Icon aria-hidden="true" />
-                Open as a full chat
+              <DropdownMenuItem asChild>
+                <Link
+                  to="/workspaces/$workspaceId/sessions/$sessionId"
+                  params={{ workspaceId, sessionId: selectedId }}
+                >
+                  <Maximize2Icon aria-hidden="true" />
+                  Open as a full chat
+                </Link>
               </DropdownMenuItem>
             ) : null}
-            <DropdownMenuItem
-              onSelect={() =>
-                void navigate({
-                  to: "/workspaces/$workspaceId/artifacts/$artifactId",
-                  params: { workspaceId, artifactId: siteId },
-                })
-              }
-            >
-              <InfoIcon aria-hidden="true" />
-              Site details
+            <DropdownMenuItem asChild>
+              <Link
+                to="/workspaces/$workspaceId/artifacts/$artifactId"
+                params={{ workspaceId, artifactId: siteId }}
+              >
+                <InfoIcon aria-hidden="true" />
+                Site details
+              </Link>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -463,7 +474,6 @@ function SiteConversationsColumn({
               labels={{ title: ready ? `Ask about ${ready.title}` : "New conversation" }}
               onCreated={(created) => {
                 setHandoff(created);
-                setFocusRequest((request) => request + 1);
                 void list.refresh();
                 // Opening it ends composing, like any other choice.
                 toSite({ conversation: created.sessionId });

@@ -12,11 +12,13 @@ const id = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")
 
 let permissions = ["sessions:create"];
 let conversations: Session[] = [];
+let listPage: ((options: SessionListPageOptions) => object) | null = null;
 let fullSessions: Record<string, Session> = {};
 let siteDetails: () => Promise<unknown> = async () => ({
   artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
 });
 let hintRefresh: (() => Promise<void>) | null = null;
+let hintOptions: { siteConversations?: boolean } | undefined;
 const listCalls: SessionListPageOptions[] = [];
 const sessionReads: string[] = [];
 const navigations: unknown[] = [];
@@ -26,7 +28,7 @@ const composerProps: Array<Record<string, unknown>> = [];
 const client = {
   listSessionPage: async (_workspace: string, options: SessionListPageOptions) => {
     listCalls.push(options);
-    return { pinned: [], sessions: conversations, nextCursor: null };
+    return listPage?.(options) ?? { pinned: [], sessions: conversations, nextCursor: null };
   },
   getSession: async (_workspace: string, sessionId: string) => {
     sessionReads.push(sessionId);
@@ -84,8 +86,13 @@ mock.module("../lib/console-site", () => ({
   useConsoleSiteToolBridge: () => () => undefined,
 }));
 mock.module("../lib/use-session-list-hint-refresh", () => ({
-  useSessionListHintRefresh: (refresh: () => Promise<void>) => {
+  useSessionListHintRefresh: (
+    refresh: () => Promise<void>,
+    _error: unknown,
+    options?: { siteConversations?: boolean },
+  ) => {
     hintRefresh = refresh;
+    hintOptions = options;
   },
 }));
 mock.module("../../artifacts", () => ({
@@ -132,11 +139,7 @@ mock.module("../../ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-  DropdownMenuItem: ({ children, onSelect }: { children: ReactNode; onSelect: () => void }) => (
-    <button type="button" role="menuitem" onClick={onSelect}>
-      {children}
-    </button>
-  ),
+  DropdownMenuItem: ({ children }: { children: ReactNode; asChild?: boolean }) => children,
 }));
 
 let module: typeof import("./site-view");
@@ -162,6 +165,8 @@ afterEach(() => {
     artifact: { title: "Opengeni usage", status: "active", currentVersion: { id: "version-4" } },
   });
   hintRefresh = null;
+  hintOptions = undefined;
+  listPage = null;
   listCalls.length = 0;
   sessionReads.length = 0;
   navigations.length = 0;
@@ -211,6 +216,8 @@ const rows = (container: HTMLElement) => [
 ];
 const button = (container: HTMLElement, text: string) =>
   [...container.querySelectorAll("button")].find((element) => element.textContent === text);
+const link = (container: HTMLElement, text: string) =>
+  [...container.querySelectorAll("a")].find((element) => element.textContent === text);
 const siteRoute = (search: object, replace?: boolean) => ({
   to: "/workspaces/$workspaceId/sites/$siteId",
   params: { workspaceId, siteId },
@@ -228,6 +235,8 @@ test("shows the Site with its newest conversation open and the others to switch 
   expect(openConversation(container)).toBe(id(1));
   expect(listCalls[0]).toMatchObject({ originSiteId: siteId, parentSessionId: null });
   expect(listCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+  // Updates to Site conversations reach this list; ordinary ones don't.
+  expect(hintOptions).toEqual({ siteConversations: true });
   expect(rows(container).map((row) => [row.textContent, row.getAttribute("aria-current")])).toEqual(
     [
       ["Time filters across all graphs2m", "page"],
@@ -267,6 +276,29 @@ test("the open conversation stays put when another one becomes newer", async () 
   await rerender(id(1));
   await rerender(undefined);
   expect(openConversation(container)).toBe(id(2));
+});
+
+test("an update keeps the older conversations the person loaded", async () => {
+  const all = Array.from({ length: 35 }, (_, n) => conversation(n + 1, `Question ${n + 1}`, n));
+  listPage = (options) =>
+    options.cursor === "older"
+      ? { pinned: [], sessions: all.slice(30), nextCursor: null }
+      : {
+          pinned: [],
+          sessions: all.slice(0, options.limit),
+          nextCursor: (options.limit ?? 0) < all.length ? "older" : null,
+        };
+  const { container } = await render();
+  expect(rows(container)).toHaveLength(30);
+  await act(async () => button(container, "Show older")!.click());
+  await settle();
+  expect(rows(container)).toHaveLength(35);
+  await act(async () => void (await hintRefresh!()));
+  await settle();
+  expect(listCalls.at(-1)).toMatchObject({ limit: 35 });
+  expect(listCalls.at(-1)?.cursor).toBeUndefined();
+  expect(rows(container)).toHaveLength(35);
+  expect(button(container, "Show older")).toBeUndefined();
 });
 
 test("a chosen conversation is the one open", async () => {
@@ -379,8 +411,8 @@ test("choosing a conversation ends composing", async () => {
 test("the menu opens the conversation as a full chat or the Site's details", async () => {
   conversations = [conversation(1, "Time filters across all graphs", 2)];
   const { container } = await render();
-  await act(async () => button(container, "Open as a full chat")!.click());
-  await act(async () => button(container, "Site details")!.click());
+  await act(async () => link(container, "Open as a full chat")!.click());
+  await act(async () => link(container, "Site details")!.click());
   expect(navigations).toEqual([
     {
       to: "/workspaces/$workspaceId/sessions/$sessionId",

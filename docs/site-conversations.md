@@ -52,9 +52,13 @@
   sending the Site and its current version (`x-opengeni-site-id`,
   `x-opengeni-site-version`) with only the fields a Site may set, so it is
   private to the viewer and listed under the Site. It doesn't offer voice-first
-  start. The panel's menu opens the conversation as a full chat or the Site's
-  details (`/artifacts/:id`, with settings, sharing and its Conversations tab).
-  `/artifacts/:id` (with its tabs) and `/sessions/:id` keep working.
+  start. Once open, New stays open until a conversation is chosen (choosing the
+  Site's own row again does not close it). The panel follows `siteSessionIds`
+  hints, so conversations started in the Site beside it appear, and a refresh
+  re-reads as many conversations as are loaded. The panel's menu opens the
+  conversation as a full chat or the Site's details (`/artifacts/:id`, with
+  settings, sharing and its Conversations tab). `/artifacts/:id` (with its tabs)
+  and `/sessions/:id` keep working.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.
