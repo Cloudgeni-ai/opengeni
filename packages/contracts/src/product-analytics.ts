@@ -145,6 +145,7 @@ export const TOOL_FAMILY_INTEGRATION_DOMAINS = [
   "googleapis.com",
   // Curated catalog MCP hosts.
   "gmailmcp.googleapis.com",
+  "drivemcp.googleapis.com",
   "mcp.slack.com",
   "api.mobbin.com",
   "mcp.linear.app",
