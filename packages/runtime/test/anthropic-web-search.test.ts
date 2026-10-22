@@ -479,6 +479,54 @@ describe("Claude web search replay", () => {
     );
   });
 
+  test("a thinking reply with a search after our tool call ends with the tool call", () => {
+    const thinking = { type: "thinking", thinking: "Plan", signature: "SIG_1" };
+    const reply = anthropicResponse(
+      message(
+        "msg_1",
+        [thinking, { type: "tool_use", id: "toolu_1", name: "lookup", input: { key: "a" } }, call],
+        "tool_use",
+      ),
+      undefined,
+      new Map([["lookup", { name: "lookup" }]]),
+    ).output;
+    const toolResult = {
+      type: "function_call_result",
+      callId: "toolu_1",
+      name: "lookup",
+      status: "completed",
+      output: "a result",
+    };
+    const turn = [{ role: "user", content: "Go" }, ...reply, toolResult] as any[];
+    const notice = { role: "system", content: "A background command finished." };
+    for (const input of [turn, [...turn, notice]]) {
+      const body = buildAnthropicRequest(request(input), "claude", provider, false);
+      const assistant = body.messages[1].content.map((block: any) => block.type);
+      expect(assistant).toEqual(["thinking", "text", "tool_use"]);
+      expect(unmarked(body.messages[1].content[0])).toEqual(thinking);
+      expect(JSON.stringify(body.messages)).not.toContain("server_tool_use");
+      expect(JSON.stringify(body.messages[1])).toContain("opengeni release notes");
+      expect(body.messages[2].content[0].type).toBe("tool_result");
+      expect(body.messages.at(-1).role).not.toBe("assistant");
+    }
+
+    // A later request keeps the same prefix.
+    const first = buildAnthropicRequest(request(turn), "claude", provider, false);
+    const later = buildAnthropicRequest(
+      request([
+        ...turn,
+        { role: "assistant", content: "Done" },
+        { role: "user", content: "Ok" },
+      ]),
+      "claude",
+      provider,
+      false,
+    );
+    expect(JSON.stringify(unmarked(later.messages.slice(0, 3)))).toBe(
+      JSON.stringify(unmarked(first.messages)),
+    );
+  });
+
   test("an interrupted search and an orphaned result become inert facts, stably", () => {
     const interrupted = anthropicResponse(
       message(
