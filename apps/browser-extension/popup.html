@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Opengeni Browser</title>
+    <title>{{name}}</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -11,7 +11,7 @@
       <header>
         <img class="brand-mark" src="icons/brand-mark.svg" alt="" width="28" height="22" />
         <div>
-          <h1><span class="wordmark">Opengeni</span><span class="product">Browser</span></h1>
+          <h1>{{heading}}</h1>
           <p class="status">
             <span class="signal" aria-hidden="true"></span
             ><span data-state role="status">Connecting…</span>
@@ -31,7 +31,7 @@
           />
           <button type="submit">Save</button>
         </div>
-        <small>Used only to recognize this profile in Opengeni.</small>
+        <small>Used only to recognize this profile in {{product}}.</small>
       </form>
     </main>
     <script type="module" src="popup.js"></script>
