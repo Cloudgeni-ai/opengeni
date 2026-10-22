@@ -345,6 +345,14 @@ const SettingsSchema = z.object({
   // port, including Azure Flexible Server's built-in pooler). Set false for any
   // other transaction-pooling proxy; set true to force them on.
   databasePreparedStatements: EnvBoolean.optional(),
+  // Application pool connection recycling, in seconds. Unset → the pool
+  // defaults in @opengeni/db: idle connections close after 30 s and each
+  // connection lives at most 600 s (jittered down by up to a quarter), because
+  // every PostgreSQL backend keeps its catalog cache and prepared plans until
+  // it closes. 0 disables the timer. The ceiling is the longest timer the
+  // runtime can arm (2^31 - 1 ms); a longer one would fire after 1 ms.
+  databasePoolIdleTimeoutSeconds: z.coerce.number().int().nonnegative().max(2_147_483).optional(),
+  databasePoolMaxLifetimeSeconds: z.coerce.number().int().nonnegative().max(2_147_483).optional(),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -2038,6 +2046,8 @@ const ArtifactServiceSettingsSchema = SettingsSchema.pick({
   dbSchema: true,
   rlsStrategy: true,
   databasePreparedStatements: true,
+  databasePoolIdleTimeoutSeconds: true,
+  databasePoolMaxLifetimeSeconds: true,
   observabilityStructuredLogs: true,
   observabilityMetricsEnabled: true,
   observabilityOtlpEndpoint: true,
@@ -2086,6 +2096,8 @@ function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
+    databasePoolIdleTimeoutSeconds: optional("OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS"),
+    databasePoolMaxLifetimeSeconds: optional("OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -5005,6 +5017,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
+    databasePoolIdleTimeoutSeconds: optional("OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS"),
+    databasePoolMaxLifetimeSeconds: optional("OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),

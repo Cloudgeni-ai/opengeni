@@ -11,6 +11,7 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePoolOptions,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -1181,14 +1182,11 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
-  const preparedStatements =
-    settings.databasePreparedStatements === undefined
-      ? {}
-      : { preparedStatements: settings.databasePreparedStatements };
+  const poolOptions = databasePoolOptions(settings);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...preparedStatements,
+    ...poolOptions,
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1198,7 +1196,7 @@ export async function startWorker() {
   const readinessDbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...preparedStatements,
+    ...poolOptions,
     max: 1,
   });
   const databasePosture = {
