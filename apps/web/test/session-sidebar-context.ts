@@ -2,6 +2,7 @@
 import type {
   OpenGeniClient,
   SessionListPageOptions,
+  SiteConversationGroup,
   WorkspaceLiveStreamOptions,
   WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
@@ -143,6 +144,43 @@ if (previewParameters.get("scenario") === "keyboard-focus") {
     ...Array.from({ length: 106 }, (_, index) =>
       session(2000 + index, `Focus conversation ${index + 1}`, null, index / 100),
     ),
+  );
+}
+
+/** Conversations that run inside a Site; ordinary pages leave them out. */
+const siteConversationIds = new Set<string>();
+export const usageSiteId = "00000000-0000-4000-a000-000000000001";
+export const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+if (previewParameters.get("scenario") === "sites") {
+  const siteConversation = (
+    number: number,
+    title: string,
+    site: { siteId: string; title: string },
+    channelId: string | null,
+    age: number,
+  ): Session => {
+    const row = { ...session(number, title, channelId, age), metadata: {} } as Session;
+    row.metadata = { _opengeniSiteOrigin: site };
+    siteConversationIds.add(row.id);
+    return row;
+  };
+  const usage = { siteId: usageSiteId, title: "Opengeni usage" };
+  const ipo = { siteId: ipoSiteId, title: "IPO research dashboard" };
+  rows.splice(
+    0,
+    rows.length,
+    session(1, "Slack community connection test", null, 60),
+    session(2, "Paused Slack QA schedule", null, 120),
+    session(3, "Frequent external Opengeni users", null, 1380),
+    session(4, "Gmail demo draft summary", null, 1500),
+    session(5, "Workspace Site planning", null, 2900),
+    session(6, "Homepage hero refresh", redesignId, 30),
+    session(7, "Pricing page copy", redesignId, 400),
+    session(8, "Flaky checkout test", bugfixesId, 200),
+    siteConversation(901, "Time filters across all graphs", usage, null, 2),
+    siteConversation(902, "Weekly active users by plan", usage, null, 180),
+    siteConversation(903, "Export usage to CSV", usage, null, 2600),
+    siteConversation(904, "Compare IPO filings", ipo, redesignId, 44),
   );
 }
 
@@ -344,6 +382,16 @@ function filteredRows(options: SessionListPageOptions): Session[] {
   const selected = rows.filter((row) => {
     if (archiveStatus !== "all" && row.archived !== (archiveStatus === "archived")) return false;
     if (options.archivedOnly && !row.archived) return false;
+    // Matches the server: Site conversations only for a Site filter or `include`.
+    if (options.originSiteId) {
+      if (
+        !siteConversationIds.has(row.id) ||
+        (row.metadata._opengeniSiteOrigin as { siteId?: string } | undefined)?.siteId !==
+          options.originSiteId
+      )
+        return false;
+    } else if (siteConversationIds.has(row.id) && options.siteConversations !== "include")
+      return false;
     if (options.parentSessionId !== undefined && row.parentSessionId !== options.parentSessionId)
       return false;
     if (options.channelId !== undefined && row.channelId !== options.channelId) return false;
@@ -372,6 +420,44 @@ function filteredRows(options: SessionListPageOptions): Session[] {
             : b.updatedAt.localeCompare(a.updatedAt);
     return order || a.id.localeCompare(b.id);
   });
+}
+
+/** The server's complete Site rows for a grouped root page. */
+function previewSiteGroups(options: SessionListPageOptions): SiteConversationGroup[] {
+  const groups = new Map<string, SiteConversationGroup>();
+  for (const row of filteredRows({ ...options, siteConversations: "include" })) {
+    if (!siteConversationIds.has(row.id)) continue;
+    const origin = row.metadata._opengeniSiteOrigin as { siteId: string; title: string };
+    const key = `${origin.siteId}:${row.channelId ?? ""}`;
+    const current = groups.get(key);
+    const active = row.status === "running" ? 1 : 0;
+    if (current) {
+      current.conversations += 1;
+      current.total += 1;
+      current.active += active;
+      if (row.updatedAt > current.updatedAt) current.updatedAt = row.updatedAt;
+      if (row.createdAt > current.createdAt) current.createdAt = row.createdAt;
+      continue;
+    }
+    groups.set(key, {
+      siteId: origin.siteId,
+      channelId: row.channelId ?? null,
+      title: origin.title,
+      conversations: 1,
+      updatedAt: row.updatedAt,
+      createdAt: row.createdAt,
+      total: 1,
+      attention: 0,
+      attentionSince: null,
+      failed: 0,
+      active,
+      queued: 0,
+      waiting: 0,
+      unread: 0,
+      activeWork: 0,
+    });
+  }
+  return [...groups.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export const client = {
@@ -441,7 +527,15 @@ export const client = {
     const nextCursor = offset + limit < selected.length ? String(offset + limit) : null;
     call.returnedIds = page.map((row) => row.id);
     call.nextCursor = nextCursor;
-    return { sessions: structuredClone(page), pinned: [], nextCursor, filtersApplied: true };
+    return {
+      sessions: structuredClone(page),
+      pinned: [],
+      nextCursor,
+      filtersApplied: true,
+      ...(options.siteConversations === "group" && options.cursor === undefined
+        ? { siteConversations: "group" as const, siteGroups: previewSiteGroups(options) }
+        : {}),
+    };
   },
   updateSessionArchive: async (
     workspace: string,
@@ -523,7 +617,13 @@ if (previewParameters.has("hints")) {
 const invocation = { workspaceId };
 const context = {
   client,
-  session: null,
+  // In the Sites scenario the session route supplies the open session, as in
+  // the app; the rail injects it. Other scenarios keep no open session.
+  get session() {
+    if (previewParameters.get("scenario") !== "sites") return null;
+    const id = /\/sessions\/([^/]+)/u.exec(window.location.pathname)?.[1];
+    return (id && rows.find((row) => row.id === id)) || null;
+  },
   accessContext: { subjectId },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},

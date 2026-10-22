@@ -7,7 +7,7 @@ import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
-import type { SessionListTotals } from "@opengeni/sdk";
+import type { SessionListTotals, SiteConversationGroup } from "@opengeni/sdk";
 import type { RailSession as Session } from "./session-list-entry";
 
 // The flat list rules are shared with native renderers through the pure
@@ -54,6 +54,11 @@ export {
 export type SessionTreeNode = {
   /** Presentation-only group; never persisted or used for session actions. */
   siteGroup?: SessionSiteOrigin | undefined;
+  /**
+   * A Site row's complete server counts, independent of which conversations
+   * are loaded. Absent when the row was built from loaded conversations only.
+   */
+  siteSummary?: SiteRowSummary | undefined;
   session: Session;
   children: SessionTreeNode[];
   /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
@@ -189,6 +194,26 @@ function railStatusCounts(
   node: SessionTreeNode,
   localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
+  if (node.siteGroup && node.siteSummary) {
+    // Complete server counts; loaded rows add only browser-local send failures.
+    const summary = node.siteSummary;
+    const waiting = Math.min(summary.waiting, summary.active);
+    return {
+      total: summary.total,
+      sendFailed: node.children.reduce(
+        (total, child) => total + loadedLocalDeliveryFailureCount(child, localDeliveryAttention),
+        0,
+      ),
+      attention: summary.attention,
+      attentionSince: summary.attentionSince,
+      failed: summary.failed,
+      active: summary.active - waiting,
+      queued: summary.queued,
+      waiting,
+      unread: summary.unread,
+      activeWork: summary.activeWork,
+    };
+  }
   if (node.siteGroup) {
     const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
     for (const key of [
@@ -773,37 +798,182 @@ export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] 
   return grouped;
 }
 
-/** Explicit project placement wins; pins have already been split out. */
-export function groupSiteConversations(roots: SessionTreeNode[]): SessionTreeNode[] {
-  const groups = new Map<string, SessionTreeNode[]>();
+export type SiteRowSummary = Omit<SiteConversationGroup, "siteId" | "channelId" | "title">;
+
+/**
+ * A Site row's stable id. Rows are per project when the rail shows projects,
+ * so a Site used from two projects appears in each; otherwise one per Site.
+ */
+export function siteRowKey(siteId: string, channelId?: string | null): string {
+  return channelId === undefined ? `site:${siteId}` : `site:${siteId}:${channelId ?? "default"}`;
+}
+
+/** The Site and project a Site row stands for, or null for an ordinary id. */
+export function parseSiteRowKey(
+  key: string,
+): { siteId: string; channelId?: string | null | undefined } | null {
+  const match = /^site:([0-9a-f-]{36})(?::(.+))?$/iu.exec(key);
+  if (!match) return null;
+  const channel = match[2];
+  return channel === undefined
+    ? { siteId: match[1]! }
+    : { siteId: match[1]!, channelId: channel === "default" ? null : channel };
+}
+
+function laterIso(a: string, b: string | undefined): string {
+  if (!b) return a;
+  return Date.parse(b) > Date.parse(a) ? b : a;
+}
+
+/** Merge per-project server groups into one per Site for rails without projects. */
+function siteRowSummaries(
+  groups: readonly SiteConversationGroup[],
+  byProject: boolean,
+): Map<string, { origin: SessionSiteOrigin; channelId: string | null; summary: SiteRowSummary }> {
+  const rows = new Map<
+    string,
+    { origin: SessionSiteOrigin; channelId: string | null; summary: SiteRowSummary }
+  >();
+  for (const group of groups) {
+    const key = siteRowKey(group.siteId, byProject ? group.channelId : undefined);
+    const { siteId, channelId, title, ...summary } = group;
+    const current = rows.get(key);
+    if (!current) {
+      rows.set(key, { origin: { siteId, title }, channelId, summary: { ...summary } });
+      continue;
+    }
+    const merged = current.summary;
+    for (const field of [
+      "conversations",
+      "total",
+      "attention",
+      "failed",
+      "active",
+      "queued",
+      "waiting",
+      "unread",
+      "activeWork",
+    ] as const)
+      merged[field] += summary[field];
+    merged.attentionSince = earliestIso(merged.attentionSince, summary.attentionSince);
+    merged.updatedAt = laterIso(merged.updatedAt, summary.updatedAt);
+    merged.createdAt = laterIso(merged.createdAt, summary.createdAt);
+  }
+  return rows;
+}
+
+/** The presentation-only row a Site's conversations nest under. */
+function siteRowSession(
+  key: string,
+  origin: SessionSiteOrigin,
+  channelId: string | null,
+  latest: Session | undefined,
+  summary: SiteRowSummary | undefined,
+  options: { workspaceId?: string | undefined; creator?: Session["createdBy"] | undefined },
+): Session {
+  const updatedAt = laterIso(summary?.updatedAt ?? latest?.updatedAt ?? "", latest?.updatedAt);
+  const createdAt = laterIso(summary?.createdAt ?? latest?.createdAt ?? "", latest?.createdAt);
+  // Only the fields the rail reads for ordering, grouping and links. It is
+  // never sent to the server or used for a session action.
+  return {
+    id: key,
+    workspaceId: latest?.workspaceId ?? options.workspaceId ?? "",
+    accountId: latest?.accountId ?? "",
+    rootSessionId: key,
+    parentSessionId: null,
+    channelId,
+    status: "idle",
+    title: origin.title,
+    displayTitle: origin.title,
+    renameSeed: origin.title,
+    titleSource: "user",
+    createdBy: latest?.createdBy ?? options.creator ?? { kind: "subject", subjectId: "" },
+    effectiveControl: { state: "active" },
+    inputWait: null,
+    pinned: false,
+    pinnedAt: null,
+    archived: false,
+    archivedAt: null,
+    unread: false,
+    activelyWorking: false,
+    lastSequence: 0,
+    treeStats: undefined,
+    scheduledTaskId: null,
+    siteOrigin: origin,
+    metadata: { _opengeniSiteOrigin: origin },
+    createdAt,
+    updatedAt,
+  } as unknown as Session;
+}
+
+/**
+ * Fold Site conversations into stable Site rows. `groups` are the complete
+ * rows from the server; loaded conversations (an expanded Site, the open
+ * session, a legacy labelled chat) join their row, so which session is
+ * selected never decides whether a Site or its conversations are listed.
+ * Pins have already been split out.
+ */
+export function attachSiteRows(
+  roots: SessionTreeNode[],
+  options: {
+    groups?: readonly SiteConversationGroup[] | undefined;
+    /** Rows per project when the rail shows projects. */
+    byProject?: boolean | undefined;
+    workspaceId?: string | undefined;
+    creator?: Session["createdBy"] | undefined;
+  } = {},
+): SessionTreeNode[] {
+  const byProject = options.byProject ?? false;
+  const rows = new Map<
+    string,
+    {
+      origin: SessionSiteOrigin;
+      channelId: string | null;
+      summary?: SiteRowSummary | undefined;
+      members: SessionTreeNode[];
+    }
+  >();
+  for (const [key, row] of siteRowSummaries(options.groups ?? [], byProject))
+    rows.set(key, { ...row, members: [] });
+  const rest: SessionTreeNode[] = [];
   for (const node of roots) {
     const origin = sessionSiteOrigin(node.session);
-    if (!origin || node.session.channelId || node.session.parentSessionId) continue;
-    const members = groups.get(origin.siteId) ?? [];
-    members.push(node);
-    groups.set(origin.siteId, members);
+    if (!origin || node.session.parentSessionId) {
+      rest.push(node);
+      continue;
+    }
+    const channelId = node.session.channelId ?? null;
+    const key = siteRowKey(origin.siteId, byProject ? channelId : undefined);
+    const row = rows.get(key) ?? { origin, channelId, members: [] };
+    row.members.push(node);
+    rows.set(key, row);
   }
-  const emitted = new Set<string>();
-  return roots.flatMap((node) => {
-    const origin = sessionSiteOrigin(node.session);
-    const members =
-      origin && !node.session.channelId && !node.session.parentSessionId
-        ? groups.get(origin.siteId)
-        : undefined;
-    if (!members || !origin) return [node];
-    if (emitted.has(origin.siteId)) return [];
-    emitted.add(origin.siteId);
-    members.sort((a, b) => compareSessionActivity(a.session, b.session));
-    const latest = members[0]!;
-    return [
-      {
-        siteGroup: origin,
-        session: { ...latest.session, id: `site:${origin.siteId}`, treeStats: undefined },
-        children: members,
-        hasActiveDescendant: members.some(nodeIsActive),
-      },
-    ];
+  const siteRows = [...rows].map(([key, row]): SessionTreeNode => {
+    const members = row.members.sort((a, b) => compareSessionActivity(a.session, b.session));
+    const summary = row.summary;
+    return {
+      siteGroup: row.origin,
+      ...(summary ? { siteSummary: summary } : {}),
+      session: siteRowSession(
+        key,
+        row.origin,
+        row.channelId,
+        members[0]?.session,
+        summary,
+        options,
+      ),
+      children: members,
+      hasActiveDescendant:
+        members.some(nodeIsActive) ||
+        Boolean(summary && summary.active + summary.queued + summary.attention > 0),
+    };
   });
+  return [...rest, ...siteRows];
+}
+
+/** How many conversations a Site row stands for, loaded or not. */
+export function siteRowConversationCount(node: SessionTreeNode): number {
+  return Math.max(node.siteSummary?.conversations ?? 0, node.children.length);
 }
 
 export function categorizeRailRoots(
@@ -1076,7 +1246,15 @@ export function projectRailSessions<T extends Session>(sessions: T[], hierarchyM
 export function buildPinnedRailSections(
   sessions: Session[],
   now: Date = new Date(),
-  options: { groupSites?: boolean | undefined } = {},
+  options: {
+    groupSites?: boolean | undefined;
+    /** Complete Site rows from a grouped root page. */
+    siteGroups?: readonly SiteConversationGroup[] | undefined;
+    /** Split Site rows by project (the rail's project view). */
+    siteRowsByProject?: boolean | undefined;
+    workspaceId?: string | undefined;
+    creator?: Session["createdBy"] | undefined;
+  } = {},
 ): PinnedRailSections {
   const complete = buildRailForest(sessions, now);
   const roots = forestRoots(complete);
@@ -1109,7 +1287,12 @@ export function buildPinnedRailSections(
     ordinary: categorizeRailRoots(
       options.groupSites === false
         ? groupScheduledRuns(ordinaryRoots)
-        : groupSiteConversations(groupScheduledRuns(ordinaryRoots)),
+        : attachSiteRows(groupScheduledRuns(ordinaryRoots), {
+            groups: options.siteGroups,
+            byProject: options.siteRowsByProject,
+            workspaceId: options.workspaceId,
+            creator: options.creator,
+          }),
       now,
     ),
   };

@@ -2587,6 +2587,46 @@ describe("OpenGeniClient", () => {
     ).resolves.toMatchObject({ originSiteId: SESSION_ID });
   });
 
+  test("rails can include Site conversations or receive them as Site rows", async () => {
+    const siteGroups = [
+      {
+        siteId: SESSION_ID,
+        channelId: null,
+        title: "Analytics",
+        conversations: 2,
+        updatedAt: "2026-10-22T12:00:00.000Z",
+        createdAt: "2026-10-22T11:00:00.000Z",
+        total: 2,
+        attention: 0,
+        attentionSince: null,
+        failed: 0,
+        active: 0,
+        queued: 0,
+        waiting: 0,
+        unread: 0,
+        activeWork: 0,
+      },
+    ];
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        siteConversations: "group",
+        siteGroups,
+      }),
+    );
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, { parentSessionId: null, siteConversations: "group" }),
+    ).resolves.toMatchObject({ siteConversations: "group", siteGroups });
+    expect(requests[0]!.url).toContain("siteConversations=group");
+    await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true, siteConversations: "include" });
+    expect(requests[1]!.url).toContain("siteConversations=include");
+    await client.listSessionPage(WORKSPACE_ID, {});
+    expect(requests[2]!.url).not.toContain("siteConversations");
+  });
+
   test("Site access lists fail closed on older servers and owner management uses native routes", async () => {
     const old = makeClient(() =>
       jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),

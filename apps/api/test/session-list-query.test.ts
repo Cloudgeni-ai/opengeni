@@ -17,6 +17,30 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ needsYouOnly: "true" }, false)).toThrow();
   });
 
+  test("lets the console rail include or group Site conversations", () => {
+    const siteId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      sessionListQuery({ parentSessionId: "null", siteConversations: "group" }).siteConversations,
+    ).toBe("group");
+    for (const query of [
+      { siteConversations: "include" },
+      { pinsOnly: "true", siteConversations: "include" },
+      { parentSessionId: siteId, siteConversations: "include" },
+    ])
+      expect(sessionListQuery(query).siteConversations).toBe("include");
+    expect(sessionListQuery({}).siteConversations).toBeUndefined();
+    for (const query of [
+      { siteConversations: "all" },
+      { siteConversations: "group" },
+      { parentSessionId: siteId, siteConversations: "group" },
+      { parentSessionId: "null", pinsOnly: "true", siteConversations: "group" },
+      { originSiteId: siteId, siteConversations: "include" },
+      { siteAccessId: siteId, siteConversations: "include" },
+    ])
+      expect(() => sessionListQuery(query)).toThrow();
+    expect(() => sessionListQuery({ siteConversations: "include" }, false)).toThrow();
+  });
+
   test("accepts Only mine as a page filter", () => {
     expect(sessionListQuery({ parentSessionId: "null", mineOnly: "true" })).toMatchObject({
       mineOnly: true,

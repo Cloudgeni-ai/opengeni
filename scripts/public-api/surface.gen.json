@@ -24903,6 +24903,9 @@
         "$.projection": "const!=[\"\\\"summary\\\"\"]",
         "$.sessions": "array!",
         "$.sessions[]": "ref(SessionListEntry)",
+        "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
+        "$.siteGroups": "array?",
+        "$.siteGroups[]": "ref(SiteConversationGroup)",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
       }
@@ -24925,6 +24928,9 @@
         "$.pinnedTruncated": "boolean?",
         "$.sessions": "array!",
         "$.sessions[]": "ref(Session)",
+        "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
+        "$.siteGroups": "array?",
+        "$.siteGroups[]": "ref(SiteConversationGroup)",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
       }
@@ -25920,6 +25926,29 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"failed\\\"\",\"\\\"needs_repair\\\"\",\"\\\"unknown\\\"\",\"\\\"verified\\\"\"]"
+      }
+    },
+    "SiteConversationGroup": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.active": "integer!",
+        "$.activeWork": "integer!",
+        "$.attention": "integer!",
+        "$.attentionSince": "string! null",
+        "$.channelId": "string! null",
+        "$.conversations": "integer!",
+        "$.createdAt": "string!",
+        "$.failed": "integer!",
+        "$.queued": "integer!",
+        "$.siteId": "string!",
+        "$.title": "string!",
+        "$.total": "integer!",
+        "$.unread": "integer!",
+        "$.updatedAt": "string!",
+        "$.waiting": "integer!"
       }
     },
     "SiteDataAccessMode": {
@@ -32437,6 +32466,7 @@
       "SiteAuthConnectionResource": "value",
       "SiteAuthHealthPolicy": "type",
       "SiteAuthMethod": "type",
+      "SiteConversationGroup": "type",
       "SiteDataAccessMode": "type",
       "SiteDataCollectionDefinitionRequest": "type",
       "SiteDataCollectionResponse": "type",

@@ -1320,6 +1320,7 @@ export type {
   AgentTopologySession,
   SessionListResponse,
   SessionListTotals,
+  SiteConversationGroup,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,

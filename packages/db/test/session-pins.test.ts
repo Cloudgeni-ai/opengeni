@@ -1673,6 +1673,144 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).rejects.toBeInstanceOf(SessionListAccessError);
   }, 60_000);
 
+  test("groups Site conversations into complete, private-safe Site rows", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    const other = `user:site-rows-other-${crypto.randomUUID()}`;
+    // A second organization member who can own private conversations here.
+    const [otherHome] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}::uuid, 'Other personal') returning id::text as id`;
+    await admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${workspace.accountId}::uuid, ${other}, 'active', ${otherHome!.id}::uuid)`;
+    await grantWorkspaceAccess(db, {
+      ...workspace,
+      subjectId: other,
+      permissions: ["workspace:read", "sessions:read", "sessions:create"],
+    });
+    const siteA = crypto.randomUUID();
+    const siteB = crypto.randomUUID();
+    const siteSession = (siteId: string, title: string, message: string, owner = subjectId) =>
+      session({
+        ...workspace,
+        message,
+        metadata: { _opengeniSiteOrigin: { siteId, title } },
+        privateOwnerSubjectId: owner,
+        createdBy: { kind: "subject", subjectId: owner },
+      });
+    const a1 = await siteSession(siteA, "Analytics", "A one");
+    const a2 = await siteSession(siteA, "Analytics", "A two");
+    const b1 = await siteSession(siteB, "Budget", "B one");
+    const othersA = await siteSession(siteA, "Analytics", "Other viewer", other);
+    const ordinary = await session({ ...workspace, message: "Ordinary" });
+    const at = (id: string, minutesAgo: number) =>
+      executeSessionActivity(
+        workspace.workspaceId,
+        sql`update sessions set updated_at = now() - make_interval(mins => ${minutesAgo})
+          where id = ${id}`,
+      );
+    await at(ordinary.id, 30);
+    await at(a1.id, 20);
+    await at(a2.id, 5);
+    await at(b1.id, 10);
+    await at(othersA.id, 1);
+    const grouped = (viewer: string, extra: Record<string, unknown> = {}) =>
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        subjectId: viewer,
+        parentSessionId: null,
+        siteConversations: "group",
+        includeTotals: true,
+        includePinned: true,
+        limit: 10,
+        ...extra,
+      });
+
+    const page = await grouped(subjectId);
+    // Rows stay ordinary; Site conversations arrive only as their Site rows.
+    expect(page.sessions.map((row) => row.id)).toEqual([ordinary.id]);
+    expect(page.siteConversations).toBe("group");
+    expect(page.siteGroups?.map((group) => [group.siteId, group.conversations])).toEqual([
+      [siteA, 2],
+      [siteB, 1],
+    ]);
+    expect(page.siteGroups?.[0]).toMatchObject({
+      title: "Analytics",
+      channelId: null,
+      total: 2,
+    });
+    // Project totals count the trees the Site rows stand for.
+    expect(page.totals?.groups[0]?.total).toBe(4);
+
+    // Another viewer's private Site conversation is never counted or titled.
+    const theirs = await grouped(other);
+    expect(theirs.siteGroups?.map((group) => [group.siteId, group.conversations])).toEqual([
+      [siteA, 1],
+    ]);
+
+    // Pins and archive are personal: pinned conversations leave the count for
+    // the pinned section; archived ones leave it entirely.
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: a1.id,
+      pinned: true,
+    });
+    await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: b1.id,
+      archived: true,
+      expectedVersion: 0,
+    });
+    const personal = await grouped(subjectId);
+    expect(personal.pinned.map((row) => row.id)).toEqual([a1.id]);
+    expect(personal.siteGroups?.map((group) => [group.siteId, group.conversations])).toEqual([
+      [siteA, 1],
+    ]);
+
+    // Site rows are a complete section read with page one only.
+    const firstPage = await grouped(subjectId, { limit: 1, includePinned: false });
+    expect(firstPage.siteGroups).toHaveLength(1);
+    expect(firstPage.nextCursor).toBeNull();
+
+    // `include` lists them as ordinary rows and binds that to its cursor.
+    const included = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      siteConversations: "include",
+      includePinned: false,
+      limit: 1,
+    });
+    expect(included.siteGroups).toBeUndefined();
+    expect(included.sessions.map((row) => row.id)).toEqual([a2.id]);
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        subjectId,
+        parentSessionId: null,
+        includePinned: false,
+        limit: 1,
+        cursor: decodeSessionListCursor(included.nextCursor!)!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    const rest = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      siteConversations: "include",
+      includePinned: false,
+      limit: 10,
+      cursor: decodeSessionListCursor(included.nextCursor!)!,
+    });
+    expect(rest.sessions.map((row) => row.id)).toEqual([ordinary.id]);
+
+    await expect(grouped(subjectId, { parentSessionId: a2.id })).rejects.toBeInstanceOf(
+      SessionListCursorError,
+    );
+    await expect(grouped(subjectId, { pinsOnly: true })).rejects.toBeInstanceOf(
+      SessionListCursorError,
+    );
+  }, 60_000);
+
   test("keeps project, creator, and date filters bound to their continuation cursor", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

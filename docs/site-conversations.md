@@ -18,12 +18,21 @@
   Site service execution and limits, with an immutable Site/viewer audience on
   the native session and descendants. A guest's existing cookie/visitor principal
   supplies continuity; losing it does not grant access to another visit.
-- Site sessions are omitted from ordinary workspace lists, sidebar, pins,
-  message search and discovery snapshots, including for their owner. Explicit
-  Site history is still available through the Site's Conversations tab and
-  `originSiteId` filter, only for the authorized viewer. Hiding is presentation;
-  native authorization and restrictive RLS independently protect reads, events,
-  files, controls and agent descendants, including direct guessed URLs.
+- Site sessions are omitted from ordinary workspace lists, message search and
+  discovery snapshots, including for their owner. Explicit Site history is
+  available through the Site's Conversations tab and `originSiteId` filter,
+  only for the authorized viewer. Hiding is presentation; native authorization
+  and restrictive RLS independently protect reads, events, files, controls and
+  agent descendants, including direct guessed URLs.
+- The console sidebar opts in with the session list's `siteConversations`
+  option. `group` (a root page) keeps Site conversations out of the rows and
+  returns `siteGroups`: one complete row per Site and project with the
+  viewer's conversation count, latest activity and status counts. `include`
+  lists them as ordinary rows; the sidebar uses it for search, Archived, pins
+  and work a Site conversation spawned. Both are bound into the cursor and use
+  the same viewer authorization, so another viewer's private Site conversation
+  is never counted, titled or listed. A Site row is stable: its conversations
+  stay nested under it, collapsed by default, whichever session is open.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.
