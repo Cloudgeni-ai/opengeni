@@ -212,14 +212,25 @@ export async function scanSessionMessages(
   const matches: SessionMessageSearchMatch[] = [];
   let exhausted = false;
   const e = schema.sessionEvents;
-  // Bounded message windows in key order. Each statement reads at most
-  // SESSION_MESSAGE_SEARCH_WINDOW eligible messages and returns only those that
-  // contain the literal; later windows run while the request budget lasts.
-  // Substring tests cannot use an index here: under row-level security
-  // PostgreSQL only uses leakproof operators in index scans, and no text
-  // pattern operator is leakproof. Bounding every statement keeps each
-  // request well inside its statement timeout however large the history is.
-  // Large scalar continuations alone use the lossless slice reader.
+  const c = schema.sessionMessageSearchTexts;
+  // Candidates come from session_message_search_texts. Under row-level
+  // security PostgreSQL only uses an index for a leakproof qualifier or one
+  // that belongs to the row-security policy, and no text pattern operator is
+  // leakproof, so the pattern is that table's restrictive policy: set here,
+  // transaction-locally, it lets the trigram index find exactly the messages
+  // whose text can contain the literal (plus losslessly encoded text, which
+  // only the decoding reader can test). A query PostgreSQL text cannot hold
+  // (NUL or a lone surrogate) leaves the pattern empty: only encoded text.
+  await db.execute(
+    sql`select pg_catalog.set_config('opengeni.session_message_search_pattern', ${
+      sessionMessagePostgresPattern(request.query) ?? ""
+    }, true)`,
+  );
+  // Bounded candidate windows in key order. Each statement reads at most
+  // SESSION_MESSAGE_SEARCH_WINDOW eligible candidates, each joined to its
+  // canonical event under that table's own policies and the list filters;
+  // later windows run while the request budget lasts. Large scalar
+  // continuations alone use the lossless slice reader.
   const limit = request.limit ?? 20;
   const budgetStarted = performance.now();
   let slots = 0;
@@ -227,8 +238,8 @@ export async function scanSessionMessages(
     signal?.throwIfAborted();
     const boundary = position
       ? position.skipSession
-        ? sql`${e.sessionId} > ${position.sessionId}::uuid`
-        : sql`(${e.sessionId} > ${position.sessionId}::uuid or (${e.sessionId} = ${position.sessionId}::uuid and ${position.done ? sql`${e.sequence} > ${position.sequence}` : sql`${e.sequence} >= ${position.sequence}`}))`
+        ? sql`${c.sessionId} > ${position.sessionId}::uuid`
+        : sql`(${c.sessionId}, ${c.sequence}) ${position.done ? sql`>` : sql`>=`} (${position.sessionId}::uuid, ${position.sequence}::int)`
       : sql`true`;
     // One statement checks the next window's text in PostgreSQL and returns
     // only the first candidates that contain the literal. The cheap
@@ -249,20 +260,23 @@ export async function scanSessionMessages(
       with eligible as materialized (
         select ${e.id} as id, ${e.sessionId} as session_id, ${e.sequence} as sequence,
           ${textMatch.matched} as matched, ${textMatch.encoded} as encoded
-        from ${e}
+        from ${c}
+        inner join ${e} on ${e.workspaceId} = ${c.workspaceId}
+          and ${e.sessionId} = ${c.sessionId} and ${e.sequence} = ${c.sequence}
         inner join ${schema.sessions}
           on ${schema.sessions.workspaceId} = ${e.workspaceId} and ${schema.sessions.id} = ${e.sessionId}
         where ${and(
+          eq(c.workspaceId, workspaceId),
           eq(e.workspaceId, workspaceId),
           ...filters,
           boundary,
-          request.sessionId ? eq(e.sessionId, request.sessionId) : sql`true`,
+          request.sessionId ? eq(c.sessionId, request.sessionId) : sql`true`,
           sql`${e.type} in ('user.message', 'agent.message.completed')`,
           sql`(${e.turnAssociation} is null or ${e.turnAssociation} = 'current')`,
           sql`${e.duplicateOfEventId} is null`,
           sql`jsonb_typeof(${e.payload}->'text') = 'string'`,
         )}
-        order by ${e.sessionId}, ${e.sequence}
+        order by ${c.sessionId}, ${c.sequence}
         limit ${sql.raw(String(SESSION_MESSAGE_SEARCH_WINDOW))}
       ), visited as (
         select count(*)::int as visited from eligible

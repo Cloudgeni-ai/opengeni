@@ -9876,6 +9876,40 @@ export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
   }),
 );
 
+/**
+ * Searchable text of each user and completed assistant message, written only
+ * by the schema owner's AFTER INSERT trigger on session_events. Its
+ * row-security policies are the search: rows are visible only while the
+ * transaction's `opengeni.session_message_search_pattern` matches them (or the
+ * text is losslessly encoded), so the trigram index can serve the pattern
+ * under FORCE RLS. See docs/session-message-search.md.
+ */
+export const sessionMessageSearchTexts = pgTable(
+  "session_message_search_texts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    encoded: boolean("encoded").notNull(),
+    text: text("text").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_message_search_texts_pkey",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+    }),
+    workspaceEvent: foreignKey({
+      name: "session_message_search_texts_event_fk",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+      foreignColumns: [sessionEvents.workspaceId, sessionEvents.sessionId, sessionEvents.sequence],
+    }).onDelete("cascade"),
+    encodedText: index("session_message_search_texts_encoded_idx")
+      .on(table.workspaceId)
+      .where(sql`${table.encoded}`),
+  }),
+);
+
 export const agentRunStates = pgTable("agent_run_states", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id")

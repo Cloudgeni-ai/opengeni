@@ -55,8 +55,9 @@ provider `messageId` is supplemental and is not always present.
 Ordering is session UUID ascending, then event sequence ascending, then match
 offset ascending. This is stable traversal order, not relevance ranking.
 `matchedMessageCount` and `matchedOccurrenceCount` are cumulative counts for this
-traversal. `scannedMessages` counts distinct visited source messages, including a
-large message still being scanned. `countIsExact` is true only at exhaustion.
+traversal. `scannedMessages` counts distinct visited candidate messages (those
+the index could not rule out, see below), including a large message still being
+scanned; messages the index rules out are never visited or counted. `countIsExact` is true only at exhaustion.
 With `groupBy: "session"`, both matched counters count returned **session
 representatives**, not full message or occurrence totals within those sessions.
 The skipped history is intentionally not counted. Grouped clients should label
@@ -74,6 +75,32 @@ text. Counts from a cursor are continuation bookkeeping, never authorization or 
 evidence. Invalid or changed-scope cursors return HTTP 400.
 Grouping mode is also bound to the cursor; it cannot be switched mid-traversal.
 
+## Indexed candidates
+
+Search reads candidates from `session_message_search_texts`, which holds the
+text of every user and completed assistant message once, keyed like its event
+by workspace, session and sequence. A trigger on `session_events` writes each
+new message as it is appended; a batched migration copied history; deleting an
+event deletes its row. The application role can only read the table.
+
+Under `FORCE ROW LEVEL SECURITY` PostgreSQL only lets an index serve a
+qualifier that is leakproof or part of a row-security policy, and no text
+pattern operator is leakproof. So the pattern test is the table's own
+restrictive policy: each search transaction sets the case-insensitive literal
+pattern in `opengeni.session_message_search_pattern`, and a row is visible only
+while its text matches it (or is losslessly encoded, which only the decoding
+reader can test). Without a pattern the table shows nothing. Workspace and
+session-visibility policies still apply, and every candidate is joined back to
+its canonical event under that table's policies and the ordinary list filters.
+
+That makes the trigram index (`pg_trgm`, with `btree_gin` for the workspace
+column) usable: a rare literal is found directly, while a common one walks the
+primary key in traversal order and stops after one window. PostgreSQL chooses
+per query. Literals shorter than three characters have no trigrams and fall
+back to that ordered walk. The `pg_trgm` and `btree_gin` extensions must be
+allowed on managed services with an extension allowlist (see
+[deployment](deployment.md)).
+
 ## Bounded scanning and cancellation
 
 An empty page with `hasMore: true` is valid: keep requesting `nextCursor` while
@@ -81,8 +108,9 @@ displaying provisional counts/searching state. Never treat an empty page, page
 size, or an arbitrary number of requests as complete. There is no overall
 history cutoff.
 
-Each request reads one batch of at most 33 message identities/bounded small
-scalars, processes at most 32 message/scalar windows, returns at most 50 hits,
+Each statement reads at most 2,000 candidates in traversal order. Each request
+reads one batch of at most 33 message identities/bounded small scalars,
+processes at most 32 message/scalar windows, returns at most 50 hits,
 and checks a roughly 1.5-second processing budget between windows. That budget
 cannot interrupt a statement already running: any single SQL statement may run
 up to the five-second statement timeout, so one slow identity or slice read can
@@ -106,8 +134,8 @@ slice reads remain bounded to 8192 units.
 Overlapping windows and in-message occurrence cursors prevent truncated false
 negatives and duplicate hits at window/page boundaries. PostgreSQL still has to
 extract/detoast source scalars; large encoded messages are slower than ordinary
-batched messages. This API is bounded in transfer and resumable work, not an
-indexed-search latency guarantee.
+batched messages. The index bounds which messages are read, and the windows
+bound transfer and resumable work; neither is an end-to-end latency guarantee.
 
 Clients should cancel superseded searches with the SDK's third `{ signal }`
 argument and retain only result snippets/cursors. Do not fetch or concatenate

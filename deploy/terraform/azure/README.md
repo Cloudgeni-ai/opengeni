@@ -10,7 +10,7 @@ This Terraform root module is the Azure reference substrate for Opengeni. It is 
 - Optional dedicated autoscaling AKS user pool for OpenSandbox workload Pods.
 - Azure Key Vault with RBAC authorization enabled.
 - Azure Database for PostgreSQL Flexible Server when `postgres.mode = "managed"`.
-- `pgcrypto`, `pgvector`, and `btree_gin` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema.
+- `pgcrypto`, `pgvector`, `btree_gin`, and `pg_trgm` enablement for managed Postgres through the `azure.extensions` server configuration. `btree_gin` is required by the upstream Temporal PostgreSQL visibility schema; `btree_gin` and `pg_trgm` also back indexed conversation message search.
 - Optional PostgreSQL firewall rules through `postgres.allow_azure_services` or `postgres.firewall_rules`.
 - Optional managed PostgreSQL high availability, custom maintenance window, pinned `max_connections`, and CPU/connection saturation alerts (see the Managed PostgreSQL sections below).
 - Azure Storage account and private Blob container when `object_storage.mode = "managed"` and `object_storage.api = "azure-blob"`.

@@ -434,7 +434,7 @@ test("ordinary no-hit history uses batched scalar SQL rather than per-message re
     max: 1,
     debug: (_connection, query) => {
       statements++;
-      if (query.includes('from "session_events"')) messageQueries++;
+      if (query.includes('from "session_message_search_texts"')) messageQueries++;
     },
   });
   const observed = drizzle(wire, { schema });
@@ -456,8 +456,9 @@ test("ordinary no-hit history uses batched scalar SQL rather than per-message re
       expect(page.matches).toHaveLength(0);
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
-    expect(page.scannedMessages).toBe(1024);
-    expect(messageQueries).toBeLessThanOrEqual(33);
+    // The trigram index finds no candidate, so no message is visited at all.
+    expect(page.scannedMessages).toBe(0);
+    expect(messageQueries).toBe(1);
     expect(statements).toBeLessThan(600);
     console.info(
       `[session-search performance] 1024 no-hit messages: ${messageQueries} batched message queries, ${statements} total statements, ${Math.round(performance.now() - started)}ms`,
@@ -522,7 +523,7 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
     max: 1,
     debug: (_connection, query) => {
       statements++;
-      if (query.includes('from "session_events"')) messageQueries++;
+      if (query.includes('from "session_message_search_texts"')) messageQueries++;
     },
   });
   const observed = drizzle(wire, { schema });
@@ -555,7 +556,8 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
           cursor = page.nextCursor ?? undefined;
           expect(++pages).toBeLessThan(1000);
         } while (cursor);
-        expect(page.scannedMessages).toBe(scenario.count);
+        // Only losslessly encoded text is a candidate the index cannot rule out.
+        expect(page.scannedMessages).toBe(scenario.name === "long-lossless" ? scenario.count : 0);
         expect(page.countIsExact).toBe(true);
         if (scenario.name.startsWith("long-")) {
           // Slow CI may exhaust the time budget before the window budget. Each
@@ -715,20 +717,38 @@ test("searches read bounded windows and resume exactly across window boundaries"
   };
   // The first session spans more than two windows with hits at both ends; the
   // second has none; the third hits only after its own full window of misses.
-  const filler = async (sessionId: string, from: number, to: number) =>
-    shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
-      select ${accountId}, ${workspaceId}, ${sessionId}, n, 'user.message', jsonb_build_object('text', 'unrelated ' || n)
-      from generate_series(${from}::int, ${to}::int) n`;
+  // Plain misses are never index candidates, so the misses that fill windows
+  // are prompts that contain the literal but were never claimed by a turn:
+  // candidates the reader visits and then excludes.
+  const unclaimedPrompts = async (sessionId: string, from: number, to: number) =>
+    shared.admin`with prompt as (
+        insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+        select ${accountId}, ${workspaceId}, ${sessionId}, n, 'user.message',
+          jsonb_build_object('text', 'window-needle never claimed ' || n)
+        from generate_series(${from}::int, ${to}::int) n
+        returning id, sequence
+      )
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, source, position, prompt, model, reasoning_effort, sandbox_backend
+      )
+      select ${accountId}, ${workspaceId}, ${sessionId}, prompt.id, 'search-fixture-' || prompt.sequence,
+        'cancelled', 'user', prompt.sequence, 'window-needle', 'test', 'medium', 'none'
+      from prompt`;
   const span = SESSION_MESSAGE_SEARCH_WINDOW * 2 + 17;
   await insert(first!.id, 1, "user.message", { text: "window-needle start" });
-  await filler(first!.id, 2, span);
+  await unclaimedPrompts(first!.id, 2, span);
   await insert(first!.id, span + 1, "agent.message.completed", { text: "end window-needle" });
-  await filler(second!.id, 1, SESSION_MESSAGE_SEARCH_WINDOW + 3);
-  await filler(third!.id, 1, SESSION_MESSAGE_SEARCH_WINDOW - 1);
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    select ${accountId}, ${workspaceId}, ${second!.id}, n, 'user.message', jsonb_build_object('text', 'unrelated ' || n)
+    from generate_series(1, ${SESSION_MESSAGE_SEARCH_WINDOW + 3}::int) n`;
+  await unclaimedPrompts(third!.id, 1, SESSION_MESSAGE_SEARCH_WINDOW - 1);
   await insert(third!.id, SESSION_MESSAGE_SEARCH_WINDOW, "user.message", {
     text: "WINDOW-NEEDLE last",
   });
-  const total = span + 1 + SESSION_MESSAGE_SEARCH_WINDOW + 3 + SESSION_MESSAGE_SEARCH_WINDOW;
+  // Every candidate is visited: all of the first and third sessions, none of
+  // the second.
+  const total = span + 1 + SESSION_MESSAGE_SEARCH_WINDOW;
   const every = await collect({ query: "window-needle" }, authority);
   expect(every.matches.map((m) => [m.sessionId, m.sequence])).toEqual([
     [first!.id, 1],
@@ -754,7 +774,7 @@ test("searches read bounded windows and resume exactly across window boundaries"
     authority,
   );
   expect(pagedGroups.matches.map((m) => m.sessionId)).toEqual([first!.id, third!.id]);
-});
+}, 180_000);
 
 test("workspace grouping skips prolific sessions in both buffered results and continuation", async () => {
   const sessions = await Promise.all([makeSession(), makeSession()]);
@@ -937,8 +957,9 @@ test("grouping returns a full batch of sessions per request, and encoded text ne
   );
   expect(rest.hasMore).toBe(false);
   expect(rest.matchedMessageCount).toBe(40);
-  // The first request's last matched session skips its two later messages.
-  expect(rest.scannedMessages).toBe(158);
+  // Filler is never a candidate, and the first request's last matched session
+  // skips its two later messages: 40 * 3 hits + 1 encoded - 2.
+  expect(rest.scannedMessages).toBe(119);
 }, 180_000);
 
 test("grouped workspace counts still exclude sessions outside authorization scope", async () => {

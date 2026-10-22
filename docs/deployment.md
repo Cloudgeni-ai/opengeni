@@ -1027,6 +1027,12 @@ or changed initial preamble fails before initial migration DDL; other migrations
 and the default path remain unchanged. Do not set this flag merely to hide an
 extension permission error without independently confirming installation.
 
+Migrations also install the `pg_trgm` and `btree_gin` extensions, which back
+indexed conversation message search. Both are trusted extensions that the
+database owner may create, but a managed service with an extension allowlist
+(Azure Database for PostgreSQL's `azure.extensions`, for example) must allow
+them before the migration that installs them runs.
+
 The ordinary SQL migration runner applies a transaction-local 5-second
 `lock_timeout` before each migration body. This bounds lock acquisition in
 migrations without a later timeout override, including 0510. Migration-specific
