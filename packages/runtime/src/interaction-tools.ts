@@ -836,6 +836,7 @@ const ComputerOpenInput = z
     mode: z.enum(["reuse_or_create", "new"]).optional(),
     name: z.string().trim().min(1).max(200).optional(),
     placement: InteractionPlacement.optional(),
+    applicationId: z.string().trim().min(1).max(1_024).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -855,7 +856,12 @@ const ComputerOpenInput = z
     }
   });
 const ComputerOpenOutput = z
-  .object({ session: ComputerSession, targets: z.array(ComputerTarget) })
+  .object({
+    session: ComputerSession,
+    targets: z.array(ComputerTarget),
+    /** The launch of `applicationId`: its receipt observes the app's window. */
+    launch: ComputerActionReceipt.optional(),
+  })
   .strict();
 const ComputerTargetsInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerObserveInput = z
@@ -2287,12 +2293,19 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. When the task is about one app, pass applicationId (what a launch action takes, such as a macOS bundle ID like com.apple.calculator) to launch it in the background, or find it if it is already running, and get its window's observation in the same call. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
-    modelText: computerOpenText,
+    modelText: (output, context) => {
+      const opened = computerOpenText(output);
+      const launch = output.launch;
+      if (!launch) return opened;
+      if (launch.observation && context.caller.kind === "model")
+        rememberComputerReading(launch.observation);
+      return `${opened}\n${computerActionText(launch)}`;
+    },
     execute: async (value, context) =>
       await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
   });
@@ -3385,13 +3398,24 @@ async function openComputer(
           })
         ).session;
   }
-  return {
-    session,
-    targets:
-      session.lifecycle === "active"
-        ? (await transport.listComputerTargets(workspaceId, session.id)).targets
-        : [],
-  };
+  const targets =
+    session.lifecycle === "active"
+      ? (await transport.listComputerTargets(workspaceId, session.id)).targets
+      : [];
+  // A launch acts on no window's contents, so any listed target carries it;
+  // the screen when there is one. Its receipt observes the app's window,
+  // whether the launch started the app or found it already running.
+  const carrier = targets.find((target) => target.kind === "screen") ?? targets[0];
+  if (!value.applicationId || !carrier) return { session, targets };
+  const launch = await transport.actInComputer(workspaceId, session.id, {
+    operationId: derivedOperationId("computer-open-launch", context.operationId, session.id),
+    targetId: carrier.id,
+    expectedTargetGeneration: carrier.targetGeneration,
+    expectedObservationId: null,
+    expectedFrameId: null,
+    action: { type: "launch", applicationId: value.applicationId },
+  });
+  return { session, targets, launch };
 }
 
 type InteractionPlacementTransport = InteractionTransport &
