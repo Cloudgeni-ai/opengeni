@@ -82,7 +82,9 @@
   is replaced, only once a page that loaded hidden is shown, and not again
   when a reload, a restored tab or going Back shows a page where this tab
   already recorded it (remembered in `sessionStorage` after the write
-  succeeds). Without a router history key, every visit counts. Without
+  succeeds). Pages the open Site view moves to, such as choosing a
+  conversation, belong to the same open. Without a router history key, every
+  visit counts. Without
   conversations a row has no count and nothing to disclose; it opens the
   Site view. Conversations someone moved to another project still nest under
   the Site's row in that project.

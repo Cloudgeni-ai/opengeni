@@ -97,6 +97,23 @@ test("a reload after the open was never recorded still opens the Site", async ()
   expect(opened()).toEqual([siteId]);
 });
 
+test("pages the open Site view moves to belong to the same open", async () => {
+  // Opened, then a conversation is chosen in the Site view, then a reload.
+  await show("a");
+  window.history.pushState({ __TSR_key: "b" }, "", `${sitePath}?conversation=x`);
+  await show("b");
+  await close();
+  await show("b");
+  await close();
+  // Reloaded onto a recorded page, then another conversation, then a reload.
+  await show("b");
+  window.history.pushState({ __TSR_key: "c" }, "", `${sitePath}?conversation=y`);
+  await show("c");
+  await close();
+  await show("c");
+  expect(opened()).toEqual([siteId]);
+});
+
 test("without a router key every visit opens the Site", async () => {
   await show(null);
   await close();

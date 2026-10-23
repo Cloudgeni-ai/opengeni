@@ -46,6 +46,8 @@ function rememberOpenedOnThisPage(siteId: string, entry: string | undefined): vo
  * page the person goes to. A new client for the same person doesn't open it
  * again, a hidden page counts once it is shown, and a reload, a restored tab
  * or coming back to a page where the open was already recorded doesn't count.
+ * Pages the open Site view moves to (choosing a conversation) belong to the
+ * same open.
  */
 export function useRecordSiteOpened(
   client: SiteOpenedClient,
@@ -56,10 +58,16 @@ export function useRecordSiteOpened(
   useInsertionEffect(() => {
     clientRef.current = client;
   }, [client]);
+  // The page this open is remembered on, once it is recorded.
+  const remembered = useRef<string | undefined>(undefined);
   useEffect(() => {
+    remembered.current = undefined;
     if (typeof clientRef.current.recordSiteOpened !== "function") return;
     const entry = historyEntryKey();
-    if (openedOnThisPage(siteId, entry)) return;
+    if (openedOnThisPage(siteId, entry)) {
+      remembered.current = entry;
+      return;
+    }
     let current = true;
     const record = () => {
       document.removeEventListener("visibilitychange", whenShown);
@@ -68,8 +76,12 @@ export function useRecordSiteOpened(
       latest
         .recordSiteOpened(workspaceId, siteId)
         .then(() => {
-          rememberOpenedOnThisPage(siteId, entry);
-          if (!current) return;
+          if (!current) {
+            rememberOpenedOnThisPage(siteId, entry);
+            return;
+          }
+          remembered.current = historyEntryKey() ?? entry;
+          rememberOpenedOnThisPage(siteId, remembered.current);
           window.dispatchEvent(
             new CustomEvent<SiteOpenedDetail>(SITE_OPENED_EVENT, {
               detail: { workspaceId, siteId },
@@ -91,6 +103,14 @@ export function useRecordSiteOpened(
       document.removeEventListener("visibilitychange", whenShown);
     };
   }, [workspaceId, siteId]);
+  // While the Site view stays open, follow it to the page it now shows.
+  useEffect(() => {
+    if (remembered.current === undefined) return;
+    const entry = historyEntryKey();
+    if (entry === undefined || entry === remembered.current) return;
+    remembered.current = entry;
+    rememberOpenedOnThisPage(siteId, entry);
+  });
 }
 
 /** Calls `onOpened` after this workspace records a Site open. */
