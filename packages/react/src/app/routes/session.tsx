@@ -157,7 +157,7 @@ import {
   SessionMachineAccessNotice,
 } from "../components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "../components/common";
-import { useHostMessageContext } from "../lib/app-host";
+import { useHostMessageContext, useReportSessionState } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { useSessionOpening } from "../lib/session-opening";
 import { creationHandoffReconciled } from "../lib/session-creation-handoff";
@@ -442,6 +442,8 @@ export function SessionRoute({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  // The embedding host follows the open chat from this stream.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>

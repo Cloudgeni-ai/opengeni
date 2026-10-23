@@ -125,7 +125,9 @@ embed.
   slots: `switcher`, `primaryNav`, `mobileWorkspacePanel`, `railFooter`,
   `canvasBanners`. The web app's `RailShell` is only its slot composition.
 - **`SessionApp`** (`@opengeni/react/session-app`): `apiBaseUrl`, `headers`,
-  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`, `preset`,
+  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`,
+  `onSessionState` (the open chat's status and held events, from the session
+  route's own stream, through `AppHost.onSessionState`), `preset`,
   `features`, `slots`, `surfaces` (PDF preview, editable artifacts), `theme`,
   `messageContext`, `openUrl`, `onUnauthorized`, `resolveLink` and
   `renderLink` (the host's handling of links in agent messages, asked before

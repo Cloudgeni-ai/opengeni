@@ -116,7 +116,10 @@ import "@opengeni/react/compiled.css";
 `consoleUrl` is the Opengeni web app's origin, which the embed links to for
 pages it does not show. `sessionId` and `onSessionChange` let the page own
 which chat is open; `onSessionChange` runs only when the person opens another
-chat. `openUrl` receives everything that leaves the embed (app pages, provider
+chat. `onSessionState` follows the open chat: it receives the chat's status
+and the events the chat holds each time they change, read from the chat's own
+stream, so the page can show that the agent is working or refresh what a turn
+changed without a second connection. `openUrl` receives everything that leaves the embed (app pages, provider
 sign-in, checkout, files opened in full); a host that cannot open browser tabs,
 such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
 from the client or a raw app request. `compiled.css` is the only stylesheet
