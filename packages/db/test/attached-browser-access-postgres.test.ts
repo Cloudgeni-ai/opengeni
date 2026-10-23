@@ -167,6 +167,63 @@ function profile(id: string, connectionGeneration: string, inventoryRevision: nu
   };
 }
 
+/** An active attached-Chrome BrowserSession in `scope` on `deviceId`, whose
+ *  profile is recorded in `deviceWorkspaceId` (default: the session's own). */
+async function activeAttachedBrowser(
+  org: Org,
+  scope: { accountId: string; workspaceId: string },
+  deviceId: string,
+  deviceWorkspaceId?: string,
+) {
+  const chat = await createSession(client.db, {
+    ...scope,
+    initialMessage: "Use my Chrome",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+  });
+  const operationId = crypto.randomUUID();
+  const browser = await prepareBrowserSessionCreate(client.db, {
+    ...scope,
+    operationId,
+    associatedSessionId: chat.id,
+    actorSubjectId: org.owner,
+    name: "Attached Chrome",
+    initialUrl: null,
+    placement: { kind: "attached_device" as const, deviceId },
+    driverId: "opengeni.attached-chrome.v1",
+    engine: "chrome" as const,
+    headless: false,
+    identityId: null,
+    baseRevisionId: null,
+    capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+    ...(deviceWorkspaceId ? { attachedDeviceWorkspaceId: deviceWorkspaceId } : {}),
+  });
+  const controller = {
+    controllerId: "browserd:attached-test",
+    controllerGeneration: crypto.randomUUID(),
+    placementInstanceId: "extension-1",
+  };
+  await dispatchBrowserSessionOperation(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId: browser.session.id,
+    controllerGeneration: controller.controllerGeneration,
+    controller,
+  });
+  await activateBrowserSession(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId: browser.session.id,
+    controller,
+    engineVersion: "151.0.7922.108",
+  });
+  return { browser, controller };
+}
+
 async function personalWorkspaceOf(org: Org, subjectId: string): Promise<string> {
   const [row] = await shared.admin<Array<{ personalWorkspaceId: string | null }>>`
     select personal_workspace_id as "personalWorkspaceId" from organization_memberships
@@ -354,8 +411,8 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
     // Hidden from the shared workspace: only usable where it is enrolled.
     const homeOnly = await machine(org, "workspace", personalWorkspaceId);
 
-    // The shared workspace learned its list changed.
-    expect(await interactionRevision(org.workspaceId)).toBeGreaterThan(sharedBefore);
+    // The heartbeat writes only the machine's own workspace.
+    expect(await interactionRevision(org.workspaceId)).toBe(sharedBefore);
 
     const asOwner = await listAttachedBrowserDevices(client.db, viewer(org, org.owner));
     expect(asOwner.devices.map((device) => device.id)).toEqual([personal.deviceId]);
@@ -380,6 +437,21 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
         deviceId: personal.deviceId,
       }),
     ).toMatchObject({ id: personal.deviceId, state: "connected" });
+    // An existing session pins the copy it was placed on.
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        ...viewer(org, org.owner),
+        deviceId: personal.deviceId,
+        deviceWorkspaceId: personalWorkspaceId,
+      }),
+    ).toMatchObject({ id: personal.deviceId, workspaceId: personalWorkspaceId });
+    await expect(
+      getAttachedBrowserDevice(client.db, {
+        ...viewer(org, org.owner),
+        deviceId: personal.deviceId,
+        deviceWorkspaceId: org.workspaceId,
+      }),
+    ).rejects.toBeInstanceOf(AttachedBrowserDeviceNotFoundError);
     await expect(
       getAttachedBrowserDevice(client.db, {
         ...viewer(org, org.owner),
@@ -407,32 +479,13 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
       }),
     ).toBe(false);
 
-    // A new tab only refreshes the machine's own workspace; other workspaces
-    // list profiles, not their tabs.
-    const homeBeforeTab = await interactionRevision(personalWorkspaceId);
-    const sharedBeforeTab = await interactionRevision(org.workspaceId);
+    // Disconnecting there is seen here on the next read.
     await reconcileAttachedBrowserInventory(client.db, {
       accountId: org.accountId,
       workspaceId: personalWorkspaceId,
       enrollmentId: personal.enrollmentId,
-      snapshot: {
-        bridgeGeneration: "bridge-1",
-        revision: 2,
-        devices: [{ ...profile(personal.deviceId, "extension-1", 2), tabCount: 5 }],
-      },
+      snapshot: { bridgeGeneration: "bridge-1", revision: 2, devices: [] },
     });
-    expect(await interactionRevision(personalWorkspaceId)).toBeGreaterThan(homeBeforeTab);
-    expect(await interactionRevision(org.workspaceId)).toBe(sharedBeforeTab);
-
-    // Disconnecting there is seen here.
-    const beforeDisconnect = await interactionRevision(org.workspaceId);
-    await reconcileAttachedBrowserInventory(client.db, {
-      accountId: org.accountId,
-      workspaceId: personalWorkspaceId,
-      enrollmentId: personal.enrollmentId,
-      snapshot: { bridgeGeneration: "bridge-1", revision: 3, devices: [] },
-    });
-    expect(await interactionRevision(org.workspaceId)).toBeGreaterThan(beforeDisconnect);
     expect((await listAttachedBrowserDevices(client.db, viewer(org, org.owner))).devices).toEqual(
       [],
     );
@@ -447,11 +500,7 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
   test("an organization machine's profiles reach every member of every workspace", async () => {
     const org = await organization();
     const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
-    const memberBefore = await interactionRevision(await personalWorkspaceOf(org, org.member));
     const everyone = await machine(org, "organization", personalWorkspaceId);
-    expect(await interactionRevision(await personalWorkspaceOf(org, org.member))).toBeGreaterThan(
-      memberBefore,
-    );
     const asMember = await listAttachedBrowserDevices(client.db, viewer(org, org.member));
     expect(asMember.devices.map((device) => device.id)).toEqual([everyone.deviceId]);
     expect(asMember.bridges.map((bridge) => bridge.enrollmentId)).toEqual([everyone.enrollmentId]);
@@ -487,11 +536,6 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
       baseRevisionId: null,
       capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
     };
-
-    // The profile is not stored in this workspace.
-    await expect(
-      prepareBrowserSessionCreate(client.db, { ...browserInput, operationId: crypto.randomUUID() }),
-    ).rejects.toThrow();
 
     const browserOperationId = crypto.randomUUID();
     const browser = await prepareBrowserSessionCreate(client.db, {
@@ -585,7 +629,9 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
       }),
     ).toBe(true);
 
-    // Chrome restarts on the machine: both sessions here are lost at once.
+    // Chrome restarts on the machine. The heartbeat touches only the
+    // machine's own workspace; the next controller check here fails and ends
+    // both sessions on the old Chrome at once.
     const before = await interactionRevision(org.workspaceId);
     await reconcileAttachedBrowserInventory(client.db, {
       accountId: org.accountId,
@@ -597,6 +643,14 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
         devices: [profile(personal.deviceId, "extension-2", 2)],
       },
     });
+    expect(await interactionRevision(org.workspaceId)).toBe(before);
+    expect(
+      await touchBrowserSessionController(client.db, {
+        ...scope,
+        browserSessionId: browser.session.id,
+        controllerGeneration: browserController.controllerGeneration,
+      }),
+    ).toBe(false);
     expect(await interactionRevision(org.workspaceId)).toBeGreaterThan(before);
     expect(
       await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),
@@ -610,12 +664,65 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
       ).session,
     ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
     expect(
+      await touchComputerSessionController(client.db, {
+        ...scope,
+        computerSessionId: computer.session.id,
+        controllerGeneration: computerController.controllerGeneration,
+      }),
+    ).toBe(false);
+  });
+
+  test("a session recorded against the wrong profile workspace never passes the fence", async () => {
+    const org = await organization();
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const personal = await machine(org, "user", personalWorkspaceId);
+    const scope = { accountId: org.accountId, workspaceId: org.workspaceId };
+    const { browser, controller } = await activeAttachedBrowser(org, scope, personal.deviceId);
+    expect(
       await touchBrowserSessionController(client.db, {
         ...scope,
         browserSessionId: browser.session.id,
-        controllerGeneration: browserController.controllerGeneration,
+        controllerGeneration: controller.controllerGeneration,
       }),
     ).toBe(false);
+    expect(
+      await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),
+    ).toMatchObject({ lifecycle: "lost" });
+  });
+
+  test("deleting a profile's workspace is never blocked by sessions elsewhere that used it", async () => {
+    const org = await organization();
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const personal = await machine(org, "user", personalWorkspaceId);
+    const scope = { accountId: org.accountId, workspaceId: org.workspaceId };
+    const { browser, controller } = await activeAttachedBrowser(
+      org,
+      scope,
+      personal.deviceId,
+      personalWorkspaceId,
+    );
+    // The owner leaves: their Personal workspace and its profile rows go,
+    // as organization retention deletion removes them.
+    await shared.admin.begin(async (tx) => {
+      await tx`update organization_memberships
+        set personal_workspace_id = null, status = 'revoked', revoked_at = now()
+        where account_id = ${org.accountId} and subject_id = ${org.owner}`;
+      await tx`delete from workspaces where id = ${personalWorkspaceId}`;
+    });
+    const [left] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from attached_browser_devices where id = ${personal.deviceId}`;
+    expect(left?.count).toBe(0);
+    // The session here fails closed and ends.
+    expect(
+      await touchBrowserSessionController(client.db, {
+        ...scope,
+        browserSessionId: browser.session.id,
+        controllerGeneration: controller.controllerGeneration,
+      }),
+    ).toBe(false);
+    expect(
+      await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),
+    ).toMatchObject({ lifecycle: "lost" });
   });
 
   test("a session from before profiles recorded their workspace still ends with its profile", async () => {

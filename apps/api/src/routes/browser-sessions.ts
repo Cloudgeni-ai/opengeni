@@ -466,6 +466,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           existing?.session.placement ?? request.placement ?? null,
+          existing?.deviceWorkspaceId ?? null,
           existing?.session.controller?.placementInstanceId ?? null,
           "browser.create",
           context.req.raw.signal,
@@ -2682,6 +2683,7 @@ export function registerBrowserSessionRoutes(
             sourceSession,
             grant,
             prepared.session.placement,
+            before.deviceWorkspaceId,
             null,
             "browser.resume",
             context.req.raw.signal,
@@ -3035,6 +3037,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.control",
       context.req.raw.signal,
@@ -3325,7 +3328,12 @@ export function registerBrowserSessionRoutes(
         // completing under the bound generation fences that controller off.
         if (
           !binding ||
-          (await browserControllerGone(grant, workspaceId, record.session.placement))
+          (await browserControllerGone(
+            grant,
+            workspaceId,
+            record.session.placement,
+            record.deviceWorkspaceId,
+          ))
         ) {
           const completed = await completeBrowserSessionEnd(deps.db, {
             accountId: grant.accountId,
@@ -3351,6 +3359,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "browser.end",
           context.req.raw.signal,
@@ -3646,6 +3655,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,
@@ -3827,6 +3837,9 @@ export function registerBrowserSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -3840,6 +3853,7 @@ export function registerBrowserSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         recordAttachedBrowserUnavailable(deps.observability, "disconnected");
@@ -4509,6 +4523,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -4599,6 +4614,7 @@ export function registerBrowserSessionRoutes(
     grant: AccessGrant,
     workspaceId: string,
     placement: InteractionPlacement | null,
+    deviceWorkspaceId: string | null,
   ): Promise<boolean> {
     if (placement?.kind !== "connected_machine" && placement?.kind !== "attached_device") {
       return false;
@@ -4606,7 +4622,7 @@ export function registerBrowserSessionRoutes(
     return await interactionControllerGone(
       deps.db,
       await attachedBrowserViewer(deps, grant, workspaceId),
-      placement,
+      placement.kind === "attached_device" ? { ...placement, deviceWorkspaceId } : placement,
     );
   }
 
@@ -4825,6 +4841,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.resume",
       context.req.raw.signal,
@@ -5007,6 +5024,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.resume",
         context.req.raw.signal,
@@ -5065,6 +5083,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,

@@ -226,6 +226,9 @@ export type BrowserSessionControlRecord = {
   session: BrowserSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Workspace storing an attached-device placement's Chrome profile, which
+   *  can be another workspace than the session's; null otherwise. */
+  deviceWorkspaceId: string | null;
   /** Placement hosting browserd. It equals the logical sandbox placement for
    * managed browsers and remains the source home sandbox for remote browsers. */
   controllerHostSandboxGroupId: string | null;
@@ -826,6 +829,7 @@ async function controlRecordFromRows(
     session: browserSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: createdAssociations[0]!.sessionId,
+    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     controllerHostSandboxGroupId: row.controllerHostSandboxGroupId,
     createOperationId: row.createOperationId,
     networkRouteAuthority: networkRouteAuthorityFromRow(row),

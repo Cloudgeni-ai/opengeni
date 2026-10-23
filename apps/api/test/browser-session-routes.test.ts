@@ -1436,9 +1436,7 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
     );
     const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
-    const gone = route.indexOf(
-      "browserControllerGone(grant, workspaceId, record.session.placement)",
-    );
+    const gone = route.indexOf("browserControllerGone(");
     expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
     // The gone check runs before any controller dispatch, and the server-side
     // completion keeps the bound generation so that controller stays fenced.

@@ -39,13 +39,10 @@ ALTER TABLE browser_sessions ADD CONSTRAINT browser_sessions_device_workspace_ch
 ALTER TABLE computer_sessions ADD CONSTRAINT computer_sessions_device_workspace_check
   CHECK (device_workspace_id IS NULL OR device_id IS NOT NULL) NOT VALID;
 
--- The profile reference follows the profile's own workspace. Row-level
--- security does not apply to the reference check itself. Rows from before
--- this release keep a NULL column and so no reference check; no code path
--- deletes a Chrome profile row. These constraints already bind new writes;
--- 0920 validates them for existing rows.
-ALTER TABLE browser_sessions ADD CONSTRAINT browser_sessions_attached_device_workspace_fk
-  FOREIGN KEY (device_workspace_id, device_id)
-  REFERENCES attached_browser_devices(workspace_id, id) ON DELETE RESTRICT NOT VALID;
+-- A session in one workspace can now run on a profile stored in another, so
+-- browser sessions stop referencing the profile row, like computer sessions
+-- already do. A reference across workspaces would also block deleting the
+-- profile's workspace (a removed member's Personal workspace) while any
+-- session elsewhere, even an ended one, had used it. Every lookup through
+-- this column is fail-closed: a missing profile ends the session.
 ALTER TABLE browser_sessions DROP CONSTRAINT browser_sessions_attached_device_fk;
-

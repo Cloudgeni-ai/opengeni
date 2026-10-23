@@ -359,6 +359,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         existing?.session.placement ?? request.placement ?? null,
+        existing?.deviceWorkspaceId ?? null,
         existing?.session.controller?.placementInstanceId ?? null,
         "computer.create",
         context.req.raw.signal,
@@ -1148,6 +1149,7 @@ export function registerComputerSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "computer.end",
           context.req.raw.signal,
@@ -1254,6 +1256,9 @@ export function registerComputerSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -1271,6 +1276,7 @@ export function registerComputerSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
@@ -1769,6 +1775,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,

@@ -74,6 +74,9 @@ export type ComputerSessionControlRecord = {
   session: ComputerSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Workspace storing an attached-device placement's Chrome profile, which
+   *  can be another workspace than the session's; null otherwise. */
+  deviceWorkspaceId: string | null;
   createOperationId: string;
   operation: null | {
     operationId: string;
@@ -384,6 +387,7 @@ async function controlRecordFromRows(
     session: computerSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: created[0]!.sessionId,
+    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     createOperationId: row.createOperationId,
     operation: operation
       ? {
