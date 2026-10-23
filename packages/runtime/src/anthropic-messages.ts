@@ -475,6 +475,14 @@ export function anthropicMessages(
  * be rejected, so that call, and any result whose call is gone, becomes inert
  * readable text. Every decision depends only on the messages themselves, so a
  * later request reproduces the same prefix.
+ *
+ * A reply with thinking must end with its tool calls: when it carries anything
+ * after its first tool call and is followed only by tool results, Claude reads
+ * the request as an assistant prefill and rejects it. Claude itself can emit a
+ * search after our tool call in such a reply, so that search (and a result
+ * after the call) becomes readable text, and text after the first tool call
+ * moves to just before it, keeping its order. Replies without thinking keep
+ * their exact shape, where a deferred search does continue.
  */
 function withoutUncontinuableSearches(messages: Message[]): void {
   const nativeCalls = new Set<string>();
@@ -502,8 +510,14 @@ function withoutUncontinuableSearches(messages: Message[]): void {
   let convertedResult = false;
   for (const [index, message] of messages.entries()) {
     if (message.role !== "assistant") continue;
+    const thinks = message.content.some(
+      (block) => block.type === "thinking" || block.type === "redacted_thinking",
+    );
+    const firstCall = thinks ? message.content.findIndex((block) => block.type === "tool_use") : -1;
+    const afterCall = (position: number) => firstCall >= 0 && position > firstCall;
     message.content = message.content.map((block, position) => {
       if (block.type === "server_tool_use" && block.name === ANTHROPIC_WEB_SEARCH_TOOL_NAME) {
+        if (afterCall(position)) return anthropicWebSearchBlockFact(block);
         const answeredHere = message.content
           .slice(position + 1)
           .some(
@@ -516,12 +530,22 @@ function withoutUncontinuableSearches(messages: Message[]): void {
         return anthropicWebSearchBlockFact(block);
       }
       if (block.type === "web_search_tool_result") {
-        if (nativeCalls.has(block.tool_use_id)) return block;
+        if (nativeCalls.has(block.tool_use_id) && !afterCall(position)) return block;
         convertedResult = true;
         return anthropicWebSearchBlockFact(block);
       }
       return block;
     });
+    if (firstCall >= 0) {
+      const trailing = (block: Json, position: number) =>
+        afterCall(position) &&
+        !["tool_use", "thinking", "redacted_thinking"].includes(String(block.type));
+      const moved = message.content.filter(trailing);
+      if (moved.length) {
+        const kept = message.content.filter((block, position) => !trailing(block, position));
+        message.content = [...kept.slice(0, firstCall), ...moved, ...kept.slice(firstCall)];
+      }
+    }
     if (convertedResult)
       message.content = message.content.map((block) => {
         if (block.type !== "text" || !("citations" in block)) return block;
