@@ -16,6 +16,7 @@ composition has a Connected Machine module; legacy bytes are unchanged.
 ```diff
 + On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
 + Open them only when the task needs them, and never scan the whole home folder recursively.
++ Code search from the home folder may skip them; to search inside one, name it as the path.
 ```
 
 An answer the agent gives in a turn that ends on `wait_for_input` now goes in

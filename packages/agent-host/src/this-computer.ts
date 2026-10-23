@@ -1196,6 +1196,10 @@ export class ThisComputer {
   // --- Running it -------------------------------------------------------------------------------
 
   private spawnAgent(apiUrl: string): AgentChild {
+    // Nothing else may check the folders for a while (screen control off, so
+    // no status reads them): a grant taken back in System Settings since the
+    // last check is taken back from the agent as it starts.
+    if (this.allowedFoldersDir) void this.foldersAllowed().catch(() => undefined);
     const log = this.openLog();
     try {
       const child = spawn(this.hostedPath, ["--api-url", apiUrl, "run"], {

@@ -193,7 +193,10 @@ are non-mutating; only explicit signed-in setup enables desktop management.
   serial and HID devices and location, and the app's own local pages in the
   default session get no permissions
   (`packages/desktop/src/main/web-permissions.ts`,
-  `apps/desktop/test/mac-privacy.test.ts`).
+  `apps/desktop/test/mac-privacy.test.ts`). The agent's shells count as the
+  app for these checks too, so a task that needs the camera or Bluetooth
+  (for example `ffmpeg -f avfoundation`) is refused without a prompt; no
+  Opengeni feature needs them.
 - On Windows, the person's interactive desktop session, where CUA sees and
   drives their windows.
 - To stay compatible with every server it serves, which may run different

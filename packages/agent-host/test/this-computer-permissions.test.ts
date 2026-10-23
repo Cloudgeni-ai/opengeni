@@ -154,4 +154,34 @@ describe("checking the folders macOS guards", () => {
       }
     },
   );
+
+  test.skipIf(!existsSync("/bin/ls"))(
+    "checks them again as the agent starts, when no status read may",
+    async () => {
+      const { dir, computer, done } = await fakeComputer();
+      const internals = computer as unknown as {
+        spawnAgent(apiUrl: string): unknown;
+        checkingFolders: Promise<boolean> | null;
+        agentEnv: Record<string, string>;
+      };
+      try {
+        const folders = internals.agentEnv.OPENGENI_MAC_FOLDERS_ALLOWED!;
+        await mkdir(join(dir, "Desktop"));
+        // Never asked about: starting the agent opens nothing.
+        internals.spawnAgent("http://127.0.0.1:9");
+        expect(internals.checkingFolders).toBeNull();
+
+        await computer.requestPermission("files");
+        expect(existsSync(join(folders, "Desktop"))).toBe(true);
+        // Taken back in System Settings while nothing was checking.
+        await chmod(join(dir, "Desktop"), 0o000);
+        internals.spawnAgent("http://127.0.0.1:9");
+        await internals.checkingFolders;
+        expect(existsSync(join(folders, "Desktop"))).toBe(process.getuid?.() === 0);
+      } finally {
+        await chmod(join(dir, "Desktop"), 0o755).catch(() => undefined);
+        await done();
+      }
+    },
+  );
 });
