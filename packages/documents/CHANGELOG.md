@@ -1,5 +1,17 @@
 # @opengeni/documents
 
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [b0d752d]
+- Updated dependencies [85fb89e]
+- Updated dependencies [238c599]
+  - @opengeni/db@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/storage@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes

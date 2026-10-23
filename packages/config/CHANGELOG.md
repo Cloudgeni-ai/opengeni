@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes
