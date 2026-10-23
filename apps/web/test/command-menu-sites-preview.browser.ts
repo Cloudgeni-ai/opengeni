@@ -98,6 +98,11 @@ try {
     await page.waitForTimeout(600);
     assert.deepEqual(await options(page, "Sites"), ["Pricing calculator"]);
     assert.ok((await options(page, "Chats")).includes("Pricing page copy"));
+    // Chats still come first; Sites follow them even when a Site matches better.
+    const labels = await menu(page)
+      .getByRole("group")
+      .evaluateAll((groups) => groups.map((group) => group.getAttribute("aria-label")));
+    assert.deepEqual(labels.slice(0, 2), ["Chats", "Sites"]);
     await page.screenshot({ path: `${output}/mixed-query-${theme}.png` });
 
     // Selecting a Site opens it in the app's Site view, like its sidebar row.

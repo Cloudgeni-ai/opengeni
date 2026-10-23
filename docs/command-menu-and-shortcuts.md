@@ -132,8 +132,10 @@ Opening it is instant: no request is made before it appears.
   workspace; opening one switches workspace. Actions that match appear in
   their own group with their keys, and workspaces whose name matches in theirs.
 - **Sites:** this workspace's Sites whose title matches appear in a "Sites"
-  group (at most five), ranked like chat titles. The Site rows the sidebar has
-  loaded answer instantly; the artifact catalog's Site title search
+  group (at most five), ranked like chat titles, right after the chats (chats
+  always come first; with no matching chats, Sites take their place). The Site
+  rows the sidebar has loaded answer instantly; the artifact catalog's Site
+  title search
   (`GET /v1/workspaces/:workspaceId/artifact-catalog?kind=site&q=…`, active
   Sites only) merges the rest as it answers, with the catalog's access checks,
   so another person's Only me Site never shows. Hostnames are not matched:

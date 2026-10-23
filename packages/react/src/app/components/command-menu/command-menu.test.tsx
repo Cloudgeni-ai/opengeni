@@ -222,7 +222,7 @@ test("before anything is typed, a few recent Sites show without asking the serve
   expect(catalogCalls).toEqual([]);
 });
 
-test("typing lists matching Sites in their own group beside chats, with the server's matches", async () => {
+test("typing still lists chats first, then matching Sites in their own group, with the server's matches", async () => {
   catalog = async () => ({
     items: [
       {
@@ -258,6 +258,8 @@ test("typing lists matching Sites in their own group beside chats, with the serv
     },
   ]);
   const listed = groups();
+  // Chats keep coming first, even when a Site matches better; Sites follow them.
+  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Sites"]);
   expect(listed.find((group) => group.label === "Sites")?.options).toEqual([
     "Usage dashboard",
     "Usage launch checklist",
@@ -272,7 +274,7 @@ test("typing lists matching Sites in their own group beside chats, with the serv
   );
 });
 
-test("Enter on a Site opens it in the app, the way its sidebar row does", async () => {
+test("with no matching chats, Sites lead; Enter opens one in the app, the way its sidebar row does", async () => {
   await openMenu();
   await type("pricing");
   expect(groups()[0]).toEqual({ label: "Sites", options: ["Pricing calculator"] });
@@ -319,6 +321,7 @@ test("a failing Site search leaves chats, actions and known Sites working", asyn
   await openMenu();
   await type("usage");
   const listed = groups();
+  expect(listed.map((group) => group.label).slice(0, 2)).toEqual(["Chats", "Sites"]);
   expect(listed.find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
   expect(listed.find((group) => group.label === "Chats")?.options).toEqual([
     "Usage report follow-up",

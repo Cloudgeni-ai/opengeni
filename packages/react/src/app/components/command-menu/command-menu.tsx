@@ -785,14 +785,6 @@ function CommandMenuDialog(props: {
         best: chats[0]!.rank,
       });
     }
-    if (sitesFound.length > 0) {
-      result.push({
-        label: "Sites",
-        items: sitesFound.map((entry) => siteItem(entry.site, "Sites", trimmed)),
-        // After chats on a tie (the sort keeps this order).
-        best: sitesFound[0]!.rank,
-      });
-    }
     if (actionsFound.length > 0) {
       result.push({
         label: "Actions",
@@ -810,6 +802,18 @@ function CommandMenuDialog(props: {
     }
     // A clearly better action match ("new" → New chat) comes before chats.
     result.sort((a, b) => b.best - a.best);
+    if (sitesFound.length > 0) {
+      const sitesGroup: Group = {
+        label: "Sites",
+        items: sitesFound.map((entry) => siteItem(entry.site, "Sites", trimmed)),
+        best: sitesFound[0]!.rank,
+      };
+      // Sites always follow chats; with no chats they take their place by match.
+      const chatsAt = result.findIndex((group) => group.label === "Chats");
+      const at =
+        chatsAt >= 0 ? chatsAt + 1 : result.findIndex((group) => group.best < sitesGroup.best);
+      result.splice(at >= 0 ? at : result.length, 0, sitesGroup);
+    }
     result.push({
       label: "Messages",
       best: -Infinity,
