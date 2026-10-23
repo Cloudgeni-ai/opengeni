@@ -245,13 +245,19 @@ describe("a wait's reply argument is the verbatim answer", () => {
         waitAccepted: true,
         waitReply: verbatim,
         latestAssistantMessageText: "Here are the pictures.",
+        attemptId: "attempt-1",
       }),
-    ).toEqual({ text: verbatim, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" });
+    ).toEqual({
+      text: verbatim,
+      messageId: `${WAIT_REPLY_MESSAGE_ID}:attempt-1`,
+      phase: "final_answer",
+    });
     expect(
       inputWaitReplyMessage({
         waitAccepted: true,
         waitReply: verbatim,
         latestAssistantMessageText: `${verbatim}\n`,
+        attemptId: "attempt-1",
       }),
     ).toBeNull();
     for (const waitReply of [null, "", " \n"]) {
@@ -260,6 +266,7 @@ describe("a wait's reply argument is the verbatim answer", () => {
           waitAccepted: true,
           waitReply,
           latestAssistantMessageText: null,
+          attemptId: "attempt-1",
         }),
       ).toBeNull();
     }
@@ -268,6 +275,7 @@ describe("a wait's reply argument is the verbatim answer", () => {
         waitAccepted: false,
         waitReply: verbatim,
         latestAssistantMessageText: null,
+        attemptId: "attempt-1",
       }),
     ).toBeNull();
   });

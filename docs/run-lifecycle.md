@@ -4161,13 +4161,15 @@ but a tool argument always is. When the accepted wait carries a `reply`,
 the worker publishes it durably before the first tool result it records after
 the wait was accepted (after that response's own text), as an
 `agent.message.completed` with `phase` `final_answer` and `messageId`
-`wait_for_input:reply`, whoever started the turn, unless it equals the turn's
+`wait_for_input:reply:<attempt id>`, whoever started the turn, unless it equals the turn's
 latest message. An approval pause or a retried activity therefore does not lose
-it, and settlement publishes it only if that did not happen. For a turn that a
+it (the agents SDK streams an executed tool's output item on an approval
+interruption too), and settlement publishes it only if that did not happen. For a turn that a
 human or API message started, it is also
 `turn.completed.payload.reply`, ahead of the latest message; a resumed
 activity finds it as the turn's newest durable message. The first accepted
-wait's reply wins. The API tool itself ignores `reply`: only the turn worker's
+wait's reply in an attempt wins; a resumed attempt that accepts another wait
+publishes its reply as a separate message. The API tool itself ignores `reply`: only the turn worker's
 model tool path shows it, so a `wait_for_input` a Code Mode script calls does
 not show its `reply`.
 

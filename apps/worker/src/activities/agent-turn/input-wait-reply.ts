@@ -95,17 +95,25 @@ export function inputWaitReplyMessage(input: {
   waitAccepted: boolean;
   waitReply: string | null;
   latestAssistantMessageText: string | null;
+  /** The turn attempt (worker activity) that accepted the wait. */
+  attemptId: string;
 }): { text: string; messageId: string; phase: "final_answer" } | null {
   const reply = input.waitReply;
   if (!input.waitAccepted || reply === null || reply.trim().length === 0) return null;
   if (input.latestAssistantMessageText?.trim() === reply.trim()) return null;
-  return { text: reply, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" };
+  return {
+    text: reply,
+    messageId: `${WAIT_REPLY_MESSAGE_ID}:${input.attemptId}`,
+    phase: "final_answer",
+  };
 }
 
 /**
- * Message id of the agent message carrying a wait's `reply`. A turn accepts at
- * most one wait, and the id keeps the reply a message of its own: it never
- * merges into the turn's earlier streamed text.
+ * Message id prefix of the agent message carrying a wait's `reply`, followed by
+ * the accepting attempt's id. An attempt keeps only its first accepted reply,
+ * and the id keeps it a message of its own: it never merges into the turn's
+ * earlier streamed text, nor into a reply a resumed attempt of the same turn
+ * accepts after an approval.
  */
 export const WAIT_REPLY_MESSAGE_ID = "wait_for_input:reply";
 

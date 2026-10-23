@@ -1700,6 +1700,7 @@ export async function runTurnStreamAttempt(
                 waitAccepted: true,
                 waitReply: acceptedReply,
                 latestAssistantMessageText,
+                attemptId: input.attemptId,
               });
               if (message) {
                 await batcher.push({ type: "agent.message.completed", payload: message });
@@ -2320,6 +2321,7 @@ export async function runTurnStreamAttempt(
       waitAccepted: inputWaitYielded,
       waitReply,
       latestAssistantMessageText,
+      attemptId: input.attemptId,
     });
     const reply = await inputWaitReply({
       inputWaitYielded,

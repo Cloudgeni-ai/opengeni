@@ -756,7 +756,7 @@ describe("a wait's verbatim reply", () => {
       ),
       event(
         "agent.message.completed",
-        { text: reply, phase: "final_answer", messageId: "wait_for_input:reply" },
+        { text: reply, phase: "final_answer", messageId: "wait_for_input:reply:attempt-1" },
         turnId,
       ),
       event("turn.completed", { output: "", reply }, turnId),

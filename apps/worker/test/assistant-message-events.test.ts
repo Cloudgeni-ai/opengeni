@@ -642,6 +642,8 @@ describe("assistant message events from a real agent turn", () => {
   // as the reply, so the person saw the summary and no images.
   describe("a reply written before wait_for_input is shown verbatim (df030716, 13:13 UTC)", () => {
     const TURN_MESSAGE_ID = "msg_011CgKEATPvLMvyNDMvWEjyi";
+    // One reply message per accepting attempt: wait_for_input:reply:<attempt id>.
+    const REPLY_MESSAGE_ID = expect.stringMatching(new RegExp(`^${WAIT_REPLY_MESSAGE_ID}:`));
     const SUMMARY =
       "I confirmed the images weren't actually posted before (known bug #5673, fixed upstream but not in this release), so here are the actual before/A/B comparison pictures across devices and themes, along with a space-usage table. I'd lean toward option B for freeing up the most chat space, especially on phone — let me know which layout (A or B) you want so the worker can finish it, get it reviewed, and merge.\n\n";
     const REPLY = [
@@ -703,7 +705,7 @@ describe("assistant message events from a real agent turn", () => {
       ).toContain("I confirmed the images");
       // The person sees the reply exactly as written, images and table included.
       expect(completedMessages(events)).toEqual([
-        { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
       const types = events.map((event) => event.type);
@@ -721,7 +723,7 @@ describe("assistant message events from a real agent turn", () => {
       expect(claude.calls()).toBe(1);
       expect(shownText(events)).not.toContain("I confirmed the images");
       expect(completedMessages(events)).toEqual([
-        { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
       // Published as soon as the wait is accepted, before its tool result,
@@ -729,7 +731,9 @@ describe("assistant message events from a real agent turn", () => {
       const replyAt = events.findIndex(
         (event) =>
           event.type === "agent.message.completed" &&
-          (event.payload as { messageId?: unknown }).messageId === WAIT_REPLY_MESSAGE_ID,
+          String((event.payload as { messageId?: unknown }).messageId).startsWith(
+            `${WAIT_REPLY_MESSAGE_ID}:`,
+          ),
       );
       const waitOutputAt = events.findIndex((event) => event.type === "agent.toolCall.output");
       expect(replyAt).toBeGreaterThan(-1);
@@ -748,7 +752,7 @@ describe("assistant message events from a real agent turn", () => {
       expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_PROGRESS_UPDATE_REFUSAL);
       expect(completedMessages(events)).toEqual([
         { text: intro, messageId: "msg_1:1", phase: "commentary" },
-        { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
     }, 60_000);
@@ -763,7 +767,7 @@ describe("assistant message events from a real agent turn", () => {
         { waitForInputTool: true },
       );
       expect(completedMessages(events)).toEqual([
-        { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
     }, 60_000);
@@ -799,7 +803,7 @@ describe("assistant message events from a real agent turn", () => {
         { waitForInputTool: true, createdBy: "agent" },
       );
       expect(completedMessages(events)).toEqual([
-        { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
+        { text: REPLY, messageId: REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "" });
     }, 60_000);
