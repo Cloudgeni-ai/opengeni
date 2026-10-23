@@ -1,6 +1,7 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
@@ -391,4 +392,6 @@ export const embeddingMigrationTail = [
   // Patches ensure_external_identity, transition_session_visibility and both
   // fork_session_content bodies by exact anchors; replay after all of them.
   "0925_membership_fences_allow_key_checks.sql",
+  // Rewrites foreign keys across the tables this tail creates; replay last.
+  ...workspaceDeletionMigrationTail,
 ];

@@ -6,6 +6,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 
 /** Session storage lifecycle migrations build on the withheld 0560 import
  * guards; this historical fixture withholds them and adds only the session
@@ -43,6 +44,9 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of strictOwnerMaintenanceMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     for (const name of knowledgeActorMigrationTail)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+    // Rewrites foreign keys of tables the withheld 0461/0499/0501 create.
+    for (const name of workspaceDeletionMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Rewrites the visibility transition installed by the withheld 0501 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
@@ -111,6 +115,8 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     for (const name of knowledgeActorMigrationTail)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
+    for (const name of workspaceDeletionMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");

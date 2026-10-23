@@ -2,6 +2,7 @@ import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
+import { workspaceDeletionMigrationTail } from "../../../packages/db/test/workspace-deletion-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -1933,6 +1934,9 @@ describe("scheduled task personal MCP authority", () => {
       // Allowance policy/attribution compiles against the same withheld
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Rewrites foreign keys of the withheld Knowledge and sharing tables.
+      for (const name of workspaceDeletionMigrationTail)
         await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
