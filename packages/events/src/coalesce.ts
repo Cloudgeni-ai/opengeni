@@ -17,10 +17,19 @@ const encoder = new TextEncoder();
  * after one that closed bold starts a new paragraph instead of colliding
  * ("****"). Every place that merges reasoning fragments (the worker's
  * write-time merge, this read-side coalescer, the React projection) must use
- * the same rule, so the rendered text never depends on fragment boundaries.
+ * the same rule and preserve ambiguous split-marker boundaries when coalescing.
  */
 export function reasoningDeltaSeparator(previous: string, next: string): string {
   return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";
+}
+
+/** A lone star cannot absorb another star without changing how a preceding
+ * fragment joins this run. For example, ['*', '*', '**b'] must not become
+ * ['*', '***b']. For every other nonempty run its first/last two characters
+ * determine the separator independently of earlier text; an empty run is an
+ * identity. Keep this boundary in both write-time and read-time coalescing. */
+export function canMergeReasoningDelta(previous: string, next: string): boolean {
+  return previous !== "*" || !next.startsWith("*");
 }
 
 export type CoalescedSessionEventPage = {
@@ -110,7 +119,8 @@ export function coalesceSessionEventDeltasWithCoverage(
       run.sandboxStream === sandboxStream &&
       run.sandboxCommandId === sandboxCommandId &&
       run.messageId === messageId &&
-      run.phase === phase
+      run.phase === phase &&
+      (event.type !== "agent.reasoning.delta" || canMergeReasoningDelta(run.text, text))
     ) {
       const piece =
         (event.type === "agent.reasoning.delta" ? reasoningDeltaSeparator(run.text, text) : "") +

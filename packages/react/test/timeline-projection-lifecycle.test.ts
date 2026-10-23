@@ -3,6 +3,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import type { TimelineGroup } from "../src/timeline/types";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { coalesceSessionEventDeltas } from "@opengeni/events";
 
 const englishText = createOpenGeniText();
 
@@ -528,6 +529,31 @@ describe("projection lifecycle audit regressions", () => {
       const reasoning = items.filter((item) => item.kind === "reasoning");
       expect(reasoning).toHaveLength(1);
       expect(reasoning[0]!.kind === "reasoning" && reasoning[0]!.text).toBe(expected);
+    }
+  });
+
+  test("split bold markers retain reasoning text across read-page coalescing boundaries", () => {
+    for (const parts of [
+      ["*", "*", "**b"],
+      ["**", "*", "*b"],
+    ]) {
+      const rows = parts.map((text, index) => ({
+        ...event(index + 1, "agent.reasoning.delta", { text }),
+        type: "agent.reasoning.delta" as const,
+      }));
+      const reasoning = (events: SessionEvent[]) =>
+        buildTimeline(englishText, events).flatMap((item) =>
+          item.kind === "reasoning" ? [item.text] : [],
+        );
+      const expected = reasoning(rows);
+      for (let split = 0; split <= rows.length; split++) {
+        expect(
+          reasoning([
+            ...coalesceSessionEventDeltas(rows.slice(0, split)),
+            ...coalesceSessionEventDeltas(rows.slice(split)),
+          ]),
+        ).toEqual(expected);
+      }
     }
   });
 });
