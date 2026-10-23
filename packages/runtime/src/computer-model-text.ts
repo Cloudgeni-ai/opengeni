@@ -44,6 +44,7 @@ export type ComputerTextObservation = {
         roots: readonly ComputerTextNode[];
         nodeCount: number;
         incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+        readByNativeTools?: true | undefined;
       }
     | {
         kind: "diff";
@@ -347,6 +348,12 @@ export function computerObservationText(observation: ComputerTextObservation): s
     lines.push("No accessibility tree is available for this target; use the screenshot.");
     return lines.join("\n");
   }
+  if (semantic.kind === "snapshot" && semantic.readByNativeTools) {
+    lines.push(
+      "Elements are not listed here because this session reads them with cua_get_window_state; reading them here too would invalidate its element tokens. Call cua_get_window_state for this window's elements.",
+    );
+    return lines.join("\n");
+  }
   const roots = semantic.kind === "snapshot" ? semantic.roots : semantic.changed;
   const rendered = computerNodeLines(roots, { focusedRef: observation.focusedRef });
   if (observation.focusedRef && !rendered.focusedListed) {
@@ -410,6 +417,8 @@ export function computerObservationDiff<Observation extends ComputerTextObservat
     after?.kind !== "snapshot" ||
     before.incomplete ||
     after.incomplete ||
+    before.readByNativeTools ||
+    after.readByNativeTools ||
     base.target.id !== next.target.id ||
     base.target.targetGeneration !== next.target.targetGeneration ||
     base.target.title !== next.target.title ||

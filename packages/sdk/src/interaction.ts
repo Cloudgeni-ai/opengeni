@@ -775,6 +775,8 @@ export type InteractionSemanticSnapshot = {
   roots: InteractionSemanticNode[];
   nodeCount: number;
   incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+  /** No elements are listed: the session reads them with the native window-state tool. */
+  readByNativeTools?: true | undefined;
 };
 
 export type InteractionSemanticDiff = {
