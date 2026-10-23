@@ -411,6 +411,49 @@ test("nested catalog reads restore the enclosing account, workspace and subject"
   });
 });
 
+test("missing and deleted workspaces fail even when the organization catalog is empty", async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Empty catalog scope",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Empty catalog scope",
+    subjectId: actor,
+  });
+  const empty = access.workspaceGrants[0]!;
+  const deletedWorkspaceId = empty.workspaceId;
+  await shared!.admin`delete from workspaces where id = ${deletedWorkspaceId}::uuid`;
+  for (const workspaceId of [crypto.randomUUID(), deletedWorkspaceId]) {
+    const input = {
+      accountId: empty.accountId,
+      workspaceId,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"] as const,
+    };
+    await expect(listConnectionsMetadata(client.db, workspaceId, null)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+    await expect(loadWorkspaceModelCatalogInputs(client.db, input)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+    await expect(resolveWorkspaceCatalogSettings(client.db, settings, input)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+  }
+});
+
+test("a catalog scope cannot pair one organization's account with another workspace", async () => {
+  await expect(
+    loadWorkspaceModelCatalogInputs(client.db, {
+      accountId: otherScope.accountId,
+      workspaceId: scope.workspaceId,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+    }),
+  ).rejects.toThrow(`Workspace not found: ${scope.workspaceId}`);
+});
+
 test("public catalog scope cost compared with the previous parallel family reads", async () => {
   if (process.env.OPENGENI_BENCH_CATALOG_SCOPE !== "1") return;
   const input = {

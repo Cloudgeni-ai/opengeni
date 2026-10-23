@@ -1,4 +1,9 @@
-import { withRlsContext, type Database } from "./database";
+import {
+  rlsContextForWorkspace,
+  withRlsContext,
+  WorkspaceNotFoundError,
+  type Database,
+} from "./database";
 import { listConnectionsMetadataInScope } from "./connection-metadata";
 import {
   listWorkspaceProviderCustomModelsByKindInScope,
@@ -24,6 +29,14 @@ export async function loadWorkspaceModelCatalogInputs(
   },
 ) {
   return await withRlsContext(db, input, async (scopedDb) => {
+    // The former connection reader resolved its account from the workspace.
+    // Retain that existence check under the shared fence; an explicit account
+    // alone must not turn a deleted workspace into an empty catalog. Refuse
+    // inconsistent scope pairs before reading either metadata family.
+    const actualScope = await rlsContextForWorkspace(scopedDb, input.workspaceId);
+    if (actualScope.accountId !== input.accountId) {
+      throw new WorkspaceNotFoundError(input.workspaceId);
+    }
     const workspaceConnections = await listConnectionsMetadataInScope(
       scopedDb,
       input.workspaceId,
