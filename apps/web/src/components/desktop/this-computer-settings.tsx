@@ -4,9 +4,10 @@
 // they can do here. Each switch is enforced by the app and its agent (see the
 // desktop's computer capabilities), and the system permissions a row needs
 // are asked for when the person turns it on, never before, one after another
-// as each is allowed. One the person hasn't allowed is a calm line with one
-// button that opens the exact page in the system's settings, and the row
-// shows Allowed once the person comes back. Red is only for real failures.
+// as each is allowed. One the person hasn't allowed is a calm line naming
+// it; the Computer use row has the one button that opens the exact page in
+// the system's settings, and the row shows Allowed once the person comes
+// back. Red is only for real failures.
 import type {
   DesktopComputerCapabilities,
   DesktopComputerSettings,
@@ -390,13 +391,12 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
         }
       >
         {view.kind !== "on" ? null : firstMissing ? (
-          // Not an error: one calm line and the one place to allow what's missing.
-          <PermissionRow
+          // Not an error: a calm line naming what's missing. The Computer use
+          // row above has the one Open System Settings for it, which asks for
+          // these in turn (`allowMissing`).
+          <SettingRow
             label={missingPermissionNames(screenMissing)}
-            description="Needed to finish turning this on."
-            granted={false}
-            action={permissionActionLabel(platform, firstMissing.id)}
-            onAction={() => void askForScreen(firstMissing.id)}
+            description="Not allowed yet."
           />
         ) : (
           view.permissions.map((permission) => {

@@ -19,7 +19,7 @@ try {
     await page.goto(`${baseUrl}/test/fixtures/this-computer-preview/?state=${state}`, {
       waitUntil: "networkidle",
     });
-    await page.getByText("Control the screen").waitFor();
+    await page.getByText("Control the screen", { exact: true }).waitFor();
     await page.getByText("Microphone", { exact: true }).waitFor();
     await page.screenshot({ path: `${output}/this-computer-${state}.png`, fullPage: true });
     if (errors.length) throw new Error(`Browser errors (${state}): ${errors.join("; ")}`);
