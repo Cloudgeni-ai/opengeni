@@ -42,6 +42,7 @@ import {
   createWorkspace,
   getSlackChannelRoute,
   grantWorkspaceAccess,
+  listInboundEvents,
   upsertSlackChannelRoute,
   saveSlackBotUserLink,
   setWorkspaceAllowance,
@@ -54,6 +55,7 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  createSlackEventSource,
   createSessionForRequest,
   updateSessionTitle,
   type ApiRouteDeps,
@@ -739,6 +741,8 @@ async function fixture(
     slackWorkspaceRouting?: boolean;
     /** Create a second workspace in the same organization the owner can use. */
     routedWorkspaceName?: string;
+    /** `OPENGENI_EVENT_TRIGGERS_ENABLED`. */
+    eventTriggers?: boolean;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -786,6 +790,7 @@ async function fixture(
     slackSigningSecret: signingMaterial,
     slackCommand: options.slackCommand ?? "/opengeni",
     ...(options.slackWorkspaceRouting ? { slackWorkspaceRoutingEnabled: true } : {}),
+    ...(options.eventTriggers ? { eventTriggersEnabled: true } : {}),
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -10567,3 +10572,94 @@ for (const audience of ["private", "shared"] as const) {
     expect(upgraded!.delivery_retry_at).toBeNull();
   }, 90_000);
 }
+
+describe("Slack event source", () => {
+  test("records channel activity for automations and keeps direct messages private", async () => {
+    if (!available) return;
+    const value = await fixture({ eventTriggers: true });
+    const source = await createSlackEventSource({
+      db: client.db,
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      createdBySubjectId: value.owner.subjectId,
+    });
+    expect(source).toMatchObject({ kind: "slack", ownerSubjectId: null, visibility: "workspace" });
+    const post = async (eventId: string, event: Record<string, unknown>) =>
+      await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/events",
+          JSON.stringify({
+            type: "event_callback",
+            team_id: value.teamId,
+            api_app_id: "A_OPENGENI",
+            event_id: eventId,
+            event_time: 1_761_200_000,
+            authorizations: [{ team_id: value.teamId, user_id: value.botUserId, is_bot: true }],
+            event,
+          }),
+          "application/json",
+        ),
+      );
+    const message = {
+      type: "message",
+      channel: "C_SUPPORT",
+      channel_type: "channel",
+      user: value.otherSlackUserId,
+      text: "The export is broken again",
+      ts: "1761200000.000100",
+    };
+    expect((await post("Ev_message", message)).status).toBe(200);
+    // Slack retrying the same callback is recorded once.
+    expect((await post("Ev_message", message)).status).toBe(200);
+    const direct = await post("Ev_direct", {
+      type: "message",
+      channel: "D_OWNER",
+      channel_type: "im",
+      user: value.ownerSlackUserId,
+      text: "Something private",
+      ts: "1761200001.000100",
+    });
+    expect(direct.status).toBe(200);
+    await post("Ev_own", {
+      type: "message",
+      channel: "C_SUPPORT",
+      channel_type: "channel",
+      user: value.botUserId,
+      bot_id: "B_OPENGENI",
+      bot_profile: { app_id: "A_OPENGENI" },
+      text: "Looking into it",
+      ts: "1761200002.000100",
+      thread_ts: "1761200000.000100",
+    });
+    await post("Ev_reaction", {
+      type: "reaction_added",
+      user: value.ownerSlackUserId,
+      reaction: "ticket",
+      item_user: value.otherSlackUserId,
+      item: { type: "message", channel: "C_SUPPORT", ts: "1761200000.000100" },
+      event_ts: "1761200003.000100",
+    });
+
+    const { events } = await listInboundEvents(client.db, value.owner.workspaceId, {
+      sourceIds: [source.id],
+      limit: 10,
+    });
+    expect(events.map((event) => [event.type, event.actor.kind])).toEqual([
+      ["reaction.added", "person"],
+      ["message.posted", "opengeni"],
+      ["message.posted", "person"],
+    ]);
+    expect(events[2]).toMatchObject({
+      subject: "C_SUPPORT:1761200000.000100",
+      summary: "Message in channel C_SUPPORT: The export is broken again",
+      data: { channel: { id: "C_SUPPORT", type: "public" }, in_thread: false },
+    });
+    expect(events[1]!.data).toMatchObject({ in_thread: true });
+    const [stored] = await shared!.admin`select count(*)::int as count,
+      sum(duplicate_count)::int as duplicates from event_deliveries where source_id = ${source.id}`;
+    expect(stored).toMatchObject({ count: 3, duplicates: 1 });
+    const [private_] = await shared!.admin`select count(*)::int as count from event_deliveries
+      where source_id = ${source.id} and convert_from(body, 'UTF8') like '%Something private%'`;
+    expect(private_!.count).toBe(0);
+  }, 90_000);
+});

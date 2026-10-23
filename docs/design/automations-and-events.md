@@ -141,8 +141,21 @@ delivery as `ignored`.
     check runs and suites, workflow runs, releases. The logins of the
     deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
-  behaviour and additionally records message, reaction and channel events for
-  the bound workspace. The bot id marks own events.
+  behaviour and additionally records the callback for the workspace the Slack
+  team is installed in, when that workspace has a Slack source.
+  - One Slack source per workspace, shared with the workspace like the channels
+    the app is in.
+  - Types: `message.posted` (messages and thread replies), `message.edited`,
+    `message.deleted`, `reaction.added`, `member.joined_channel`,
+    `member.left_channel`. Data carries the channel id and type, the Slack user
+    id and the bounded text.
+  - Direct messages with the app stay private: they and every other callback
+    that is not an event are never stored. Mentions start a conversation; the
+    message itself is still a `message.posted` event.
+  - Own events are read from the callback itself (its `api_app_id` and the
+    authorized bot user), so a stored delivery reads the same on replay.
+  - Recording never affects the conversation: a failure is logged and the
+    callback is handled as before.
 - **Gmail**: a Pub/Sub push endpoint verified by Google's OIDC token. A mailbox
   with an active trigger keeps a `users.watch` (renewed daily); each
   notification reads `history.list` with the owner's connection and emits

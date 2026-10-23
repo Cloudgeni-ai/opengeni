@@ -4,6 +4,7 @@ import type { EventDeliveryStatus } from "@opengeni/contracts";
 import type { EventSourceRecord, StoredEventInput } from "@opengeni/db";
 import { GITHUB_RETAINED_HEADERS, githubOwnLogins, readGitHubDelivery } from "./github-events";
 import { boundEvent } from "./normalize";
+import { readSlackDelivery } from "./slack-events";
 import {
   retainedWebhookHeaders,
   webhookAdapter,
@@ -35,6 +36,8 @@ function readSourceDelivery(
   switch (source.kind) {
     case "github":
       return readGitHubDelivery({ ...input, ownLogins: deploymentGitHubOwnLogins(settings) });
+    case "slack":
+      return readSlackDelivery(input);
     case "webhook":
       return webhookAdapter(source.adapter ?? "standard").read(input);
     default:
@@ -47,14 +50,20 @@ export function retainedSourceHeaders(
   source: EventSourceRecord,
   headers: Headers,
 ): Record<string, string> {
-  if (source.kind !== "github")
-    return retainedWebhookHeaders(source.adapter ?? "standard", headers);
-  const kept: Record<string, string> = {};
-  for (const name of GITHUB_RETAINED_HEADERS) {
-    const value = headers.get(name);
-    if (value !== null) kept[name] = value.slice(0, 512);
+  switch (source.kind) {
+    case "webhook":
+      return retainedWebhookHeaders(source.adapter ?? "standard", headers);
+    case "github": {
+      const kept: Record<string, string> = {};
+      for (const name of GITHUB_RETAINED_HEADERS) {
+        const value = headers.get(name);
+        if (value !== null) kept[name] = value.slice(0, 512);
+      }
+      return kept;
+    }
+    default:
+      return {};
   }
-  return kept;
 }
 
 export type DeliveryOutcome = {

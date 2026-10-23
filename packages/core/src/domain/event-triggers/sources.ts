@@ -44,6 +44,8 @@ import {
 } from "./github-source";
 import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
+import { slackEventTypeCatalog } from "./slack-events";
+import { createSlackEventSource } from "./slack-source";
 import { webhookAdapter } from "./webhook-adapters";
 import {
   withMcpEventSourceClient,
@@ -176,6 +178,10 @@ export async function createEventSourceForViewer(
   if (request.kind === "mcp") return await createMcpEventSource(input, request);
   if (request.kind === "github") {
     const source = await createGitHubEventSource({ ...input, name: request.name });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "slack") {
+    const source = await createSlackEventSource({ ...input, name: request.name });
     return { source: eventSourceForClient(source, input.baseUrl) };
   }
   if (request.kind !== "webhook") {
@@ -472,6 +478,7 @@ const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set(
   "webhook",
   "mcp",
   "github",
+  "slack",
 ]);
 
 /** Run a stored delivery through intake again; its events fire again even if seen before. */
@@ -634,6 +641,7 @@ export async function listEventSourceTypes(
   if (input.source.kind === "github") {
     return await githubSourceEventTypes(recent, input.githubApp ?? null);
   }
+  if (input.source.kind === "slack") return slackEventTypeCatalog();
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
   }
