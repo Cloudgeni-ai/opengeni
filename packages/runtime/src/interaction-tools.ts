@@ -3159,7 +3159,12 @@ async function openBrowser(
         : null,
       (value.mode === "new" || value.placement) && !resolveProfile
         ? null
-        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+        : resolveProfile
+          ? // Only a preference here: a failed read must not fail the open.
+            readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
+              () => null,
+            )
+          : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -3592,7 +3597,10 @@ async function readCurrentMachineSandboxId(
   workspaceId: string,
   sessionId: string,
 ): Promise<string | null> {
-  const placement = await readCurrentInteractionPlacement(transport, workspaceId, sessionId);
+  // Only a preference: a failed read means no machine is preferred.
+  const placement = await readCurrentInteractionPlacement(transport, workspaceId, sessionId).catch(
+    () => null,
+  );
   return placement?.kind === "connected_machine" ? placement.sandboxId : null;
 }
 
