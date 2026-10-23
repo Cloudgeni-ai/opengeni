@@ -539,6 +539,52 @@ CREATE POLICY workspace_isolation ON recording_events
     AND (visibility = 'workspace_shared' OR owner_subject_id = opengeni_private.current_subject_id())
   );
 
+-- The worker's recovery sweep is one cross-workspace loop. It finds work whose
+-- workflow may never have started (the API stopped between its commit and the
+-- start) through this identity-only function; everything else it does runs
+-- under the recording's workspace and owner. Transcripts queued for over two
+-- minutes or leased for over three hours, and deletions older than two minutes.
+CREATE FUNCTION opengeni_private.list_stalled_recording_work_v1(p_limit integer)
+RETURNS TABLE (
+  kind text,
+  account_id uuid,
+  workspace_id uuid,
+  recording_id uuid,
+  version_id uuid,
+  owner_subject_id text
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $list_stalled_recording_work$
+  (
+    SELECT 'transcript', version.account_id, version.workspace_id, version.recording_id,
+      version.id, recording.owner_subject_id
+    FROM recording_transcript_versions version
+    JOIN recordings recording
+      ON recording.workspace_id = version.workspace_id AND recording.id = version.recording_id
+    WHERE recording.state <> 'deleting'
+      AND (
+        (version.state = 'queued' AND version.created_at < pg_catalog.now() - interval '2 minutes')
+        OR (version.state = 'processing'
+          AND version.processing_started_at < pg_catalog.now() - interval '3 hours')
+      )
+    ORDER BY version.created_at, version.id
+    LIMIT greatest(1, least(coalesce(p_limit, 50), 200))
+  )
+  UNION ALL
+  (
+    SELECT 'deletion', recording.account_id, recording.workspace_id, recording.id,
+      NULL::uuid, recording.owner_subject_id
+    FROM recordings recording
+    WHERE recording.state = 'deleting'
+      AND recording.updated_at < pg_catalog.now() - interval '2 minutes'
+    ORDER BY recording.updated_at, recording.id
+    LIMIT greatest(1, least(coalesce(p_limit, 50), 200))
+  );
+$list_stalled_recording_work$;
+REVOKE ALL ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM PUBLIC;
+
 DO $recording_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
@@ -548,6 +594,7 @@ BEGIN
       recording_segment_edits
     TO opengeni_app;
     GRANT SELECT, INSERT ON recording_events TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app;
   END IF;
 END
 $recording_grants$;

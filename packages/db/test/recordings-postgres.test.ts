@@ -17,6 +17,7 @@ import {
   getRecordingTranscriptPage,
   listDeletingRecordingObjectKeys,
   listRecordings,
+  listStalledRecordingWork,
   markRecordingChunksUploaded,
   markRecordingDeleting,
   purgeDeletingRecording,
@@ -241,6 +242,17 @@ describe("recordings", () => {
         leaseSeconds: 600,
       }),
     ).toBeNull();
+    // The same workflow takes its own lease back after a crash.
+    expect(
+      (
+        await claimRecordingTranscriptVersion(db, {
+          ...recording.actor,
+          versionId: recording.versionId,
+          processingOwner: owner,
+          leaseSeconds: 600,
+        })
+      )?.version.id,
+    ).toBe(recording.versionId);
     const completed = await completeRecordingTranscriptVersion(db, {
       ...recording.actor,
       versionId: recording.versionId,
@@ -488,6 +500,45 @@ describe("recordings", () => {
         (select count(*)::int from recording_chunks where recording_id = ${recording.recordingId}) as chunks,
         (select count(*)::int from recording_events where recording_id = ${recording.recordingId}) as events`;
     expect(rows).toEqual({ recordings: 0, chunks: 0, events: 3 });
+  });
+
+  test("the recovery sweep finds stalled transcripts and deletions", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recording = await finalizedRecording(scope, "private");
+    const mine = async () =>
+      (await listStalledRecordingWork(db, 200)).filter(
+        (work) => work.recordingId === recording.recordingId,
+      );
+    expect(await mine()).toEqual([]);
+    await shared.admin`
+      update recording_transcript_versions set created_at = now() - interval '5 minutes'
+      where id = ${recording.versionId}`;
+    expect(await mine()).toEqual([
+      {
+        kind: "transcript",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId: recording.recordingId,
+        versionId: recording.versionId,
+        ownerSubjectId: scope.owner,
+      },
+    ]);
+    await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
+    await shared.admin`
+      update recordings set updated_at = now() - interval '5 minutes'
+      where id = ${recording.recordingId}`;
+    expect(await mine()).toEqual([
+      {
+        kind: "deletion",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId: recording.recordingId,
+        versionId: null,
+        ownerSubjectId: scope.owner,
+      },
+    ]);
   });
 
   test("deleting the workspace removes its recordings", async () => {

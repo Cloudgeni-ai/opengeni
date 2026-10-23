@@ -51,6 +51,7 @@ import type {
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
+  StartRecordingWorkflow,
   StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
@@ -461,6 +462,7 @@ export async function createWorkerWorkflowSignaler(
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   startSessionTitleWorkflow: StartSessionTitleWorkflow;
+  startRecordingWorkflow: StartRecordingWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -612,6 +614,34 @@ export async function createWorkerWorkflowSignaler(
             { accountId, workspaceId, operationId, baseTaskQueue: settings.temporalTaskQueue },
           ],
         });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
+    },
+    startRecordingWorkflow: async (work) => {
+      const transcript = work.kind === "transcript" && work.versionId !== null;
+      try {
+        await temporal.workflow.start(
+          transcript ? "recordingTranscriptWorkflow" : "recordingDeletionWorkflow",
+          {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: transcript
+              ? `recording-transcript:${work.versionId}`
+              : `recording-deletion:${work.recordingId}`,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+            args: [
+              {
+                accountId: work.accountId,
+                workspaceId: work.workspaceId,
+                recordingId: work.recordingId,
+                ownerSubjectId: work.ownerSubjectId,
+                ...(transcript ? { versionId: work.versionId } : {}),
+              },
+            ],
+          },
+        );
         return "started";
       } catch (error) {
         if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
@@ -839,7 +869,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.signalCodexCapacityWorkflow ||
       !options.activityDependencies.startSandboxReaperWorkflow ||
       !options.activityDependencies.startVideoGenerationWorkflow ||
-      !options.activityDependencies.startSessionTitleWorkflow;
+      !options.activityDependencies.startSessionTitleWorkflow ||
+      !options.activityDependencies.startRecordingWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -866,6 +897,8 @@ export async function createOpenGeniWorkerService(
       signaler?.startVideoGenerationWorkflow;
     const startSessionTitleWorkflow =
       options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
+    const startRecordingWorkflow =
+      options.activityDependencies.startRecordingWorkflow ?? signaler?.startRecordingWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
@@ -873,7 +906,8 @@ export async function createOpenGeniWorkerService(
       !signalCodexCapacityWorkflow ||
       !startSandboxReaperWorkflow ||
       !startVideoGenerationWorkflow ||
-      !startSessionTitleWorkflow
+      !startSessionTitleWorkflow ||
+      !startRecordingWorkflow
     ) {
       throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -893,6 +927,7 @@ export async function createOpenGeniWorkerService(
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
         startSessionTitleWorkflow,
+        startRecordingWorkflow,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
           cleanupContainment.request();

@@ -6,6 +6,7 @@ import { createBrowserDeadlineCheckpointActivities } from "./activities/browser-
 import { createAutomationActivities } from "./activities/automations";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
+import { createRecordingActivities } from "./activities/recordings";
 import { createGoalActivities } from "./activities/goals";
 import { createModelCallFactReconcilerActivities } from "./activities/model-call-fact-reconciler";
 import { createKnowledgeSourceSyncActivities } from "./activities/knowledge-source-sync";
@@ -47,6 +48,7 @@ export function createControlActivitiesFromServices(
     ...createBrowserStateArtifactMaintenanceActivities(services),
     ...createBrowserDeadlineCheckpointActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createRecordingActivities(services),
     ...createModelCallFactReconcilerActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),

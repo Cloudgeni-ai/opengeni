@@ -46,6 +46,14 @@ export {
   type VideoGenerationWorkflowInput,
 } from "./workflows/video-generation";
 export { sessionTitleWorkflow } from "./workflows/session-title";
+export {
+  recordingDeletionWorkflow,
+  recordingDeletionWorkflowId,
+  recordingTranscriptWorkflow,
+  recordingTranscriptWorkflowId,
+  type RecordingDeletionWorkflowInput,
+  type RecordingTranscriptWorkflowInput,
+} from "./workflows/recordings";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

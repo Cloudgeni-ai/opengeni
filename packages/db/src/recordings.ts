@@ -11,7 +11,7 @@ import type {
   RecordingVisibility,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
-import { withWorkspaceSubjectRls, type Database } from "./database";
+import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 import type { RecordingWordTiming } from "./recordings-schema";
 
@@ -1047,7 +1047,8 @@ export type RecordingTranscriptionJob = {
 
 /**
  * Lease a queued version for processing. Returns null when the version is
- * finished, gone, or leased by a live attempt.
+ * finished, gone, or leased by a live attempt. The same processing owner
+ * (one workflow) may take its own lease back after a crash.
  */
 export async function claimRecordingTranscriptVersion(
   db: Database,
@@ -1074,7 +1075,10 @@ export async function claimRecordingTranscriptVersion(
             eq(schema.recordingTranscriptVersions.state, "queued"),
             and(
               eq(schema.recordingTranscriptVersions.state, "processing"),
-              sql`${schema.recordingTranscriptVersions.processingStartedAt} < clock_timestamp() - make_interval(secs => ${input.leaseSeconds})`,
+              or(
+                eq(schema.recordingTranscriptVersions.processingOwner, input.processingOwner),
+                sql`${schema.recordingTranscriptVersions.processingStartedAt} < clock_timestamp() - make_interval(secs => ${input.leaseSeconds})`,
+              ),
             ),
           ),
         ),
@@ -2014,4 +2018,41 @@ export async function createRecordingPerson(
     }
     return { person: personView(existing), created: false };
   });
+}
+
+/** Work the recovery sweep restarts: a transcript version or a deletion. */
+export type StalledRecordingWork = {
+  kind: "transcript" | "deletion";
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  versionId: string | null;
+  ownerSubjectId: string;
+};
+
+/**
+ * Transcripts and deletions whose workflow may never have started, across
+ * every workspace. Identity only; the caller restarts each workflow, which
+ * does nothing when it is already running.
+ */
+export async function listStalledRecordingWork(
+  db: Database,
+  limit = 50,
+): Promise<StalledRecordingWork[]> {
+  const rows = await rawRows<{
+    kind: "transcript" | "deletion";
+    account_id: string;
+    workspace_id: string;
+    recording_id: string;
+    version_id: string | null;
+    owner_subject_id: string;
+  }>(db, sql`select * from opengeni_private.list_stalled_recording_work_v1(${limit})`);
+  return rows.map((row) => ({
+    kind: row.kind,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    recordingId: row.recording_id,
+    versionId: row.version_id,
+    ownerSubjectId: row.owner_subject_id,
+  }));
 }

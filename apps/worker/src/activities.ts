@@ -141,6 +141,10 @@ export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
+export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
+export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
+export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
+export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
