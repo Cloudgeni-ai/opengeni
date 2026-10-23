@@ -401,6 +401,119 @@ test("turning computer use off pauses it and shows off at once", async () => {
   await hook.unmount();
 });
 
+function permissionHost(granted: { screenRecording: boolean }) {
+  const asked: string[] = [];
+  const read = (): ThisComputerStatus => ({
+    ...connected,
+    permissions: [{ id: "screenRecording", granted: granted.screenRecording }],
+  });
+  const host: ThisComputerHost = {
+    platform: "macos",
+    productName: "App",
+    status: async () => read(),
+    connect: async () => read(),
+    pause: async () => undefined,
+    resume: async () => undefined,
+    requestPermission: async (id) => {
+      asked.push(id);
+    },
+    onChange: () => () => undefined,
+  };
+  return { host, asked, read };
+}
+
+function withFocus(focused: () => boolean): () => void {
+  const previous = Object.getOwnPropertyDescriptor(document, "hasFocus");
+  Object.defineProperty(document, "hasFocus", { configurable: true, value: focused });
+  return () => {
+    if (previous) Object.defineProperty(document, "hasFocus", previous);
+    else Reflect.deleteProperty(document, "hasFocus");
+  };
+}
+
+test("asking ends by itself when no system window comes up, and goes on while the person is away", async () => {
+  let focused = true;
+  const restore = withFocus(() => focused);
+  const { host, asked } = permissionHost({ screenRecording: false });
+  const hook = await renderHook(
+    () => useThisComputer(host, "workspace", { askQuietMs: 40 }),
+    undefined,
+  );
+  try {
+    await flush();
+    // macOS already decided: nothing opens, the app keeps focus, asking stops once.
+    await actRun(() => hook.result.current.allowPermissions());
+    expect(hook.result.current.asking).toBe("screenRecording");
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    await flush();
+    expect(hook.result.current.asking).toBeNull();
+    expect(asked).toEqual(["screenRecording"]);
+
+    // In System Settings (the app in the background): it keeps asking.
+    focused = false;
+    await actRun(() => hook.result.current.allowPermissions());
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    await flush();
+    expect(hook.result.current.asking).toBe("screenRecording");
+  } finally {
+    restore();
+    await hook.unmount();
+  }
+});
+
+test("asks for what a just-returned reading lacks, before the shared one catches up", async () => {
+  const { host, asked, read } = permissionHost({ screenRecording: true });
+  const hook = await renderHook(() => useThisComputer(host, "workspace"), undefined);
+  try {
+    await flush();
+    // The hook's reading has everything; the one an action returned doesn't.
+    await actRun(() => hook.result.current.allowPermissions());
+    expect(asked).toEqual([]);
+    await actRun(() =>
+      hook.result.current.allowPermissions({
+        ...read(),
+        permissions: [{ id: "screenRecording", granted: false }],
+      }),
+    );
+    expect(asked).toEqual(["screenRecording"]);
+  } finally {
+    await hook.unmount();
+  }
+});
+
+test("turning off goes straight to Off, never On again in between", async () => {
+  let paused = false;
+  const host: ThisComputerHost = {
+    platform: "macos",
+    productName: "App",
+    status: async () => (paused ? { ...connected, state: "paused" } : connected),
+    connect: async () => connected,
+    pause: async () => {
+      paused = true;
+    },
+    resume: async () => undefined,
+    onChange: () => () => undefined,
+  };
+  const seen: string[] = [];
+  const hook = await renderHook(() => {
+    const computer = useThisComputer(host, "workspace");
+    seen.push(`${computer.pending ?? "-"}:${computer.status?.state ?? "none"}`);
+    return computer;
+  }, undefined);
+  try {
+    await flush();
+    await actRun(async () => {
+      await hook.result.current.turnOff();
+    });
+    // Once nothing is pending any more, the reading already says paused.
+    const settled = seen.filter((entry) => entry.startsWith("-:"));
+    expect(settled.at(-1)).toBe("-:paused");
+    expect(settled.slice(settled.indexOf("-:connected") + 1).includes("-:connected")).toBe(false);
+  } finally {
+    await hook.unmount();
+  }
+});
+
 test("turning on asks for each missing permission in turn, and stops when the person declines", async () => {
   const listeners = new Set<() => void>();
   const asked: string[] = [];

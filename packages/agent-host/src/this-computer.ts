@@ -257,6 +257,8 @@ interface ComputerState {
    * stays turned off. Null otherwise.
    */
   hostedService: string | null;
+  /** When permissions were last asked for (ms), so only a recent ask continues after a relaunch. */
+  askedAt: number;
 }
 
 /** What the agent reports and asks for itself: screen control. */
@@ -298,6 +300,9 @@ const GRANT_WATCH_LIMIT_MS = 10 * 60_000;
 const STOP_GRACE_MS = 15_000;
 /** A hosted agent that exits sooner than this (another agent holds the lock, it crashed) didn't start. */
 const HOSTED_SETTLE_MS = 6_000;
+const SETTLE_SAMPLE_MS = 200;
+/** Asking for permissions continues after a relaunch only within this long of the last ask. */
+const ASKING_RESUME_MS = 10 * 60_000;
 const LOG_LIMIT_BYTES = 10 * 1024 * 1024;
 
 type Permissions = ReturnType<typeof parsePermissions>;
@@ -372,8 +377,10 @@ export class ThisComputer {
   private grantWatch: { timer: NodeJS.Timeout; until: number } | null = null;
   /** Moving a service agent into the app is in progress (see `hostService`). */
   private hosting: Promise<void> | null = null;
-  /** Tried once per launch: a failed move leaves the service as it was. */
+  /** Tried once per launch: a move not made leaves the service as it was. */
   private hostingTried = false;
+  /** A move that didn't stay up isn't tried again this launch, even when asking. */
+  private hostingFailed = false;
   /** The permission the person was sent to System Settings for, while it is missing. */
   private guiding: ThisComputerPermissionId | null = null;
   /** Environment every agent command gets: the host marker and, when set, its own config. */
@@ -487,8 +494,8 @@ export class ThisComputer {
               () =>
                 reject(
                   new ThisComputerError(
-                    "offline",
-                    "Couldn't reach the server to check this computer's connection. Check your connection and try again.",
+                    "unknown",
+                    "The server took too long to confirm this computer's connection. Try again.",
                   ),
                 ),
               MACHINE_READ_TIMEOUT_MS,
@@ -579,6 +586,7 @@ export class ThisComputer {
    * paused. Existing standalone services are never changed or started here.
    */
   async boot(): Promise<void> {
+    if (this.state.hostedService !== null) return await this.bootHostedService();
     if (!this.supported || this.state.paused || this.serviceBacked) return;
     if (!this.state.adopted && (this.adopts || !this.hasAnyAgent())) return;
     try {
@@ -590,6 +598,37 @@ export class ThisComputer {
       this.fail(caught);
       this.deps.onChange();
     }
+  }
+
+  /**
+   * A service agent the app runs (see `hostServiceAgent`): started again, and
+   * handed back to its service when its binary is gone or it doesn't stay up,
+   * so the computer is never left without an agent.
+   */
+  private async bootHostedService(): Promise<void> {
+    const binary = this.state.hostedService;
+    const back = () =>
+      this.handBack().catch((caught: unknown) => {
+        this.fail(caught);
+        this.deps.onChange();
+      });
+    if (!binary || !existsSync(binary)) return await back();
+    // The app ended without asking and the service took the agent back
+    // (see `shutdownNow`): it keeps it, so there's never a second one.
+    if ((await this.serviceStatus().catch(() => null))?.running) {
+      this.saveState({ hostedService: null, management: "service", paused: false });
+      this.serviceCache = null;
+      return;
+    }
+    if (this.state.paused) return;
+    const first = (await this.connections(true).catch(() => []))[0];
+    if (!first) return await back();
+    this.agent.start(first.apiUrl);
+    void this.runHosting(async () => {
+      if (await this.hostedSettles()) return true;
+      await this.handBack();
+      return false;
+    });
   }
 
   async status(
@@ -676,7 +715,13 @@ export class ThisComputer {
     const reading = accountId
       ? await this.reportedMachine(accountId, baseUrl, workspaceId, connection)
       : null;
-    if (this.removedOnServer(reading, connection)) return removed();
+    if (this.removedOnServer(reading, connection)) {
+      // An agent left serving only removed connections has nothing to do.
+      if (this.live(connections).length === 0 && this.agent.state !== "stopped") {
+        void this.agent.stop().catch(() => undefined);
+      }
+      return removed();
+    }
     const permissions = await this.permissionList();
     const missing = permissions?.some((permission) => !permission.granted) ?? false;
     return {
@@ -689,7 +734,9 @@ export class ThisComputer {
             systemNames: macSystemNames(this.deps.systemLanguages?.() ?? [], this.deps.systemNames),
           }
         : {}),
-      ...(missing && this.state.setupPending ? { setupPending: true } : {}),
+      ...(missing && this.state.setupPending && Date.now() - this.state.askedAt < ASKING_RESUME_MS
+        ? { setupPending: true }
+        : {}),
       ...(permissions ? { requestedPermissions: [...this.state.requested] } : {}),
       ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
     };
@@ -706,6 +753,8 @@ export class ThisComputer {
     /** In the order to allow them. */
     missingPermissions: ThisComputerPermissionId[];
     management?: "service" | "app";
+    /** A service agent the app runs: quitting hands it back to its service, so it stays available. */
+    handsBackOnQuit?: boolean;
   }> {
     if (!this.supported) {
       return {
@@ -742,6 +791,7 @@ export class ThisComputer {
       reconnecting: !this.state.paused && connections.length > 0 && this.agent.state !== "running",
       needsPermissions: missingPermissions.length > 0,
       missingPermissions,
+      ...(this.state.hostedService !== null ? { handsBackOnQuit: true } : {}),
     };
   }
 
@@ -791,6 +841,7 @@ export class ThisComputer {
         paused: false,
         screenControl: this.state.screenControl || options.screenControl,
         setupPending: options.screenControl && this.deps.platform === "darwin",
+        askedAt: Date.now(),
         turnedOff: this.state.turnedOff.filter((key) => key !== useKey(baseUrl, workspaceId)),
       });
       // A running agent reads its connections when it starts.
@@ -817,7 +868,7 @@ export class ThisComputer {
         await this.serviceAction("stop");
         return;
       }
-      this.saveState({ paused: true });
+      this.saveState({ paused: true, setupPending: false });
       await this.agent.stop();
     });
   }
@@ -959,55 +1010,117 @@ export class ThisComputer {
 
   /**
    * Moves an adopted service agent into the app (see `hostServiceAgent`), once
-   * per launch, in the background. One agent at a time: the service is
-   * turned off before the app starts the same agent as its helper, with the
-   * same connections. If the helper doesn't stay up, it is stopped and the
-   * service turned back on, so the computer never has two agents or none.
+   * per launch, in the background. On its own it moves only when the app
+   * already holds every screen permission the service has, so a setup that
+   * works never loses a grant; asking for a permission moves it first anyway
+   * (see `requestPermission`), so the grant goes to the app. Actions wait for
+   * a move in progress.
    */
-  private hostService(machine: { screenControl: boolean } | null): void {
-    if (!this.deps.hostServiceAgent || this.deps.platform !== "darwin") return;
-    if (this.hostingTried || this.hosting || this.busy || !this.state.adopted) return;
+  private hostService(machine: ListedMachine | null): void {
+    if (!this.canHostService() || this.hostingTried || this.hosting || this.busy) return;
     this.hostingTried = true;
-    this.hosting = this.moveServiceIntoApp(machine?.screenControl === true)
+    void this.runHosting(() => this.moveServiceIntoApp(machine, false));
+  }
+
+  private canHostService(): boolean {
+    return (
+      this.deps.hostServiceAgent === true &&
+      this.deps.platform === "darwin" &&
+      this.serviceBacked &&
+      this.state.adopted
+    );
+  }
+
+  /** Runs a move (or its check) as the one in progress; true when the app now runs the agent. */
+  private runHosting(move: () => Promise<boolean>): Promise<boolean> {
+    const moving = move()
       .catch((caught: unknown) => {
         // Even the way back failed: say so, as for any failed action.
         this.fail(caught);
+        return false;
       })
       .finally(() => {
         this.hosting = null;
         this.serviceCache = null;
+        this.machineCache = null;
+        this.permissionsCache = null;
         this.deps.onChange();
       });
+    this.hosting = moving.then(() => undefined);
+    return moving;
   }
 
-  private async moveServiceIntoApp(screenControl: boolean): Promise<void> {
+  /**
+   * One agent at a time: the service is turned off before the app starts the
+   * same agent as its helper, with the same connections and registration. If
+   * the helper doesn't stay up, the service runs it again as before.
+   */
+  private async moveServiceIntoApp(
+    machine: ListedMachine | null,
+    force: boolean,
+  ): Promise<boolean> {
     const service = await this.serviceStatus().catch(() => null);
-    if (!service?.installed || !service.enabled || !service.running) return;
+    if (!service?.installed || !service.enabled || !service.running) return false;
     const binary = service.binaryPath ?? this.hostedPath;
     const first = (await this.connections(true))[0];
-    if (!first || !(await this.versionOf(binary))) return;
+    if (!first || !(await this.versionOf(binary))) return false;
+    if (!force && !(await this.appHoldsGrants(binary, machine))) return false;
     try {
       await this.serviceAction("stop");
     } catch {
       // It may have stopped anyway: make sure the service runs, as before.
       await this.serviceAction("start");
-      return;
+      return false;
     }
     this.saveState({
       hostedService: binary,
       management: "app",
       paused: false,
-      screenControl: this.state.screenControl || screenControl,
+      screenControl: this.state.screenControl || machine?.screenControl === true || force,
     });
     this.agent.start(first.apiUrl);
-    await new Promise((resolve) =>
-      setTimeout(resolve, this.deps.hostedSettleMs ?? HOSTED_SETTLE_MS),
+    if (await this.hostedSettles()) return true;
+    this.hostingFailed = true;
+    await this.handBack();
+    return false;
+  }
+
+  /**
+   * Whether the app already has every screen permission the service has (a
+   * check run by the app reads the app's own grants). When the service's are
+   * unknown, only all of them will do.
+   */
+  private async appHoldsGrants(binary: string, machine: ListedMachine | null): Promise<boolean> {
+    const result = await this.run(binary, ["permissions"], { timeoutMs: 10_000 });
+    const own = result.code === 0 ? parsePermissions(result.output) : null;
+    if (!own) return false;
+    if (!own.required) return true;
+    const service = machine?.permissions ?? null;
+    return SCREEN_PERMISSIONS.every(
+      (id) => own.granted[id] || (service !== null && service[id] !== true),
     );
-    if (this.agent.state === "running") return;
-    // Back to the service, as it was.
+  }
+
+  /** The app's helper keeps running, without restarting, for the whole settle time. */
+  private async hostedSettles(): Promise<boolean> {
+    const pid = this.childPid;
+    const until = Date.now() + (this.deps.hostedSettleMs ?? HOSTED_SETTLE_MS);
+    while (Date.now() < until) {
+      if (pid === null || this.agent.state !== "running" || this.childPid !== pid) return false;
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_SAMPLE_MS));
+    }
+    return pid !== null && this.agent.state === "running" && this.childPid === pid;
+  }
+
+  /**
+   * The service runs the agent again, as before it moved into the app, and the
+   * app's helper stops. Off stays off: the service then stays turned off.
+   */
+  private async handBack(): Promise<void> {
+    const off = this.state.paused;
     await this.agent.stop();
-    this.saveState({ hostedService: null, management: "service" });
-    await this.serviceAction("start");
+    this.saveState({ hostedService: null, management: "service", paused: false });
+    if (!off) await this.serviceAction("start");
   }
 
   /** Every workspace that uses a connection, by server and workspace. */
@@ -1095,12 +1208,23 @@ export class ThisComputer {
    */
   async requestPermission(id: ThisComputerPermissionId): Promise<void> {
     if (this.deps.platform !== "darwin" || !PERMISSION_ORDER.includes(id)) return;
+    if (this.hosting) await this.hosting.catch(() => undefined);
     if (this.serviceBacked) {
+      // The grant should go to the app: the agent moves into it first.
+      if (
+        this.canHostService() &&
+        !this.hostingFailed &&
+        (await this.runHosting(() => this.moveServiceIntoApp(null, true)))
+      ) {
+        return await this.requestPermission(id);
+      }
       // A child of the desktop asks for the desktop's grants, not the service's.
       // The existing agent already owns the System Settings entries.
       if (this.state.adopted) this.deps.openSystemSettings(SETTINGS_PANES[id]);
       return;
     }
+    // Asking began: after a relaunch macOS forces for a grant, it may go on.
+    this.saveState({ setupPending: true, askedAt: Date.now() });
     if (id === "files") return await this.requestFolders();
     this.watchForGrants();
     this.guide(id);
@@ -1245,6 +1369,13 @@ export class ThisComputer {
   async shutdown(): Promise<void> {
     this.stopWatchingForGrants();
     for (const check of this.folderChecks) check.kill("SIGKILL");
+    if (this.hosting) await this.hosting.catch(() => undefined);
+    if (this.state.hostedService !== null) {
+      // Quitting the app keeps this computer available: the service runs the
+      // agent until the app is back (and Off stays off).
+      await this.handBack().catch(() => this.agent.stop());
+      return;
+    }
     await this.agent.stop();
   }
 
@@ -1257,6 +1388,21 @@ export class ThisComputer {
     for (const check of this.folderChecks) check.kill("SIGKILL");
     const pid = this.childPid;
     if (pid !== null) killTree(pid, this.deps.platform, false, true);
+    const binary = this.state.hostedService;
+    if (binary === null || this.state.paused || !existsSync(binary)) return;
+    // Ended without asking (logout, restart): the service runs the agent again,
+    // as `shutdown` would, so this computer stays available. The saved state
+    // still says the app runs it: the next launch finds the service holding the
+    // agent and hands it back for good (see `bootHostedService`).
+    try {
+      spawn(binary, ["service", "start"], {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, ...this.agentEnv },
+      }).unref();
+    } catch {
+      // The next launch hands it back (see `boot`).
+    }
   }
 
   /** Forget the cached readings, e.g. when the window comes back to the front. */
@@ -1571,6 +1717,7 @@ export class ThisComputer {
       alsoIn: {},
       turnedOff: [],
       hostedService: null,
+      askedAt: 0,
     };
     try {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
@@ -1600,6 +1747,7 @@ export class ThisComputer {
           typeof saved.hostedService === "string" && saved.hostedService
             ? saved.hostedService
             : null,
+        askedAt: typeof saved.askedAt === "number" ? saved.askedAt : 0,
       };
     } catch {
       return fallback;
@@ -1658,6 +1806,9 @@ export class ThisComputer {
   private async act(action: () => Promise<void>): Promise<void> {
     if (this.busy) throw new ThisComputerError("busy", "This computer is already being set up.");
     this.busy = true;
+    // A move into the app in progress finishes (or rolls back) first, so the
+    // person's action applies to the agent as it then is.
+    if (this.hosting) await this.hosting.catch(() => undefined);
     this.error = null;
     this.errorCode = null;
     this.deps.onChange();
@@ -1718,9 +1869,17 @@ function useKey(baseUrl: string, workspaceId: string): string {
   return `${normalizeServerUrl(baseUrl)} ${workspaceId}`;
 }
 
+/** A request that never got an answer: fetch's TypeError, or the SDK's transport failure. */
+function transportFailure(caught: unknown): boolean {
+  if (caught instanceof TypeError) return true;
+  if (typeof caught !== "object" || caught === null) return false;
+  const { status, code } = caught as { status?: unknown; code?: unknown };
+  return status === 0 || code === "network_error";
+}
+
 function serverFailure(caught: unknown, failure: string): ThisComputerError {
   if (caught instanceof ThisComputerError) return caught;
-  if (caught instanceof TypeError) {
+  if (transportFailure(caught)) {
     return new ThisComputerError("offline", `${failure}: the server couldn't be reached.`, {
       cause: caught,
     });
@@ -1750,6 +1909,13 @@ const NETWORK_FAILURE =
  */
 export function machineReadFailure(caught: unknown): ThisComputerError {
   if (caught instanceof ThisComputerError) return caught;
+  if (transportFailure(caught)) {
+    return new ThisComputerError(
+      "offline",
+      "Couldn't reach the server to check this computer's connection. Check your connection and try again.",
+      { cause: caught },
+    );
+  }
   const status =
     typeof caught === "object" && caught !== null && "status" in caught
       ? (caught as { status: unknown }).status

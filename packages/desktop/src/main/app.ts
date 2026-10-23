@@ -501,14 +501,20 @@ export class DesktopShell {
    * Quitting stops the agent, so agents lose this computer until the app opens
    * again. While this computer serves agents, ask first; closing the window
    * keeps it available. macOS quits the app itself to apply a new permission,
-   * so there is no question while permissions are being set up.
+   * so there is no question while permissions are being set up. An agent the
+   * app took over from its service goes back to the service, so it stays too.
    */
   private async confirmQuit(): Promise<void> {
     if (this.confirmingQuit) return;
     this.confirmingQuit = true;
     try {
       const summary = this.config.thisComputer ? await this.computer.summary() : null;
-      if (summary?.running && summary.management !== "service" && !summary.needsPermissions) {
+      if (
+        summary?.running &&
+        summary.management !== "service" &&
+        !summary.handsBackOnQuit &&
+        !summary.needsPermissions
+      ) {
         const parent = this.window?.window;
         const options: Electron.MessageBoxOptions = {
           type: "question",

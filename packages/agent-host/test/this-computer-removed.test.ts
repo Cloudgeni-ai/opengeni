@@ -277,6 +277,9 @@ describe("why the server's machine list couldn't be read", () => {
   test("each failure keeps its own meaning", () => {
     expect(machineReadFailure(new TypeError("fetch failed")).code).toBe("offline");
     expect(machineReadFailure(new Error("net::ERR_INTERNET_DISCONNECTED")).code).toBe("offline");
+    // The SDK's own transport failure: no answer, so not a server error.
+    expect(machineReadFailure({ status: 0, message: "HTTP request failed" }).code).toBe("offline");
+    expect(machineReadFailure({ code: "network_error", message: "failed" }).code).toBe("offline");
     expect(machineReadFailure({ status: 401, message: "API 401" }).code).toBe("signed_out");
     expect(machineReadFailure({ status: 500, message: "API 500: boom" }).code).toBe("unknown");
     expect(machineReadFailure(new Error("unexpected")).code).toBe("unknown");

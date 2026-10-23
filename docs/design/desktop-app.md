@@ -168,22 +168,38 @@ from the web app's install command): the app records it as its own, asks the
 server to allow the person's agents if that is still missing, and shows
 computer use on with nothing for the person to do.
 
-On macOS the app then moves that agent into the app (`hostServiceAgent`): one
-set of permissions, the app's, covers app-shots and computer use. In the
-background, once per launch and only while the service is on and running, it
-turns the service off (kept installed, also off at login) and starts the same
-binary as its own helper with the same config folder, so the connections and
-registration are unchanged: no new enrollment and no new machine. macOS then
-attributes screen and input use to Opengeni.app. If the helper doesn't stay up,
-the app stops it and turns the service back on, so the computer never has two
-agents or none. Hosting was chosen over keeping the service because the app
-can keep its helper running: it opens hidden at login while this computer is in
-use and keeps running in the menu bar with the window closed; only quitting it
-stops the agent, and quitting asks first. Grants the person gave
-"Opengeni Agent" don't carry over; the app asks for its own missing ones the
-same way as for a new install. An agent that stays a service (another
-platform, or the move failed) keeps working as before, and System Settings
-guidance names "Opengeni Agent".
+On macOS the app then moves that agent into the app (`hostServiceAgent`), so
+one set of permissions, the app's, covers app-shots and computer use. It moves
+it only when that loses nothing: on its own (once per launch, in the
+background) when a check run by the app shows the app already holds every
+screen permission the service has, and otherwise as the first step of asking
+for a missing permission, so macOS gives that grant to Opengeni.app instead of
+"Opengeni Agent". A move turns the service off (kept installed, also off at
+login) and starts the same binary as the app's helper with the same config
+folder, so the connections and registration are unchanged: no new enrollment
+and no new machine. Actions such as turning computer use off wait for a move
+in progress, so they apply to the agent as it then is.
+
+The computer never has two agents or none:
+
+- The helper must keep running, with the same process, for the whole settle
+  time; otherwise the app stops it and turns the service back on, and doesn't
+  try again in that launch.
+- Quitting the app hands the agent back to its service (Off stays off), so the
+  computer stays available while the app is closed and quitting doesn't ask.
+  When the app ends without asking (log out, restart), it starts the service
+  as it goes; the next launch finds the service running and leaves it there.
+- At launch, a moved agent starts as the helper again; if its program is gone
+  or the helper doesn't stay up, the service runs it again.
+
+Hosting was chosen over keeping the service because the app can keep its
+helper running: it opens hidden at login while this computer is in use and
+keeps running in the menu bar with the window closed, and handing back on quit
+covers the time it isn't running. While the service runs the agent, grants
+given only to Opengeni.app don't apply, so screen control waits for the app;
+files and commands keep working. An agent that stays a service (another
+platform, a move not made or failed) keeps working as before, and System
+Settings guidance names "Opengeni Agent".
 
 In the app this is **Computer use**: one switch (`ComputerUseRow` in
 `packages/react/src/app/components/desktop/computer-use.tsx`, state from
@@ -197,7 +213,7 @@ on. The switch shows one state at a time:
 | Turning on | on | "Turning on…", no buttons. Includes asking macOS for a missing permission. |
 | On | on | "Agents can use {computer}" with a green dot. |
 | Needs permission | on | Calm, not an error: "To let agents see and control the screen, allow {app} in System Settings." and **Open System Settings**. Files and commands work meanwhile. |
-| Problem | on, red | The problem and exactly one fix: **Sign in** (signed out) or **Try again** (server unreachable, or the server's or agent's own error). |
+| Problem | on | In red text: the problem and exactly one fix: **Sign in** (signed out) or **Try again** (server unreachable, or the server's or agent's own error). |
 
 Off is pause: it persists across restarts and log-ins and keeps the
 installation and registration, so turning on is instant. Turning on is the
@@ -211,7 +227,9 @@ comes back to the app without allowing one, asking stops there and the switch
 shows **Needs permission**; nothing is asked again until they choose **Open
 System Settings** or turn the switch on again. If macOS quits and reopens the
 app to apply a grant, asking continues once for the next missing permission,
-unless that one was already asked for (`requestedPermissions`). Removing the
+unless that one was already asked for (`requestedPermissions`); only an ask from
+the last few minutes continues (`setupPending`). Asking also ends when no
+system window comes up (macOS already decided) and the app keeps focus. Removing the
 computer from the workspace stays on its entry in the Machines list. The sidebar
 shows a small notice only while computer use turns on, needs a permission (same
 calm tone) or has a problem, with the same one fix.

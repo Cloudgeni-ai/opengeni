@@ -213,8 +213,9 @@ export function useComputerUse(
   const fix = useMemo(() => {
     if (!problem) return null;
     const kind = problem === "signed_out" && !onSignIn ? "try_again" : computerUseFix(problem);
+    // A click handler: nothing from the click reaches `allow`.
     const run =
-      kind === "open_settings" ? (allow ?? noop) : kind === "sign_in" && onSignIn ? onSignIn : on;
+      kind === "open_settings" ? () => allow?.() : kind === "sign_in" && onSignIn ? onSignIn : on;
     return { kind, run };
   }, [allow, on, onSignIn, problem]);
   return {
@@ -225,5 +226,3 @@ export function useComputerUse(
     fix,
   };
 }
-
-function noop() {}

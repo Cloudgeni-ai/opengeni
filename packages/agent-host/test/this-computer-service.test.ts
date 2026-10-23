@@ -27,6 +27,8 @@ function fixture(
     inspectionFailure?: boolean;
     /** How the agent behaves when the app runs it as its helper. */
     hosted?: "runs" | "exits";
+    /** The app's own screen grants (what a check run by the app reports). */
+    appGrants?: "all" | "some";
   } = {},
 ) {
   const home = mkdtempSync(join(tmpdir(), "og-service-host-"));
@@ -48,8 +50,8 @@ function fixture(
       `  'service stop') touch "${paused}" ;;`,
       `  'service start') rm -f "${paused}" ;;`,
       `  --version) echo 'opengeni-agent 0.1.109' ;;`,
-      `  permissions) echo '{"required":true,"screenRecording":true,"accessibility":false,"inputMonitoring":false}' ;;`,
-      `  *' run') ${options.hosted === "exits" ? "exit 1" : `echo "$$" > "${home}/hosted.pid"; exec sleep 30`} ;;`,
+      `  permissions) echo '{"required":true,"screenRecording":true,"accessibility":${options.appGrants === "all"},"inputMonitoring":${options.appGrants === "all"}}' ;;`,
+      `  *' run') ${options.hosted === "exits" ? "exit 1" : `if [ -f "${home}/crash" ]; then exit 1; fi; echo "$$" > "${home}/hosted.pid"; exec sleep 30`} ;;`,
       "  *) exit 99 ;;",
       "esac",
     ].join("\n"),
@@ -265,16 +267,19 @@ describe.skipIf(process.platform === "win32")("a service agent moved into the ap
       hostedService: string | null;
     };
 
-  test("runs as the app's helper with the same registration, and the service stays off", async () => {
+  test("asking for a permission moves it into the app first, with the same registration", async () => {
     const f = fixture({ hosted: "runs" });
     const app = f.create();
     await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
-    // Adopted and running as a service: the next reading moves it into the app.
+    // The service has grants the app lacks: a reading alone never moves it, so
+    // a setup that works keeps working.
     await app.status("https://server.example", "w1", "signed-in-account");
-    await until(
-      () => state(f.home).hostedService !== null && existsSync(join(f.home, "hosted.pid")),
-    );
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(f.commands()).not.toContain("service stop");
+    expect(state(f.home).hostedService).toBeNull();
+    // Asking for one moves it first, so macOS gives the grant to the app.
+    await app.requestPermission("screenRecording");
+    expect(f.settings).toEqual([]);
     expect(state(f.home)).toMatchObject({ management: "app", hostedService: expect.any(String) });
     // The service was turned off (kept installed) before the helper started: one agent.
     expect(existsSync(f.paused)).toBe(true);
@@ -287,12 +292,14 @@ describe.skipIf(process.platform === "win32")("a service agent moved into the ap
     expect(status.state).toBe("connected");
     // Its permissions now are the app's own, and opening at login keeps it available.
     expect(status.permissions?.find((p) => p.id === "accessibility")?.granted).toBe(false);
-    expect(status.requestedPermissions).toEqual([]);
+    expect(status.requestedPermissions).toEqual(["screenRecording"]);
+    // Asking began just now: after a macOS relaunch it goes on.
+    expect(status.setupPending).toBe(true);
     // Asked once: screens then know not to ask again unprompted.
     await app.requestPermission("accessibility");
     expect(
       (await app.status("https://server.example", "w1", "signed-in-account")).requestedPermissions,
-    ).toEqual(["accessibility"]);
+    ).toEqual(["screenRecording", "accessibility"]);
     expect(app.openAtLoginChange(true)).toBe("open");
     // Turning computer use off and on is the app's pause, not the service.
     const serviceCommands = f.commands().filter((command) => command.startsWith("service "));
@@ -307,8 +314,115 @@ describe.skipIf(process.platform === "win32")("a service agent moved into the ap
     f.preserved();
   });
 
+  test("moves on its own when the app already holds the service's grants", async () => {
+    const f = fixture({ hosted: "runs", appGrants: "all" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    await app.status("https://server.example", "w1", "signed-in-account");
+    await until(() => existsSync(join(f.home, "hosted.pid")));
+    await new Promise((r) => setTimeout(r, 600));
+    expect(state(f.home)).toMatchObject({ management: "app", hostedService: expect.any(String) });
+    expect(existsSync(f.paused)).toBe(true);
+    // Quitting doesn't take this computer away: it goes back to the service.
+    expect((await app.summary()).handsBackOnQuit).toBe(true);
+  });
+
+  test("turning off during a move applies after it and stays off", async () => {
+    const f = fixture({ hosted: "runs", appGrants: "all" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    void app.status("https://server.example", "w1", "signed-in-account");
+    await until(() => f.commands().includes("service stop"));
+    await app.pause();
+    // Long past the settle time: nothing rolled back or turned it on again.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(state(f.home)).toMatchObject({ management: "app", paused: true });
+    expect(existsSync(f.paused)).toBe(true);
+    expect(f.commands().filter((command) => command === "service start")).toHaveLength(1);
+    expect((await app.status("https://server.example", "w1", "signed-in-account")).state).toBe(
+      "paused",
+    );
+  });
+
+  test("quitting hands it back to the service, and Off stays off", async () => {
+    for (const off of [false, true]) {
+      const f = fixture({ hosted: "runs", appGrants: "all" });
+      const app = f.create();
+      await app.connect("signed-in-account", "https://server.example", "w1", {
+        screenControl: true,
+      });
+      await app.status("https://server.example", "w1", "signed-in-account");
+      await until(() => existsSync(join(f.home, "hosted.pid")));
+      await new Promise((r) => setTimeout(r, 600));
+      if (off) await app.pause();
+      await app.shutdown();
+      expect(state(f.home)).toMatchObject({ management: "service", hostedService: null });
+      expect(existsSync(f.paused)).toBe(off);
+      // Next launch: the service's agent, as before (on or off).
+      const next = f.create();
+      expect((await next.status("https://server.example", "w1", "signed-in-account")).state).toBe(
+        off ? "paused" : "connected",
+      );
+    }
+  }, 15_000);
+
+  test("a relaunch starts the helper again, or hands back when it can't stay up", async () => {
+    const moved = async () => {
+      const f = fixture({ hosted: "runs", appGrants: "all" });
+      const app = f.create();
+      await app.connect("signed-in-account", "https://server.example", "w1", {
+        screenControl: true,
+      });
+      await app.status("https://server.example", "w1", "signed-in-account");
+      await until(() => existsSync(join(f.home, "hosted.pid")));
+      await new Promise((r) => setTimeout(r, 600));
+      const saved = readFileSync(join(f.home, "this-computer.json"), "utf8");
+      // The app ended unasked; the next launch finds what was saved then.
+      await app.shutdown();
+      writeFileSync(f.paused, "");
+      writeFileSync(join(f.home, "this-computer.json"), saved);
+      rmSync(join(f.home, "hosted.pid"), { force: true });
+      return f;
+    };
+
+    // Healthy: the app runs it again, and the service stays off.
+    const healthy = await moved();
+    await healthy.create().boot();
+    await until(() => existsSync(join(healthy.home, "hosted.pid")));
+    await new Promise((r) => setTimeout(r, 600));
+    expect(state(healthy.home)).toMatchObject({ management: "app" });
+    expect(existsSync(healthy.paused)).toBe(true);
+
+    // The helper keeps exiting: the service runs it again.
+    const crashing = await moved();
+    writeFileSync(join(crashing.home, "crash"), "");
+    await crashing.create().boot();
+    await until(() => !existsSync(crashing.paused));
+    expect(existsSync(crashing.paused)).toBe(false);
+    expect(state(crashing.home)).toMatchObject({ management: "service", hostedService: null });
+
+    // Its program is gone (reinstalled elsewhere): back to the service.
+    const missing = await moved();
+    const saved = JSON.parse(readFileSync(join(missing.home, "this-computer.json"), "utf8"));
+    writeFileSync(
+      join(missing.home, "this-computer.json"),
+      JSON.stringify({ ...saved, hostedService: join(missing.home, "gone") }),
+    );
+    await missing.create().boot();
+    expect(existsSync(missing.paused)).toBe(false);
+    expect(state(missing.home)).toMatchObject({ management: "service", hostedService: null });
+
+    // The service already took it back: it keeps it, with no second agent.
+    const taken = await moved();
+    rmSync(taken.paused);
+    await taken.create().boot();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(existsSync(join(taken.home, "hosted.pid"))).toBe(false);
+    expect(state(taken.home)).toMatchObject({ management: "service", hostedService: null });
+  }, 30_000);
+
   test("goes back to the service when the helper doesn't start", async () => {
-    const f = fixture({ hosted: "exits" });
+    const f = fixture({ hosted: "exits", appGrants: "all" });
     const app = f.create();
     await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
     await app.status("https://server.example", "w1", "signed-in-account");

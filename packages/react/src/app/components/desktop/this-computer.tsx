@@ -11,6 +11,7 @@ import {
   type ThisComputerHost,
   type ThisComputerLabels,
   type ThisComputerPlatform,
+  type ThisComputerStatus,
   type UseThisComputerResult,
 } from "../../../this-computer";
 import "../../../../styles/this-computer.css";
@@ -34,8 +35,9 @@ export interface DesktopThisComputer {
   /**
    * Asks for the missing permissions, one after another (the system prompt
    * the first time, else the System Settings list with the app's guide).
+   * Pass the reading an action just returned, as the shared one may lag.
    */
-  allowPermissions(): void;
+  allowPermissions(status?: ThisComputerStatus | null): void;
   /** Signs this account in again, when the app has to; null where it can't. */
   signIn: (() => void) | null;
 }
@@ -71,7 +73,7 @@ function bridgeHost(): ThisComputerHost | null {
 
 const host = typeof window === "undefined" ? null : bridgeHost();
 
-/** The app's own sign-in, which renews this account's credential. */
+/** The app's own sign-in screen (its add-account welcome), to sign in again. */
 const signIn = desktopBridge?.accounts?.add
   ? () => void desktopBridge!.accounts.add().catch(() => undefined)
   : null;
