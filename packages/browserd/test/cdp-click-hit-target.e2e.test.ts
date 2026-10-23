@@ -41,7 +41,11 @@ async function openFixture(html: string) {
         { sessionId: attached.sessionId },
       )
     ).result.value;
-  const click = (observation: BrowserObservation, name: string) => {
+  const click = (
+    observation: BrowserObservation,
+    name: string,
+    type: "click" | "double_click" = "click",
+  ) => {
     const command: BrowserActionCommand = {
       protocolVersion: 1,
       operationId: randomUUID(),
@@ -53,7 +57,7 @@ async function openFixture(html: string) {
       expectedFrameId: observation.frameId!,
       actor: { kind: "human", subjectId: "click-hit-target-fixture" },
       observationMode: "none",
-      action: { type: "click", locator: { kind: "role", role: "button", name, exact: true } },
+      action: { type, locator: { kind: "role", role: "button", name, exact: true } },
     };
     return controller.run(command);
   };
@@ -117,6 +121,50 @@ e2e(
       expect(refused.state).not.toBe("completed");
       expect(refused.error?.message).toContain('covered by dialog "Profile card"');
       expect(await fixture.evaluate("[clicks.confirm, clicks.card]")).toEqual([0, 0]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a target the page re-renders as the pointer arrives still takes the click",
+  async () => {
+    // Moving the pointer onto "Confirm" re-renders it: the page swaps in an
+    // identical copy, as a framework that re-renders on hover does.
+    const fixture = await openFixture(
+      '<!doctype html><title>Re-render</title><style>body{margin:0}</style><div id="row" style="padding:30px"><button id="target">Confirm</button></div><script>globalThis.clicks=0;let swapped=false;document.addEventListener("click",(event)=>{if(event.target.id==="target")clicks++});row.addEventListener("pointerover",()=>{if(swapped)return;swapped=true;row.innerHTML=row.innerHTML});</script>',
+    );
+    try {
+      const accepted = await fixture.click(fixture.initial, "Confirm");
+      expect(accepted.error ?? null).toBeNull();
+      expect(accepted.state).toBe("completed");
+      expect(await fixture.evaluate("[swapped, clicks]")).toEqual([true, 1]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a double-click whose first click turns its row into an editor still double-clicks",
+  async () => {
+    // The first click replaces the "Edit" button with a text field, as a
+    // "double-click to edit" row does; the second press lands on the field.
+    const fixture = await openFixture(
+      '<!doctype html><title>Edit row</title><style>body{margin:0}input,button{width:120px;height:30px}</style><div id="row" style="padding:30px"><button id="target">Edit</button></div><script>globalThis.events=[];document.addEventListener("click",(event)=>{events.push("click:"+event.target.tagName);if(event.target.id==="target")row.innerHTML="<input id=editor>"});document.addEventListener("dblclick",(event)=>events.push("dblclick:"+event.target.tagName));</script>',
+    );
+    try {
+      const accepted = await fixture.click(fixture.initial, "Edit", "double_click");
+      expect(accepted.error ?? null).toBeNull();
+      expect(accepted.state).toBe("completed");
+      expect(await fixture.evaluate("events")).toEqual([
+        "click:BUTTON",
+        "click:INPUT",
+        "dblclick:INPUT",
+      ]);
     } finally {
       await fixture.close();
     }
