@@ -73,6 +73,9 @@ type Operation = {
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
+  /** run_steps options of a step that names its element instead of carrying
+   * a token: how long CUA waits for it, and the check that holds first. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown> };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -516,7 +519,7 @@ export class CuaComputerBackend implements ComputerBackend {
           // finds stale names an element of a window that changed since: the
           // batch stops there instead of acting on a lookalike CUA finds again.
           refind_stale: false,
-          steps: chunk.map((step) => ({ tool: step.name, args: step.args })),
+          steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
         });
       } catch (error) {
         // A later call refused before it ran: the earlier calls still did.
@@ -1437,7 +1440,14 @@ export class CuaComputerBackend implements ComputerBackend {
       );
     }
     if (action.type === "semantic") {
-      const node = this.locateObserved(command.targetId, observed, action.locator);
+      let node: InteractionSemanticNodeValue;
+      try {
+        node = this.locateObserved(command.targetId, observed, action.locator);
+      } catch (error) {
+        const named = laterInBatch ? namedOperation(args, action, error) : null;
+        if (!named) throw error;
+        return [named];
+      }
       if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
         const field = this.dateFieldOf(command.targetId, node.ref);
         if (field)
@@ -1773,6 +1783,72 @@ const MAX_RUN_STEPS = 64;
 
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
+
+/** How long a batch step that names its element waits for it to appear and
+ * enable: CUA's longest wait for one step. */
+const NAMED_STEP_WAIT_MS = 10_000;
+
+/** The roles observations show, as CUA's lookup names them where they
+ * differ ("text" there is a text field; here it is static text). */
+const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
+  textbox: "textfield",
+  text: "statictext",
+  radio: "radiobutton",
+  combobox: "popupbutton",
+};
+
+type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
+
+/** A later action of a batch whose element the batch's observation does not
+ * show: an earlier action may bring it up (the next page, a loading form, a
+ * dialog). It names the element by role and name, and CUA finds it when the
+ * step runs, after waiting for it to appear and enable. Only a role, label or
+ * text locator can name an element not yet seen, and only an invoke, menu or
+ * set_value acts on one found this way; anything else stays refused. */
+function namedOperation(
+  args: Record<string, unknown>,
+  action: SemanticAction,
+  error: unknown,
+): Operation | null {
+  if (!(error instanceof ComputerBackendError) || error.code !== "locator_not_found") return null;
+  const { locator } = action;
+  if (locator.kind !== "role" && locator.kind !== "label" && locator.kind !== "text") return null;
+  if (action.action !== "invoke" && action.action !== "show_menu" && action.action !== "set_value")
+    return null;
+  if (action.action === "set_value" && action.value === undefined) return null;
+  const name = locator.kind === "role" ? locator.name : locator.text;
+  const selector = {
+    ...(locator.kind === "role" ? { role: CUA_LOOKUP_ROLES[locator.role] ?? locator.role } : {}),
+    ...(name !== undefined && name !== "" ? { name } : {}),
+  };
+  if (!("role" in selector) && !("name" in selector)) return null;
+  const stepOptions = {
+    timeout_ms: NAMED_STEP_WAIT_MS,
+    wait_for: {
+      ...selector,
+      pid: args.pid,
+      window_id: args.window_id,
+      enabled: true,
+      timeout_ms: NAMED_STEP_WAIT_MS,
+    },
+  };
+  if (action.action === "set_value")
+    return {
+      name: "set_value",
+      args: { ...args, ...selector, value: String(action.value) },
+      stepOptions,
+    };
+  return {
+    name: "click",
+    args: {
+      ...args,
+      ...selector,
+      button: action.action === "show_menu" ? "right" : "left",
+      delivery_mode: "background",
+    },
+    stepOptions,
+  };
+}
 
 /** `select` is the natural verb for a radio button or tab, which the platform
  * offers only as a press, so it presses one rather than being refused. */

@@ -2426,6 +2426,93 @@ describe("CUA desktop boundary", () => {
       }
     });
 
+    test("a later action may name an element an earlier one brings up, and CUA waits for it", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const crossing = batch(observation);
+        if (crossing.action.type !== "batch") throw new Error("not a batch");
+        crossing.action.actions = [
+          crossing.action.actions[0]!,
+          {
+            type: "semantic",
+            locator: { kind: "role", role: "textbox", name: "Seats" },
+            action: "set_value",
+            value: 12,
+          },
+          { type: "semantic", locator: { kind: "label", text: "Save changes" }, action: "invoke" },
+        ];
+        await backend.validate(crossing);
+        await backend.dispatch(crossing);
+        const calls = fixture.calls.filter((call) => call.name === "run_steps");
+        expect(calls).toHaveLength(1);
+        const { steps } = calls[0]!.args as {
+          steps: { tool: string; args: Record<string, unknown>; [key: string]: unknown }[];
+        };
+        expect(steps.map((step) => step.tool)).toEqual(["click", "set_value", "click"]);
+        expect(steps[0]!.args.element_token).toBeDefined();
+        expect(steps[0]).not.toHaveProperty("wait_for");
+        expect(steps[1]!.args).not.toHaveProperty("element_token");
+        expect(steps[1]).toMatchObject({
+          args: { pid: 42, window_id: 1, role: "textfield", name: "Seats", value: "12" },
+          timeout_ms: 10_000,
+          wait_for: {
+            role: "textfield",
+            name: "Seats",
+            pid: 42,
+            window_id: 1,
+            enabled: true,
+            timeout_ms: 10_000,
+          },
+        });
+        expect(steps[2]).toMatchObject({
+          args: { name: "Save changes", button: "left", delivery_mode: "background" },
+          wait_for: { name: "Save changes", enabled: true },
+        });
+        expect(steps[2]!.args).not.toHaveProperty("role");
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("an element not yet seen is refused first in a batch, by ref, or for other actions", async () => {
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const missing = { kind: "role", role: "button", name: "Not there" } as const;
+        const variants: ComputerBackendActionCommand["action"][] = [
+          { type: "batch", actions: [{ type: "semantic", locator: missing, action: "invoke" }] },
+          {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              {
+                type: "semantic",
+                locator: { kind: "identifier", value: "nope" },
+                action: "invoke",
+              },
+            ],
+          },
+          {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              { type: "semantic", locator: missing, action: "expand" },
+            ],
+          },
+        ];
+        for (const action of variants) {
+          const failure = await backend
+            .dispatch({ ...batch(observation), action })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
+        }
+        expect(fixture.ran).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    });
+
     test("a batch CUA stopped says how far it got", async () => {
       const step = (index: number, fields: Record<string, unknown>) => ({
         ok: true,
