@@ -279,13 +279,18 @@ anyone else to it. Legacy `"isolated"` needs the `Opengeni` facade as the proxy
 target; with `{ tenant, user }` it does the same per tenant user (standalone:
 `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 `memberPermissions` replaces that first owner grant's permissions; a
-retry never restores a revoked owner grant. A `resolve` that returns a
+retry never restores a revoked owner grant. Set `memberPermissions` on the
+facade for tenant workspaces too when your users need a role other than the
+defaults (for example `artifacts:read` or `documents:search`): the SDK then
+adds each signed-in user the relay or facade resolves with exactly those
+permissions before their first request, with the same stable onboarding key. A `resolve` that returns a
 `tenant` or `workspaceId` key with an empty or undefined value is refused
 rather than falling back to the per-user workspace.
 
-Automatically added users receive workspace read, session create/read/control
-(including Send), file upload/read, and `mcp_servers:attach` for the host's
-per-session servers, never admin permissions. The organization key remains a
+Without `memberPermissions`, automatically added users (and anonymous
+visitors) receive workspace read, session create/read/control (including
+Send), file upload/read, and `mcp_servers:attach` for the host's per-session
+servers, never admin permissions. The organization key remains a
 permission ceiling on every request. Change an existing member's permissions
 with `updateExternalWorkspaceMember`; Opengeni never overwrites them. Supply
 MCP URLs and credentials only in the server's `createSession` hook, not

@@ -154,7 +154,11 @@ working for products that manage access themselves. Legacy
 workspace per user and tenant. Per-user workspaces add their owner with a
 stable onboarding key, so a retry never restores a revoked grant;
 `memberPermissions` replaces that owner's permissions on first onboarding
-only. The standalone resolver is on the server-only
+only. Set `memberPermissions` for tenant workspaces too when your users need
+another role than Opengeni's first-use defaults: the facade and the proxy then
+add each signed-in user with exactly those permissions before their first
+request, with the same stable onboarding key, and never change an existing
+grant. The standalone resolver is on the server-only
 `@opengeni/sdk/tenant-workspaces` subpath.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
