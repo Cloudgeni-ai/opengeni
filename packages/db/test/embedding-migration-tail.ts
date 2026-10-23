@@ -388,4 +388,7 @@ export const embeddingMigrationTail = [
   // Redefines 0718's inbox recipient and 0677's person resolver, which read
   // scheduled_tasks.owner_subject_id from withheld 0478; replay after them.
   "0923_external_user_inbox.sql",
+  // Patches ensure_external_identity from withheld 0439 and the visibility and
+  // fork bodies 0855/0856 rewrite; replay after them.
+  "0925_membership_fences_allow_key_checks.sql",
 ];
