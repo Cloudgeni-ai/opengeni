@@ -37,6 +37,8 @@ import {
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext } from "../app-context";
+import { SitePublicLink } from "../components/artifacts/site-public-link";
+import { useSitePublication } from "../components/artifacts/site-publishing";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate } from "../lib/navigation";
@@ -81,8 +83,12 @@ export function SiteViewRoute({
   /** The conversation open in the panel; the newest when omitted. */
   conversation?: string | undefined;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const viewer = useConsoleSiteViewer();
+  // People who manage the Site (as on its Settings tab) get its published
+  // address in the header; the API decides, and anyone else sees "Live".
+  const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const publication = useSitePublication({ client, workspaceId, siteId, enabled: canPublish });
   const toolBridge = useConsoleSiteToolBridge(workspaceId);
   const [site, setSite] = useState<SiteState>({ status: "loading" });
   const [siteAttempt, setSiteAttempt] = useState(0);
@@ -118,6 +124,7 @@ export function SiteViewRoute({
           siteId={siteId}
           toolBridge={toolBridge}
           viewer={viewer}
+          liveStatus={siteLiveStatus(publication.load, canPublish, workspaceId, siteId)}
           archivedMessage="This Site is archived. Restore it from Site details."
         />
       </div>
@@ -597,6 +604,23 @@ function SiteChatPanel({
         </div>
       ) : null}
     </>
+  );
+}
+
+/** The header's publication control, or undefined for the plain "Live". */
+function siteLiveStatus(
+  load: ReturnType<typeof useSitePublication>["load"],
+  canPublish: boolean,
+  workspaceId: string,
+  siteId: string,
+) {
+  if (!canPublish) return undefined;
+  // Nothing until the answer, so an unpublished Site never flashes "Live".
+  if (load.state === "loading") return null;
+  if (load.state === "unavailable" || load.state === "forbidden" || load.state === "error")
+    return undefined;
+  return (
+    <SitePublicLink load={load} workspaceId={workspaceId} siteId={siteId} canPublish={canPublish} />
   );
 }
 

@@ -26,6 +26,11 @@ export type ArtifactSandboxProps = {
   /** Hide the visible title/icon while retaining the accessible iframe title. */
   showTitle?: boolean | undefined;
   showLiveStatus?: boolean | undefined;
+  /**
+   * Replaces the "Live" indicator, for example with the host's link to the
+   * published Site. `null` shows nothing there; omit it for the default.
+   */
+  liveStatus?: ReactNode | undefined;
   versionLabel?: string | undefined;
   className?: string | undefined;
   editDisabled?: boolean | undefined;
@@ -168,7 +173,10 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <span className="sm:hidden">{labels.editShort}</span>
             </ArtifactButton>
           ) : null}
-          {props.showLiveStatus !== false && (
+          {props.showLiveStatus !== false && props.liveStatus !== undefined
+            ? props.liveStatus
+            : null}
+          {props.showLiveStatus !== false && props.liveStatus === undefined && (
             <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
               <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
               {labels.live}

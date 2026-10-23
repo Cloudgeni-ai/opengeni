@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { loadSiteSnapshot } from "../../sites-ui";
@@ -33,6 +33,11 @@ export type SiteViewProps = {
   onTitle?: ((title: string) => void) | undefined;
   /** Hide the frame toolbar under a host header that draws reload and full screen. */
   showToolbar?: boolean | undefined;
+  /**
+   * Replaces the toolbar's "Live" indicator, for example with a link to the
+   * published Site; `null` shows nothing there. Omit it for the default.
+   */
+  liveStatus?: ReactNode | undefined;
   /** Reload the Site whenever this changes. */
   reloadToken?: number | undefined;
   /** Host-controlled full screen; omit to let the frame manage it. */
@@ -57,6 +62,7 @@ export function SiteView({
   loadingLabel,
   onTitle,
   showToolbar,
+  liveStatus,
   reloadToken,
   fullScreen,
   onFullScreenChange,
@@ -134,6 +140,7 @@ export function SiteView({
       connectedToolCount={content.requestedTools.length}
       theme={theme}
       {...(showToolbar !== undefined ? { showToolbar } : {})}
+      {...(liveStatus !== undefined ? { liveStatus } : {})}
       {...(reloadToken !== undefined ? { reloadToken } : {})}
       {...(fullScreen !== undefined ? { fullScreen } : {})}
       {...(onFullScreenChange ? { onFullScreenChange } : {})}
