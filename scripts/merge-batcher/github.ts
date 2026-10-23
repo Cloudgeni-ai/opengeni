@@ -422,7 +422,7 @@ export class GitHubReader {
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
-    const rules = await this.get(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
+    const rules = await this.pages(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
     if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
     if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
       throw Error("Required workflow rules need explicit hosted-check mapping before admission");
@@ -475,7 +475,16 @@ export class GitHubReader {
         excluded.push({ number, reason: "actual ready-event timeline unavailable" });
         continue;
       }
-      const checks = await this.hostedChecks(pull.head?.sha ?? "");
+      let checks: HostedCheck[];
+      try {
+        checks = await this.hostedChecks(pull.head?.sha ?? "");
+      } catch (error) {
+        if (error instanceof ProviderError && [404, 410].includes(error.status)) {
+          excluded.push({ number, reason: "Exact-head hosted run or job no longer readable" });
+          continue;
+        }
+        throw error;
+      }
       const review =
         reviewRequired || conversationResolutionRequired
           ? await this.nativeReview(number)
@@ -530,6 +539,13 @@ export class GitHubReader {
       ref = data.data?.repository?.ref;
     if (data.errors || !ref || !("branchProtectionRule" in ref))
       throw Error("Classic branch protection unavailable");
+    if (ref.branchProtectionRule === null) {
+      const branch = await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}`);
+      // A null GraphQL projection can mean insufficient visibility. Ruleset-only
+      // protection also needs positive provider evidence before lifting this hold.
+      if (Array.isArray(branch) || branch.protected !== false)
+        throw Error("Classic protection absence is not proven by this token");
+    }
     return ref.branchProtectionRule;
   }
   async hostedChecks(head: string): Promise<HostedCheck[]> {

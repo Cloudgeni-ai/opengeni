@@ -7,6 +7,7 @@ type Run = {
   head_branch: string;
   head_sha: string;
   status: string;
+  conclusion?: string | null;
   pull_requests?: { number: number }[];
   run_attempt: number;
   display_title?: string;
@@ -57,7 +58,10 @@ export function priorityHold(
   return null;
 }
 export function docsOnly(paths: string[]): boolean {
-  return paths.length > 0 && paths.every((p) => p.startsWith("docs/") || /^[^/]+\.md$/.test(p));
+  return (
+    paths.length > 0 &&
+    paths.every((p) => /^(?:docs\/(?!merge-batcher-admin\/).+\.mdx?|[^/]+\.md)$/.test(p))
+  );
 }
 export function supersededVersionValidationRuns(
   runs: Run[],
@@ -85,23 +89,63 @@ export async function runPrCiCommand(
   env: Record<string, string | undefined> = process.env,
   transport: typeof fetch = fetch,
   laneArgument = process.argv[3],
+  timing = { now: Date.now, sleep: (ms: number) => Bun.sleep(ms) },
 ) {
   const repo = env.GITHUB_REPOSITORY,
     token = env.GITHUB_TOKEN;
   if (!repo || !token) throw Error("Repository and GitHub token required");
+  const deadline = timing.now() + 5 * 60 * 60 * 1000;
+  let readAfter = 0;
   async function api(path: string, method = "GET", body?: unknown): Promise<any> {
-    const r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (!r.ok) throw Error(`GitHub ${method} ${r.status}`);
-    return r.status === 204 ? null : r.json();
+    for (;;) {
+      if (method === "GET" && readAfter > timing.now()) {
+        if (readAfter >= deadline) throw Error("Provider rate budget exceeds admission deadline");
+        await timing.sleep(readAfter - timing.now());
+      }
+      const r = await transport(`https://api.github.com/repos/${repo}/${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const remaining = r.headers.get("x-ratelimit-remaining"),
+        reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
+      const retry = Number(r.headers.get("retry-after")) * 1000;
+      if (
+        remaining !== null &&
+        Number(remaining) <= 25 &&
+        Number.isFinite(reset) &&
+        reset > timing.now()
+      )
+        readAfter = reset + 1000;
+      if (
+        method === "GET" &&
+        (r.status === 429 || (r.status === 403 && (remaining === "0" || retry > 0)))
+      ) {
+        readAfter = Math.max(
+          readAfter,
+          timing.now() + Math.max(60000, Number.isFinite(retry) ? retry : 0),
+        );
+        continue; // authenticated reads only; never replay a mutation
+      }
+      if (!r.ok) throw Error(`GitHub ${method} ${r.status}`);
+      return r.status === 204 ? null : r.json();
+    }
+  }
+  async function activeRuns(workflow: string, filter = ""): Promise<Run[]> {
+    const all: Run[] = [];
+    for (const status of ["queued", "in_progress", "waiting", "pending", "requested"])
+      all.push(
+        ...(await pages(
+          `actions/workflows/${workflow}/runs?status=${status}${filter}`,
+          "workflow_runs",
+        )),
+      );
+    return [...new Map(all.map((r) => [r.id, r])).values()];
   }
   async function pages(path: string, key?: string): Promise<any[]> {
     const all: any[] = [];
@@ -109,8 +153,14 @@ export async function runPrCiCommand(
       const data = await api(`${path}${path.includes("?") ? "&" : "?"}per_page=100&page=${p}`);
       const rows = key ? data[key] : data;
       if (!Array.isArray(rows)) throw Error("Malformed provider page");
+      if (key === "workflow_runs" && Number(data.total_count) > 1000)
+        throw Error("Filtered provider run inventory exceeds search bound");
       all.push(...rows);
-      if (rows.length < 100) return all;
+      if (rows.length < 100) {
+        if (key && Number(data.total_count) > all.length)
+          throw Error("Incomplete provider inventory");
+        return all;
+      }
     }
     throw Error("Incomplete provider pagination");
   }
@@ -120,21 +170,31 @@ export async function runPrCiCommand(
   if (action === "priority") {
     const lane = laneArgument;
     if (lane !== "pr" && lane !== "batch") throw Error("Invalid priority lane");
-    const deadline = Date.now() + 5 * 60 * 60 * 1000;
-    while (Date.now() < deadline) {
+    while (timing.now() < deadline) {
       const raw: Run[] = [];
       for (const status of ["queued", "in_progress", "waiting", "pending", "requested"])
         raw.push(...(await pages(`actions/runs?status=${status}`, "workflow_runs")));
-      const unique = [...new Map(raw.map((r) => [r.id, r])).values()].filter((r) =>
-        [".github/workflows/ci.yml", ".github/workflows/batch-ci.yml"].includes(
-          r.path.split("@")[0]!,
-        ),
+      const unique = [...new Map(raw.map((r) => [r.id, r])).values()].filter(
+        (r) =>
+          r.id !== Number(env.GITHUB_RUN_ID) &&
+          ((r.path.split("@")[0] === ".github/workflows/ci.yml" &&
+            r.event === "push" &&
+            r.head_branch === "main") ||
+            (lane === "pr" &&
+              r.path.split("@")[0] === ".github/workflows/batch-ci.yml" &&
+              r.event === "push" &&
+              r.head_branch.startsWith("queue/"))),
       );
       const observations = [];
       for (const run of unique)
         observations.push({
           run,
-          jobs: await pages(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, "jobs"),
+          // Known queued/running demand needs no per-job inventory. Only waiting
+          // runs can be cleared by proving every remaining job waits on approval.
+          jobs:
+            run.status === "waiting"
+              ? await pages(`actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`, "jobs")
+              : [],
         });
       const hold = priorityHold(lane, observations, Number(env.GITHUB_RUN_ID));
       if (!hold) {
@@ -142,7 +202,7 @@ export async function runPrCiCommand(
         return;
       }
       console.log(hold);
-      await Bun.sleep(30000);
+      await timing.sleep(300000);
     }
     throw Error("Higher-priority demand did not clear within admission deadline");
   }
@@ -153,7 +213,7 @@ export async function runPrCiCommand(
     const p = event.pull_request,
       live = await api(`pulls/${p.number}`);
     if (live.head.sha !== p.head.sha) throw Error("Supersession event is stale");
-    const runs = await pages("actions/workflows/pr-ci.yml/runs", "workflow_runs");
+    const runs = await activeRuns("pr-ci.yml", `&branch=${encodeURIComponent(p.head.ref)}`);
     for (const id of supersededPrRuns(runs, p.number, p.head.sha, p.head.ref)) {
       if ((await api(`pulls/${p.number}`)).head.sha !== p.head.sha)
         throw Error("Head changed before cancellation");
@@ -201,10 +261,13 @@ export async function runPrCiCommand(
       p.user?.login !== "github-actions[bot]"
     )
       throw Error("Version identity changed");
-    await api(`issues/${number}/labels`, "POST", { labels: ["queue-ready"] });
-    const runs: Run[] = await pages("actions/workflows/pr-ci.yml/runs", "workflow_runs");
-    const validations: Run[] = await pages(
-      "actions/workflows/ci.yml/runs?event=workflow_dispatch",
+    const runs = await activeRuns("pr-ci.yml", `&branch=${encodeURIComponent(p.head.ref)}`);
+    const validations = await activeRuns(
+      "ci.yml",
+      `&event=workflow_dispatch&branch=${encodeURIComponent(p.head.ref)}`,
+    );
+    const exact: Run[] = await pages(
+      `actions/workflows/pr-ci.yml/runs?head_sha=${head}&event=workflow_dispatch`,
       "workflow_runs",
     );
     for (const id of [
@@ -217,11 +280,21 @@ export async function runPrCiCommand(
     }
     // GITHUB_TOKEN label/push events do not recursively start CI. Explicit dispatch
     // does, with ref pinned again by the identity job and admission at exact SHA.
-    if (!runs.some((r) => r.event === "workflow_dispatch" && r.head_sha === head))
+    if (
+      !exact.some(
+        (r) =>
+          r.event === "workflow_dispatch" &&
+          r.head_sha === head &&
+          (r.status !== "completed" || r.conclusion === "success"),
+      )
+    )
       await api("actions/workflows/pr-ci.yml/dispatches", "POST", {
         ref: p.head.ref,
         inputs: { pr_number: String(number), head_sha: head },
       });
+    if ((await api(`pulls/${number}`)).head.sha !== head)
+      throw Error("Version head changed before readiness label");
+    await api(`issues/${number}/labels`, "POST", { labels: ["queue-ready"] });
     return;
   }
   throw Error("Unknown PR CI command");

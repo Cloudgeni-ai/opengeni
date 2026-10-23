@@ -15,6 +15,16 @@ const run = (id: number, path: string, event = "push", head_branch = "main") => 
   run_attempt: 1,
   pull_requests: [{ number: 42 }],
 });
+test("executable admin and non-document files under docs never skip source checks", () => {
+  for (const path of [
+    "docs/merge-batcher-admin/off.ts",
+    "docs/merge-batcher-admin/README.md",
+    "docs/a.sh",
+    "docs/config.json",
+  ])
+    expect(docsOnly([path])).toBe(false);
+  expect(docsOnly(["docs/guide.md", "README.md"])).toBe(true);
+});
 test("cancellation selects only older heads of the exact PR CI workflow", () => {
   const runs = [
     run(1, ".github/workflows/pr-ci.yml", "pull_request", "feature"),

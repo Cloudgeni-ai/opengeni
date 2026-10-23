@@ -76,7 +76,6 @@ jobs:
 
   contracts:
     needs: plan
-    if: ${{ needs.plan.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -144,9 +143,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$PLAN" = success
+          test "$CONTRACTS" = success
           if [ "$DOCS" = true ]; then
-            test "$CONTRACTS" = skipped && test "$UNITS" = skipped
+            test "$UNITS" = skipped
           else
-            test "$CONTRACTS" = success
             if [ "$COUNT" = 0 ]; then test "$UNITS" = skipped; else test "$UNITS" = success; fi
           fi

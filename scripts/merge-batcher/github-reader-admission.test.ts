@@ -23,6 +23,10 @@ async function fixture() {
     unresolved: false,
     classic: false,
     queueReady: true,
+    protected: false,
+    secondRulePage: false,
+    missingRunOnce: false,
+    twoPulls: false,
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -95,18 +99,23 @@ async function fixture() {
             auto_merge: {},
           },
         ];
+      else if (path === "branches/main") body = { protected: state.protected };
       else if (path === "rules/branches/main")
-        body = state.reviewRequired
-          ? [
-              {
-                type: "pull_request",
-                parameters: {
-                  required_approving_review_count: 1,
-                  required_review_thread_resolution: true,
+        body = state.secondRulePage
+          ? url.searchParams.get("page") === "1"
+            ? Array.from({ length: 100 }, () => ({ type: "deletion" }))
+            : [{ type: "workflows" }]
+          : state.reviewRequired
+            ? [
+                {
+                  type: "pull_request",
+                  parameters: {
+                    required_approving_review_count: 1,
+                    required_review_thread_resolution: true,
+                  },
                 },
-              },
-            ]
-          : [];
+              ]
+            : [];
       else if (path === `commits/${sha}/check-runs`)
         body = {
           check_runs: [
@@ -121,14 +130,18 @@ async function fixture() {
             },
           ],
         };
-      else if (path === "actions/runs/200")
+      else if (path === "actions/runs/200") {
+        if (state.missingRunOnce) {
+          state.missingRunOnce = false;
+          return new Response("missing", { status: 404 });
+        }
         body = {
           id: 200,
           run_attempt: state.currentAttempt,
           path: ".github/workflows/pr-ci.yml",
           head_sha: sha,
         };
-      else if (path === `actions/runs/200/attempts/${state.currentAttempt}/jobs`)
+      } else if (path === `actions/runs/200/attempts/${state.currentAttempt}/jobs`)
         body = {
           jobs: [
             {
@@ -143,12 +156,14 @@ async function fixture() {
             },
           ],
         };
-      else if (path === "pulls/1/files") body = [{ filename: "apps/api/a.ts" }];
+      else if (["pulls/1/files", "pulls/2/files"].includes(path))
+        body = [{ filename: "apps/api/a.ts" }];
       else if (path.includes("comments")) {
         state.commentsRead = true;
         throw Error("Prose is not admission");
       } else throw Error(`Unexpected path ${path}`);
     }
+    if (url.pathname.endsWith("/pulls") && state.twoPulls) body.push({ ...body[0], number: 2 });
     return Response.json(body);
   }) as typeof fetch;
   const c = config({ BATCHER_OUTPUT_DIR: root });
@@ -198,4 +213,25 @@ test("auto-merge alone does not admit", async () => {
   f.state.queueReady = false;
   expect((await f.reader.ready()).ready).toHaveLength(0);
   expect(f.state.commentsRead).toBe(false);
+});
+test("required workflow on second rule page cannot be ignored", async () => {
+  const f = await fixture();
+  f.state.secondRulePage = true;
+  await expect(f.reader.ready()).rejects.toThrow("Required workflow");
+});
+test("null classic policy on protected branch is unknown rather than absent", async () => {
+  const f = await fixture();
+  f.state.protected = true;
+  await expect(f.reader.ready()).rejects.toThrow("absence is not proven");
+});
+test("one deleted hosted run excludes only that PR", async () => {
+  const f = await fixture();
+  f.state.missingRunOnce = true;
+  f.state.twoPulls = true;
+  const result = await f.reader.ready();
+  expect(result.excluded[0]?.number).toBe(1);
+  expect(result.ready[0]?.number).toBe(2);
+});
+test("invalid ON notice fails during configuration", () => {
+  expect(() => config({ BATCHER_ON_NOTICE_ID: "bad id!" })).toThrow("BATCHER_ON_NOTICE_ID");
 });

@@ -37,8 +37,15 @@ async function fixture(version = false) {
     VERSION_PR_NUMBER: "42",
     VERSION_HEAD_SHA: head,
   };
-  const calls: { path: string; method: string; body: any }[] = [],
-    state = { pull, changeBeforeCancel: false, pullReads: 0, existingCurrent: false };
+  const calls: { path: string; method: string; body: any; query: string }[] = [],
+    state = {
+      pull,
+      changeBeforeCancel: false,
+      pullReads: 0,
+      existingCurrent: false,
+      existingStatus: "queued",
+      existingConclusion: null as string | null,
+    };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
@@ -47,7 +54,7 @@ async function fixture(version = false) {
       path = url.pathname.replace("/repos/Cloudgeni-ai/opengeni/", "");
     const method = init?.method ?? "GET",
       body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    calls.push({ path, method, body });
+    calls.push({ path, method, body, query: url.search });
     if (method === "POST") return new Response(null, { status: 204 });
     if (path === "pulls/42") {
       state.pullReads++;
@@ -81,7 +88,8 @@ async function fixture(version = false) {
                   event: "workflow_dispatch",
                   head_branch: pull.head.ref,
                   head_sha: head,
-                  status: "queued",
+                  status: state.existingStatus,
+                  conclusion: state.existingConclusion,
                   run_attempt: 1,
                 },
               ]
@@ -132,7 +140,7 @@ test("Version queue labels explicitly and dispatches exact head; existing curren
     expect(writes.some((c) => c.path === "actions/runs/300/cancel")).toBe(false);
     expect(writes.some((c) => c.path.endsWith("/dispatches"))).toBe(!existing);
     if (!existing)
-      expect(writes.at(-1)?.body).toEqual({
+      expect(writes.find((c) => c.path.endsWith("/dispatches"))?.body).toEqual({
         ref: "changeset-release/main",
         inputs: { pr_number: "42", head_sha: head },
       });
@@ -143,4 +151,80 @@ test("incomplete file list never grants docs-only bypass", async () => {
   f.state.pull.changed_files = 2;
   await runPrCiCommand("identity", f.env, f.transport);
   expect(await Bun.file(join(f.root, "out")).text()).toContain("docs_only=false");
+});
+test("workflow scans are server filtered and failed Version dispatch can be renewed", async () => {
+  const f = await fixture(true);
+  f.state.existingCurrent = true;
+  f.state.existingStatus = "completed";
+  f.state.existingConclusion = "failure";
+  await runPrCiCommand("queue-version", f.env, f.transport);
+  const scans = f.calls.filter((c) => c.path.endsWith("/runs"));
+  expect(
+    scans.every((c) => c.query.includes("status=") || c.query.includes(`head_sha=${head}`)),
+  ).toBe(true);
+  expect(f.calls.some((c) => c.path.endsWith("/dispatches") && c.method === "POST")).toBe(true);
+  expect(f.calls.at(-1)?.path).toBe("issues/42/labels");
+});
+test("Version dispatch identity rejects workflow execution on a different SHA", async () => {
+  const f = await fixture(true);
+  await expect(
+    runPrCiCommand(
+      "identity",
+      { ...f.env, GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: old },
+      f.transport,
+    ),
+  ).rejects.toThrow("exact head");
+});
+test("provider search truncation refuses Version readiness before any mutation", async () => {
+  const f = await fixture(true);
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/runs?"))
+      return Response.json({ total_count: 1001, workflow_runs: [] });
+    return f.transport(input, init);
+  }) as typeof fetch;
+  await expect(runPrCiCommand("queue-version", f.env, transport)).rejects.toThrow("search bound");
+  expect(f.calls.some((c) => c.method === "POST")).toBe(false);
+});
+test("priority uses five-minute low-call polling and waits on provider rate hints", async () => {
+  let now = 0,
+    calls = 0;
+  const sleeps: number[] = [];
+  const transport = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls++;
+    expect(init?.method).toBe("GET");
+    const url = new URL(String(input));
+    expect(url.pathname.endsWith("/actions/runs")).toBe(true);
+    if (calls === 1) return new Response("", { status: 429, headers: { "retry-after": "60" } });
+    return Response.json({
+      workflow_runs:
+        now < 300000
+          ? [
+              {
+                id: 1,
+                path: ".github/workflows/ci.yml",
+                event: "push",
+                head_branch: "main",
+                head_sha: head,
+                status: "in_progress",
+                run_attempt: 1,
+              },
+            ]
+          : [],
+    });
+  }) as typeof fetch;
+  await runPrCiCommand(
+    "priority",
+    { GITHUB_REPOSITORY: "org/repo", GITHUB_TOKEN: "fixture", GITHUB_RUN_ID: "2" },
+    transport,
+    "pr",
+    {
+      now: () => now,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        now += ms;
+      },
+    },
+  );
+  expect(sleeps).toEqual([60000, 300000]);
+  expect(calls).toBe(11);
 });

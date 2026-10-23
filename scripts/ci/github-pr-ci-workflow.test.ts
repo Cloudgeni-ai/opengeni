@@ -34,9 +34,10 @@ test("required aggregate covers docs and every selected job at exact head", () =
     'test "$PLAN" = success',
     'test "$CONTRACTS" = success',
     'test "$UNITS" = success',
-    'test "$CONTRACTS" = skipped && test "$UNITS" = skipped',
+    'test "$UNITS" = skipped',
   ])
     expect(aggregate).toContain(required);
+  expect(jobs.contracts.if).toBeUndefined();
   for (const name of ["contracts", "units"]) {
     expect(jobs[name]["runs-on"]).toBe("ubuntu-latest");
     const checkout = jobs[name].steps.find((s: any) => s.uses?.startsWith("actions/checkout@"));

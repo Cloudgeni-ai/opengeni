@@ -725,6 +725,8 @@ export function config(env: Record<string, string | undefined>): Config {
   if (mode !== "shadow" && mode !== "shadow-ci" && mode !== "active")
     throw new Error("Invalid BATCHER_MODE");
   const repository = env.BATCHER_REPOSITORY ?? "Cloudgeni-ai/opengeni";
+  if (env.BATCHER_ON_NOTICE_ID && !/^[a-zA-Z0-9_-]{8,128}$/.test(env.BATCHER_ON_NOTICE_ID))
+    throw new Error("Invalid BATCHER_ON_NOTICE_ID");
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid repository");
   const baseBranch = env.BATCHER_BASE_BRANCH ?? "main";
   const branchPrefix = env.BATCHER_BRANCH_PREFIX ?? (mode === "active" ? "queue/live/" : "queue/");
