@@ -1,5 +1,32 @@
 # @opengeni/core
 
+## 4.7.2
+
+### Patch Changes
+
+- 61ec823: Read public workspace model metadata in one short tenant scope instead of three.
+  Keep default selection, fresh admission, subscription discovery and execution
+  credential resolution separate; no catalog or authorization cache is introduced.
+- Updated dependencies [c6499fc]
+- Updated dependencies [9efd9b3]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [106b430]
+- Updated dependencies [8301382]
+- Updated dependencies [61ec823]
+- Updated dependencies [b3fc68b]
+  - @opengeni/runtime@4.7.2
+  - @opengeni/contracts@4.7.2
+  - @opengeni/db@4.7.2
+  - @opengeni/capabilities@4.7.2
+  - @opengeni/codex@4.7.2
+  - @opengeni/config@4.7.2
+  - @opengeni/documents@4.7.2
+  - @opengeni/events@4.7.2
+  - @opengeni/observability@4.7.2
+  - @opengeni/storage@4.7.2
+  - @opengeni/vaults@4.7.2
+  - @opengeni/network@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

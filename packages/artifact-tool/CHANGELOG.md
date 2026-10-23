@@ -1,5 +1,14 @@
 # @opengeni/artifact-tool
 
+## 4.7.2
+
+### Patch Changes
+
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

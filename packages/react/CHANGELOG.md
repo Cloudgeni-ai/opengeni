@@ -1,5 +1,20 @@
 # @opengeni/react
 
+## 4.7.2
+
+### Patch Changes
+
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- e423d8f: A parent session now shows the questions and tool approvals its sub-sessions are waiting on, pinned above the composer. Each one names the sub-session that is asking, uses the same answer form or approval card as the sub-session's own page, and sends the answer or decision to that sub-session as if it were given there, with the same permission checks. An unsent answer is shared with the sub-session's page, so it is still there when you switch between them. Several waiting sub-sessions stack under one line ("3 sub-sessions need you") that collapses. Each item links to the sub-session, opened at the moment it asked. A request disappears once it is resolved anywhere, including by the parent agent answering it. The collapsed bar of a question with a deadline no longer shows "[object Object]".
+- b3fc68b: Site rows in the sidebar sort only by real activity: their conversations, a new published version, and your own opens. Archiving, restoring or rolling back a Site no longer lifts it for everyone. The console records one open per page that shows a Site: not again when its client is replaced, and not again when a reload, restored tab or Back shows a page where it was already recorded. A page that loads hidden counts once it is shown.
+- ee5020c: Text selected and copied from the conversation timeline no longer carries the app's styling. Browsers copy a selection's rich text with the page's computed colours, fonts and the surrounding message's background inlined, so pasting into a document or chat brought the timeline's dark or tinted backgrounds along. The timeline now copies its selection as clean semantic HTML (paragraphs, lists, emphasis, code, links, tables and images keep their structure) together with the browser's own plain text. Selections inside editable fields and outside the timeline keep the browser's default copy.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/sdk@4.7.2
+  - @opengeni/connect@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes
