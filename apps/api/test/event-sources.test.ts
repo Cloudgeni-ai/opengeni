@@ -3,9 +3,11 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { EventOccurrenceToStart } from "@opengeni/db";
 import { signStandardWebhook, type SessionWorkflowClient } from "@opengeni/core";
 import {
+  bindAuthorizedGitHubInstallationRepositories,
   createDb,
   createOrganizationApiKey,
   createWorkspace,
+  deleteGitHubInstallationBinding,
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
@@ -47,6 +49,7 @@ const memberPermissions = [
 async function fixture(options: {
   enabled: boolean;
   mcpServers?: Array<{ id: string; name: string; url: string }>;
+  github?: { webhookSecret: string; appSlug: string; api: AppDependencies["githubAppApi"] };
 }) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Event source fixture') returning id`;
@@ -77,6 +80,12 @@ async function fixture(options: {
     environmentsEncryptionKey: randomBytes(32).toString("base64"),
     eventTriggersEnabled: options.enabled,
     mcpServers: options.mcpServers ?? [],
+    ...(options.github
+      ? {
+          githubWebhookSecret: options.github.webhookSecret,
+          githubAppSlug: options.github.appSlug,
+        }
+      : {}),
   });
   const bus = new MemoryEventBus();
   const app = createApp({
@@ -94,6 +103,7 @@ async function fixture(options: {
       triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
+    ...(options.github ? { githubAppApi: options.github.api } : {}),
   } as unknown as AppDependencies);
   const source = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -885,5 +895,278 @@ describe("MCP event sources", () => {
       "Polled instead",
     ]);
     expect((await f.task(automation.id)).events.triggers[0].status).toBe("active");
+  });
+});
+
+describe("GitHub event sources", () => {
+  const webhookSecret = "github-hook-secret";
+  let nextInstallationId = 700_000 + Math.floor(Math.random() * 100_000) * 10;
+
+  function fakeGitHubApp(events: string[], webhookUrl: string | null = null) {
+    const setUrls: string[] = [];
+    let current = webhookUrl;
+    return {
+      setUrls,
+      api: {
+        getWebhookSetup: async () => ({ webhookUrl: current, events }),
+        setWebhookUrl: async ({ url }: { url: string }) => {
+          setUrls.push(url);
+          current = url;
+        },
+      },
+    };
+  }
+
+  async function githubFixture(app: ReturnType<typeof fakeGitHubApp>) {
+    const f = await fixture({
+      enabled: true,
+      github: { webhookSecret, appSlug: "opengeni-agent", api: app.api },
+    });
+    const bind = async (installationId: number, repositoryIds: number[]) => {
+      const checkedAt = new Date();
+      await bindAuthorizedGitHubInstallationRepositories(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        installationId,
+        githubAccountId: 9001,
+        accountLogin: "acme",
+        accountType: "Organization",
+        linkedBySubjectId: f.owner.subjectId,
+        githubActorId: 9002,
+        githubActorLogin: "owner",
+        authorityKind: "organization_owner",
+        authorityCheckedAt: checkedAt,
+        authorityExpiresAt: new Date(checkedAt.getTime() + 5 * 60_000),
+        authorityNonce: `github-events-${crypto.randomUUID()}`,
+        repositoryIds,
+      });
+    };
+    const addSource = async () =>
+      await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "github" }),
+      });
+    return { ...f, bind, addSource };
+  }
+
+  function installation(): number {
+    nextInstallationId += 1;
+    return nextInstallationId;
+  }
+
+  function pullRequestOpened(
+    installationId: number,
+    repositoryId: number,
+    sender: { login: string; type: string } = { login: "octocat", type: "User" },
+  ): string {
+    return JSON.stringify({
+      action: "opened",
+      installation: { id: installationId },
+      repository: {
+        id: repositoryId,
+        name: "api",
+        full_name: "acme/api",
+        owner: { login: "acme" },
+      },
+      sender,
+      pull_request: {
+        number: 7,
+        title: "Add retries",
+        html_url: "https://github.com/acme/api/pull/7",
+      },
+    });
+  }
+
+  function signed(
+    body: string,
+    event: string,
+    delivery = crypto.randomUUID(),
+    secret = webhookSecret,
+  ) {
+    return {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": event,
+        "x-github-delivery": delivery,
+        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+      },
+      body,
+    };
+  }
+
+  test("a workspace's GitHub source receives its repositories' events and wakes automations", async () => {
+    const github = fakeGitHubApp(["pull_request", "push"]);
+    const f = await githubFixture(github);
+    const installationId = installation();
+
+    const unconnected = await f.addSource();
+    expect(unconnected.status).toBe(422);
+    expect(await unconnected.text()).toContain("Connect GitHub to this workspace first");
+
+    await f.bind(installationId, [601]);
+    const created = await f.addSource();
+    expect(created.status).toBe(201);
+    const { source } = await f.json(created);
+    expect(source).toMatchObject({
+      kind: "github",
+      name: "GitHub",
+      ownerSubjectId: null,
+      visibility: "workspace",
+      webhookUrl: null,
+    });
+    // The App had no webhook, so it now sends its webhooks here.
+    expect(github.setUrls).toEqual(["https://opengeni.example/v1/webhooks/github"]);
+    // Adding it again returns the same source and leaves the App alone.
+    expect((await f.json(await f.addSource())).source.id).toBe(source.id);
+    expect(github.setUrls).toHaveLength(1);
+    expect(
+      (await f.app.request(`${f.sources}/${source.id}`, { headers: f.other.headers })).status,
+    ).toBe(200);
+
+    const types = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    const byType = new Map<string, any>(types.eventTypes.map((entry: any) => [entry.type, entry]));
+    expect(byType.get("pull_request.opened")).toMatchObject({ available: true });
+    expect(byType.get("issues.opened")).toMatchObject({ available: false });
+
+    const automationResponse = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: source.id, eventTypes: ["pull_request.opened"] }],
+    });
+    expect(automationResponse.status).toBe(201);
+    const automation = await f.json(automationResponse);
+
+    const deliveryId = crypto.randomUUID();
+    const body = pullRequestOpened(installationId, 601);
+    const received = await f.app.request(
+      "/v1/webhooks/github",
+      signed(body, "pull_request", deliveryId),
+    );
+    expect(received.status).toBe(200);
+    expect(await f.json(received)).toEqual({ deliveries: 1 });
+    // GitHub redelivering the same delivery is recorded once.
+    await f.app.request("/v1/webhooks/github", signed(body, "pull_request", deliveryId));
+    // Another repository of the installation, or another installation, is not this workspace's.
+    const otherRepository = await f.app.request(
+      "/v1/webhooks/github",
+      signed(pullRequestOpened(installationId, 602), "pull_request"),
+    );
+    expect(await f.json(otherRepository)).toEqual({ deliveries: 0 });
+    const otherInstallation = await f.app.request(
+      "/v1/webhooks/github",
+      signed(pullRequestOpened(installation(), 601), "pull_request"),
+    );
+    expect(await f.json(otherInstallation)).toEqual({ deliveries: 0 });
+    // Events made by Opengeni's own App are kept but leave the trigger alone.
+    const own = await f.app.request(
+      "/v1/webhooks/github",
+      signed(
+        pullRequestOpened(installationId, 601, { login: "opengeni-agent[bot]", type: "Bot" }),
+        "pull_request",
+      ),
+    );
+    expect(await f.json(own)).toEqual({ deliveries: 1 });
+    const forged = await f.app.request(
+      "/v1/webhooks/github",
+      signed(body, "pull_request", crypto.randomUUID(), "not-the-secret"),
+    );
+    expect(forged.status).toBe(401);
+
+    const deliveries = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/deliveries`, { headers: f.owner.headers }),
+    );
+    expect(deliveries.deliveries).toHaveLength(2);
+    expect(deliveries.deliveries[1]).toMatchObject({
+      status: "accepted",
+      duplicateCount: 1,
+      bodyRetained: true,
+    });
+    const events = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/events`, { headers: f.owner.headers }),
+    );
+    expect(events.events.map((event: any) => [event.type, event.actor.kind])).toEqual([
+      ["pull_request.opened", "opengeni"],
+      ["pull_request.opened", "person"],
+    ]);
+    expect(events.events[1]).toMatchObject({
+      subject: "acme/api#7",
+      summary: "Pull request opened: acme/api#7 Add retries",
+    });
+    const [queued] =
+      await shared.admin`select count(*)::int as count from scheduled_task_event_inbox
+      where task_id = ${automation.id}`;
+    expect(queued!.count).toBe(1);
+
+    const started: EventOccurrenceToStart[] = [];
+    const dispatch = () =>
+      dispatchDueEventTriggers({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        startRun: async (occurrence) => {
+          if (occurrence.workspaceId === f.workspace.id) started.push(occurrence);
+        },
+      });
+    await makeDue(f.workspace.id);
+    await dispatch();
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ taskId: automation.id });
+
+    // A replay reads the stored delivery with its GitHub headers again. The
+    // source is the workspace's, so members use it and admins manage it.
+    const replayPath = `${f.sources}/${source.id}/deliveries/${deliveries.deliveries[1].id}/replay`;
+    expect(
+      (await f.app.request(replayPath, { method: "POST", headers: f.owner.headers })).status,
+    ).toBe(403);
+    const replay = await f.app.request(replayPath, { method: "POST", headers: f.service });
+    expect(replay.status).toBe(201);
+    const replayed = await f.json(replay);
+    expect(replayed.delivery).toMatchObject({ status: "accepted" });
+    expect(replayed.delivery.eventIds).toHaveLength(1);
+    await makeDue(f.workspace.id);
+    await dispatch();
+    expect(started).toHaveLength(2);
+  });
+
+  test("the source follows the workspace's GitHub connection", async () => {
+    const f = await githubFixture(fakeGitHubApp(["pull_request"]));
+    const first = installation();
+    const second = installation();
+    await f.bind(first, [701]);
+    const { source } = await f.json(await f.addSource());
+    await f.bind(second, [801]);
+    const deliver = async (installationId: number, repositoryId: number) =>
+      (await f.json(
+        await f.app.request(
+          "/v1/webhooks/github",
+          signed(pullRequestOpened(installationId, repositoryId), "pull_request"),
+        ),
+      )) as { deliveries: number };
+    expect(await deliver(second, 801)).toEqual({ deliveries: 1 });
+    expect(await deliver(first, 701)).toEqual({ deliveries: 1 });
+
+    await deleteGitHubInstallationBinding(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      installationId: first,
+    });
+    expect(await deliver(first, 701)).toEqual({ deliveries: 0 });
+    const routes = await shared.admin`select external_key from event_ingress_routes
+      where source_id = ${source.id} order by external_key`;
+    expect(routes.map((route) => route.external_key)).toEqual([`installation:${second}`]);
+  });
+
+  test("an App that sends its webhooks elsewhere is left alone", async () => {
+    const github = fakeGitHubApp(["pull_request"], "https://ci.example/hooks/github");
+    const f = await githubFixture(github);
+    await f.bind(installation(), [901]);
+    const refused = await f.addSource();
+    expect(refused.status).toBe(409);
+    const message = await refused.text();
+    expect(message).toContain("https://ci.example/hooks/github");
+    expect(message).toContain("https://opengeni.example/v1/webhooks/github");
+    expect(github.setUrls).toEqual([]);
   });
 });

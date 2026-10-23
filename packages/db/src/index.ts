@@ -12,6 +12,7 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
+import { syncGitHubEventRoutes } from "./event-triggers";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -5396,6 +5397,7 @@ export async function upsertGitHubInstallation(
       if (!row) {
         throw new Error("Failed to upsert GitHub installation");
       }
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId);
       return mapGitHubInstallation(row);
     },
   );
@@ -5477,6 +5479,7 @@ export async function bindGitHubInstallationRepositories(
             })),
           );
         }
+        await syncGitHubEventRoutes(tx, input.workspaceId);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5643,6 +5646,7 @@ export async function bindAuthorizedGitHubInstallationRepositories(
           input.authorityCheckedAt,
           input.authorityExpiresAt,
         );
+        await syncGitHubEventRoutes(tx, input.workspaceId);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5793,6 +5797,7 @@ export async function deleteGitHubInstallationBinding(
           ),
         )
         .returning({ id: schema.githubInstallations.id });
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId);
       return rows.length > 0;
     },
   );

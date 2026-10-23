@@ -121,10 +121,25 @@ delivery as `ignored`.
 ### Apps
 
 - **GitHub**: `POST /v1/webhooks/github` for the platform GitHub App, verified
-  with `X-Hub-Signature-256` and the App webhook secret, routed by installation
-  to every workspace bound to it. Events: issues, issue and review comments,
-  pull requests, reviews, pushes, check runs and suites, workflow runs,
-  releases. The App's bot login marks own events.
+  with `X-Hub-Signature-256` and the App webhook secret.
+  - A workspace has at most one GitHub source, shared with the workspace. It
+    follows the workspace's GitHub connection: its routes, one per bound
+    installation, are recomputed whenever a binding changes.
+  - A route only names a candidate. Each delivery reaches a workspace only if
+    the workspace is still bound to the installation and allowed the
+    delivery's repository, the same check that gives its agents repository
+    access. Deliveries about no repository are dropped.
+  - Adding the source points an App without a webhook URL at this deployment.
+    An App that sends its webhooks elsewhere is left alone, and the person is
+    told what to change. New Apps get the webhook and their events from the
+    manifest.
+  - Types are `<X-GitHub-Event>.<action>`, or the event alone when it has no
+    action (`push`). Data is a compact shape per event family, not GitHub's
+    payload. Event types the App is not subscribed to are listed as
+    unavailable, with what to change.
+  - Events: issues, issue and review comments, pull requests, reviews, pushes,
+    check runs and suites, workflow runs, releases. The logins of the
+    deployment's own Apps (`<slug>[bot]`) mark own events.
 - **Slack**: the existing Slack events receiver keeps its conversational
   behaviour and additionally records message, reaction and channel events for
   the bound workspace. The bot id marks own events.

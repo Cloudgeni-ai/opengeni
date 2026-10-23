@@ -3164,6 +3164,7 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
   { pattern: /^\/v1\/webhooks\/events\/[^/]+$/, label: "/v1/webhooks/events/:routeId" },
+  { pattern: /^\/v1\/webhooks\/github$/, label: "/v1/webhooks/github" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
     label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,

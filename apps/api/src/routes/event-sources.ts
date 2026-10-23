@@ -18,8 +18,10 @@ import {
   deleteEventSourceForViewer,
   eventSourceAccess,
   eventSourceForClient,
+  GITHUB_WEBHOOK_PATH,
   listEventSourceTypes,
   receiveEventWebhook,
+  receiveGitHubWebhook,
   replayEventDelivery,
   requireAccessGrant,
   requireEventSource,
@@ -34,6 +36,7 @@ import { listEventDeliveries, listEventSources, listInboundEvents } from "@openg
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { githubAppWebhookPort } from "../github-access";
 import { integrationBaseUrl } from "../integrations/oauth-client";
 import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
@@ -101,6 +104,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       viewer,
       request,
       baseUrl: baseUrl(c),
+      githubApp: request.kind === "github" ? githubAppWebhookPort(deps) : null,
     });
     c.header("cache-control", "private, no-store");
     return c.json(CreateEventSourceResponse.parse(created), 201);
@@ -167,7 +171,12 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!z.string().uuid().safeParse(deliveryId).success) {
         throw new HTTPException(404, { message: "event delivery not found" });
       }
-      const delivery = await replayEventDelivery({ db, source, deliveryId });
+      const delivery = await replayEventDelivery({
+        db,
+        settings: deps.settings,
+        source,
+        deliveryId,
+      });
       return c.json(ReplayEventDeliveryResponse.parse({ delivery }), 201);
     },
   );
@@ -185,8 +194,40 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId/event-types", async (c) => {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    const eventTypes = await listEventSourceTypes({ db, settings: deps.settings, source });
+    const eventTypes = await listEventSourceTypes({
+      db,
+      settings: deps.settings,
+      source,
+      githubApp: source.kind === "github" ? githubAppWebhookPort(deps) : null,
+    });
     return c.json(ListEventTypesResponse.parse({ sourceId: source.id, eventTypes }));
+  });
+
+  // The deployment's GitHub App sends every webhook here. The App's webhook
+  // secret authenticates GitHub; each delivery goes to the GitHub source of
+  // every workspace bound to its installation and repository.
+  app.post(GITHUB_WEBHOOK_PATH, async (c) => {
+    const body = await readBoundedRawBody(
+      c.req.raw,
+      EVENT_DELIVERY_BODY_MAX_BYTES,
+      "webhook payload is too large",
+    );
+    const result = await receiveGitHubWebhook({
+      db,
+      settings: deps.settings,
+      headers: c.req.raw.headers,
+      body,
+    });
+    switch (result.outcome) {
+      case "not_found":
+        return c.json({ error: "not found" }, 404);
+      case "rejected":
+        return c.json({ error: result.reason }, 401);
+      case "unreadable":
+        return c.json({ error: result.reason }, 400);
+      case "received":
+        return c.json({ deliveries: result.deliveries }, 200);
+    }
   });
 
   // The public intake. The URL names the source; the signature authenticates
