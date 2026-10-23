@@ -182,7 +182,7 @@ rows:
 | Kind | Class | Produced by | Dedupe |
 | --- | --- | --- | --- |
 | `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary; an idle result carries the child's `finalAnswer` | `child-completion:<child>:...` |
-| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
+| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews and compact answerable questions (ids, kinds, prompts, option ids and labels; no secret specs) plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
 | `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
@@ -199,8 +199,11 @@ and the parent's claim order both follow delivery order, so the reaper claims a
 backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
 the claim returns its rows sorted instead of in heap order (migration 0528). Like
 child results, an immediate child notice may autonomously wake a parent with either
-an active goal or a current session-level wait. Without either durable
-obligation, child lifecycle notices remain pending until new intent arrives.
+an active goal or a current session-level wait. Like `child_terminal_result`, a
+`child_requires_action` also wakes an idle parent that has no goal at all, so
+the parent can answer the child's question while the person sees the same card;
+a parent whose goal is paused or completed is not woken by it. Without such an obligation, other child lifecycle notices remain
+pending until new intent arrives.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal

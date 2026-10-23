@@ -2,12 +2,14 @@ import {
   CHILD_PAUSED_REASON_MAX_BYTES,
   CHILD_PROGRESS_NOTE_MAX_BYTES,
   CHILD_REQUIRES_ACTION_MAX_REQUESTS,
+  CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES,
   CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES,
   CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES,
   approvalIdentifier,
   type ChildPausedPayload,
   type ChildProgressPayload,
   type ChildRequiresActionPayload,
+  type ChildRequiresActionQuestion,
   type ChildRequiresActionRequest,
   type ChildRequiresActionResolvedPayload,
   type ChildWaitingCapacityPayload,
@@ -109,13 +111,38 @@ function approvalToolName(value: unknown): string | null {
     : null;
 }
 
+/** Compact, secret-free copy of one question: ids, kind, prompt and option labels. */
+function compactChildQuestion(question: HumanInputQuestion): ChildRequiresActionQuestion {
+  return {
+    id: question.id,
+    kind: question.kind,
+    prompt: boundedChildNoticeText(
+      typeof question.prompt === "string" ? question.prompt : "",
+      CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES,
+    ).text,
+    required: question.required !== false,
+    options:
+      question.kind === "secret"
+        ? []
+        : (question.options ?? []).map((option) => ({
+            id: option.id,
+            label: boundedChildNoticeText(
+              option.label,
+              CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES,
+            ).text,
+          })),
+  };
+}
+
 /**
  * Build the bounded child_requires_action payload from the child's frozen
- * human-input requests and pending approvals. Only typed, content-free facts
- * plus one bounded first-question preview per request cross to the parent:
- * never subject ids, credentials, or raw tool arguments. The whole payload
- * stays within CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES by dropping trailing
- * requests and recording `truncated`.
+ * human-input requests and pending approvals. Typed facts, a bounded
+ * first-question preview and a compact copy of every question (ids, kind,
+ * prompt, option labels) cross to the parent so its agent can answer:
+ * never subject ids, secret specs, credentials, or raw tool arguments. The
+ * whole payload stays within CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES: compact
+ * questions are dropped from trailing requests first, then trailing requests
+ * themselves, recording `truncated`.
  */
 export function buildChildRequiresActionPayload(input: {
   childSessionId: string;
@@ -142,6 +169,7 @@ export function buildChildRequiresActionPayload(input: {
       ).text,
       allowSkip: request.allowSkip,
       expiresAt: request.expiresAt ? request.expiresAt.toISOString() : null,
+      questions: request.questions.map(compactChildQuestion),
     });
   }
   const seenApprovals = new Set<string>();
@@ -166,6 +194,20 @@ export function buildChildRequiresActionPayload(input: {
     truncated,
   });
   let payload = build();
+  // Compact questions are a convenience: drop them (last request first)
+  // before dropping a whole request.
+  for (
+    let index = bounded.length - 1;
+    index >= 0 &&
+    Buffer.byteLength(JSON.stringify(payload)) > CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES;
+    index -= 1
+  ) {
+    const request = bounded[index]!;
+    if (request.kind !== "human_input" || request.questions === undefined) continue;
+    const { questions: _omitted, ...withoutQuestions } = request;
+    bounded = [...bounded.slice(0, index), withoutQuestions, ...bounded.slice(index + 1)];
+    payload = build();
+  }
   while (
     bounded.length > 0 &&
     Buffer.byteLength(JSON.stringify(payload)) > CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES
@@ -201,6 +243,13 @@ export function childRequiresActionSummary(
     );
   }
   if (payload.truncated) lines.push("The request list was truncated.");
+  if (
+    humanInputs.some((request) => request.kind === "human_input" && request.questions === undefined)
+  ) {
+    lines.push(
+      "Some questions did not fit this notice; read the worker's request_human_input call with session_events before answering.",
+    );
+  }
   return lines.join(" ");
 }
 

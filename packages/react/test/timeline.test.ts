@@ -1628,6 +1628,32 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("marks an answer given by an agent, such as a sub-session's parent", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("user.humanInputResponse", {
+        requestId: "request-agent",
+        respondedByKind: "agent_attempt",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["eu"] }] },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-human",
+        respondedByKind: "human",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["us"] }] },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-legacy",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["ap"] }] },
+      }),
+    ]);
+
+    expect(items.map((item) => (item as HumanInputItem).answeredByAgent)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+  });
+
   test("projects realtime voice text while retaining expandable execution context", () => {
     reset();
     const context = [

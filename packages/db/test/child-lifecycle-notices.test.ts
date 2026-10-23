@@ -10,6 +10,9 @@ import {
   applySessionTurnSettlement,
   armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
+  buildChildRequiresActionPayload,
+  childRequiresActionSummary,
+  setSessionGoalStatus,
   childWaitingCapacityDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
   failSessionWorkBeforeAttemptClaim,
@@ -613,7 +616,7 @@ describe("child lifecycle notices", () => {
     ).toBeNull();
   });
 
-  test("delivery wakes an idle parent only when its goal is active and the kind is immediate", async () => {
+  test("a blocking question wakes an idle parent with an active goal or no goal, never a settled goal", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const child = await startSession(grant, {
@@ -647,7 +650,9 @@ describe("child lifecycle notices", () => {
     const again = await deliver(row);
     expect(again.reason).toBe("duplicate");
 
-    // A parent without an active goal is not woken by a child notice.
+    // A parent with no goal (an ordinary chat that started a worker) is woken
+    // by the worker's question, exactly like by its terminal result, so it can
+    // answer or tell the person.
     const noGoalParent = await startSession(grant, { message: "no goal" });
     const noGoalChild = await startSession(grant, {
       parent: noGoalParent,
@@ -655,7 +660,7 @@ describe("child lifecycle notices", () => {
     });
     await settleIdle(grant, noGoalParent);
     await freezeChild(grant, noGoalChild);
-    const quiet = await deliver(
+    const woken = await deliver(
       (await outbox(
         grant,
         childRequiresActionDedupeKey({
@@ -665,9 +670,189 @@ describe("child lifecycle notices", () => {
         }),
       ))!,
     );
+    if (woken.reason !== "added") throw new Error(`unexpected ${woken.reason}`);
+    expect(woken.shouldWake).toBe(true);
+    expect(woken.workflowWakeRevision).not.toBeNull();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: noGoalParent.session.id,
+      workflowId: `session-${noGoalParent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const [claimedNotice] = await shared.admin`
+      select state from session_system_updates
+      where session_id=${noGoalParent.session.id} and kind='child_requires_action'`;
+    expect(claimedNotice).toMatchObject({ state: "delivered" });
+
+    // A parent whose goal was settled (paused by intent) is not restarted by
+    // a late question; the notice stays pending for its next turn.
+    const pausedParent = await startSession(grant, { goal: true, message: "paused goal" });
+    const pausedChild = await startSession(grant, { parent: pausedParent, message: "work" });
+    await settleIdle(grant, pausedParent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, pausedParent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await freezeChild(grant, pausedChild);
+    const quiet = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: pausedChild.session.id,
+          turnId: pausedChild.turn.id,
+          turnGeneration: pausedChild.turn.executionGeneration,
+        }),
+      ))!,
+    );
     if (quiet.reason !== "added") throw new Error(`unexpected ${quiet.reason}`);
     expect(quiet.shouldWake).toBe(false);
     expect(quiet.workflowWakeRevision).toBeNull();
+  });
+
+  test("a parent busy in a turn gets the child's question at its next turn, with every question", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    const { requestId } = await freezeChild(grant, child);
+    const row = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+      }),
+    ))!;
+    // The notice carries the compact questions the parent needs to answer.
+    expect(row.payload).toMatchObject({
+      requests: [
+        {
+          kind: "human_input",
+          requestId,
+          questions: [
+            {
+              id: "environment",
+              kind: "single_select",
+              prompt: "Which environment should I deploy to?",
+              required: true,
+              options: [
+                { id: "staging", label: "Staging" },
+                { id: "production", label: "Production" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // Mid-turn: no wake now, the input waits for the turn to end.
+    expect(delivered.shouldWake).toBe(false);
+    await settleIdle(grant, parent);
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    if (claim.action !== "claimed") throw new Error("unreachable");
+    const [notice] = await shared.admin`
+      select state, delivered_turn_id from session_system_updates
+      where session_id=${parent.session.id} and kind='child_requires_action'`;
+    expect(notice).toMatchObject({ state: "delivered", delivered_turn_id: claim.turn.id });
+  });
+
+  test("a person and the parent agent answering at once: one answer, one resolution notice", async () => {
+    for (const round of [0, 1, 2, 3, 4, 5]) {
+      const grant = await workspace();
+      const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+      const child = await startSession(grant, { parent, message: "work" });
+      const { requestId } = await freezeChild(grant, child);
+      const answer = (who: "human" | "agent") =>
+        acceptSessionHumanInputResponse(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: child.session.id,
+          requestId,
+          response: {
+            outcome: "answered",
+            answers: [
+              { questionId: "environment", values: [who === "human" ? "production" : "staging"] },
+            ],
+          },
+          respondedBy: who === "human" ? grant.subjectId : `agent_attempt:${parent.attemptId}`,
+          clientEventId: crypto.randomUUID(),
+        });
+      const order = round % 2 === 0 ? (["human", "agent"] as const) : (["agent", "human"] as const);
+      const runs = order.map((who) => answer(who));
+      const results = await Promise.all(runs);
+      const accepted = results.filter((result) => result.action === "accepted");
+      const lost = results.filter((result) => result.action === "completed");
+      expect(accepted).toHaveLength(1);
+      expect(lost).toHaveLength(1);
+      expect(lost[0]).toMatchObject({ settledBy: "earlier_response" });
+      if (accepted[0]!.action !== "accepted" || lost[0]!.action !== "completed") {
+        throw new Error("unreachable");
+      }
+      // The loser is handed the winner's event, never a second answer.
+      expect(lost[0]!.event.id).toBe(accepted[0]!.event.id);
+      const responses = (
+        await listSessionEvents(client.db, grant.workspaceId, child.session.id)
+      ).filter((event) => event.type === "user.humanInputResponse");
+      expect(responses).toHaveLength(1);
+      const winner = accepted[0]!.request.respondedBy?.startsWith("agent_attempt:")
+        ? "agent_attempt"
+        : "human";
+      expect(responses[0]!.payload).toMatchObject({ requestId, respondedByKind: winner });
+      const resolutions = await shared.admin`
+        select payload from session_system_update_outbox
+        where source_session_id=${child.session.id} and kind='child_requires_action_resolved'`;
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0]!.payload).toMatchObject({ requestId, respondedByKind: winner });
+    }
+  });
+
+  test("compact questions give way to the byte bound before whole requests do", () => {
+    const many = Array.from({ length: 20 }, (_, index) => ({
+      id: `q${index}`,
+      kind: "single_select" as const,
+      prompt: `Question ${index} ${"x".repeat(400)}`,
+      options: Array.from({ length: 20 }, (_unused, option) => ({
+        id: `o${option}`,
+        label: `Option ${option} ${"y".repeat(100)}`,
+      })),
+      required: true,
+      allowOther: false,
+    }));
+    const small = [{ ...questions[0]!, id: "env" }];
+    const payload = buildChildRequiresActionPayload({
+      childSessionId: crypto.randomUUID(),
+      childTurnId: crypto.randomUUID(),
+      childTurnGeneration: 1,
+      humanInputRequests: [
+        { id: crypto.randomUUID(), questions: small, allowSkip: false },
+        { id: crypto.randomUUID(), questions: many, allowSkip: true },
+      ],
+      pendingApprovals: [],
+    });
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(8 * 1024);
+    expect(payload.truncated).toBe(false);
+    expect(payload.requests).toHaveLength(2);
+    const [first, second] = payload.requests;
+    expect(first).toMatchObject({ kind: "human_input", questions: [{ id: "env" }] });
+    expect(second).toMatchObject({ kind: "human_input", questionCount: 20 });
+    expect(second && "questions" in second ? second.questions : undefined).toBeUndefined();
+    expect(childRequiresActionSummary(crypto.randomUUID(), payload)).toContain(
+      "read the worker's request_human_input call with session_events",
+    );
   });
 
   test("child_progress is deferred: pending row without a wake, newer note supersedes older", async () => {

@@ -320,7 +320,10 @@ export function nativeHumanInputSummary(
   const questions = item.questions
     .map((question) => (question.label ? `${question.label}: ${question.prompt}` : question.prompt))
     .join("\n");
-  const outcome = labels.humanInputOutcome[item.response.outcome];
+  const outcome =
+    item.response.outcome === "answered" && item.answeredByAgent
+      ? (labels.humanInputOutcome.agentAnswered ?? labels.humanInputOutcome.answered)
+      : labels.humanInputOutcome[item.response.outcome];
   const answers = humanInputAnswerLines(item.answers, item.response, labels.secretSaved, false)
     .map(
       (line, index) =>

@@ -6316,7 +6316,7 @@ function registerWorkspaceOrchestrationTools(
         "session_human_input_respond",
         {
           description:
-            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId. Use it only when you actually know the answer; otherwise report the exact blocker to the user. Tool approvals are decided by humans only and cannot be answered here. The response is recorded as an agent-attempt answer and resumes that session's blocked turn.",
+            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId and questions. The person is shown the same question, and the first answer wins. Answer when you can from your task context; leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer on their behalf a question meant for them. Tool approvals are decided by humans only and cannot be answered here. An accepted response is recorded as an agent answer and resumes that session's blocked turn. If the result reports alreadyAnswered, someone answered first and your answer was not used; do not answer again.",
           inputSchema: {
             sessionId: z4.string().uuid(),
             requestId: z4.string().uuid(),
@@ -6404,6 +6404,52 @@ function registerWorkspaceOrchestrationTools(
           }
           if (accepted.action === "conflict") {
             throw new Error("human-input request is not currently actionable");
+          }
+          if (accepted.action === "completed" && accepted.settledBy === "earlier_response") {
+            // Lost the first-writer race (or the request had already expired
+            // or been cancelled): a clear non-error result, so the agent does
+            // not retry or assume its answer was used.
+            const winner = accepted.request.respondedBy ?? "";
+            const answeredBy =
+              accepted.request.status === "expired" || winner.startsWith("system:")
+                ? "system"
+                : winner === `agent_attempt:${context.callerAttemptId}`
+                  ? "you"
+                  : winner.startsWith("agent_attempt:")
+                    ? "agent"
+                    : "person";
+            const answeredByText =
+              answeredBy === "person"
+                ? "a person"
+                : answeredBy === "agent"
+                  ? "another agent"
+                  : answeredBy === "you"
+                    ? "your earlier call"
+                    : "the system";
+            const state = accepted.request.status;
+            return json(
+              mcpMutationReceipt({
+                operation: "session_human_input_respond",
+                committed: true,
+                outcome: "unchanged",
+                changed: false,
+                resource: { type: "session_human_input_request", id: requestId, state },
+                relatedResources: [{ type: "session", id: sessionId }],
+                timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
+                idempotency: { status: "applied" },
+                facts: {
+                  alreadyAnswered: true,
+                  answeredBy,
+                  outcome: accepted.request.response?.outcome ?? state,
+                },
+                warnings: [
+                  state === "answered" || state === "skipped"
+                    ? `Already ${state} by ${answeredByText}; this answer was not used. Do not answer again.`
+                    : `This request is already ${state}; this answer was not used. Do not answer again.`,
+                ],
+                nextAction: { tool: "session_get", arguments: { sessionId } },
+              }),
+            );
           }
           return json(
             mcpMutationReceipt({
