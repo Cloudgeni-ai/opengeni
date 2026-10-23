@@ -29,9 +29,7 @@ export function recordingDeletionWorkflowId(recordingId: string): string {
  * The activity heartbeats while it waits, so a lost worker is noticed in
  * minutes; retryable provider failures back off for up to about an hour.
  */
-const transcriptActivity = proxyActivities<
-  Pick<typeof activities, "transcribeRecordingVersion">
->({
+const transcriptActivity = proxyActivities<Pick<typeof activities, "transcribeRecordingVersion">>({
   startToCloseTimeout: "2 hours",
   heartbeatTimeout: "3 minutes",
   retry: {
@@ -79,6 +77,8 @@ export async function recordingTranscriptWorkflow(
 }
 
 /** Remove a deleted recording's audio and rows. */
-export async function recordingDeletionWorkflow(input: RecordingDeletionWorkflowInput): Promise<void> {
+export async function recordingDeletionWorkflow(
+  input: RecordingDeletionWorkflowInput,
+): Promise<void> {
   await deletionActivity.deleteRecordingMedia(input);
 }

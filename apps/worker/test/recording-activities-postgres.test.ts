@@ -55,7 +55,9 @@ function memoryStorage() {
 }
 
 function fakeProvider(
-  transcribe: (request: RecordingTranscriptionRequest) => ReturnType<RecordingTranscriptionProvider["transcribe"]>,
+  transcribe: (
+    request: RecordingTranscriptionRequest,
+  ) => ReturnType<RecordingTranscriptionProvider["transcribe"]>,
 ): RecordingTranscriptionProvider {
   return {
     id: "elevenlabs",
@@ -123,11 +125,24 @@ async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
       startMilliseconds: chunkNumber * 1_000,
       durationMilliseconds: 1_000,
     }));
-    const reserved = await reserveRecordingChunks(db, { ...actor, recordingId, trackNumber, chunks });
+    const reserved = await reserveRecordingChunks(db, {
+      ...actor,
+      recordingId,
+      trackNumber,
+      chunks,
+    });
     for (const row of reserved) {
-      storage.objects.set(row.objectKey, { bytes: parts[row.chunkNumber]!, contentType: "audio/webm" });
+      storage.objects.set(row.objectKey, {
+        bytes: parts[row.chunkNumber]!,
+        contentType: "audio/webm",
+      });
     }
-    await markRecordingChunksUploaded(db, { ...actor, recordingId, trackNumber, chunkNumbers: [0, 1] });
+    await markRecordingChunksUploaded(db, {
+      ...actor,
+      recordingId,
+      trackNumber,
+      chunkNumbers: [0, 1],
+    });
   }
   const versionId = crypto.randomUUID();
   await finalizeRecording(db, {
@@ -193,12 +208,36 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         diarized: !microphone,
         words: microphone
           ? [
-              { text: "Hello", startMilliseconds: 100, endMilliseconds: 400, speaker: null, spaceBefore: false },
-              { text: "team.", startMilliseconds: 450, endMilliseconds: 800, speaker: null, spaceBefore: true },
+              {
+                text: "Hello",
+                startMilliseconds: 100,
+                endMilliseconds: 400,
+                speaker: null,
+                spaceBefore: false,
+              },
+              {
+                text: "team.",
+                startMilliseconds: 450,
+                endMilliseconds: 800,
+                speaker: null,
+                spaceBefore: true,
+              },
             ]
           : [
-              { text: "Hi", startMilliseconds: 900, endMilliseconds: 1_100, speaker: "speaker_1", spaceBefore: false },
-              { text: "Yes", startMilliseconds: 1_300, endMilliseconds: 1_500, speaker: "speaker_0", spaceBefore: true },
+              {
+                text: "Hi",
+                startMilliseconds: 900,
+                endMilliseconds: 1_100,
+                speaker: "speaker_1",
+                spaceBefore: false,
+              },
+              {
+                text: "Yes",
+                startMilliseconds: 1_300,
+                endMilliseconds: 1_500,
+                speaker: "speaker_0",
+                spaceBefore: true,
+              },
             ],
       };
     });
@@ -265,7 +304,9 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ).rejects.toMatchObject({ type: "provider_unavailable" });
     // The same workflow takes its lease back on the next attempt.
     expect(
-      await activities(storage, outage, null).activities.transcribeRecordingVersion(recording.input),
+      await activities(storage, outage, null).activities.transcribeRecordingVersion(
+        recording.input,
+      ),
     ).toEqual({ outcome: "failed", errorCode: "missing_provider_key" });
     const [version] = await listRecordingTranscriptVersions(client.db, {
       ...recording.actor,
@@ -280,7 +321,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const recording = await capturedRecording(storage);
     const { activities: run } = activities(
       storage,
-      fakeProvider(async () => ({ languages: [], audioMilliseconds: 0, diarized: false, words: [] })),
+      fakeProvider(async () => ({
+        languages: [],
+        audioMilliseconds: 0,
+        diarized: false,
+        words: [],
+      })),
     );
     await run.transcribeRecordingVersion(recording.input);
     expect(storage.objects.size).toBe(6);

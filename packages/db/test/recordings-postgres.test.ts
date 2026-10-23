@@ -143,7 +143,12 @@ async function finalizedRecording(
         },
       ],
     });
-    await markRecordingChunksUploaded(db, { ...actor, recordingId, trackNumber, chunkNumbers: [0, 1] });
+    await markRecordingChunksUploaded(db, {
+      ...actor,
+      recordingId,
+      trackNumber,
+      chunkNumbers: [0, 1],
+    });
   }
   const versionId = crypto.randomUUID();
   const finalized = await finalizeRecording(db, {
@@ -174,13 +179,15 @@ describe("recordings", () => {
     );
     const memberList = await listRecordings(db, memberActor);
     expect(memberList.recordings.map((recording) => recording.id)).toEqual([ours.recordingId]);
-    await expect(getRecording(db, { ...memberActor, recordingId: mine.recordingId })).rejects.toBeInstanceOf(
-      RecordingNotFoundError,
-    );
-    const shared = await getRecording(db, { ...memberActor, recordingId: ours.recordingId });
-    expect(shared.visibility).toBe("workspace");
-    expect(shared.state).toBe("processing");
-    expect(shared.tracks.map((track) => [track.source, track.chunkCount, track.durationMilliseconds])).toEqual([
+    await expect(
+      getRecording(db, { ...memberActor, recordingId: mine.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+    const visible = await getRecording(db, { ...memberActor, recordingId: ours.recordingId });
+    expect(visible.visibility).toBe("workspace");
+    expect(visible.state).toBe("processing");
+    expect(
+      visible.tracks.map((track) => [track.source, track.chunkCount, track.durationMilliseconds]),
+    ).toEqual([
       ["microphone", 2, 10_000],
       ["system", 2, 10_000],
     ]);
@@ -262,18 +269,45 @@ describe("recordings", () => {
       diarization: "provider",
       audioMilliseconds: 10_000,
       segments: [
-        { startMilliseconds: 0, endMilliseconds: 2_000, trackNumber: 0, speakerLabel: "track-0", text: "Hi all." },
-        { startMilliseconds: 2_100, endMilliseconds: 4_000, trackNumber: 1, speakerLabel: "speaker_0", text: "Hello." },
-        { startMilliseconds: 4_100, endMilliseconds: 6_000, trackNumber: 1, speakerLabel: "speaker_1", text: "Budget is fine." },
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi all.",
+        },
+        {
+          startMilliseconds: 2_100,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_0",
+          text: "Hello.",
+        },
+        {
+          startMilliseconds: 4_100,
+          endMilliseconds: 6_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_1",
+          text: "Budget is fine.",
+        },
       ],
       trackSpeakers: [{ label: "track-0", displayName: "Recording owner" }],
     });
     expect(completed?.state).toBe("complete");
     expect(completed?.isCurrent).toBe(true);
 
-    const page = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
-    expect(page.segments.map((segment) => segment.text)).toEqual(["Hi all.", "Hello.", "Budget is fine."]);
-    expect(page.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe("Recording owner");
+    const page = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
+    expect(page.segments.map((segment) => segment.text)).toEqual([
+      "Hi all.",
+      "Hello.",
+      "Budget is fine.",
+    ]);
+    expect(page.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe(
+      "Recording owner",
+    );
 
     const { person } = await createRecordingPerson(db, {
       ...recording.actor,
@@ -284,11 +318,17 @@ describe("recordings", () => {
     const speakers = await updateRecordingSpeakers(db, {
       ...recording.actor,
       recordingId: recording.recordingId,
-      assignments: [{ label: "speaker_0", personId: person.id }, { label: "speaker_1", name: "Ola" }],
+      assignments: [
+        { label: "speaker_0", personId: person.id },
+        { label: "speaker_1", name: "Ola" },
+      ],
       segmentOverrides: [{ segmentIndex: 2, label: "speaker_0" }],
     });
     expect(speakers.find((speaker) => speaker.label === "speaker_0")?.name).toBe("Kari");
-    const renamed = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    const renamed = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
     expect(renamed.segments[2]?.speakerLabel).toBe("speaker_0");
 
     // Text corrections are a layer: the original comes back when cleared.
@@ -297,13 +337,20 @@ describe("recordings", () => {
       recordingId: recording.recordingId,
       edits: [{ segmentIndex: 1, text: "Hello there." }],
     });
-    expect(corrected[0]).toMatchObject({ text: "Hello there.", edited: true, speakerLabel: "speaker_0" });
+    expect(corrected[0]).toMatchObject({
+      text: "Hello there.",
+      edited: true,
+      speakerLabel: "speaker_0",
+    });
     await updateRecordingSegments(db, {
       ...recording.actor,
       recordingId: recording.recordingId,
       edits: [{ segmentIndex: 1, text: "Hello." }],
     });
-    const reverted = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    const reverted = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
     expect(reverted.segments[1]).toMatchObject({ text: "Hello.", edited: false });
     expect(reverted.segments[2]?.speakerLabel).toBe("speaker_0");
 
@@ -347,15 +394,44 @@ describe("recordings", () => {
       diarization: "provider",
       audioMilliseconds: 10_000,
       segments: [
-        { startMilliseconds: 0, endMilliseconds: 2_000, trackNumber: 0, speakerLabel: "track-0", text: "Hi, all." },
-        { startMilliseconds: 2_000, endMilliseconds: 4_000, trackNumber: 1, speakerLabel: "speaker_9", text: "Hello." },
-        { startMilliseconds: 4_000, endMilliseconds: 6_100, trackNumber: 1, speakerLabel: "speaker_9", text: "Budget's fine." },
-        { startMilliseconds: 8_000, endMilliseconds: 9_000, trackNumber: 1, speakerLabel: "speaker_4", text: "New voice." },
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 2_000,
+          trackNumber: 0,
+          speakerLabel: "track-0",
+          text: "Hi, all.",
+        },
+        {
+          startMilliseconds: 2_000,
+          endMilliseconds: 4_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_9",
+          text: "Hello.",
+        },
+        {
+          startMilliseconds: 4_000,
+          endMilliseconds: 6_100,
+          trackNumber: 1,
+          speakerLabel: "speaker_9",
+          text: "Budget's fine.",
+        },
+        {
+          startMilliseconds: 8_000,
+          endMilliseconds: 9_000,
+          trackNumber: 1,
+          speakerLabel: "speaker_4",
+          text: "New voice.",
+        },
       ],
     });
-    const current = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    const current = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
     expect(current.version.versionNumber).toBe(2);
-    expect(current.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe("Recording owner");
+    expect(current.speakers.find((speaker) => speaker.label === "track-0")?.name).toBe(
+      "Recording owner",
+    );
     expect(current.speakers.find((speaker) => speaker.label === "speaker_9")).toMatchObject({
       name: "Kari",
       personId: person.id,
@@ -377,7 +453,10 @@ describe("recordings", () => {
       versionId: recording.versionId,
     });
     expect(switched.isCurrent).toBe(true);
-    const after = await getRecordingTranscriptPage(db, { ...recording.actor, recordingId: recording.recordingId });
+    const after = await getRecordingTranscriptPage(db, {
+      ...recording.actor,
+      recordingId: recording.recordingId,
+    });
     expect(after.version.versionNumber).toBe(1);
   });
 
@@ -426,9 +505,13 @@ describe("recordings", () => {
         array['recording.finished'], true)
       returning id`;
     const recording = await finalizedRecording(scope, "workspace");
-    const workspaceDeliveries = await shared.admin<{ event_type: string; payload: Record<string, unknown> }[]>`
+    const workspaceDeliveries = await shared.admin<
+      { event_type: string; payload: Record<string, unknown> }[]
+    >`
       select event_type, payload from workspace_webhook_deliveries where webhook_id = ${workspaceHook!.id}`;
-    expect(workspaceDeliveries.map((delivery) => delivery.event_type)).toEqual(["recording.finished"]);
+    expect(workspaceDeliveries.map((delivery) => delivery.event_type)).toEqual([
+      "recording.finished",
+    ]);
     const payload = workspaceDeliveries[0]!.payload as {
       type: string;
       lane: string;
@@ -446,7 +529,9 @@ describe("recordings", () => {
     expect(JSON.stringify(payload)).not.toContain("Weekly sync");
     const organizationDeliveries = await shared.admin<{ payload: { lane: string } }[]>`
       select payload from organization_webhook_deliveries where webhook_id = ${organizationHook!.id}`;
-    expect(organizationDeliveries.map((delivery) => delivery.payload.lane)).toEqual(["organization"]);
+    expect(organizationDeliveries.map((delivery) => delivery.payload.lane)).toEqual([
+      "organization",
+    ]);
 
     await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
     const afterDelete = await shared.admin<{ event_type: string }[]>`
@@ -464,17 +549,20 @@ describe("recordings", () => {
     const scope = await workspace();
     const recording = await finalizedRecording(scope, "workspace");
     expect(
-      await listDeletingRecordingObjectKeys(db, { ...recording.actor, recordingId: recording.recordingId }),
+      await listDeletingRecordingObjectKeys(db, {
+        ...recording.actor,
+        recordingId: recording.recordingId,
+      }),
     ).toBeNull();
-    expect(await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId })).toBe(
-      false,
-    );
+    expect(
+      await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).toBe(false);
 
     await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
     await markRecordingDeleting(db, { ...recording.actor, recordingId: recording.recordingId });
-    await expect(getRecording(db, { ...recording.actor, recordingId: recording.recordingId })).rejects.toBeInstanceOf(
-      RecordingNotFoundError,
-    );
+    await expect(
+      getRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
     expect((await listRecordings(db, recording.actor)).recordings).toHaveLength(0);
     await expect(
       claimRecordingTranscriptVersion(db, {
@@ -490,10 +578,14 @@ describe("recordings", () => {
       recordingId: recording.recordingId,
     });
     expect(keys).toHaveLength(4);
-    expect(keys!.every((key) => key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`))).toBe(
-      true,
-    );
-    expect(await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId })).toBe(true);
+    expect(
+      keys!.every((key) =>
+        key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`),
+      ),
+    ).toBe(true);
+    expect(
+      await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId }),
+    ).toBe(true);
     const [rows] = await shared.admin<{ recordings: number; chunks: number; events: number }[]>`
       select
         (select count(*)::int from recordings where id = ${recording.recordingId}) as recordings,

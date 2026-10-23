@@ -135,7 +135,9 @@ export function labelWordsFromTurns(
   turns: readonly SpeakerTurn[],
 ): RecordingTranscribedWord[] {
   if (turns.length === 0) return words.map((word) => ({ ...word, speaker: null }));
-  const ordered = [...turns].sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  const ordered = [...turns].sort(
+    (left, right) => left.startMilliseconds - right.startMilliseconds,
+  );
   let first = 0;
   return words.map((word) => {
     while (first < ordered.length && ordered[first]!.endMilliseconds <= word.startMilliseconds) {
@@ -204,7 +206,11 @@ export function planRecordingTracks(
     .sort((left, right) => left.trackNumber - right.trackNumber)
     .map((track) =>
       hasSystem && track.source === "microphone"
-        ? { trackNumber: track.trackNumber, fixedLabel: `track-${track.trackNumber}`, diarize: false }
+        ? {
+            trackNumber: track.trackNumber,
+            fixedLabel: `track-${track.trackNumber}`,
+            diarize: false,
+          }
         : { trackNumber: track.trackNumber, fixedLabel: null, diarize: true },
     );
 }
@@ -479,11 +485,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
           throw new RecordingTranscriptionError("ElevenLabs took too long", "timeout", true);
         }
         if (input.signal?.aborted) throw error;
-        throw new RecordingTranscriptionError(
-          "Could not reach ElevenLabs",
-          "network",
-          true,
-        );
+        throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
       }
       if (!response.ok) throw elevenLabsError(response.status, await errorDetail(response));
       return parseElevenLabsTranscript(await response.json());

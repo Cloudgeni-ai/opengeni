@@ -9406,9 +9406,9 @@ describe("clean session control plane", () => {
       action: "settled",
       recordingMutationApplied: true,
     });
-    expect(await getSessionRecording(client.db, approval.grant.workspaceId!, discardedRecordingId)).toBe(
-      null,
-    );
+    expect(
+      await getSessionRecording(client.db, approval.grant.workspaceId!, discardedRecordingId),
+    ).toBe(null);
     if (suspended.action === "settled") {
       expect(suspended.events.map((event) => event.type)).toEqual(["session.requiresAction"]);
     }

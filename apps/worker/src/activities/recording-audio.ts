@@ -37,7 +37,13 @@ export function recordingAudioContainer(mimeType: string): RecordingAudioContain
 
 /** Whether a chunk begins a new container: an EBML, MP4 `ftyp` or Ogg header. */
 export function startsContainer(bytes: Uint8Array): boolean {
-  if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
     return true;
   }
   if (
@@ -127,9 +133,7 @@ export function ffmpegReportedMilliseconds(stderr: string): number | null {
   const matches = [...stderr.matchAll(/time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/gu)];
   const last = matches.at(-1);
   if (!last) return null;
-  return Math.round(
-    (Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3])) * 1_000,
-  );
+  return Math.round((Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3])) * 1_000);
 }
 
 export type PreparedRecordingAudio = {
@@ -161,7 +165,8 @@ export async function prepareRecordingTrackAudio(input: {
   }
   const format = preparedAudioFormat(container);
   const ordered = [...input.chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
-  if (ordered.length === 0) throw new RecordingAudioError("The track has no audio", "invalid_audio");
+  if (ordered.length === 0)
+    throw new RecordingAudioError("The track has no audio", "invalid_audio");
   const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-"));
   try {
     const runs: Array<{ startMilliseconds: number; path: string }> = [];
@@ -192,12 +197,33 @@ export async function prepareRecordingTrackAudio(input: {
       await handle?.close();
     }
     const output = join(directory, `prepared.${format.extension}`);
-    const base = ["-nostdin", "-hide_banner", "-loglevel", "info", "-stats", "-stats_period", "30", "-y"];
+    const base = [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "info",
+      "-stats",
+      "-stats_period",
+      "30",
+      "-y",
+    ];
     let result: { stderr: string };
     if (runs.length === 1) {
       result = await runFfmpeg(
         input.ffmpegPath,
-        [...base, "-i", runs[0]!.path, "-vn", "-map", "0:a:0", "-c:a", "copy", "-f", format.muxer, output],
+        [
+          ...base,
+          "-i",
+          runs[0]!.path,
+          "-vn",
+          "-map",
+          "0:a:0",
+          "-c:a",
+          "copy",
+          "-f",
+          format.muxer,
+          output,
+        ],
         input.signal,
       );
     } else {
@@ -237,7 +263,8 @@ export async function prepareRecordingTrackAudio(input: {
     if (size === 0) throw new RecordingAudioError("The prepared audio is empty", "invalid_audio");
     const reported = ffmpegReportedMilliseconds(result.stderr);
     const lastChunk = ordered.at(-1)!;
-    const declared = lastChunk.startMilliseconds + lastChunk.durationMilliseconds - runs[0]!.startMilliseconds;
+    const declared =
+      lastChunk.startMilliseconds + lastChunk.durationMilliseconds - runs[0]!.startMilliseconds;
     return {
       bytes: new Uint8Array(await readFile(output)),
       mimeType: format.mimeType,

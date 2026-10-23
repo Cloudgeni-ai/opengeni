@@ -83,6 +83,36 @@ export const RecordingTranscriptionOptions = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingTranscriptionOptions = z.infer<typeof RecordingTranscriptionOptions>;
 
+/**
+ * A workspace's recording defaults. New recordings are Only me unless the
+ * workspace says otherwise; products may always set visibility explicitly.
+ */
+export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      defaultVisibility: RecordingVisibility.optional(),
+      /** Provider and model new transcripts use when a request names none. */
+      transcription: z
+        .object({
+          providerId: z.string().trim().min(1).max(128),
+          model: z.string().trim().min(1).max(128),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+);
+export type WorkspaceRecordingSettings = z.infer<typeof WorkspaceRecordingSettings>;
+
+/** Read a workspace's recording defaults leniently; a bad value means none. */
+export function resolveWorkspaceRecordingSettings(settings: unknown): WorkspaceRecordingSettings {
+  const value =
+    settings !== null && typeof settings === "object"
+      ? (settings as { recordings?: unknown }).recordings
+      : undefined;
+  return WorkspaceRecordingSettings.safeParse(value ?? {}).data ?? {};
+}
+
 export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

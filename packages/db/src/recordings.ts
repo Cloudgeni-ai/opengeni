@@ -145,7 +145,9 @@ async function lockRecording(
   const [row] = await tx
     .select()
     .from(schema.recordings)
-    .where(and(eq(schema.recordings.workspaceId, workspaceId), eq(schema.recordings.id, recordingId)))
+    .where(
+      and(eq(schema.recordings.workspaceId, workspaceId), eq(schema.recordings.id, recordingId)),
+    )
     .for("update");
   // A recording being deleted is gone for every caller but its deletion.
   if (!row || row.state === "deleting") throw new RecordingNotFoundError();
@@ -384,7 +386,10 @@ export type UpdateRecordingInput = RecordingActor & {
 };
 
 /** Anyone who can see a recording may rename it; only its owner may share or unshare it. */
-export async function updateRecording(db: Database, input: UpdateRecordingInput): Promise<Recording> {
+export async function updateRecording(
+  db: Database,
+  input: UpdateRecordingInput,
+): Promise<Recording> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const row = await lockRecording(tx, input.workspaceId, input.recordingId);
     const visibility = input.visibility === undefined ? undefined : toVisibility(input.visibility);
@@ -736,7 +741,11 @@ export async function listRecordingChunks(
 /** Mark chunks whose stored objects the caller has checked. Returns the updated rows. */
 export async function markRecordingChunksUploaded(
   db: Database,
-  input: RecordingActor & { recordingId: string; trackNumber: number; chunkNumbers: readonly number[] },
+  input: RecordingActor & {
+    recordingId: string;
+    trackNumber: number;
+    chunkNumbers: readonly number[];
+  },
 ): Promise<RecordingChunk[]> {
   if (input.chunkNumbers.length === 0) return [];
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
@@ -833,10 +842,17 @@ export async function finalizeRecording(
         .orderBy(asc(schema.recordingTranscriptVersions.versionNumber))
         .limit(1);
       if (!sameCounts || !version) {
-        throw new RecordingConflictError("This recording is already finalized", "already_finalized");
+        throw new RecordingConflictError(
+          "This recording is already finalized",
+          "already_finalized",
+        );
       }
       const [view] = await loadViews(tx, input.workspaceId, [recording]);
-      return { recording: view!, version: recordingTranscriptVersionView(version), finalized: false };
+      return {
+        recording: view!,
+        version: recordingTranscriptVersionView(version),
+        finalized: false,
+      };
     }
     const chunks = await tx
       .select({
@@ -1353,10 +1369,7 @@ export async function completeRecordingTranscriptVersion(
     const labels = new Set(
       ordered.map((segment) => segment.speakerLabel).filter((label): label is string => !!label),
     );
-    const assignments = new Map<
-      string,
-      typeof schema.recordingSpeakerAssignments.$inferInsert
-    >();
+    const assignments = new Map<string, typeof schema.recordingSpeakerAssignments.$inferInsert>();
     for (const speaker of input.trackSpeakers ?? []) {
       if (!labels.has(speaker.label)) continue;
       assignments.set(speaker.label, {
@@ -1441,7 +1454,10 @@ export async function completeRecordingTranscriptVersion(
         updatedAt: sql`clock_timestamp()`,
       })
       .where(
-        and(eq(schema.recordings.workspaceId, input.workspaceId), eq(schema.recordings.id, recording.id)),
+        and(
+          eq(schema.recordings.workspaceId, input.workspaceId),
+          eq(schema.recordings.id, recording.id),
+        ),
       )
       .returning();
     await insertEvent(tx, ready!, "recording.transcript.ready", {
@@ -1635,10 +1651,7 @@ export async function getRecordingTranscriptPage(
       .leftJoin(
         schema.recordingSegmentEdits,
         and(
-          eq(
-            schema.recordingSegmentEdits.versionId,
-            schema.recordingTranscriptSegments.versionId,
-          ),
+          eq(schema.recordingSegmentEdits.versionId, schema.recordingTranscriptSegments.versionId),
           eq(
             schema.recordingSegmentEdits.segmentIndex,
             schema.recordingTranscriptSegments.segmentIndex,
@@ -1661,12 +1674,14 @@ export async function getRecordingTranscriptPage(
 export type UpdateRecordingSpeakersInput = RecordingActor & {
   recordingId: string;
   versionId?: string | undefined;
-  assignments?: ReadonlyArray<{
-    label: string;
-    personId?: string | null | undefined;
-    name?: string | null | undefined;
-  }>;
-  segmentOverrides?: ReadonlyArray<{ segmentIndex: number; label: string }>;
+  assignments?:
+    | ReadonlyArray<{
+        label: string;
+        personId?: string | null | undefined;
+        name?: string | null | undefined;
+      }>
+    | undefined;
+  segmentOverrides?: ReadonlyArray<{ segmentIndex: number; label: string }> | undefined;
 };
 
 /**

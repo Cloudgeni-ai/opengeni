@@ -149,7 +149,10 @@ export const recordingTranscriptVersions = pgTable(
       .notNull()
       .default("queued"),
     isCurrent: boolean("is_current").notNull().default(false),
-    languages: text("languages").array().notNull().default(sql`'{}'::text[]`),
+    languages: text("languages")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
     diarized: boolean("diarized").notNull().default(false),
     diarization: text("diarization", { enum: recordingDiarizationValues }),
     audioMilliseconds: integer("audio_milliseconds").notNull().default(0),

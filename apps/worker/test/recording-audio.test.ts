@@ -22,9 +22,9 @@ describe("recording audio", () => {
     expect(recordingAudioContainer("audio/webm;codecs=opus")).toBe("webm");
     expect(recordingAudioContainer("audio/mp4")).toBe("mp4");
     expect(recordingAudioContainer("audio/wav")).toBeNull();
-    expect(ffmpegReportedMilliseconds("size= 1kB time=00:00:01.50 x\nsize= 2kB time=00:01:02.25")).toBe(
-      62_250,
-    );
+    expect(
+      ffmpegReportedMilliseconds("size= 1kB time=00:00:01.50 x\nsize= 2kB time=00:01:02.25"),
+    ).toBe(62_250);
   });
 
   test.skipIf(!hasFfmpeg)("one capture session is remuxed into one seekable file", async () => {
@@ -52,25 +52,28 @@ describe("recording audio", () => {
     expect(progress).toBe(4);
   });
 
-  test.skipIf(!hasFfmpeg)("a second session after a reload lands at its own start time", async () => {
-    const first = split(opusWebm(2), 2);
-    const second = split(opusWebm(2, 880), 2);
-    const parts = [...first, ...second];
-    const starts = [0, 1_000, 5_000, 6_000];
-    const prepared = await prepareRecordingTrackAudio({
-      chunks: parts.map((_, index) => ({
-        chunkNumber: index,
-        startMilliseconds: starts[index]!,
-        durationMilliseconds: 1_000,
-        objectKey: `k${index}`,
-      })),
-      mimeType: "audio/webm",
-      ffmpegPath,
-      readChunk: async (chunk) => parts[chunk.chunkNumber]!,
-    });
-    // Two seconds, a three-second gap of silence, then two more seconds.
-    expect(Math.abs(prepared.durationMilliseconds - 7_000)).toBeLessThan(200);
-  });
+  test.skipIf(!hasFfmpeg)(
+    "a second session after a reload lands at its own start time",
+    async () => {
+      const first = split(opusWebm(2), 2);
+      const second = split(opusWebm(2, 880), 2);
+      const parts = [...first, ...second];
+      const starts = [0, 1_000, 5_000, 6_000];
+      const prepared = await prepareRecordingTrackAudio({
+        chunks: parts.map((_, index) => ({
+          chunkNumber: index,
+          startMilliseconds: starts[index]!,
+          durationMilliseconds: 1_000,
+          objectKey: `k${index}`,
+        })),
+        mimeType: "audio/webm",
+        ffmpegPath,
+        readChunk: async (chunk) => parts[chunk.chunkNumber]!,
+      });
+      // Two seconds, a three-second gap of silence, then two more seconds.
+      expect(Math.abs(prepared.durationMilliseconds - 7_000)).toBeLessThan(200);
+    },
+  );
 
   test.skipIf(!hasFfmpeg)("a missing chunk is reported as such", async () => {
     const parts = split(opusWebm(1), 2);

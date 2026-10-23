@@ -99,8 +99,10 @@ function activityContext(): Context | null {
 
 /** A failure the workflow should not retry; the version is failed with this code. */
 class PermanentRecordingFailure extends Error {
-  constructor(readonly code: string) {
+  readonly code: string;
+  constructor(code: string) {
     super(code);
+    this.code = code;
   }
 }
 
@@ -127,7 +129,9 @@ export function createRecordingActivities(
     else activityContext()?.heartbeat(details);
   };
   const cancellation = () =>
-    options.cancellationSignal ? options.cancellationSignal() : activityContext()?.cancellationSignal;
+    options.cancellationSignal
+      ? options.cancellationSignal()
+      : activityContext()?.cancellationSignal;
 
   /**
    * Make one transcript version: prepare each track's audio once (later
@@ -178,7 +182,7 @@ export function createRecordingActivities(
       if (!apiKey) throw new PermanentRecordingFailure("missing_provider_key");
       const plans = planRecordingTracks(job.recording.tracks);
       const capabilities = found.spec.capabilities;
-      const options = job.version.options;
+      const requested = job.version.options;
       const signal = cancellation();
       const trackWords: RecordingTrackWords[] = [];
       let providerDiarized = false;
@@ -213,10 +217,10 @@ export function createRecordingActivities(
                 fileName: `track-${plan.trackNumber}.${audio.extension}`,
               },
               model: found.spec.model,
-              language: options.language,
+              language: requested.language,
               diarize,
-              maxSpeakers: options.maxSpeakers,
-              keyterms: capabilities.keyterms ? options.keyterms : undefined,
+              maxSpeakers: requested.maxSpeakers,
+              keyterms: capabilities.keyterms ? requested.keyterms : undefined,
               signal,
             },
             { apiKey },
@@ -233,9 +237,13 @@ export function createRecordingActivities(
       }
       const segments = buildRecordingSegments(trackWords);
       const diarization = recordingDiarizationKind({ plans, providerDiarized, ourDiarizer: false });
-      const costUsdMicros = estimateRecordingTranscriptionCostMicros(found.spec, audioMilliseconds, {
-        keyterms: capabilities.keyterms && (options.keyterms?.length ?? 0) > 0,
-      });
+      const costUsdMicros = estimateRecordingTranscriptionCostMicros(
+        found.spec,
+        audioMilliseconds,
+        {
+          keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
+        },
+      );
       const completed = await completeRecordingTranscriptVersion(db, {
         ...actor,
         versionId: input.versionId,
@@ -302,7 +310,12 @@ export function createRecordingActivities(
     offsetMilliseconds: number;
     knownDurationMilliseconds: number;
     signal: AbortSignal | undefined;
-  }): Promise<{ bytes: Uint8Array; mimeType: string; extension: string; durationMilliseconds: number }> {
+  }): Promise<{
+    bytes: Uint8Array;
+    mimeType: string;
+    extension: string;
+    durationMilliseconds: number;
+  }> {
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
     const format = preparedAudioFormat(container);
@@ -355,7 +368,8 @@ export function createRecordingActivities(
       });
     } catch (error) {
       // Deleted meanwhile: its deletion listed keys before this one existed.
-      if (error instanceof RecordingNotFoundError) await input.objectStorage.deleteObject(objectKey);
+      if (error instanceof RecordingNotFoundError)
+        await input.objectStorage.deleteObject(objectKey);
       throw error;
     }
     return prepared;
@@ -392,7 +406,8 @@ export function createRecordingActivities(
     };
     const keys = await listDeletingRecordingObjectKeys(db, actor);
     if (keys === null) return { deleted: 0, purged: false };
-    if (!objectStorage) throw ApplicationFailure.retryable("Object storage is unavailable", "storage_unavailable");
+    if (!objectStorage)
+      throw ApplicationFailure.retryable("Object storage is unavailable", "storage_unavailable");
     const prefix = `workspaces/${input.workspaceId}/recordings/${input.recordingId}/`;
     let deleted = 0;
     for (const key of keys) {

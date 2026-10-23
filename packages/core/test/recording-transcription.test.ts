@@ -104,18 +104,21 @@ describe("buildRecordingSegments", () => {
       {
         trackNumber: 1,
         fixedLabel: "track-1",
-        words: [word("Hello", 0, 300, null, false), word("there.", 350, 700), word("Later", 5000, 5400, null)],
+        words: [
+          word("Hello", 0, 300, null, false),
+          word("there.", 350, 700),
+          word("Later", 5000, 5400, null),
+        ],
       },
       {
         trackNumber: 2,
         fixedLabel: null,
-        words: [
-          word("Hi", 1000, 1200, "speaker_7", false),
-          word("Bye", 1300, 1500, "speaker_3"),
-        ],
+        words: [word("Hi", 1000, 1200, "speaker_7", false), word("Bye", 1300, 1500, "speaker_3")],
       },
     ]);
-    expect(segments.map((segment) => [segment.trackNumber, segment.speakerLabel, segment.text])).toEqual([
+    expect(
+      segments.map((segment) => [segment.trackNumber, segment.speakerLabel, segment.text]),
+    ).toEqual([
       [1, "track-1", "Hello there."],
       [2, "speaker_0", "Hi"],
       [2, "speaker_1", "Bye"],
@@ -132,7 +135,10 @@ describe("buildRecordingSegments", () => {
       { trackNumber: 1, fixedLabel: null, words: [word("a", 0, 100, "s")] },
       { trackNumber: 2, fixedLabel: null, words: [word("b", 200, 300, "s")] },
     ]);
-    expect(segments.map((segment) => segment.speakerLabel)).toEqual(["t1_speaker_0", "t2_speaker_0"]);
+    expect(segments.map((segment) => segment.speakerLabel)).toEqual([
+      "t1_speaker_0",
+      "t2_speaker_0",
+    ]);
   });
 
   test("ends a long monologue at a sentence end after a minute", () => {
@@ -153,9 +159,27 @@ describe("recordingDiarizationKind", () => {
     { trackNumber: 2, source: "system" },
   ]);
   test("names who told speakers apart", () => {
-    expect(recordingDiarizationKind({ plans: fixedAndDiarized, providerDiarized: true, ourDiarizer: false })).toBe("provider");
-    expect(recordingDiarizationKind({ plans: fixedAndDiarized, providerDiarized: true, ourDiarizer: true })).toBe("ours");
-    expect(recordingDiarizationKind({ plans: fixedAndDiarized, providerDiarized: false, ourDiarizer: false })).toBe("tracks");
+    expect(
+      recordingDiarizationKind({
+        plans: fixedAndDiarized,
+        providerDiarized: true,
+        ourDiarizer: false,
+      }),
+    ).toBe("provider");
+    expect(
+      recordingDiarizationKind({
+        plans: fixedAndDiarized,
+        providerDiarized: true,
+        ourDiarizer: true,
+      }),
+    ).toBe("ours");
+    expect(
+      recordingDiarizationKind({
+        plans: fixedAndDiarized,
+        providerDiarized: false,
+        ourDiarizer: false,
+      }),
+    ).toBe("tracks");
     expect(
       recordingDiarizationKind({
         plans: planRecordingTracks([{ trackNumber: 1, source: "microphone" }]),
@@ -167,7 +191,11 @@ describe("recordingDiarizationKind", () => {
 });
 
 describe("ElevenLabs provider", () => {
-  const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/ogg", fileName: "track-1.ogg" };
+  const audio = {
+    bytes: new Uint8Array([1, 2, 3]),
+    mimeType: "audio/ogg",
+    fileName: "track-1.ogg",
+  };
 
   test("posts multipart audio with the requested options", async () => {
     let seen: { url: string; init: RequestInit } | null = null;
@@ -181,7 +209,14 @@ describe("ElevenLabs provider", () => {
       }) as unknown as typeof fetch,
     });
     const result = await provider.transcribe(
-      { audio, model: "scribe_v2", diarize: true, maxSpeakers: 50, language: "en", keyterms: ["Opengeni", "Scribe"] },
+      {
+        audio,
+        model: "scribe_v2",
+        diarize: true,
+        maxSpeakers: 50,
+        language: "en",
+        keyterms: ["Opengeni", "Scribe"],
+      },
       { apiKey: "test-key" },
     );
     expect(result.words).toHaveLength(1);
@@ -205,7 +240,10 @@ describe("ElevenLabs provider", () => {
       });
     const attempt = async (status: number) => {
       try {
-        await failing(status).transcribe({ audio, model: "scribe_v2", diarize: false }, { apiKey: "k" });
+        await failing(status).transcribe(
+          { audio, model: "scribe_v2", diarize: false },
+          { apiKey: "k" },
+        );
       } catch (error) {
         return error as RecordingTranscriptionError;
       }
@@ -239,7 +277,11 @@ describe("registry and cost", () => {
     );
     expect(found?.spec.capabilities.diarization).toBe(true);
     expect(estimateRecordingTranscriptionCostMicros(found!.spec, 3_600_000)).toBe(220_000);
-    expect(estimateRecordingTranscriptionCostMicros(found!.spec, 3_600_000, { keyterms: true })).toBe(286_000);
-    expect(findRecordingTranscriptionModel(createRecordingTranscriptionProviderRegistry(), "x", "y")).toBeNull();
+    expect(
+      estimateRecordingTranscriptionCostMicros(found!.spec, 3_600_000, { keyterms: true }),
+    ).toBe(286_000);
+    expect(
+      findRecordingTranscriptionModel(createRecordingTranscriptionProviderRegistry(), "x", "y"),
+    ).toBeNull();
   });
 });
