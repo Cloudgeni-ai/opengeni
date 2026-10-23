@@ -382,4 +382,7 @@ export const embeddingMigrationTail = [
   "0906_scheduled_shared_slack_authority.sql",
   // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
   "0907_subscription_connection_one_owner.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it) and
+  // replaces the machine-access reader; replay after both.
+  "0917_continue_waiting_work.sql",
 ];
