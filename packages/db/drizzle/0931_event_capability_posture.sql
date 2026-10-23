@@ -134,5 +134,3 @@ BEGIN
   END IF;
 END
 $event_capability_runtime_drain_after$;
-
-
