@@ -19,6 +19,14 @@ Before the first healthy cycle, age is measured from the durable activation time
 never from the watchdog's first poll. Unknown/malformed health or write outcomes
 hold and alert; they do not establish safe restoration.
 
+Before an action claim, uncertainty (including unavailable/stale health, unknown
+writes or drift) leaves the record watching: emit an alert with the stable
+activation incident key and re-observe next scheduled run. No OFF is executed
+until a fresh observation qualifies. Deduplicate the issue surface, not the
+per-run monitoring signal. After a claim, `held` means disarmed pending operator
+reconciliation: never reset/re-arm it automatically or replay an unknown effect.
+Each subsequent held run emits an alert even after its incident comment exists.
+
 An action claim uses remote object-generation CAS in a dedicated state bucket.
 Cloud Run taskCount/parallelism do not serialize separate executions; the CAS
 claim does. A claim is never stolen because a timer expired. An existing action
@@ -36,6 +44,13 @@ drift. The fresh read after claiming is not a remote atomic fence: the provider
 adapter must fence the exact activation through the reviewed STOP control
 protocol before calling OFF. Concurrent deliberate ON is forbidden until the
 exclusive restoration operation has settled.
+The shared remote fence must cover **all** operator OFF and STOP/START operations,
+not just concurrent watchdog jobs. STOP currently triggers on its first qualified
+observation; there is no debounce or planned-maintenance exemption. Until that
+shared fence is implemented and reviewed, planned operator STOP/START or OFF
+requires disabling the watchdog schedule and proving all its executions settled
+first. Pausing scheduling alone does not stop an already running job. A new ON
+requires a fresh activation binding; do not erase a held action to resume it.
 
 ## Honest timing and independent observation
 
@@ -47,6 +62,15 @@ no automatic task retries; timeout is an unknown outcome requiring readback,
 not proof that an effect did not happen. Scheduler acknowledgement only proves
 execution submission, not watchdog completion. Provider outages, scheduler
 delay and unavailable permissions have no finite bound promised here.
+
+The fixed 900-second threshold has **not** been qualified against the runtime
+health producer. A 900-second cycle plus 120-second reconciliation and a
+120-second poll can exceed it; configured cycles and classified provider backoff
+can reach 3600 seconds. The runtime contract must supply reviewed liveness proof
+compatible with this threshold, or the rollout owner must explicitly accept
+automatic OFF during a legitimate long cycle/backoff. Do not relabel a poll as
+a completed healthy cycle or silently widen the threshold. This remains an
+integration gate, not an invented producer guarantee.
 
 The watchdog writes separate started and finished heartbeats with run identity,
 timestamps and outcome. A fresh started heartbeat cannot hide a hung action.

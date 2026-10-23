@@ -58,7 +58,9 @@ export type Ports = {
     mode: "first" | "reconcile",
   ): Promise<boolean>;
   /** Independent monitoring/log alert, not an unjournalled public-comment POST. */
-  alert(reason: string): Promise<void>;
+  // Emit each run for monitoring; incidentKey deduplicates the downstream issue
+  // surface without suppressing repeated unresolved-health observations.
+  alert(reason: string, incidentKey?: string): Promise<void>;
 };
 export const staleAfterMs = 15 * 60_000;
 export const maxObservationAgeMs = 120_000;
@@ -148,7 +150,8 @@ export async function tick(ports: Ports, expected: Binding, runId: string): Prom
     !["none", "intent", "sent"].includes(stored.value.notification) ||
     (stored.value.phase === "off-intent" &&
       (!stored.value.incident?.id || !stored.value.incident.runId)) ||
-    (stored.value.phase === "manual" && !stored.value.receipt)
+    (stored.value.phase === "manual" &&
+      (typeof stored.value.receipt !== "string" || !stored.value.receipt))
   ) {
     await ports.alert("Unknown watchdog record/binding; no writes");
     return finish("binding-hold");
@@ -206,7 +209,13 @@ export async function tick(ports: Ports, expected: Binding, runId: string): Prom
     }
     return notify();
   }
-  if (value.phase === "held") return notify();
+  if (value.phase === "held") {
+    await ports.alert(
+      "Unresolved post-claim hold; operator reconciliation required",
+      `${expected.activation}:post-claim-hold`,
+    );
+    return notify();
+  }
   if (value.phase === "off-intent") {
     const execution = await ports.execution(value.incident!.runId);
     if (execution === "running") return finish("off-in-progress");
@@ -232,28 +241,22 @@ export async function tick(ports: Ports, expected: Binding, runId: string): Prom
   try {
     observation = await ports.read();
   } catch {
-    if (
-      !(await save({
-        ...value,
-        phase: "held",
-        reason: "Health read unavailable; no restoration proof",
-      }))
-    )
-      return finish("cas-lost");
-    return notify();
+    // No action has been claimed. A read failure is not an unknown effect and
+    // must not permanently disarm observation for this activation.
+    await ports.alert(
+      "Health read unavailable; retry observation next run, no OFF executed",
+      `${expected.activation}:pre-claim-health`,
+    );
+    return finish("observation-unknown");
   }
   const trigger = classify(observation, expected, ports.now());
   if (trigger === "healthy" || trigger === "manual") return finish(trigger);
   if (trigger === "unknown") {
-    if (
-      !(await save({
-        ...value,
-        phase: "held",
-        reason: "Unknown health/write state or policy drift; no automatic restore",
-      }))
-    )
-      return finish("cas-lost");
-    return notify();
+    await ports.alert(
+      "Unknown health/write state or policy drift; retry observation next run, no OFF executed",
+      `${expected.activation}:pre-claim-health`,
+    );
+    return finish("observation-unknown");
   }
   const incident = {
     id: `${expected.activation}:${runId}`,

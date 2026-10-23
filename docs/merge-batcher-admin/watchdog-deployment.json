@@ -12,13 +12,20 @@
         "serviceAccount": "${WATCHDOG_SERVICE_ACCOUNT_EMAIL}",
         "maxRetries": 0,
         "timeout": "3600s",
-        "containers": [{
-          "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
-          "command": ["bun"],
-          "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "run"],
-          "env": [{ "name": "WATCHDOG_BINDING_OBJECT", "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}" }],
-          "resources": { "limits": { "cpu": "1", "memory": "1Gi" } }
-        }]
+        "containers": [
+          {
+            "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
+            "command": ["bun"],
+            "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "run"],
+            "env": [
+              {
+                "name": "WATCHDOG_BINDING_OBJECT",
+                "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}"
+              }
+            ],
+            "resources": { "limits": { "cpu": "1", "memory": "1Gi" } }
+          }
+        ]
       }
     }
   },
@@ -33,7 +40,10 @@
       "httpMethod": "POST",
       "headers": { "Content-Type": "application/json" },
       "body": "e30=",
-      "oauthToken": { "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}", "scope": "https://www.googleapis.com/auth/cloud-platform" }
+      "oauthToken": {
+        "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}",
+        "scope": "https://www.googleapis.com/auth/cloud-platform"
+      }
     }
   },
   "observerJob": {
@@ -45,13 +55,20 @@
         "serviceAccount": "${OBSERVER_SERVICE_ACCOUNT_EMAIL}",
         "maxRetries": 0,
         "timeout": "120s",
-        "containers": [{
-          "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
-          "command": ["bun"],
-          "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "observe"],
-          "env": [{ "name": "WATCHDOG_BINDING_OBJECT", "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}" }],
-          "resources": { "limits": { "cpu": "1", "memory": "512Mi" } }
-        }]
+        "containers": [
+          {
+            "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
+            "command": ["bun"],
+            "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "observe"],
+            "env": [
+              {
+                "name": "WATCHDOG_BINDING_OBJECT",
+                "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}"
+              }
+            ],
+            "resources": { "limits": { "cpu": "1", "memory": "512Mi" } }
+          }
+        ]
       }
     }
   },
@@ -66,7 +83,10 @@
       "httpMethod": "POST",
       "headers": { "Content-Type": "application/json" },
       "body": "e30=",
-      "oauthToken": { "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}", "scope": "https://www.googleapis.com/auth/cloud-platform" }
+      "oauthToken": {
+        "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}",
+        "scope": "https://www.googleapis.com/auth/cloud-platform"
+      }
     }
   }
 }

@@ -37,6 +37,7 @@ function fixture() {
   const messages = new Map<string, string>();
   const heartbeat: Heartbeat[] = [];
   const alerts: string[] = [];
+  const alertKeys: (string | undefined)[] = [];
   let providerExecution: "running" | "terminal" | "unknown" = "terminal";
   let reconciled: string | null = null;
   const ports: Ports = {
@@ -71,8 +72,9 @@ function fixture() {
       messages.set(id, reason);
       return true;
     },
-    alert: async (reason) => {
+    alert: async (reason, incidentKey) => {
       alerts.push(reason);
+      alertKeys.push(incidentKey);
     },
   };
   return {
@@ -81,6 +83,7 @@ function fixture() {
     heartbeat,
     messages,
     alerts,
+    alertKeys,
     observation: () => observation,
     patch: (patch: Partial<Observation>) => {
       observation = { ...observation, ...patch };
@@ -156,21 +159,34 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     { activatedAt: NaN },
     { revision: "" },
     { binding: { ...binding, activation: "another-activation" } },
-  ])("unknown health/identity/policy holds and alerts: %j", async (patch) => {
+  ])("pre-claim uncertainty alerts but re-observes and recovers: %j", async (patch) => {
     const f = fixture();
+    const original = structuredClone(f.observation());
     f.patch({ stopped: true, ...patch });
-    expect(await tick(f.ports, binding, "r1")).toBe("held");
-    expect(await tick(f.ports, binding, "r2")).toBe("held");
+    expect(await tick(f.ports, binding, "r1")).toBe("observation-unknown");
+    expect(await tick(f.ports, binding, "r2")).toBe("observation-unknown");
     expect(f.calls.off).toBe(0);
-    expect(f.messages.size).toBe(1);
+    expect(f.stored()!.value.phase).toBe("watching");
+    expect(f.stored()!.value.incident).toBeNull();
+    expect(f.messages.size).toBe(0);
+    expect(f.alerts.length).toBe(2);
+    expect(new Set(f.alertKeys).size).toBe(1);
+    f.patch({ ...original, crashLoop: true });
+    expect(await tick(f.ports, binding, "r3")).toBe("manual");
+    expect(f.calls.off).toBe(1);
   });
   test("health read outage alerts, does not infer a healthy/empty ledger", async () => {
     const f = fixture();
+    const read = f.ports.read;
     f.ports.read = async () => {
       throw Error("unavailable");
     };
-    expect(await tick(f.ports, binding, "r")).toBe("held");
+    expect(await tick(f.ports, binding, "r")).toBe("observation-unknown");
     expect(f.calls.off).toBe(0);
+    f.ports.read = read;
+    f.patch({ stopped: true });
+    expect(await tick(f.ports, binding, "recovered")).toBe("manual");
+    expect(f.calls.off).toBe(1);
   });
   test("CAS race permits only one OFF claimant", async () => {
     const f = fixture();
@@ -190,6 +206,71 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     };
     expect(await tick(f.ports, binding, "a")).toBe("held");
     expect(f.calls.off).toBe(0);
+    const reads = f.calls.read;
+    expect(await tick(f.ports, binding, "b")).toBe("held");
+    expect(await tick(f.ports, binding, "c")).toBe("held");
+    expect(f.calls.read).toBe(reads);
+    expect(f.alerts.length).toBe(2);
+    expect(f.messages.size).toBe(1);
+  });
+  test("observation age alone rejects otherwise healthy consistent timestamps", async () => {
+    const f = fixture();
+    f.patch({ observedAt: f.ports.now() - 120_001, lastHealthyAt: f.ports.now() - 120_001 });
+    expect(await tick(f.ports, binding, "a")).toBe("observation-unknown");
+    expect(f.calls.off).toBe(0);
+  });
+  test.each([99_999, 1_999_500])(
+    "completed health must lie within activation/observation bounds: %d",
+    async (lastHealthyAt) => {
+      const f = fixture();
+      f.patch({ observedAt: 1_999_000, lastHealthyAt, stopped: true });
+      expect(await tick(f.ports, binding, "a")).toBe("observation-unknown");
+      expect(f.calls.off).toBe(0);
+    },
+  );
+  test.each([
+    { phase: "off-intent", incident: null },
+    { phase: "off-intent", incident: { id: "incident", runId: "" } },
+    { phase: "manual", receipt: "" },
+    { phase: "manual", receipt: 123 },
+  ])("malformed action/manual records cannot authorize effects: %j", async (patch) => {
+    const f = fixture();
+    await tick(f.ports, binding, "initialize");
+    const stored = structuredClone(f.stored()!);
+    f.ports.load = async () =>
+      ({ ...stored, value: { ...stored.value, ...patch } }) as unknown as Stored;
+    const cas = f.calls.cas;
+    expect(await tick(f.ports, binding, "a")).toBe("binding-hold");
+    expect(f.calls.off).toBe(0);
+    expect(f.calls.reconcile).toBe(0);
+    expect(f.calls.cas).toBe(cas);
+    expect(f.messages.size).toBe(0);
+  });
+  test("post-claim trigger change holds even when revision is unchanged", async () => {
+    const f = fixture();
+    f.patch({ stopped: true });
+    const read = f.ports.read;
+    f.ports.read = async () => {
+      const value = await read();
+      if (f.calls.read > 1) value.stopped = false;
+      return value;
+    };
+    expect(await tick(f.ports, binding, "a")).toBe("held");
+    expect(f.calls.off).toBe(0);
+  });
+  test("empty OFF receipt preserves intent; later ticks never replay it", async () => {
+    const f = fixture();
+    f.patch({ stopped: true });
+    f.ports.off = async () => {
+      f.calls.off++;
+      return "";
+    };
+    await expect(tick(f.ports, binding, "a")).rejects.toThrow("no retained receipt");
+    expect(f.stored()!.value.phase).toBe("off-intent");
+    expect(await tick(f.ports, binding, "b")).toBe("held");
+    expect(await tick(f.ports, binding, "c")).toBe("held");
+    expect(f.calls.off).toBe(1);
+    expect(f.calls.reconcile).toBe(1);
   });
   test("ambiguous OFF restart only reconciles terminal execution; never retries", async () => {
     const f = fixture();
