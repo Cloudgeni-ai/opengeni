@@ -956,7 +956,7 @@ test("a Site row keeps its conversations nested whichever session is selected", 
   for (const title of usageConversations) await railConversation(title).waitFor();
 }, 30_000);
 
-test("a Site a chat made sits in that chat's project, and opening a Site moves its row up", async () => {
+test("a Site a chat made sits in that chat's project, and opening a Site keeps its place", async () => {
   await page.goto(`${url}?scenario=sites&theme=light`);
   // "Pricing page copy" made it in Website redesign; nobody has asked it
   // anything, so the row has no count and nothing to disclose.
@@ -977,13 +977,15 @@ test("a Site a chat made sits in that chat's project, and opening a Site moves i
     (id) => window.sessionSidebarQa.siteOpens.includes(id),
     checklistSiteId,
   );
-  // Opening it is activity: it now leads Default.
-  await page.waitForFunction(() => {
-    const folder = document.querySelector('[role="group"][aria-label="Default"]');
-    const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
-    return first?.textContent?.includes("Launch checklist") === true;
-  });
+  // Opening it is not activity, as opening a chat is not: it keeps its place.
   expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
+  expect(
+    await page.evaluate(() => {
+      const folder = document.querySelector('[role="group"][aria-label="Default"]');
+      const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
+      return first?.textContent?.includes("Launch checklist") === true;
+    }),
+  ).toBe(false);
   await capture("site-row-opened");
 }, 30_000);
 

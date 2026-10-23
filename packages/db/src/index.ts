@@ -33434,30 +33434,35 @@ async function sessionListTotalsInScope(
       -- isolates the workspace), else the creation-time label. A row without
       -- conversations needs a live Site the viewer can see. Activity is the
       -- latest of its conversations, its newest published version (creation
-      -- is version 1) and this person opening it. Archive, restore, rollback
-      -- and other updates to the Site's record are not activity, so they
-      -- never lift a Site for everyone. One extra row reports truncation.
+      -- is version 1) and the chats that published its versions (the chat
+      -- that created it and any used to edit it), as far as this viewer can
+      -- see them. Opening a Site is not activity, as opening a chat is not;
+      -- an open only lists it. Archive, restore, rollback and other updates
+      -- to the Site's record are not activity either, so they never lift a
+      -- Site for everyone. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, opened.opened_at) as "updatedAt",
+        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at
+            order by version.revision desc limit 1) as published_at,
+          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
+            join ${schema.sessions} source
+              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
+            join ${schema.sessions} editor
+              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
+            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
+            as edited_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
             or artifact.owner_subject_id = ${options.subjectId})
       ) site on true
-      left join lateral (
-        select opened.opened_at from ${schema.siteOpens} opened
-        where opened.workspace_id = ${workspaceId} and opened.subject_id = ${options.subjectId}
-          and opened.site_id = key.site_id
-      ) opened on true
       where (key.conversations > 0 or site.status = 'active')
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
       order by 5 desc, 1, 2

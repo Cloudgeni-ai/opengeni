@@ -82,11 +82,14 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open. A row's activity is the latest of its conversations, its
-  newest published version (creation is the first) and that open, so Sites
-  in use rise and untouched ones sort down like old sessions, without being
-  hidden. Archiving, restoring, rolling back or any other write to the Site's
-  record is not activity. Opens are personal and never visible to anyone
+  latest open, which only lists the Site. A row's activity is the latest of
+  its conversations, its newest published version (creation is the first)
+  and the chats that published its versions (the one that created it and any
+  used to edit it), as far as the viewer can see them. So Sites in use rise
+  and untouched ones sort down like old sessions, without being hidden.
+  Opening a Site is not activity, just as opening a chat is not. Archiving,
+  restoring, rolling back or any other write to the Site's record is not
+  activity either. Opens are personal and never visible to anyone
   else; a Site page cannot record one. The console records one open per page
   (router history entry) that shows the Site view: not again when its client
   is replaced, only once a page that loaded hidden is shown, and not again

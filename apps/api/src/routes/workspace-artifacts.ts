@@ -235,8 +235,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     }
   });
 
-  // Opening a Site counts as this person's activity on its sidebar row. It is
-  // personal, needs only read access, and a Site page cannot record it.
+  // Opening a Site lists it in this person's sidebar; it is not activity and
+  // never moves the row. It is personal, needs only read access, and a Site
+  // page cannot record it.
   app.post(`${base}/:artifactId/opened`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");

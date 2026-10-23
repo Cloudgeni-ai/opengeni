@@ -195,7 +195,6 @@ const createdSites: Array<{
   updatedAt: string;
 }> = [];
 /** This person's latest open of each Site, which counts as its activity. */
-const siteOpenedAt = new Map<string, string>();
 if (previewParameters.get("scenario") === "sites") {
   const siteConversation = (
     number: number,
@@ -521,9 +520,6 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
       activeWork: 0,
     });
   }
-  const later = (a: string, b: string | undefined) => (b && b > a ? b : a);
-  for (const group of groups.values())
-    group.updatedAt = later(group.updatedAt, siteOpenedAt.get(group.siteId));
   const listed = new Set([...groups.values()].map((group) => group.siteId));
   if (!options.needsYouOnly && options.archiveStatus !== "archived")
     for (const created of createdSites) {
@@ -534,7 +530,8 @@ function previewSiteGroups(options: SessionListPageOptions): SiteConversationGro
         channelId: created.channelId,
         title: created.title,
         conversations: 0,
-        updatedAt: later(created.updatedAt, siteOpenedAt.get(created.siteId)),
+        // Opening a Site lists it but is not activity, so it never moves the row.
+        updatedAt: created.updatedAt,
         createdAt: created.updatedAt,
         total: 0,
         attention: 0,
@@ -714,10 +711,8 @@ if (previewParameters.get("scenario") === "sites") {
     }),
     {
       recordSiteOpened: async (_workspace: string, siteId: string) => {
-        const openedAt = new Date().toISOString();
-        siteOpenedAt.set(siteId, openedAt);
         evidence.siteOpens.push(siteId);
-        return { openedAt };
+        return { openedAt: new Date().toISOString() };
       },
       tools: {
         forWorkspace: () => ({
