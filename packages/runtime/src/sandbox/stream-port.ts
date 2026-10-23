@@ -35,6 +35,9 @@ export type ExposedPortEndpoint = {
    *  the root (`/`, the default); the selfhosted relay serves it at `/stream`
    *  (M8b). When set, buildStreamUrl uses it instead of the root. */
   path?: string;
+  /** A Connected Machine relay stream's exact channel; the viewer token is
+   *  bound to it (see MintStreamTokenInput.relayChannel). */
+  relayChannel?: { workspaceId: string; agentId: string; channelId: string };
   [key: string]: unknown;
 };
 
@@ -319,6 +322,7 @@ export async function exposeStreamPort(
     nowSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
+    ...(endpoint.relayChannel ? { relayChannel: endpoint.relayChannel } : {}),
   });
 
   return {

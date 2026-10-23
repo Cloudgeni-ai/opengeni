@@ -2240,8 +2240,15 @@ export function registerBrowserSessionRoutes(
                     "stream authority is unavailable for this session",
                   );
                 }
+                // The machine may be enrolled in another workspace than this
+                // chat; the token is for its exact relay channel.
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
+                  relayChannel: {
+                    workspaceId: relayed.channel.workspaceId,
+                    agentId: relayed.channel.agentId,
+                    channelId: relayed.channel.channelId,
+                  },
                   sessionId: record.sourceSessionId,
                   viewerId: grantId,
                   leaseEpoch: record.tokenGeneration,
