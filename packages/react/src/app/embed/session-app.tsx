@@ -32,7 +32,7 @@ import { CreditRequiredGate } from "../components/credit-required-gate";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
-import { AppHostProvider, type AppHost } from "../lib/app-host";
+import { AppHostProvider, type AppHost, type SessionViewState } from "../lib/app-host";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
@@ -87,6 +87,13 @@ export type SessionAppProps = Readonly<{
   sessionId?: string | null | undefined;
   /** Called when the person opens another chat (null: the new-chat page). */
   onSessionChange?: ((sessionId: string | null) => void) | undefined;
+  /**
+   * Called with the open chat's status and loaded events each time they
+   * change, from the stream the chat already reads, so the host can follow its
+   * progress (show that the agent is working, refresh what a turn changed)
+   * without opening a second one.
+   */
+  onSessionState?: ((state: SessionViewState) => void) | undefined;
   /**
    * Which features show. `embed` (default) is the chat list, chats and
    * composer; `companion` (first-party side panes) adds the session panel and
@@ -506,6 +513,7 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
     [api, editableArtifact, messageContext, navigation, pdfPreview],
   );
