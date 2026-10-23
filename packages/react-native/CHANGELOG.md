@@ -1,5 +1,16 @@
 # @opengeni/react-native
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [b3a641c]
+- Updated dependencies [2d6484c]
+- Updated dependencies [c4d18a1]
+  - @opengeni/react@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/contracts@5.2.0
+
 ## 5.1.2
 
 ### Patch Changes
