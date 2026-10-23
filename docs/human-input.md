@@ -259,8 +259,30 @@ lineage poll covers pages without hints. The tree read stops at 200
 descendants and 5 levels, so the `Needs you` count can include a child the
 card does not show; the child's own page still has its request.
 Settlement wakes the child's frozen turn and returns the structured result to
-that original child tool call; the parent agent receives only the child's later
-ordinary terminal result, not a copy of the human answer.
+that original child tool call.
+
+The parent agent may answer the same request. When child lifecycle notices are
+enabled (`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`), the child's
+`requires_action` settlement sends the parent a `child_requires_action` update
+carrying each request's compact questions (id, kind, prompt, required, option
+ids and labels; secret questions carry no options or secret spec, and a Skill
+review question is marked `humanOnly`), so the parent can call
+`session_human_input_respond` without reading the child's history. That update
+wakes an idle parent that has an active goal, a held wait, or no goal at all. A
+mid-turn parent receives it at its next claim, and a waiting parent's
+`wait_for_input` ends.
+
+The first accepted answer wins under the request row lock. A later human
+submission returns `200` with the winning event. A later agent call returns
+`outcome: "unchanged"` with `facts.alreadyAnswered: true`, `facts.answeredBy`
+(`person | api | agent | you | system`) and a warning not to answer again.
+Either answer refreshes the human's card, which then disappears, and the parent
+gets a deferred `child_requires_action_resolved` update. The
+`user.humanInputResponse` event records `respondedByKind`
+(`human | api | agent_attempt | system`), and the conversation says "Agent
+answered" for an agent's answer. Agents are told to answer a child's question
+only from their task context and to leave questions only a person can answer
+(decisions, preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary
 

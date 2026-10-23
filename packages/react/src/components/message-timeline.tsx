@@ -4489,7 +4489,9 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
   const settledLabel =
     item.response.outcome === "answered"
-      ? t("messageTimeline.youAnswered")
+      ? item.answeredByAgent
+        ? t("messageTimeline.agentAnswered")
+        : t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
         ? t("messageTimeline.skipped")
         : item.response.outcome === "expired"
