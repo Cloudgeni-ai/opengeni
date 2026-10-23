@@ -127,6 +127,10 @@ function SupportAgentPanelView({
             sessionId={sessionId}
             toolRegistry={supportToolRegistry}
             renderMessageText={renderNorthstarMessage}
+            // The panel is text-only; its relay forwards only the chat routes.
+            attachments={false}
+            voiceInput={false}
+            renderInteractiveBlock={false}
             className="northstar-agent-conversation"
           />
         </div>

@@ -101,7 +101,6 @@ describe("session proxy real PostgreSQL", () => {
       const actor = service.asUser(user, { source: SOURCE });
       const handler = createSessionProxyHandler(service, {
         resolve: () => ({ workspaceId: workspace.id, user, source: SOURCE }),
-        artifacts: true,
       });
       const browser = new OpenGeniClient({
         baseUrl: PRODUCT,
