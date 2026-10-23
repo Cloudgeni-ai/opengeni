@@ -8,9 +8,11 @@ or the 720-second E2E deadline.
 `e2e-shard-profile.json` records completed CI file durations. Its evidence names
 the exact source and jobs; a duration includes every browser engine and child
 startup/teardown. Do not use a killed file's partial time as its full cost. The
-initial startup weight comes from an earlier successful job with identical test
-content, not the later aggregate timeout. These are planning observations, not
-performance guarantees or cross-source efficacy claims.
+current weights pool every successful shard job on main with identical file
+content, dependency lock, Bun pin and browser runner; each file's weight is its
+lower-median observed interval, and `fileSources` names the job that observed
+it. These are planning observations, not performance guarantees or
+cross-source efficacy claims.
 
 The profile is used only when its complete discovered file set, per-file hashes,
 platform/architecture, Bun runtime/pin, dependency lock and browser runner match.
