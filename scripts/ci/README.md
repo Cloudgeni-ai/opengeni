@@ -14,10 +14,14 @@ lower-median observed interval, and `fileSources` names the job that observed
 it. These are planning observations, not performance guarantees or
 cross-source efficacy claims.
 
-The profile is used only when its complete discovered file set, per-file hashes,
-platform/architecture, Bun runtime/pin, dependency lock and browser runner match.
-A missing, malformed or stale profile falls back to deterministic source-byte
-weights and reports the reason. Integration retains its existing service-image
+The profile is used only when its platform/architecture, Bun runtime/pin,
+dependency lock and browser runner match; a missing, malformed or
+environment-stale profile falls back to deterministic source-byte weights and
+reports the reason. Test files are fenced one by one: a file whose content
+changed keeps its last measured time, a new file is estimated from its size at
+the profile's median milliseconds per byte, and a removed file is ignored, so
+ordinary test edits never discard every other file's timing. Refresh the
+profile when many files have drifted. Integration retains its existing service-image
 fence. Neither profile is execution or release authority.
 
 To refresh, retain the CI file profiles (or timestamped job logs), record only
