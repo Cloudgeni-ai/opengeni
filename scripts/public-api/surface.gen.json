@@ -2498,6 +2498,7 @@
         "BrowserRecordingSaveRequest"
       ],
       "response": [
+        "BrowserRecordingSaveProgress",
         "BrowserRecordingSaveResponse"
       ]
     },
@@ -11863,6 +11864,17 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"denied\\\"\",\"\\\"granted\\\"\",\"\\\"prompt\\\"\"]"
+      }
+    },
+    "BrowserRecordingSaveProgress": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.recording": "ref(BrowserRecordingSummary)!",
+        "$.retryAfterMs": "integer!",
+        "$.state": "const!=[\"\\\"uploading\\\"\"]"
       }
     },
     "BrowserRecordingSaveRequest": {
@@ -31377,6 +31389,7 @@
       "BrowserOpenTargetRequest": "type",
       "BrowserPermission": "type",
       "BrowserPermissionSetting": "type",
+      "BrowserRecordingSaveProgress": "type",
       "BrowserRecordingSaveRequest": "type",
       "BrowserRecordingSaveResponse": "type",
       "BrowserRecordingSummary": "type",
@@ -33696,6 +33709,7 @@
       "BrowserOpenTargetRequest": "type",
       "BrowserPermission": "type",
       "BrowserPermissionSetting": "type",
+      "BrowserRecordingSaveProgress": "type",
       "BrowserRecordingSaveRequest": "type",
       "BrowserRecordingSaveResponse": "type",
       "BrowserRecordingSummary": "type",
