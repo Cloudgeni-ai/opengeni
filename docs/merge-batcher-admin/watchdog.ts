@@ -64,6 +64,7 @@ export type Ports = {
 };
 export const staleAfterMs = 15 * 60_000;
 export const maxObservationAgeMs = 120_000;
+export const missedCompletionAfterMs = 20 * 60_000;
 
 function same(a: Binding, b: Binding): boolean {
   return (
@@ -318,6 +319,6 @@ export function missedRuns(lastFinishedAt: number | null, enabledAt: number, now
     enabledAt > now ||
     (lastFinishedAt !== null &&
       (!Number.isFinite(lastFinishedAt) || lastFinishedAt > now || lastFinishedAt < enabledAt)) ||
-    now - (lastFinishedAt ?? enabledAt) >= staleAfterMs
+    now - (lastFinishedAt ?? enabledAt) >= missedCompletionAfterMs
   );
 }

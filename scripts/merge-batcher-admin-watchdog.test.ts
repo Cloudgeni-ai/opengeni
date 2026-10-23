@@ -5,6 +5,7 @@ import {
   missedRuns,
   tick,
   staleAfterMs,
+  missedCompletionAfterMs,
   type Binding,
   type Observation,
   type Ports,
@@ -356,15 +357,12 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
   test("prepared provider jobs are same-image separate identities with no task retry", () => {
     expect(deployment.status).toContain("not-deployable");
     const worker = deployment.watchdogJob.template.template;
-    const observer = deployment.observerJob.template.template;
-    expect(worker.containers[0]!.image).toBe(observer.containers[0]!.image);
-    expect(worker.serviceAccount).not.toBe(observer.serviceAccount);
+    expect(worker.containers[0]!.image).toBe("${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}");
     expect(worker.maxRetries).toBe(0);
-    expect(observer.maxRetries).toBe(0);
     expect(deployment.watchdogSchedule.schedule).toBe("*/5 * * * *");
     expect(deployment.watchdogSchedule.retryConfig.retryCount).toBe(0);
     expect(deployment.watchdogSchedule.httpTarget.uri).toEndWith("/batcher-watchdog:run");
-    expect(deployment.observerSchedule.httpTarget.uri).toEndWith("/batcher-watchdog-observer:run");
+    expect(deployment.independentObserver.missingCompletionThresholdSeconds).toBe(1200);
   });
   test("new activation cannot reuse old watchdog state", async () => {
     const f = fixture();
@@ -380,9 +378,10 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     };
     await expect(tick(f.ports, binding, "a")).rejects.toThrow();
     expect(f.calls.off).toBe(0);
-    expect(missedRuns(null, 0, staleAfterMs)).toBe(true);
+    expect(missedRuns(null, 0, staleAfterMs)).toBe(false);
+    expect(missedRuns(null, 0, missedCompletionAfterMs)).toBe(true);
     expect(missedRuns(100, 0, 101)).toBe(false);
-    expect(missedRuns(100, 0, 100 + staleAfterMs)).toBe(true);
+    expect(missedRuns(100, 0, 100 + missedCompletionAfterMs)).toBe(true);
     expect(missedRuns(100, 0, 99)).toBe(true);
   });
 });

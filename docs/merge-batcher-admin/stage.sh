@@ -11,6 +11,11 @@
   PLAN="$ADMIN_DIR/plan"
   source "$BATCHER_ADMIN_CODE/read.sh"
   action=${2:?Action required}
+  checkpoint() {
+    if [ -n "${BATCHER_ADMIN_JOURNAL_CONFIG:-}" ]; then
+      bun "$BATCHER_ADMIN_CODE/watchdog-journal.ts"
+    fi
+  }
   verify_phase() {
     local current
     current=$(batcher_snapshot)
@@ -110,12 +115,17 @@
   printf '%s\n' "$action" > "$attempt/intent"
   cp "$prepared/request-meta.json" "$attempt/request-meta.json"
   if [ -n "$payload" ]; then cp "$prepared/request.json" "$attempt/request.json"; fi
+  # Persist intent and exact payload outside ephemeral job storage BEFORE effect.
+  # Failed/unknown journal CAS must prevent this provider write.
+  checkpoint
   args=(api --method "$method" "$endpoint")
   if [ -n "$payload" ]; then args+=(--input "$attempt/request.json"); fi
   if ! gh "${args[@]}" > "$attempt/response.json" 2> "$attempt/error.log"; then
+    checkpoint
     echo "Write failed or outcome uncertain; retained $attempt. Stop writers; reconcile by readback. A 422 must not be repaired by dropping policy fields." >&2
     exit 1
   fi
+  checkpoint
   if [ "$method" = POST ]; then
     reconcile_created "$payload"
   elif [ "$after" = restored ]; then
@@ -124,4 +134,5 @@
     verify_phase "$after"
   fi
   touch "$attempt/verified"
+  checkpoint
 )

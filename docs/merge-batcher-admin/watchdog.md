@@ -5,7 +5,9 @@ the **same exact reviewed image digest**, invoked by Cloud Scheduler every five
 minutes. It is not a child of the batcher process and needs no agent session or
 connected VM. The prepared resource payloads are in `watchdog-deployment.json`;
 placeholders and the explicit not-deployable status are intentional. This slice
-implements portable policy only. Provider adapters, entrypoint/image closure,
+contains portable policy, executable provider/storage adapters and entrypoint.
+The authoritative core bridge is still pending; the adapters are not live-qualified.
+Core bridge and entrypoint/image closure,
 credential bindings and the live kill drill require paired independent review
 and explicit rollout-owner go before any resource creation or rules writes.
 
@@ -27,7 +29,10 @@ per-run monitoring signal. After a claim, `held` means disarmed pending operator
 reconciliation: never reset/re-arm it automatically or replay an unknown effect.
 Each subsequent held run emits an alert even after its incident comment exists.
 
-An action claim uses remote object-generation CAS in a dedicated state bucket.
+Job bookkeeping uses remote object-generation CAS in a dedicated state bucket.
+Before OFF, the core bridge must also claim the incident and set the stop fence
+in the **same Git state.json CAS** used by writers and operators. The object claim
+is not a substitute for that authoritative fence.
 Cloud Run taskCount/parallelism do not serialize separate executions; the CAS
 claim does. A claim is never stolen because a timer expired. An existing action
 first checks its actual Cloud Run execution: running means leave it alone;
@@ -63,32 +68,53 @@ not proof that an effect did not happen. Scheduler acknowledgement only proves
 execution submission, not watchdog completion. Provider outages, scheduler
 delay and unavailable permissions have no finite bound promised here.
 
-The fixed 900-second threshold has **not** been qualified against the runtime
-health producer. A 900-second cycle plus 120-second reconciliation and a
+The accepted runtime-health/v1 contract keeps the completed-cycle deadline at
+900 seconds, not heartbeat or in-cycle activity. It has **not** yet been qualified
+against the implemented producer. A 900-second cycle plus 120-second reconciliation and a
 120-second poll can exceed it; configured cycles and classified provider backoff
-can reach 3600 seconds. The runtime contract must supply reviewed liveness proof
-compatible with this threshold, or the rollout owner must explicitly accept
-automatic OFF during a legitimate long cycle/backoff. Do not relabel a poll as
+can reach 3600 seconds. Therefore this contract can trigger OFF during a legitimate
+long cycle/backoff; the paired tests and controlled drill must expose this behavior,
+not claim all allowed runtime timing fits beneath the deadline. Do not relabel a poll as
 a completed healthy cycle or silently widen the threshold. This remains an
 integration gate, not an invented producer guarantee.
 
-The watchdog writes separate started and finished heartbeats with run identity,
-timestamps and outcome. A fresh started heartbeat cannot hide a hung action.
-A second job on a separately scheduled tick reads the **finished** heartbeat and
-Cloud Run execution state, posting a deterministic incident marker to the
-existing configured GitHub issue/PR surface when no completion exists for
-15 minutes, or when the watchdog reports a hold. A long legitimate drain is
-reported as in-progress, not falsely called a dead process. The observer has no
-STOP or rules-write authority. Notification retries reconcile the same marker;
-a lost response never licenses a duplicate POST.
+The entrypoint emits exactly one final `batcher_watchdog_completed` event with
+schema `batcher-watchdog/v1`, execution/job/source identity, checked/completed time,
+activation, state SHA, incident ID, result and optional receipt digest. Progress
+events are not completion. The independent GitHub scheduled sweep (runtime-owner
+implementation, nominally every ten minutes) requires both a terminal provider
+execution and its matching bound final event. It alerts after twenty minutes
+without a match, or for held/error outcomes, on a fixed configured incident
+thread. Inaccessible logs/incomplete pagination are unknown, not healthy. The
+watchdog creates no new thread; absent destination fails and retains logs.
+The sweep has read-only provider access and comment-only GitHub access; it cannot
+STOP or restore rules. Notification retries reconcile the same marker and never
+blindly repeat POST. No agent or VM is a runtime dependency.
 
-Neither job can detect itself while dead. Before enable, configure an independent
-Cloud Monitoring absence alert for observer completions to an approved existing
-notification channel, and test delivery. No channel ID is guessed here. This is
-independent of both job processes, not independent of a total GCP outage. A missed
-watchdog/observer alert is not a reason to automatically turn the batcher ON.
+The watchdog cannot detect itself while dead. The sweep's job/log read binding
+and configured thread must be qualified before enable. GitHub scheduling or
+availability can delay that independent alert; no missing-heartbeat guarantee
+is claimed during a GitHub outage. No channel or thread ID is guessed here.
+A missed-watchdog alert is never a reason to automatically turn the batcher ON.
 
 ## Provider and image boundary required from runtime owner
+
+The implemented entrypoint is `bun docs/merge-batcher-admin/watchdog-main.ts run`.
+It reads `WATCHDOG_CONFIG_BUCKET`, `WATCHDOG_CONFIG_OBJECT` and the immutable
+`WATCHDOG_CONFIG_GENERATION`, then verifies its actual Cloud Run execution/job/image
+before running policy. `RuntimeConfig` in `watchdog-provider.ts` defines the
+configuration; it is not generated from ambient credentials or an old activation.
+
+The runtime-owned, source-digest-pinned bridge exports
+`createWatchdogBridge(config, stateToken)` and implements `CoreBridge`:
+`observe`, `claimStop`, `verifyClaim` and `verifyOffReceipt`. `observe.revision`
+is the full stable Git state SHA. `claimStop` must set the actual shared Git fence,
+not return a synthetic token. `verifyOffReceipt` must freshly bind current
+reconciliation to that incident so an old same-image drain proof cannot qualify.
+These are adapter interfaces for the proposed runtime-health/v1 contract, not a
+claim that the runtime module already supplies these exports. Until its exact
+implementation pin is paired and reviewed, startup must fail rather than use a
+fake bridge. State objects are keyed by the complete activation binding.
 
 The producer must supply a reviewed source pin and authoritative durable read:
 activation/control epoch, activated-at, last completed healthy cycle with proof,
@@ -97,21 +123,25 @@ how it is read when the service is manual0 or unreachable; old logs and ephemera
 checkpoints are not that contract. The adapter validates a complete current
 rules inventory against the saved plan before returning `applied` or `manual`.
 
-The common image must package the policy entrypoint, a pinned provider adapter,
+The common image must package the entrypoint, pinned core bridge and provider adapters,
 the reviewed OFF bundle and its five bound operator files plus required
 `bun`, `bash`, `gh`, `jq` and Git tools. The current retained operator credential
-helper requires a static credential file: it must gain reviewed workload-identity
-support for this job, not mount a broad administrator key as a shortcut.
+helper requires a static credential file: `watchdog-operator-auth.ts` supplies a
+metadata/workload-identity replacement for reviewed packaging as `cloud-auth.ts`.
+Its dependency and new operator hashes must be bound and reviewed; do not mount
+a broad administrator key as a shortcut.
 Saved plan/originals, operator hashes and receipts must be downloaded from an
 immutable generation-bound configuration object to each job's temporary
 directory. Durable action intents, reverse-stage receipts and notification
 intents cannot live only on ephemeral container storage. The adapter must retain
-them with generation CAS before/after effects. No live adapter is supplied or
-implicitly trusted by these pure policy tests.
+them with generation CAS before/after effects. The optional journal hook in the
+reviewed OFF/stage path uploads exact intent/payload before each rule mutation and
+response/verification after it; a failed CAS stops further writes. No unknown
+upload is retried. Live acceptance and paired core integration remain unqualified.
 
 ## Permissions and practical scope
 
-- Scheduler identity: `run.jobs.run` on exactly the watchdog and observer jobs,
+- Scheduler identity: `run.jobs.run` on exactly the watchdog job,
   not `run.jobs.runWithOverrides` or service mutation. Use OAuth for the Google
   Run API; neither job has a public HTTP endpoint.
 - Watchdog identity: read the bound service/executions and health state, invoke
@@ -121,15 +151,23 @@ implicitly trusted by these pure policy tests.
   No object deletion, runtime start path, unrelated service or project-wide
   administrator role is proposed. Exact IAM permissions must be derived from
   and tested against the final reviewed provider adapter.
-- Watchdog GitHub installation token: selected repository only; administration
+- Watchdog restoration App token: selected repository only; administration
   write for exact saved rules restoration, contents/actions read for reconciliation,
-  and issues write for the configured incident comment. GitHub cannot scope
-  administration write to only those rules or only restoration. The pinned
+  and issues write for the configured incident comment. A separate `stateApp`
+  token requests only contents **write** from the existing reviewed state-writer
+  capability and is passed only to the core CAS module. This avoids adding a new
+  App to the combined main/queue/state bypass merely to obtain state access.
+  Do not give the runtime App administration or pass the restoration token to
+  the fence module. GitHub cannot scope
+  contents-write to one ref, or administration write to only those rules or only restoration. The pinned
   reviewed code enforces that narrower semantic boundary; do not falsely claim
   the permission system does. The existing batcher App lacks administration
   permission: a separately approved credential/grant is a deployment prerequisite,
   not authority to mint one or broaden the runtime writer in this task.
-- Observer identity: heartbeat/config and execution reads plus the chosen
+  Access to an App signing key can mint permissions beyond a single reduced token;
+  the runtime permission boundary of each issued token and the reviewed software
+  boundary are distinct. E must authorize the state capability binding explicitly.
+- Sweep identity: execution/log reads plus the configured
   notification permission only. No GitHub administration, control-secret write
   or runtime update access. Monitoring alert delivery uses the separately
   approved channel; it must not depend on either job running.

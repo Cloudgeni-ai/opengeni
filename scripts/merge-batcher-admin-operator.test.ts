@@ -258,6 +258,27 @@ test("checked-in shell helpers parse; sourcing read-only definitions has no effe
   );
   expect(output).toBe("ok");
 });
+test("durable journal failure blocks rule effect and OFF child before submission", async () => {
+  const h = await harness();
+  try {
+    const missing = join(h.root, "missing-journal-config.json");
+    const result = await h.run("create-guard", "--apply-after-go", {
+      BATCHER_ADMIN_JOURNAL_CONFIG: missing,
+    });
+    expect(result.code).not.toBe(0);
+    expect(
+      (await h.events()).filter((event) =>
+        ["POST", "PUT", "DELETE", "STOP"].includes(event.method),
+      ),
+    ).toHaveLength(0);
+    expect(await Bun.file(join(h.root, "plan/create-guard-attempt/intent")).exists()).toBe(true);
+    const control = await offHarness(h);
+    expect((await control.run({ BATCHER_ADMIN_JOURNAL_CONFIG: missing })).code).not.toBe(0);
+    expect((await h.events()).filter((event) => event.method === "STOP")).toHaveLength(0);
+  } finally {
+    await h.close();
+  }
+});
 test("both App-JWT GETs use explicit Bearer, without logging the secret", async () => {
   const h = await harness();
   try {

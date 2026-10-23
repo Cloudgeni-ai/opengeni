@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rmdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
+import { checkpoint } from "./watchdog-journal";
 
 const controlFiles = [
   "control.ts",
@@ -233,6 +234,8 @@ function verifyReconciliation(result: Stop, receipt: Deployment, expected: Deplo
   return result.drainProven === false && result.idempotent === true;
 }
 async function command(args: string[], directory: string, name: string): Promise<string> {
+  const journal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+  if (journal) await checkpoint(journal);
   const child = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const [status, out, err] = await Promise.all([
     child.exited,
@@ -241,13 +244,14 @@ async function command(args: string[], directory: string, name: string): Promise
   ]);
   await writeFile(join(directory, `${name}.stdout`), out, { flag: "wx", mode: 0o600 });
   await writeFile(join(directory, `${name}.stderr`), err, { flag: "wx", mode: 0o600 });
+  if (journal) await checkpoint(journal);
   if (status !== 0)
     throw new Error(
       `${name} failed; retained receipts, STOP/hold remains, no automatic forward retry`,
     );
   return out;
 }
-export async function off(adminPath: string, optIn: string): Promise<void> {
+export async function off(adminPath: string, optIn: string): Promise<string> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
   const admin = resolve(adminPath),
@@ -277,11 +281,14 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
         "stop",
       ),
     ) as Stop;
-    verifyStop(
-      result,
-      await json<Deployment>(join(contract.directory, "deployment-receipt.json")),
-      contract.deployment,
+    const operatorReceipt = await json<Deployment>(
+      join(contract.directory, "deployment-receipt.json"),
     );
+    await writeFile(join(attempt, "operator-receipt.json"), JSON.stringify(operatorReceipt), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    verifyStop(result, operatorReceipt, contract.deployment);
     const plan = await json<Plan>(join(planDir, "plan.json"));
     validatePlan(plan);
     let serial = 0;
@@ -342,6 +349,9 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
     console.log(
       `OFF verified; normal reviewed squash path restored. Receipt: ${attempt}/off-verified.json`,
     );
+    if (process.env.BATCHER_ADMIN_JOURNAL_CONFIG)
+      await checkpoint(process.env.BATCHER_ADMIN_JOURNAL_CONFIG);
+    return join(attempt, "off-verified.json");
   } finally {
     await rmdir(lock);
   }

@@ -19,9 +19,11 @@
             "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "run"],
             "env": [
               {
-                "name": "WATCHDOG_BINDING_OBJECT",
-                "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}"
-              }
+                "name": "WATCHDOG_CONFIG_BUCKET",
+                "value": "${DEDICATED_CONFIG_BUCKET}"
+              },
+              { "name": "WATCHDOG_CONFIG_OBJECT", "value": "${PINNED_CONFIG_OBJECT}" },
+              { "name": "WATCHDOG_CONFIG_GENERATION", "value": "${PINNED_CONFIG_GENERATION}" }
             ],
             "resources": { "limits": { "cpu": "1", "memory": "1Gi" } }
           }
@@ -46,47 +48,15 @@
       }
     }
   },
-  "observerJob": {
-    "name": "projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog-observer",
-    "template": {
-      "taskCount": 1,
-      "parallelism": 1,
-      "template": {
-        "serviceAccount": "${OBSERVER_SERVICE_ACCOUNT_EMAIL}",
-        "maxRetries": 0,
-        "timeout": "120s",
-        "containers": [
-          {
-            "image": "${SAME_REVIEWED_BATCHER_IMAGE_DIGEST}",
-            "command": ["bun"],
-            "args": ["/app/docs/merge-batcher-admin/watchdog-main.ts", "observe"],
-            "env": [
-              {
-                "name": "WATCHDOG_BINDING_OBJECT",
-                "value": "${IMMUTABLE_BINDING_OBJECT_AND_GENERATION}"
-              }
-            ],
-            "resources": { "limits": { "cpu": "1", "memory": "512Mi" } }
-          }
-        ]
-      }
-    }
-  },
-  "observerSchedule": {
-    "name": "projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog-observer-tick",
-    "schedule": "2-57/5 * * * *",
-    "timeZone": "UTC",
-    "attemptDeadline": "180s",
-    "retryConfig": { "retryCount": 0, "maxRetryDuration": "0s" },
-    "httpTarget": {
-      "uri": "https://run.googleapis.com/v2/projects/cloudgeni-gecko/locations/europe-west1/jobs/batcher-watchdog-observer:run",
-      "httpMethod": "POST",
-      "headers": { "Content-Type": "application/json" },
-      "body": "e30=",
-      "oauthToken": {
-        "serviceAccountEmail": "${SCHEDULER_SERVICE_ACCOUNT_EMAIL}",
-        "scope": "https://www.googleapis.com/auth/cloud-platform"
-      }
-    }
+  "independentObserver": {
+    "owner": "runtime-owner",
+    "implementation": "GitHub scheduled comment-only sweep",
+    "nominalIntervalSeconds": 600,
+    "missingCompletionThresholdSeconds": 1200,
+    "requiredEvidence": [
+      "terminal Cloud Run execution",
+      "matching batcher_watchdog_completed event"
+    ],
+    "status": "pending-paired-source-and-read-only-workload-identity-binding"
   }
 }
