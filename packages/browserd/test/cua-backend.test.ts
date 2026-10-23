@@ -2558,9 +2558,14 @@ describe("CUA desktop boundary", () => {
       class DateFixture extends BatchFixture {
         value: string | undefined = undefined;
         afterRun = "2027-03-07T14:05";
+        /** What the parts read once run_steps ran, when Chrome leaves the
+         * field itself without a value. */
+        partsAfterRun: string[] | null = null;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const response = await super.callTool(name, argumentsJson);
-          if (name === "run_steps" && !this.reply) this.value = this.afterRun;
+          if (name === "run_steps" && !this.reply && !this.partsAfterRun)
+            this.value = this.afterRun;
+          const ran = this.ran && !this.reply;
           const args = JSON.parse(argumentsJson) as Record<string, unknown>;
           if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
           const data = JSON.parse(response.structuredJson!);
@@ -2583,7 +2588,7 @@ describe("CUA desktop boundary", () => {
               parent_index: 1,
               role: "AXIncrementor",
               label: `${part} Meeting`,
-              value: "--",
+              value: (ran && this.partsAfterRun?.[index]) || "--",
               actions: ["AXIncrement", "AXDecrement"],
             })),
           ];
@@ -2705,6 +2710,64 @@ describe("CUA desktop boundary", () => {
         }
       });
 
+      test("a field Chrome left without a value reads what its parts read", async () => {
+        const fixture = new DateFixture();
+        fixture.partsAfterRun = ["07", "03", "2027", "14", "05"];
+        const { backend, observation } = await open(fixture);
+        try {
+          const after = await backend.dispatch(
+            setDate(observation, field(observation).ref, "2027-03-07T14:05"),
+          );
+          expect(field(after!).value).toBe("2027-03-07T14:05");
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a field whose parts read nothing either still says it reads empty", async () => {
+        const fixture = new DateFixture();
+        fixture.partsAfterRun = ["", "", "", "", ""];
+        const { backend, observation } = await open(fixture);
+        try {
+          const failure = await backend
+            .dispatch(setDate(observation, field(observation).ref, "2027-03-07T14:05"))
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            message: `The keys were typed, but the date field ${field(observation).ref} reads empty instead of the value it was given; observe it and set its value again`,
+          });
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a batch whose actions all ran reports only its last as unknown when a field is wrong", async () => {
+        const fixture = new DateFixture();
+        fixture.afterRun = "0012-03-07T14:05";
+        const { backend, observation } = await open(fixture);
+        try {
+          const one = setDate(observation, field(observation).ref, "2027-03-07T14:05").action;
+          const failure = await backend
+            .dispatch({
+              ...command(observation),
+              action: {
+                type: "batch",
+                actions: [one, { type: "keyboard", action: "press", value: "tab" }] as never,
+              },
+            })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            message: `All 2 actions of the batch ran, but the date field ${field(observation).ref} reads "0012-03-07T14:05" instead of the value it was given; observe it and set its value again`,
+            details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+          });
+        } finally {
+          await backend.close();
+        }
+      });
+
       test("a batch longer than one run_steps call runs in several, and reports by action", async () => {
         const fixture = new DateFixture();
         const { backend, observation } = await open(fixture);
@@ -2751,6 +2814,127 @@ describe("CUA desktop boundary", () => {
           } finally {
             await second.backend.close();
           }
+        } finally {
+          await backend.close();
+        }
+      });
+    });
+
+    describe("a text field that does not take set_value says so", () => {
+      /** A field that reads `text`, and takes what set_value writes only
+       * when `takes` (Chrome ignores a number written to a web text field
+       * as a number). Enter submits the form and empties it. */
+      class TextFixture extends BatchFixture {
+        text = "";
+        takes = false;
+        async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+          const steps =
+            name === "run_steps"
+              ? (args.steps as { tool: string; args: Record<string, unknown> }[])
+              : [{ tool: name, args }];
+          for (const step of steps) {
+            if (step.tool === "set_value" && this.takes) this.text = String(step.args.value);
+            if (step.tool === "press_key" && step.args.key === "enter") this.text = "";
+          }
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
+          const data = JSON.parse(response.structuredJson!);
+          const s = data.snapshot_id as string;
+          data.elements = [
+            {
+              element_index: 0,
+              element_token: `${s}:0`,
+              role: "AXTextField",
+              label: "CVC",
+              value: this.text,
+              actions: ["AXConfirm"],
+            },
+          ];
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const setText = (
+        observation: ComputerBackendObservation,
+        value: string,
+      ): ComputerBackendActionCommand["action"] => ({
+        type: "semantic",
+        locator: { kind: "ref", ref: observation.roots[0]!.ref },
+        action: "set_value",
+        value,
+      });
+
+      test("set_value that the field ignores fails without repeating the value", async () => {
+        const fixture = new TextFixture();
+        const { backend, observation } = await open(fixture);
+        try {
+          expect(observation.roots[0]).toMatchObject({ role: "textbox" });
+          const failure = await backend
+            .dispatch({ ...command(observation), action: setText(observation, "312") })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            message: `The value was written, but the text field ${observation.roots[0]!.ref} still reads empty: the app did not take the value; invoke the field and type the text instead`,
+          });
+          expect(String((failure as Error).message)).not.toContain("312");
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a field that takes the value, or already read it, passes", async () => {
+        const fixture = new TextFixture();
+        fixture.takes = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          const after = await backend.dispatch({
+            ...command(observation),
+            action: setText(observation, "312"),
+          });
+          expect(after!.roots[0]!.value).toBe("312");
+          fixture.takes = false;
+          await backend.dispatch({ ...command(after!), action: setText(after!, "312") });
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("in a batch, a field a later step may submit or clear is not judged", async () => {
+        const fixture = new TextFixture();
+        fixture.takes = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          await backend.dispatch({
+            ...command(observation),
+            action: {
+              type: "batch",
+              actions: [
+                setText(observation, "hello"),
+                { type: "keyboard", action: "press", value: "enter" },
+              ] as never,
+            },
+          });
+          fixture.takes = false;
+          const fresh = await backend.observe(observation.target.id);
+          const failure = await backend
+            .dispatch({
+              ...command(fresh),
+              action: {
+                type: "batch",
+                actions: [setText(fresh, "312"), setText(fresh, "313")] as never,
+              },
+            })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "driver_failed",
+            dispatched: true,
+            details: { batchActionsCompleted: 1, batchStoppedActionState: "outcome_unknown" },
+          });
+          expect(String((failure as Error).message)).toStartWith(
+            "All 2 actions of the batch ran, but the text field ",
+          );
         } finally {
           await backend.close();
         }

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { InteractionSemanticNode } from "@opengeni/contracts";
 import {
   dateFields,
+  dateFieldValueFromParts,
   dateFieldTyping,
   projectElements,
   unindexedTextByElement,
@@ -329,6 +330,38 @@ test("a web date or time field takes a value; its parts are known in the order s
     "invoke",
     "focus",
   ]);
+});
+
+test("a web date field Chrome left without a value reads what its parts read", () => {
+  const elements = webDateField("AXDateField", "Date of birth", ["Day", "Month", "Year"], "");
+  const read = (parts: string[]) =>
+    projectElements(
+      elements.map((element) =>
+        element.role === "AXIncrementor"
+          ? { ...element, value: parts[[3, 5, 7].indexOf(element.element_index)] }
+          : element,
+      ),
+      "macos",
+    ).find((node) => node.ref === "s1:2")!.value;
+  expect(read(["1", "11", "1996"])).toBe("1996-11-01");
+  // A part still showing its placeholder: the field reads what Chrome says.
+  expect(read(["1", "mm", "1996"])).toBe("");
+  expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["2", "05", "PM"])).toBe(
+    "14:05",
+  );
+  expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["12", "15", "AM"])).toBe(
+    "00:15",
+  );
+  expect(dateFieldValueFromParts(["month", "year"], ["7", "2031"])).toBe("2031-07");
+  expect(dateFieldValueFromParts(["week", "year"], ["9", "2027"])).toBe("2027-W09");
+  expect(
+    dateFieldValueFromParts(
+      ["day", "month", "year", "hours", "minutes"],
+      ["7", "3", "2027", "14", "5"],
+    ),
+  ).toBe("2027-03-07T14:05");
+  expect(dateFieldValueFromParts(["day", "month", "year"], ["0", "0", "0"])).toBeNull();
+  expect(dateFieldValueFromParts(["day", "month"], ["1"])).toBeNull();
 });
 
 test("a date or time value becomes each part's digits in the field's own order", () => {
