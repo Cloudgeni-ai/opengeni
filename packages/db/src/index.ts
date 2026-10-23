@@ -2517,31 +2517,24 @@ async function projectManagedOrganizationAccess(
   }
 
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
-  // An organization that turned Personal workspaces off lands people in a
-  // shared workspace instead of their hidden Personal one (0918).
+  const finalAccountId = activeOrganizationMemberships.at(-1)!.organizationId;
+  // The authority tables below are non-RLS: every join is explicitly limited to
+  // the subject and the active organization ids just returned by the canonical
+  // membership helper. The default organization's account-scoped privacy row
+  // (0918: Personal workspaces off lands people in a shared workspace) rides
+  // in the same read under that organization's scope.
   await setRlsContext(db, { accountId: defaultAccountId, workspaceId: null });
-  const [defaultOrganizationPrivacy] = await db
-    .select({
-      personalWorkspacesEnabled: schema.organizationPrivacyPreferences.personalWorkspacesEnabled,
-    })
-    .from(schema.organizationPrivacyPreferences)
-    .where(eq(schema.organizationPrivacyPreferences.accountId, defaultAccountId))
-    .limit(1);
-  const defaultPersonalWorkspacesEnabled =
-    defaultOrganizationPrivacy?.personalWorkspacesEnabled ?? true;
-  // Preserve the final scope of the old per-organization loop. These authority
-  // tables are non-RLS: every join is explicitly limited to the subject and the
-  // active organization ids just returned by the canonical membership helper.
-  await setRlsContext(db, {
-    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
-    workspaceId: null,
-  });
   const rows = await db
     .select({
       accountId: schema.managedAccounts.id,
       accountName: schema.managedAccounts.name,
       workspaceId: schema.workspaces.id,
       permissions: schema.workspaceMemberships.permissions,
+      defaultPersonalWorkspacesEnabled: sql<boolean | null>`(
+        select privacy.personal_workspaces_enabled
+        from ${schema.organizationPrivacyPreferences} privacy
+        where privacy.account_id = ${defaultAccountId}::uuid
+      )`,
       preferredDefaultWorkspaceId: sql<string | null>`(
         select legacy.id from ${schema.workspaces} legacy
         join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
@@ -2575,6 +2568,11 @@ async function projectManagedOrganizationAccess(
       ),
     )
     .orderBy(desc(schema.workspaces.createdAt));
+  // Preserve the final scope of the old per-organization loop.
+  if (finalAccountId !== defaultAccountId) {
+    await setRlsContext(db, { accountId: finalAccountId, workspaceId: null });
+  }
+  const defaultPersonalWorkspacesEnabled = rows[0]?.defaultPersonalWorkspacesEnabled ?? true;
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
     workspaceGrants.push(

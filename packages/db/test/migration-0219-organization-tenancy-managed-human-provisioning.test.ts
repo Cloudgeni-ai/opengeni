@@ -444,7 +444,13 @@ describe("migration 0219 managed-human organization provisioning", () => {
     } finally {
       driver.options.debug = previousDebug;
     }
-    expect(queries).toHaveLength(6);
+    // One projection read (which also carries the default organization's
+    // Personal-workspaces setting) and one extra scope switch back to the last
+    // organization; the count stays constant however many organizations exist.
+    expect(queries).toHaveLength(7);
+    expect(
+      queries.filter((query) => query.includes("organization_privacy_preferences")),
+    ).toHaveLength(1);
     const projectionQueries = queries.filter((query) =>
       query.includes('left join "workspace_memberships"'),
     );
