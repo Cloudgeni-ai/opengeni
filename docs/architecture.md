@@ -1725,6 +1725,9 @@ VOLATILE document/source ACL helpers keep their fresh-snapshot behavior; this
 does not promise a single immutable snapshot across all nested ACL checks.
 Accepted-agent session/turn/attempt SHARE locks remain held until transaction
 completion, so reducing search work also shortens the event-writer lock queue.
+Summary collection IDs use that same body-visibility helper with only the
+`groupIds` input; they do not clone retained content or inspect discarded
+relationships. Full entry bodies keep their complete visibility projection.
 
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
