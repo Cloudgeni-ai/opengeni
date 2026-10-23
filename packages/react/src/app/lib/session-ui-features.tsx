@@ -5,7 +5,10 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 
 export type SessionUiFeatures = Readonly<{
-  /** The chat list: search, filters, projects, pins, archive, subagent rows. */
+  /**
+   * The chat list: search, filters, projects, pins, archive, subagent rows.
+   * Off, the new-chat page also leaves out its project picker and recent chats.
+   */
   chatList: boolean;
   /**
    * The session panel beside the chat: files, terminal, desktop, browser and
