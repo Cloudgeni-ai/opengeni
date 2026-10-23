@@ -58,7 +58,7 @@ test("actual scalar and batch authorization queries keep keyed target reads in c
     from (select gen_random_uuid() id from generate_series(1,10001)) generated returning id
   `),
   );
-  const ids = seeded.map((row) => String(row.id));
+  const ids = seeded.map((row: { id: unknown }) => String(row.id));
   await shared.admin`analyze sessions`;
   const [role] =
     await driver`select rolsuper,rolbypassrls,current_setting('row_security') as rls from pg_roles where rolname=current_user`;
