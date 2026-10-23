@@ -15,7 +15,11 @@ import {
 import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
-import { hasWorkspacePermission, isWorkspacePermissionDenied } from "./lib/permissions";
+import {
+  hasWorkspacePermission,
+  isWorkspacePermissionDenied,
+  lacksWorkspacePermission,
+} from "./lib/permissions";
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
@@ -1390,6 +1394,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
+      // A member whose loaded grant lacks GitHub has no GitHub state to read.
+      if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
+        setGithubStatus(null);
+        setGithubStatusFailed(false);
+        setGithubAppOpen(false);
+        setGithubRepos([]);
+        setGithubCatalogReady(true);
+        setRepoBusy(false);
+        return;
+      }
       setRepoBusy(true);
       try {
         const status = await client.getGitHubApp(workspaceId);
