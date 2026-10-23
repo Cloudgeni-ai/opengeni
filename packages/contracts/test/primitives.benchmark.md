@@ -50,9 +50,16 @@ primitive definitions rather than introducing generated schema machinery.
   and output conversion for draft-7, draft-2020-12 and OpenAPI 3.0. Field-specific
   builder/description calls leave the shared primitive unchanged.
 
-Existing exported schema names, validators, defaults, descriptions and JSON
-Schema bytes are retained. Object identity is intentionally shared: consumers
+Existing exported schema names, validators, defaults, descriptions and default
+JSON Schema bytes are retained. Object identity is intentionally shared: consumers
 must not mutate a primitive's internal definition or register field-specific
 metadata directly on that shared instance. Normal builder methods produce derived
 schemas. No in-repository mutation/registration of these primitives was found;
 arbitrary external mutation is not a universal-equivalence claim.
+
+The supported `z.toJSONSchema(schema, { reused: "ref" })` mode is identity-sensitive:
+it can emit a shared primitive under `$defs` where the baseline used inline fields.
+Current application MCP/model serializers do not select that option. Likewise,
+direct `z.globalRegistry.add()` on a primitive field can affect other fields that
+now share its identity. These are compatibility differences, not failures hidden
+by the default-serialization parity test.

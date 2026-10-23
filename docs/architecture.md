@@ -107,8 +107,10 @@ initial clone, not just subsequent sandbox commands.
 
 Contracts reuse common eager Zod validators from `packages/contracts/src/primitives.ts`
 instead of constructing identical primitive instances for every field. Validation
-and generated JSON Schema stay unchanged; field-specific constraints and metadata
-belong on derived schemas. This is allocation sharing, not lazy validation or a cache.
+and current application JSON Schema serialization stay unchanged; field-specific
+constraints and metadata belong on derived schemas, not a shared registry entry.
+External serializers explicitly using `reused: "ref"` can now emit shared primitive
+references. This is allocation sharing, not lazy validation or a cache.
 
 The console Machines page also projects live background commands across authorized
 chats through the session-list endpoint (`view=running_commands`). It shares the
