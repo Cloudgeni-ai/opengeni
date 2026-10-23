@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { plan } from "./planner";
+import { operatorOffIntervals } from "./operator-off";
 import {
   capacityDecision,
   digest,
@@ -30,13 +31,19 @@ function creditedWait(
   waits: NonNullable<StageSample["mainCapacityWaits"]>,
   ready: number,
   start: number,
+  off: NonNullable<StageSample["operatorOffWaits"]> = [],
 ) {
-  const intervals = waits
+  const capacity = waits
     .filter((w) => Number.isSafeInteger(w.mainRunId) && w.mainRunId > 0)
     .map((w) => [Date.parse(w.from), Date.parse(w.to)] as const)
     .filter(
       ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a && b - a <= MAX_HOLD_GAP_MS,
-    )
+    );
+  const offIntervals = off
+    .filter((w) => /^[a-f0-9]{64}$/.test(w.evidenceDigest))
+    .map((w) => [Date.parse(w.from), Date.parse(w.to)] as const)
+    .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a && b - a <= 7 * DAY);
+  const intervals = [...capacity, ...offIntervals]
     .map(([a, b]) => [Math.max(a, ready), Math.min(b, start)] as const)
     .filter(([a, b]) => b > a)
     .sort((a, b) => a[0] - b[0]);
@@ -55,6 +62,14 @@ export function latencySummary(
 ): { p95: number | null; samples: number } {
   const firstStarts = new Map<string, { readyAt: string; startedAt: string }>();
   const waits = new Map<string, NonNullable<StageSample["mainCapacityWaits"]>>();
+  const offWaits = new Map<string, NonNullable<StageSample["operatorOffWaits"]>>();
+  if (adjustCapacity)
+    for (const sample of Object.values(stages))
+      for (const wait of sample.operatorOffWaits ?? []) {
+        const list = offWaits.get(wait.key) ?? [];
+        list.push(wait);
+        offWaits.set(wait.key, list);
+      }
   if (adjustCapacity)
     for (const sample of Object.values(stages))
       for (const wait of sample.mainCapacityWaits ?? []) {
@@ -80,7 +95,11 @@ export function latencySummary(
       const ready = Date.parse(s.readyAt),
         start = Date.parse(s.startedAt);
       return (
-        (start - ready - (adjustCapacity ? creditedWait(waits.get(key) ?? [], ready, start) : 0)) /
+        (start -
+          ready -
+          (adjustCapacity
+            ? creditedWait(waits.get(key) ?? [], ready, start, offWaits.get(key) ?? [])
+            : 0)) /
         1000
       );
     })
@@ -207,6 +226,14 @@ export class ObservationJournal {
                 [...(sample.mainCapacityWaits ?? []), ...(local.mainCapacityWaits ?? [])].map(
                   (w) => [JSON.stringify(w), w],
                 ),
+              ).values(),
+            ],
+            operatorOffWaits: [
+              ...new Map(
+                [...(sample.operatorOffWaits ?? []), ...(local.operatorOffWaits ?? [])].map((w) => [
+                  JSON.stringify(w),
+                  w,
+                ]),
               ).values(),
             ],
             ...(sample.retry ? { retry: sample.retry } : {}),
@@ -372,6 +399,19 @@ export class ObservationJournal {
         }
     }
     data.lastCapacityHold = hold;
+    // Append proven operator intervals; never replace measured stage timestamps.
+    const off = operatorOffIntervals(this.config.operatorOffEvidence, this.config, o.now);
+    for (const sample of Object.values(data.stages)) {
+      if (!off.length) continue;
+      const credits = (sample.readyBindings ?? []).flatMap((binding) =>
+        off.map((interval) => ({ key: binding.key, ...interval })),
+      );
+      sample.operatorOffWaits = [
+        ...new Map(
+          [...(sample.operatorOffWaits ?? []), ...credits].map((w) => [JSON.stringify(w), w]),
+        ).values(),
+      ].slice(-4096);
+    }
     const { p95, samples } = latencySummary(data.stages, o.now);
     const excluded = [...o.excluded];
     const ready = o.ready.filter((p) => {

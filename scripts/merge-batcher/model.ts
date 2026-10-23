@@ -110,6 +110,7 @@ export interface StageSample {
   retry?: RetryIntent;
   /** Consecutive complete controller observations of a main-capacity hold. */
   mainCapacityWaits?: { key: string; from: string; to: string; mainRunId: number }[];
+  operatorOffWaits?: { key: string; from: string; to: string; evidenceDigest: string }[];
 }
 export interface MissingRun {
   firstSeenAt: string;
@@ -703,6 +704,7 @@ export interface Config {
   leaseSeconds: number;
   gitDir: string;
   outputDir: string;
+  operatorOffEvidence?: string;
   port: number;
   fetchTimeoutSeconds: number;
   missingRunSeconds: number;
@@ -756,6 +758,9 @@ export function config(env: Record<string, string | undefined>): Config {
     leaseSeconds: integer("BATCHER_LEASE_SECONDS", 120, 3600),
     gitDir: env.BATCHER_GIT_DIR ?? "/data/objects.git",
     outputDir: env.BATCHER_OUTPUT_DIR ?? "/data/shadow",
+    ...(env.BATCHER_OPERATOR_OFF_EVIDENCE
+      ? { operatorOffEvidence: env.BATCHER_OPERATOR_OFF_EVIDENCE }
+      : {}),
     port: integer("PORT", 8080, 65535),
     fetchTimeoutSeconds: integer("BATCHER_FETCH_TIMEOUT_SECONDS", 600, 3600),
     missingRunSeconds: integer("BATCHER_MISSING_RUN_SECONDS", 900, 86400),

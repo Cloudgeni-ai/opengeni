@@ -78,7 +78,7 @@ export class ShadowCiController {
     };
     if (o.telemetry?.status === "stop")
       return wait(
-        "stop signal: recent 2h sampled capacity-adjusted p95 ready-to-CI exceeds 30 minutes",
+        "stop signal: recent 2h sampled capacity/OFF-adjusted p95 ready-to-CI exceeds 30 minutes",
       );
     if (
       o.candidates.some(
