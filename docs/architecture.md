@@ -3171,7 +3171,7 @@ shared workspace under the existing organization privacy policy; this does not m
 approvals.
 
 Teams reply discovery uses a content-free sequence wake on relevant durable session events.
-The owner-only trigger updates the reserved route in the event transaction; delivery still
+An invoker-rights trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
 Personal sidebar Archive is an atomic composition of native Pause and personal

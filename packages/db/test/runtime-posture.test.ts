@@ -3678,7 +3678,7 @@ describe("runtime database posture evaluator", () => {
   });
 });
 
-test("Teams wake is owner-only with its exact definer and search-path boundary", () => {
+test("Teams wake is non-callable and uses invoker rights with a fixed search path", () => {
   const posture = safePosture();
   posture.tables.push({ ...posture.tables[0]!, name: "teams_bot_routes" });
   const routine = {
@@ -3686,7 +3686,7 @@ test("Teams wake is owner-only with its exact definer and search-path boundary",
     owner: "opengeni_migrator",
     execute: false,
     publicExecute: false,
-    securityDefiner: true,
+    securityDefiner: false,
     configuration: ["search_path=pg_catalog, public, pg_temp"],
   };
   posture.privateRoutines.push(routine);
@@ -3695,7 +3695,7 @@ test("Teams wake is owner-only with its exact definer and search-path boundary",
   for (const patch of [
     { execute: true },
     { publicExecute: true },
-    { securityDefiner: false },
+    { securityDefiner: true },
     { owner: "other_owner" },
     { configuration: ["search_path=pg_temp, public"] },
   ]) {

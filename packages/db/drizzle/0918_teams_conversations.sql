@@ -71,26 +71,55 @@ DO $teams_scope$ DECLARE tab text; BEGIN
 END $teams_scope$;
 CREATE POLICY teams_installation_directory ON teams_bot_installations FOR SELECT USING (true);
 
+-- Existing custom event-writer roles must keep appending during the rolling
+-- migration/provisioning gap. Give only the new trigger's metadata access;
+-- provisioning the current application role remains the sole broader grant.
+DO $teams_existing_event_writers$
+DECLARE writer_role text; data_schema text:=current_schema(); event_table oid;
+BEGIN
+ event_table:=format('%I.session_events',data_schema)::regclass;
+ FOR writer_role IN
+  SELECT role.rolname FROM pg_roles role
+  WHERE NOT role.rolsuper
+   AND role.oid<>(SELECT relowner FROM pg_class WHERE oid=event_table)
+   AND has_table_privilege(role.oid,event_table,'INSERT')
+ LOOP
+  EXECUTE format('GRANT SELECT, UPDATE(relevant_event_sequence) ON %I.teams_bot_routes TO %I',data_schema,writer_role);
+ END LOOP;
+END
+$teams_existing_event_writers$;
+
 -- A content-free wake only. Dispatch still reauthorizes the linked human and
 -- native session before reading any event payload or contacting Microsoft.
 -- Route reservation precedes native session creation, so even an immediate
 -- first reply commits its wake in the same transaction as its event.
 CREATE FUNCTION opengeni_private.wake_teams_route_for_session_event()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $wake$
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path FROM CURRENT AS $wake$
+DECLARE
+ prior_account text:=coalesce(current_setting('opengeni.account_id',true),'');
+ prior_workspace text:=coalesce(current_setting('opengeni.workspace_id',true),'');
 BEGIN
+ -- The already-authorized native event supplies the exact scope. This uses
+ -- the inserting role's ordinary Teams-table privileges, never an owner role.
+ -- Some native lifecycle writers establish their own event audience rather
+ -- than caller workspace GUCs; no actor identity is borrowed or changed here.
+ PERFORM set_config('opengeni.account_id',NEW.account_id::text,true);
+ PERFORM set_config('opengeni.workspace_id',NEW.workspace_id::text,true);
  UPDATE teams_bot_routes SET relevant_event_sequence=greatest(relevant_event_sequence,NEW.sequence)
  WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id AND session_id=NEW.session_id;
+ PERFORM set_config('opengeni.account_id',prior_account,true);
+ PERFORM set_config('opengeni.workspace_id',prior_workspace,true);
  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+ PERFORM set_config('opengeni.account_id',prior_account,true);
+ PERFORM set_config('opengeni.workspace_id',prior_workspace,true);
+ RAISE;
 END
 $wake$;
 DO $teams_wake_security$
-DECLARE target_schema text:=current_schema(); migration_owner text:=current_user;
+DECLARE target_schema text:=current_schema();
 BEGIN
  EXECUTE format('ALTER FUNCTION opengeni_private.wake_teams_route_for_session_event() SET search_path=pg_catalog,%I,pg_temp',target_schema);
- -- Only the migration owner, reached through this non-callable trigger, may
- -- update content-free wake metadata without borrowing a human RLS context.
- EXECUTE format('CREATE POLICY teams_wake_owner_read ON %I.teams_bot_routes FOR SELECT USING(current_user=%L)',target_schema,migration_owner);
- EXECUTE format('CREATE POLICY teams_wake_owner_write ON %I.teams_bot_routes FOR UPDATE USING(current_user=%L) WITH CHECK(current_user=%L)',target_schema,migration_owner,migration_owner);
 END
 $teams_wake_security$;
 REVOKE ALL ON FUNCTION opengeni_private.wake_teams_route_for_session_event() FROM PUBLIC;

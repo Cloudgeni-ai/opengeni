@@ -256,6 +256,10 @@ References: [publisher verification](https://learn.microsoft.com/en-us/entra/ide
 
 ## Disable and recover
 
+The initial release keeps each tenant/workspace binding fixed. Disconnect pauses
+that binding; reconnect uses the same tenant and workspace. Disconnect does not
+permit transferring either side to another binding.
+
 Remove the pilot/reviewer allowlists and keep broad switches false to close
 admission. Revoke a compromised credential at its Microsoft authority and rotate
 it through the deployment secret store. Disabling rollout or uninstalling the

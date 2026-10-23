@@ -590,21 +590,66 @@ const SettingsSchema = z.object({
   googleDriveMcpEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
-    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
     z.array(z.string().uuid()).default([]),
   ),
   teamsBotEnabled: EnvBoolean.default(false),
   teamsBotAllowedTenantIds: z.preprocess(
-    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
     z.array(z.string().uuid()).default([]),
   ),
   teamsBotAllowedChannelIds: z.preprocess(
-    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
-    z.array(z.string().max(550).refine(value => value[36] === ":" && z.string().uuid().safeParse(value.slice(0,36)).success && value.slice(37).length>0)).default([]),
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .max(550)
+          .refine(
+            (value) =>
+              value[36] === ":" &&
+              z.string().uuid().safeParse(value.slice(0, 36)).success &&
+              value.slice(37).length > 0,
+          ),
+      )
+      .default([]),
   ),
   teamsBotSetupAdminIds: z.preprocess(
-    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim().toLowerCase()).filter(Boolean) : value,
-    z.array(z.string().regex(/^[0-9a-f-]{36}:[0-9a-f-]{36}$/).refine(value => value.split(":").every(id => z.string().uuid().safeParse(id).success))).default([]),
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim().toLowerCase())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .regex(/^[0-9a-f-]{36}:[0-9a-f-]{36}$/)
+          .refine((value) =>
+            value.split(":").every((id) => z.string().uuid().safeParse(id).success),
+          ),
+      )
+      .default([]),
   ),
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),

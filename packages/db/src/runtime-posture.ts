@@ -6158,7 +6158,7 @@ export function evaluateRuntimeDatabasePosture(
       routine.name === "wake_teams_route_for_session_event()" &&
       (routine.execute ||
         routine.publicExecute ||
-        !routine.securityDefiner ||
+        routine.securityDefiner ||
         routine.owner !== tableByName.get("teams_bot_routes")?.owner ||
         !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
     )
