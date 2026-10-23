@@ -5232,7 +5232,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           stopReports,
         };
       } finally {
-        await this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
+        // Not awaited: CDP runs a session's commands in order, and nothing
+        // waits on the release.
+        void this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
           () => undefined,
         );
       }
@@ -5272,18 +5274,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         },
       );
     } catch (error) {
-      guard.stopReports();
       if (error instanceof CdpProtocolError && GUARD_DOCUMENT_GONE.test(error.message)) {
+        // Over the extension bridge, the reports the guard sent before its
+        // document went away can still be on their way; take them in first.
+        try {
+          await (await this.ensureConnection()).flushEvents?.();
+        } catch {
+          // The verdicts already in decide, as without a bridge.
+        }
+        guard.stopReports();
         const blocked = guard.verdicts.find((verdict) => verdict !== null);
         if (blocked !== undefined) return blocked;
         if (guard.reported && guard.verdicts.length >= presses) return null;
         throw unknown();
       }
+      guard.stopReports();
       if (!(error instanceof CdpProtocolError)) throw error;
       throw unknown();
     }
     guard.stopReports();
-    await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
+    void this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
@@ -7468,11 +7478,43 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
   const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
+  // The target's own markup and its parent's text, as found: a copy must
+  // match both, so a re-render that shifted other data into the target's
+  // place (the next item's button, a row now showing another invoice) does
+  // not pass for it.
+  const markup = (node) => String(node.outerHTML || "");
+  const text = (node) => String(node.textContent || "");
+  const original = markup(element);
+  const parent = element.parentElement;
+  const parentText = parent ? text(parent) : "";
+  const position = parent ? Array.prototype.indexOf.call(parent.children, element) : -1;
+  const reaches = (hit) => {
+    if (hit instanceof Node && owns(element, hit)) return true;
+    // Seen from outside a closed shadow root, a press on the target is
+    // retargeted to that root's host.
+    if (
+      hit instanceof Element &&
+      hit.shadowRoot === null &&
+      owns(hit, element) &&
+      element.getRootNode() !== hit.getRootNode()
+    )
+      return true;
+    // The page re-rendered the target since it was found, replacing it with
+    // a copy in the same place of the same parent: the press reaches the
+    // copy, as it would a person's. A lookalike elsewhere (the next row's
+    // identical button once this row is removed) is not the target.
+    if (!element.isConnected && parent && parent.isConnected && text(parent) === parentText) {
+      const copy = parent.children[position];
+      if (copy && markup(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
+    }
+    return false;
+  };
   const presses = ["pointerdown", "mousedown"];
   const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
   const types = [...presses, ...followers];
   const guard = { blocked: null };
   const expiresAt = Date.now() + 5000;
+  let pointerDowns = 0;
   const listener = (event) => {
     if (Date.now() > expiresAt) {
       guard.settle();
@@ -7480,19 +7522,19 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
     }
     if (!event.isTrusted) return;
     if (presses.includes(event.type)) {
+      if (event.type === "pointerdown") pointerDowns += 1;
       const hit = event.composedPath()[0];
-      const onTarget =
-        (hit instanceof Node && owns(element, hit)) ||
-        // Seen from outside a closed shadow root, a press on the target is
-        // retargeted to that root's host.
-        (hit instanceof Element && hit.shadowRoot === null && owns(hit, element) && element.getRootNode() !== hit.getRootNode());
+      // Only a click's first press is judged: a double-click's second press
+      // lands where the first one's effect left the page (a row the first
+      // click turned into an editor), as a person's does.
+      const onTarget = pointerDowns > 1 || reaches(hit);
       const verdict = onTarget ? null : describe(hit);
       // One report per physical press, before any page listener after this
       // one can replace the document.
       if (event.type === "pointerdown" && typeof report === "function") {
         report(JSON.stringify({ token, blocked: verdict }));
       }
-      if (onTarget) return;
+      if (onTarget && guard.blocked === null) return;
       if (guard.blocked === null) guard.blocked = verdict;
     } else if (guard.blocked === null) return;
     event.preventDefault();
