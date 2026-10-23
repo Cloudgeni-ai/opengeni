@@ -428,6 +428,59 @@ describe("AttachedChromeCdpConnection", () => {
     expect(bridge.commands).toContainEqual({ type: "debugger.detach", tabId: "7" });
     expect(bridge.closed).toBe(true);
   });
+
+  test("polls slowly while unused and resumes fast polling on the next command", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+
+    // Fast while recently used.
+    await Bun.sleep(500);
+    expect(bridge.pollCount).toBeGreaterThan(4);
+
+    // After the quiet spell, at most about one poll a second.
+    await Bun.sleep(2_000);
+    const idleStart = bridge.pollCount;
+    await Bun.sleep(1_100);
+    expect(bridge.pollCount - idleStart).toBeLessThanOrEqual(2);
+
+    // A command wakes the idle wait at once and polling is fast again.
+    const beforeCommand = bridge.pollCount;
+    await connection.send("Target.getTargets");
+    await Bun.sleep(300);
+    expect(bridge.pollCount - beforeCommand).toBeGreaterThan(3);
+
+    await connection.shutdown();
+  }, 10_000);
+
+  test("keeps polling fast while a command runs past the quiet window", async () => {
+    class SlowListBridge extends FakeBridge {
+      slow = false;
+      override async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "tabs.list" && this.slow) await Bun.sleep(3_500);
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new SlowListBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+    bridge.slow = true;
+    const command = connection.send("Target.getTargets");
+
+    await Bun.sleep(2_500);
+    const during = bridge.pollCount;
+    await Bun.sleep(500);
+    expect(bridge.pollCount - during).toBeGreaterThan(4);
+
+    await command;
+    await connection.shutdown();
+  }, 10_000);
 });
 
 for (const lost of [false, true]) {
