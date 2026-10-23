@@ -222,9 +222,9 @@ describe("session proxy chats", () => {
     await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
     await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
     await resolver({ tenant: "acme", user: "bob" }, { isolation: "tenant" });
-    expect(api.requests.filter((request) => request.path === "/v1/workspaces/external")).toHaveLength(
-      1,
-    );
+    expect(
+      api.requests.filter((request) => request.path === "/v1/workspaces/external"),
+    ).toHaveLength(1);
     await resolver({ tenant: "acme", user: "alice", source: "other" }, { isolation: "tenant" });
     expect(members().map((request) => request.path)).toEqual(
       Array(3).fill(`/v1/workspaces/${WORKSPACE_ID}/external-members`),
