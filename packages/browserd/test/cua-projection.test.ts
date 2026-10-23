@@ -361,6 +361,7 @@ test("a web date field Chrome left without a value reads what its parts read", (
     ),
   ).toBe("2027-03-07T14:05");
   expect(dateFieldValueFromParts(["day", "month", "year"], ["0", "0", "0"])).toBeNull();
+  expect(dateFieldValueFromParts(["hours", "minutes"], ["0", "0"])).toBe("00:00");
   expect(dateFieldValueFromParts(["day", "month"], ["1"])).toBeNull();
 });
 

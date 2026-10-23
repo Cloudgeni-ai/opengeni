@@ -275,7 +275,7 @@ export function dateFieldFormat(segments: readonly DateSegment[]): string {
 /**
  * The ISO value a date or time field's parts read, in the parts' order, or
  * null when a part reads no number (an empty part reads its placeholder,
- * "dd" or "--") or every part reads zero. Chrome on macOS does not always
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not always
  * give the field itself a value: it may update only the parts (or only the
  * field) after typing.
  */
@@ -297,7 +297,11 @@ export function dateFieldValueFromParts(
     if (!/^\d{1,6}$/u.test(text)) return null;
     parts[segment] = Number(text);
   }
-  if (Object.values(parts).every((part) => part === 0)) return null;
+  // A time of 00:00 is a time; a date of all zeros is not a date.
+  const dateParts = (["year", "month", "day", "week"] as const)
+    .filter((segment) => parts[segment] !== undefined)
+    .map((segment) => parts[segment]);
+  if (dateParts.length > 0 && dateParts.every((part) => part === 0)) return null;
   if (pm !== null) {
     if (parts.hours === undefined || parts.hours < 1 || parts.hours > 12) return null;
     parts.hours = (parts.hours % 12) + (pm ? 12 : 0);

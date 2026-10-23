@@ -2827,6 +2827,9 @@ describe("CUA desktop boundary", () => {
       class TextFixture extends BatchFixture {
         text = "";
         takes = false;
+        /** Readings that still show the value from before the last write. */
+        lateReads = 0;
+        previous = "";
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const args = JSON.parse(argumentsJson) as Record<string, unknown>;
           const steps =
@@ -2834,20 +2837,25 @@ describe("CUA desktop boundary", () => {
               ? (args.steps as { tool: string; args: Record<string, unknown> }[])
               : [{ tool: name, args }];
           for (const step of steps) {
-            if (step.tool === "set_value" && this.takes) this.text = String(step.args.value);
+            if (step.tool === "set_value" && this.takes) {
+              this.previous = this.text;
+              this.text = String(step.args.value);
+            }
             if (step.tool === "press_key" && step.args.key === "enter") this.text = "";
           }
           const response = await super.callTool(name, argumentsJson);
           if (name !== "get_window_state" || !args.include_accessibility_tree) return response;
           const data = JSON.parse(response.structuredJson!);
           const s = data.snapshot_id as string;
+          const shown = this.lateReads > 0 ? this.previous : this.text;
+          if (this.lateReads > 0) this.lateReads -= 1;
           data.elements = [
             {
               element_index: 0,
               element_token: `${s}:0`,
               role: "AXTextField",
               label: "CVC",
-              value: this.text,
+              value: shown,
               actions: ["AXConfirm"],
             },
           ];
@@ -2896,6 +2904,22 @@ describe("CUA desktop boundary", () => {
           expect(after!.roots[0]!.value).toBe("312");
           fixture.takes = false;
           await backend.dispatch({ ...command(after!), action: setText(after!, "312") });
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a field that shows the value a moment late passes", async () => {
+        const fixture = new TextFixture();
+        fixture.takes = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          fixture.lateReads = 1;
+          const after = await backend.dispatch({
+            ...command(observation),
+            action: setText(observation, "312"),
+          });
+          expect(after!.roots[0]!.value).toBe("312");
         } finally {
           await backend.close();
         }

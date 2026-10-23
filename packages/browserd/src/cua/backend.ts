@@ -80,6 +80,10 @@ type Operation = {
  * but quick, without a pause after each click. */
 const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
 
+/** How long a field check waits before reading a window again, when the
+ * reading straight after the input does not show it yet. */
+const INPUT_REREAD_MS = 150;
+
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
@@ -363,18 +367,32 @@ export class CuaComputerBackend implements ComputerBackend {
         }
       }
       const after = await this.observeAfter(command.targetId, acted, known, report);
-      if (after?.target.id === command.targetId) {
-        const failures = inputFailures(after, operations);
-        if (failures.length)
-          throw new ComputerBackendError(
-            "driver_failed",
-            `The value was written, but ${failures.join("; ")}`,
-            false,
-            true,
-          );
-      }
-      return after;
+      if (after?.target.id !== command.targetId) return after;
+      const confirmed = await this.confirmInput(after, operations);
+      if (confirmed.failures.length)
+        throw new ComputerBackendError(
+          "driver_failed",
+          `The value was written, but ${confirmed.failures.join("; ")}`,
+          false,
+          true,
+        );
+      return confirmed.after;
     });
+  }
+
+  /** The checks of `steps` a reading after their input fails, read once more
+   * a moment later before any counts: an app's accessibility tree can show a
+   * write a little after it took. */
+  private async confirmInput(
+    after: ComputerBackendObservation,
+    steps: readonly Operation[],
+  ): Promise<{ after: ComputerBackendObservation; failures: string[] }> {
+    const failures = inputFailures(after, steps);
+    if (!failures.length) return { after, failures };
+    await new Promise((resolve) => setTimeout(resolve, INPUT_REREAD_MS));
+    const again = await this.observeTarget(after.target.id).catch(() => null);
+    if (again?.target.id !== after.target.id) return { after, failures };
+    return { after: again, failures: inputFailures(again, steps) };
   }
 
   /** The window an action left in front: the one CUA reports it opened, or
@@ -518,27 +536,26 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     if (!stopped) {
       const after = await this.observeAfter(command.targetId, acted, known, report);
-      if (after?.target.id === command.targetId) {
-        const failures = inputFailures(after, steps);
-        if (failures.length) {
-          const count = command.action.type === "batch" ? command.action.actions.length : 1;
-          const failure = new ComputerBackendError(
-            "driver_failed",
-            `${single ? "The keys were typed" : `All ${count} actions of the batch ran`}, but ${failures.join("; ")}`,
-            false,
-            true,
-          );
-          // Every action ran: the batch reports its last one as the one
-          // whose outcome is unknown, never later actions as not run.
-          if (!single && count > 1)
-            failure.details = {
-              batchActionsCompleted: count - 1,
-              batchStoppedActionState: "outcome_unknown",
-            };
-          throw failure;
-        }
+      if (after?.target.id !== command.targetId) return after;
+      const { after: confirmed, failures } = await this.confirmInput(after, steps);
+      if (failures.length) {
+        const count = command.action.type === "batch" ? command.action.actions.length : 1;
+        const failure = new ComputerBackendError(
+          "driver_failed",
+          `${single ? "The keys were typed" : `All ${count} actions of the batch ran`}, but ${failures.join("; ")}`,
+          false,
+          true,
+        );
+        // Every action ran: the batch reports its last one as the one
+        // whose outcome is unknown, never later actions as not run.
+        if (!single && count > 1)
+          failure.details = {
+            batchActionsCompleted: count - 1,
+            batchStoppedActionState: "outcome_unknown",
+          };
+        throw failure;
       }
-      return after;
+      return confirmed;
     }
     const { step, outcome } = stopped;
     const action = actionOf[step]!;
