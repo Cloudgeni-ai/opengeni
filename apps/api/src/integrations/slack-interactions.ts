@@ -98,6 +98,7 @@ import {
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
+  getOrganizationPrivacyPreferences,
   namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
@@ -166,6 +167,7 @@ import { slackMrkdwnFromMarkdown } from "./slack-mrkdwn";
 import {
   isSlackDirectMessageConversation,
   resolveSlackWorkspaceRoute,
+  slackRouteChoicesForPersonalWorkspaces,
   slackRoutedRequestText,
   type SlackRouteResolution,
   type SlackRouteTenancy,
@@ -1608,7 +1610,7 @@ async function resolveSlackRouteForEntry(
     return resolveSlackWorkspaceRoute(base);
   }
   const directMessage = isSlackDirectMessageConversation(entry);
-  const [channelRoute, dmRoute, candidates] = await Promise.all([
+  const [channelRoute, storedDmRoute, allCandidates, privacy] = await Promise.all([
     directMessage
       ? Promise.resolve(null)
       : getSlackChannelRoute(deps.db, home, {
@@ -1622,7 +1624,14 @@ async function resolveSlackRouteForEntry(
         })
       : Promise.resolve(null),
     listNamedSubjectSlackRoutableWorkspaces(deps.db, { accountId: home.accountId, subjectId }),
+    getOrganizationPrivacyPreferences(deps.db, home.accountId),
   ]);
+  // With Personal workspaces turned off, new Slack work never lands in one.
+  const { candidates, dmRoute } = slackRouteChoicesForPersonalWorkspaces({
+    personalWorkspacesEnabled: privacy.personalWorkspacesEnabled,
+    candidates: allCandidates,
+    dmRoute: storedDmRoute,
+  });
   return resolveSlackWorkspaceRoute({
     ...base,
     channelRoute,

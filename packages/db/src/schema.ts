@@ -4833,6 +4833,7 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .notNull()
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -9163,6 +9164,11 @@ export const sessionSystemUpdates = pgTable(
     deliveredHistoryItemId: uuid("delivered_history_item_id"),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // The personal machine's owner let this informational update from someone
+    // else's work continue under the owner's receiving context (0916). Set
+    // only by continue_session_waiting_work; the producer receipt is unchanged.
+    continuedBySubjectId: text("continued_by_subject_id"),
+    continuedAt: timestamp("continued_at", { withTimezone: true }),
   },
   (table) => ({
     kindValid: check(

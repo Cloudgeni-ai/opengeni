@@ -197,12 +197,13 @@ describe("offline batcher administration contract", () => {
     });
     expect(manifest.url).toBe("https://github.com/Cloudgeni-ai/opengeni");
   });
-  test("App ID, not installation ID, bypasses only main PR admission", () => {
+  test("assigned App ID and organization administrators bypass admission; original approvals unchanged", () => {
     const before = fixture();
     const original = structuredClone(before);
     const plan = prepare(before, 501, 999);
     expect(plan.admission.bypass_actors).toEqual([
       { actor_id: 501, actor_type: "Integration", bypass_mode: "always" },
+      { actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always" },
     ]);
     const rules = before.rulesets[0]!.rules;
     expect(plan.admission.rules).toEqual(Array.isArray(rules) ? rules.slice(2) : []);
@@ -220,7 +221,7 @@ describe("offline batcher administration contract", () => {
       },
     });
   });
-  test("main and live namespace creation/update are App-only; no production/tag/shadow overlap", () => {
+  test("main and live namespace allow App and emergency organization admin; no production/tag/shadow overlap", () => {
     const plan = prepare(fixture(), 501, 999);
     expect(plan.namespace.conditions).toEqual({
       ref_name: {
@@ -235,12 +236,52 @@ describe("offline batcher administration contract", () => {
     expect(plan.namespace.bypass_actors).toEqual(plan.admission.bypass_actors);
   });
 
+  test("emergency bypass cannot leak into immutable guard or broaden to repository admins", () => {
+    const plan = prepare(fixture(), 501, 999);
+    for (const target of ["guard", "admission", "namespace"] as const) {
+      const changed = structuredClone(plan);
+      (changed[target].bypass_actors as unknown[]).push({
+        actor_type: "RepositoryRole",
+        actor_id: 5,
+        bypass_mode: "always",
+      });
+      expect(() => validatePlan(changed)).toThrow("drift");
+    }
+    for (const target of ["admission", "namespace"] as const) {
+      const missing = structuredClone(plan);
+      (missing[target].bypass_actors as unknown[]).pop();
+      expect(() => validatePlan(missing)).toThrow("drift");
+      const exempt = structuredClone(plan);
+      (exempt[target].bypass_actors as { bypass_mode: string }[])[1]!.bypass_mode = "exempt";
+      expect(() => validatePlan(exempt)).toThrow("drift");
+    }
+    const legacy = fixture();
+    legacy.rulesets[1]!.name = "Opengeni batcher dedicated writer";
+    expect(() => prepare(legacy, 501, 999)).toThrow("reconcile prior execution");
+  });
+
+  test("GitHub-only instructions require checks and readiness, not attestations", async () => {
+    const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
+    const guide = await readFile(new URL("../docs/merge-batcher.md", import.meta.url), "utf8");
+    expect(agents).toContain(
+      "VM attestations and reviewer session UUIDs are not admission requirements",
+    );
+    expect(guide).toContain("required GitHub-hosted checks on its exact current head");
+    expect(guide).toContain("open the failed GitHub check and its logs");
+    expect(guide).not.toContain("generic review alone does not admit");
+    expect(agents).not.toContain("there is no standing admin writer bypass");
+  });
+
   test("old/manual-path or tampered plans are never silently activated", () => {
     const plan = prepare(fixture(), 501, 999);
-    expect(plan.schemaVersion).toBe(2);
+    expect(plan.schemaVersion).toBe(3);
     expect(() => validatePlan({ ...plan, schemaVersion: 1 } as unknown as Plan)).toThrow(
-      "version 2",
+      "version 3",
     );
+    expect(() => validatePlan({ ...plan, schemaVersion: 2 } as unknown as Plan)).toThrow(
+      "version 3",
+    );
+    expect(plan.namespace.name).toBe("Merges go through the batcher: add the queue-ready label");
     const weakened = structuredClone(plan);
     weakened.namespace.conditions = {
       ref_name: { include: ["refs/heads/queue/live/**", "refs/heads/batcher-state"], exclude: [] },
@@ -469,7 +510,7 @@ describe("offline batcher administration contract", () => {
         s.rulesets[0]!.conditions = { ref_name: { include: ["~ALL"], exclude: [] } };
       },
       (s: Snapshot) => {
-        s.rulesets[1]!.name = "Opengeni batcher dedicated writer";
+        s.rulesets[1]!.name = "Merges go through the batcher: add the queue-ready label";
       },
       (s: Snapshot) => {
         s.rulesets[1]!.name = "Opengeni batcher immutable refs";

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "bun run public-api:refresh",
-  "sdkMajor": 4,
+  "sdkMajor": 5,
   "routes": [
     {
       "method": "GET",
@@ -301,7 +301,7 @@
       "path": "/v1/config/client",
       "sdk": [
         "OpenGeniClient.getClientConfig",
-        "createSessionProxyHandler"
+        "clientConfig"
       ],
       "request": [],
       "response": [
@@ -1806,7 +1806,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/access/grant",
       "sdk": [
-        "createSessionProxyHandler",
         "getSessionProxyWorkspaceGrant"
       ],
       "request": [],
@@ -1818,8 +1817,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning",
       "sdk": [
-        "OpenGeniClient.saveAgentLearningSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.saveAgentLearningSettings"
       ],
       "request": [],
       "response": [
@@ -1854,8 +1852,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-learning/overrides",
       "sdk": [
-        "OpenGeniClient.listAgentLearningOverrides",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listAgentLearningOverrides"
       ],
       "request": [],
       "response": [
@@ -1866,8 +1863,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning/read",
       "sdk": [
-        "OpenGeniClient.getAgentLearningSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getAgentLearningSettings"
       ],
       "request": [
         "AgentLearningContext"
@@ -1880,8 +1876,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-topology",
       "sdk": [
-        "OpenGeniClient.listAgentTopology",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listAgentTopology"
       ],
       "request": [
         "SessionStatus",
@@ -1910,7 +1905,6 @@
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
         "OpenGeniEmbeddingClient.getWorkspaceAllowance",
-        "createSessionProxyHandler",
         "getWorkspaceAllowance"
       ],
       "request": [],
@@ -1923,7 +1917,6 @@
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
         "OpenGeniEmbeddingClient.setWorkspaceAllowance",
-        "createSessionProxyHandler",
         "setWorkspaceAllowance"
       ],
       "request": [
@@ -1938,7 +1931,6 @@
       "path": "/v1/workspaces/:workspaceId/allowance/grants",
       "sdk": [
         "OpenGeniEmbeddingClient.grantWorkspaceCredits",
-        "createSessionProxyHandler",
         "grantWorkspaceCredits"
       ],
       "request": [
@@ -1953,7 +1945,6 @@
       "path": "/v1/workspaces/:workspaceId/allowance/state",
       "sdk": [
         "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
-        "createSessionProxyHandler",
         "getWorkspaceAllowanceState"
       ],
       "request": [],
@@ -1965,8 +1956,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/api-keys",
       "sdk": [
-        "OpenGeniClient.listApiKeys",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listApiKeys"
       ],
       "request": [],
       "response": [
@@ -1977,8 +1967,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/api-keys",
       "sdk": [
-        "OpenGeniClient.createApiKey",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createApiKey"
       ],
       "request": [
         "CreateApiKeyRequest"
@@ -2002,8 +1991,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/artifact-catalog",
       "sdk": [
-        "OpenGeniClient.listArtifactCatalog",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listArtifactCatalog"
       ],
       "request": [],
       "response": [
@@ -2027,8 +2015,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId",
       "sdk": [
-        "OpenGeniClient.getRetainedArtifact",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getRetainedArtifact"
       ],
       "request": [],
       "response": []
@@ -2046,8 +2033,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source",
       "sdk": [
-        "OpenGeniClient.createVideoArtifactPlaybackSource",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createVideoArtifactPlaybackSource"
       ],
       "request": [],
       "response": [
@@ -2058,8 +2044,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/attached-browsers",
       "sdk": [
-        "OpenGeniClient.listAttachedBrowsers",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listAttachedBrowsers"
       ],
       "request": [],
       "response": [
@@ -2070,8 +2055,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/attached-browsers/:deviceId",
       "sdk": [
-        "OpenGeniClient.getAttachedBrowser",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getAttachedBrowser"
       ],
       "request": [],
       "response": [
@@ -2082,8 +2066,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/auth-runs",
       "sdk": [
-        "OpenGeniClient.listAuthRuns",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listAuthRuns"
       ],
       "request": [],
       "response": [
@@ -2094,8 +2077,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/auth-runs/:authRunId",
       "sdk": [
-        "OpenGeniClient.getAuthRun",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getAuthRun"
       ],
       "request": [],
       "response": [
@@ -2106,8 +2088,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/automations/runs",
       "sdk": [
-        "OpenGeniAutomationsClient.listRuns",
-        "createSessionProxyHandler"
+        "OpenGeniAutomationsClient.listRuns"
       ],
       "request": [],
       "response": [
@@ -2118,8 +2099,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/automations/sources",
       "sdk": [
-        "OpenGeniAutomationsClient.listSources",
-        "createSessionProxyHandler"
+        "OpenGeniAutomationsClient.listSources"
       ],
       "request": [],
       "response": [
@@ -2130,8 +2110,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/automations/sources",
       "sdk": [
-        "OpenGeniAutomationsClient.createSource",
-        "createSessionProxyHandler"
+        "OpenGeniAutomationsClient.createSource"
       ],
       "request": [
         "CreateAutomationSourceRequest"
@@ -2179,8 +2158,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/automations/triggers",
       "sdk": [
-        "OpenGeniAutomationsClient.listTriggers",
-        "createSessionProxyHandler"
+        "OpenGeniAutomationsClient.listTriggers"
       ],
       "request": [],
       "response": [
@@ -2191,8 +2169,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/automations/triggers",
       "sdk": [
-        "OpenGeniAutomationsClient.createTrigger",
-        "createSessionProxyHandler"
+        "OpenGeniAutomationsClient.createTrigger"
       ],
       "request": [
         "CreateAutomationTriggerRequest"
@@ -2227,8 +2204,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/browser-identities",
       "sdk": [
-        "OpenGeniClient.listBrowserIdentities",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listBrowserIdentities"
       ],
       "request": [],
       "response": [
@@ -2239,8 +2215,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-identities",
       "sdk": [
-        "OpenGeniClient.createBrowserIdentity",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createBrowserIdentity"
       ],
       "request": [
         "CreateBrowserIdentityRequest"
@@ -2253,8 +2228,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/browser-identities/:identityId",
       "sdk": [
-        "OpenGeniClient.getBrowserIdentity",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getBrowserIdentity"
       ],
       "request": [],
       "response": [
@@ -2265,8 +2239,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/browser-identities/:identityId",
       "sdk": [
-        "OpenGeniClient.updateBrowserIdentity",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateBrowserIdentity"
       ],
       "request": [
         "UpdateBrowserIdentityRequest"
@@ -2290,8 +2263,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/browser-sessions",
       "sdk": [
-        "OpenGeniClient.listBrowserSessions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listBrowserSessions"
       ],
       "request": [],
       "response": [
@@ -2302,8 +2274,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions",
       "sdk": [
-        "OpenGeniClient.createBrowserSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createBrowserSession"
       ],
       "request": [
         "CreateBrowserSessionRequest"
@@ -2316,8 +2287,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
       "sdk": [
-        "OpenGeniClient.getBrowserSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getBrowserSession"
       ],
       "request": [],
       "response": [
@@ -2734,8 +2704,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/capabilities",
       "sdk": [
-        "OpenGeniClient.listCapabilities",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listCapabilities"
       ],
       "request": [],
       "response": [
@@ -2746,8 +2715,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/capabilities",
       "sdk": [
-        "OpenGeniClient.createCapability",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createCapability"
       ],
       "request": [
         "CreateCapabilityCatalogItemRequest"
@@ -2835,8 +2803,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/channels",
       "sdk": [
-        "OpenGeniClient.listChannels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listChannels"
       ],
       "request": [],
       "response": [
@@ -2847,8 +2814,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/channels",
       "sdk": [
-        "OpenGeniClient.createChannel",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createChannel"
       ],
       "request": [
         "CreateChannelRequest"
@@ -2870,8 +2836,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/channels/:channelId",
       "sdk": [
-        "OpenGeniClient.updateChannel",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateChannel"
       ],
       "request": [
         "UpdateChannelRequest"
@@ -2884,8 +2849,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/channels/order",
       "sdk": [
-        "OpenGeniClient.reorderChannels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.reorderChannels"
       ],
       "request": [
         "ReorderChannelsRequest"
@@ -2895,20 +2859,10 @@
       ]
     },
     {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/chat/completions",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/claude/accounts",
       "sdk": [
-        "OpenGeniClient.listClaudeSubscriptionAccounts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listClaudeSubscriptionAccounts"
       ],
       "request": [],
       "response": [
@@ -2992,31 +2946,12 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/claude/settings",
       "sdk": [
-        "OpenGeniClient.setClaudeSubscriptionRotationSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.setClaudeSubscriptionRotationSettings"
       ],
       "request": [],
       "response": [
         "SubscriptionPoolSettings"
       ]
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/codemode/calls",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/codemode/catalog",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
     },
     {
       "method": "DELETE",
@@ -3031,8 +2966,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/codex/accounts",
       "sdk": [
-        "OpenGeniClient.listCodexAccounts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listCodexAccounts"
       ],
       "request": [],
       "response": []
@@ -3095,8 +3029,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/codex/apps",
       "sdk": [
-        "OpenGeniClient.designateCodexAppsAccount",
-        "createSessionProxyHandler"
+        "OpenGeniClient.designateCodexAppsAccount"
       ],
       "request": [],
       "response": []
@@ -3123,8 +3056,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/codex/overview",
       "sdk": [
-        "OpenGeniClient.codexOverview",
-        "createSessionProxyHandler"
+        "OpenGeniClient.codexOverview"
       ],
       "request": [],
       "response": []
@@ -3133,26 +3065,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/codex/settings",
       "sdk": [
-        "OpenGeniClient.setCodexRotationSettings",
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/codex/source",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "PATCH",
-      "path": "/v1/workspaces/:workspaceId/codex/source",
-      "sdk": [
-        "createSessionProxyHandler"
+        "OpenGeniClient.setCodexRotationSettings"
       ],
       "request": [],
       "response": []
@@ -3161,8 +3074,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/codex/status",
       "sdk": [
-        "OpenGeniClient.codexStatus",
-        "createSessionProxyHandler"
+        "OpenGeniClient.codexStatus"
       ],
       "request": [],
       "response": []
@@ -3171,8 +3083,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/codex/usage",
       "sdk": [
-        "OpenGeniClient.codexUsage",
-        "createSessionProxyHandler"
+        "OpenGeniClient.codexUsage"
       ],
       "request": [],
       "response": []
@@ -3190,8 +3101,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.getCompanyBrain",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.getCompanyBrain"
       ],
       "request": [],
       "response": [
@@ -3202,7 +3112,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain/context-receipts",
       "sdk": [
-        "createSessionProxyHandler",
         "inspectorPath",
         "listCompanyBrainContextReceipts",
         "listCompanyBrainKnowledgeProposals"
@@ -3218,7 +3127,6 @@
       "path": "/v1/workspaces/:workspaceId/company-brain/export",
       "sdk": [
         "OpenGeniDocumentAuthorityClient.exportCompanyBrainOkf",
-        "createSessionProxyHandler",
         "inspectorPath",
         "listCompanyBrainContextReceipts",
         "listCompanyBrainKnowledgeProposals"
@@ -3233,7 +3141,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
       "sdk": [
-        "createSessionProxyHandler",
         "inspectorPath",
         "listCompanyBrainContextReceipts",
         "listCompanyBrainKnowledgeProposals"
@@ -3248,8 +3155,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-profile",
       "sdk": [
-        "OpenGeniClient.listCompanyProfile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listCompanyProfile"
       ],
       "request": [],
       "response": [
@@ -3260,8 +3166,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/company-profile",
       "sdk": [
-        "OpenGeniClient.updateCompanyProfile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateCompanyProfile"
       ],
       "request": [
         "UpdateCompanyProfileRequest"
@@ -3274,8 +3179,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-profile/agent-policy",
       "sdk": [
-        "OpenGeniClient.getCompanyProfileAgentPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getCompanyProfileAgentPolicy"
       ],
       "request": [],
       "response": [
@@ -3286,8 +3190,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/company-profile/agent-policy",
       "sdk": [
-        "OpenGeniClient.updateCompanyProfileAgentPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateCompanyProfileAgentPolicy"
       ],
       "request": [
         "UpdateCompanyProfileAgentPolicyRequest"
@@ -3300,8 +3203,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-profile/diff",
       "sdk": [
-        "OpenGeniClient.diffCompanyProfileRevisions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.diffCompanyProfileRevisions"
       ],
       "request": [
         "CompanyProfileDiffRequest"
@@ -3338,8 +3240,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/company-profile/rollback",
       "sdk": [
-        "OpenGeniClient.rollbackCompanyProfile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.rollbackCompanyProfile"
       ],
       "request": [
         "RollbackCompanyProfileRequest"
@@ -3352,8 +3253,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/computer-sessions",
       "sdk": [
-        "OpenGeniClient.listComputerSessions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listComputerSessions"
       ],
       "request": [],
       "response": [
@@ -3364,8 +3264,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/computer-sessions",
       "sdk": [
-        "OpenGeniClient.createComputerSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createComputerSession"
       ],
       "request": [
         "CreateComputerSessionRequest"
@@ -3378,8 +3277,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId",
       "sdk": [
-        "OpenGeniClient.getComputerSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getComputerSession"
       ],
       "request": [],
       "response": [
@@ -3520,8 +3418,7 @@
       "path": "/v1/workspaces/:workspaceId/connect/accounts",
       "sdk": [
         "OpenGeniClient.connectTransport",
-        "OpenGeniEmbeddingClient.listConnectAccounts",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.listConnectAccounts"
       ],
       "request": [],
       "response": [
@@ -3533,8 +3430,7 @@
       "path": "/v1/workspaces/:workspaceId/connect/attempts",
       "sdk": [
         "OpenGeniClient.connectTransport",
-        "OpenGeniEmbeddingClient.listPendingConnectAttempts",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.listPendingConnectAttempts"
       ],
       "request": [],
       "response": [
@@ -3546,8 +3442,7 @@
       "path": "/v1/workspaces/:workspaceId/connect/attempts",
       "sdk": [
         "OpenGeniClient.beginConnect",
-        "OpenGeniClient.connectTransport",
-        "createSessionProxyHandler"
+        "OpenGeniClient.connectTransport"
       ],
       "request": [
         "ConnectInstallationTarget",
@@ -3600,8 +3495,7 @@
       "path": "/v1/workspaces/:workspaceId/connect/catalog",
       "sdk": [
         "OpenGeniClient.connectTransport",
-        "OpenGeniEmbeddingClient.listConnectProviders",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.listConnectProviders"
       ],
       "request": [],
       "response": [
@@ -3612,8 +3506,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/connections",
       "sdk": [
-        "OpenGeniClient.listConnections",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listConnections"
       ],
       "request": [],
       "response": [
@@ -3625,8 +3518,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connections",
       "sdk": [
-        "OpenGeniClient.createConnection",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createConnection"
       ],
       "request": [
         "CreateConnectionRequest"
@@ -3660,8 +3552,7 @@
       "sdk": [
         "OpenGeniClient.connectTransport",
         "OpenGeniClient.listOwnConnectionAccounts",
-        "OpenGeniClient.personalGitHubStatus",
-        "createSessionProxyHandler"
+        "OpenGeniClient.personalGitHubStatus"
       ],
       "request": [],
       "response": [
@@ -3674,8 +3565,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/connections/:connectionId",
       "sdk": [
-        "OpenGeniClient.updateConnection",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateConnection"
       ],
       "request": [
         "UpdateConnectionRequest"
@@ -3918,8 +3808,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/connections/accounts",
       "sdk": [
-        "OpenGeniClient.listOwnConnectionAccounts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listOwnConnectionAccounts"
       ],
       "request": [],
       "response": [
@@ -3995,8 +3884,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/connections/github",
       "sdk": [
-        "OpenGeniClient.personalGitHubStatus",
-        "createSessionProxyHandler"
+        "OpenGeniClient.personalGitHubStatus"
       ],
       "request": [],
       "response": [
@@ -4110,8 +3998,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/control-events",
       "sdk": [
-        "OpenGeniClient.listWorkspaceControlEventPage",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceControlEventPage"
       ],
       "request": [],
       "response": []
@@ -4120,8 +4007,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/control-events/stream",
       "sdk": [
-        "OpenGeniClient.openWorkspaceControlEventStream",
-        "createSessionProxyHandler"
+        "OpenGeniClient.openWorkspaceControlEventStream"
       ],
       "request": [],
       "response": []
@@ -4139,8 +4025,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/credential-provider",
       "sdk": [
-        "OpenGeniClient.getWorkspaceCredentialProvider",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceCredentialProvider"
       ],
       "request": [],
       "response": [
@@ -4151,8 +4036,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/credential-provider",
       "sdk": [
-        "OpenGeniClient.putWorkspaceCredentialProvider",
-        "createSessionProxyHandler"
+        "OpenGeniClient.putWorkspaceCredentialProvider"
       ],
       "request": [
         "PutWorkspaceCredentialProviderRequest"
@@ -4165,7 +4049,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/credential-provider/rotate-secret",
       "sdk": [
-        "createSessionProxyHandler",
         "rotateWorkspaceCredentialProviderSecret"
       ],
       "request": [],
@@ -4177,7 +4060,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/credential-provider/test",
       "sdk": [
-        "createSessionProxyHandler",
         "testWorkspaceCredentialProvider"
       ],
       "request": [],
@@ -4189,8 +4071,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/default-rig",
       "sdk": [
-        "OpenGeniClient.setWorkspaceDefaultRig",
-        "createSessionProxyHandler"
+        "OpenGeniClient.setWorkspaceDefaultRig"
       ],
       "request": [
         "SetWorkspaceDefaultRigRequest"
@@ -4203,8 +4084,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/document-authority-reclassifications",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.listOrganizationDocumentAuthorityReclassifications",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.listOrganizationDocumentAuthorityReclassifications"
       ],
       "request": [],
       "response": [
@@ -4215,8 +4095,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/document-bases",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.listDocumentBases",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.listDocumentBases"
       ],
       "request": [],
       "response": [
@@ -4227,8 +4106,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/document-bases",
       "sdk": [
-        "OpenGeniClient.createDocumentBase",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createDocumentBase"
       ],
       "request": [
         "CreateDocumentBaseRequest"
@@ -4241,8 +4119,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/document-bases/:baseId",
       "sdk": [
-        "OpenGeniClient.getDocumentBase",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getDocumentBase"
       ],
       "request": [],
       "response": [
@@ -4297,8 +4174,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/document-default-collection-backfills",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.listDocumentDefaultCollectionBackfillRuns",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.listDocumentDefaultCollectionBackfillRuns"
       ],
       "request": [],
       "response": [
@@ -4309,8 +4185,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/document-default-collection-backfills",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.runDocumentDefaultCollectionBackfill",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.runDocumentDefaultCollectionBackfill"
       ],
       "request": [
         "RunDocumentDefaultCollectionBackfillRequest"
@@ -4323,8 +4198,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/document-default-collection-backfills/:runId",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.getDocumentDefaultCollectionBackfillAudit",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.getDocumentDefaultCollectionBackfillAudit"
       ],
       "request": [],
       "response": [
@@ -4335,8 +4209,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/documents",
       "sdk": [
-        "OpenGeniDocumentAuthorityClient.listAccessibleDocuments",
-        "createSessionProxyHandler"
+        "OpenGeniDocumentAuthorityClient.listAccessibleDocuments"
       ],
       "request": [],
       "response": [
@@ -4406,8 +4279,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/editable-artifacts",
       "sdk": [
-        "OpenGeniClient.listSessionEditableArtifacts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listSessionEditableArtifacts"
       ],
       "request": [],
       "response": []
@@ -4416,8 +4288,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/editable-artifacts",
       "sdk": [
-        "OpenGeniClient.createEditableArtifact",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createEditableArtifact"
       ],
       "request": [],
       "response": []
@@ -4426,8 +4297,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId",
       "sdk": [
-        "OpenGeniClient.getEditableArtifact",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getEditableArtifact"
       ],
       "request": [],
       "response": []
@@ -4481,17 +4351,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/editable-artifacts/imports",
       "sdk": [
-        "OpenGeniClient.importEditableArtifact",
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/enrollments",
-      "sdk": [
-        "createSessionProxyHandler"
+        "OpenGeniClient.importEditableArtifact"
       ],
       "request": [],
       "response": []
@@ -4535,8 +4395,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/enrollments/token",
       "sdk": [
-        "OpenGeniClient.mintEnrollToken",
-        "createSessionProxyHandler"
+        "OpenGeniClient.mintEnrollToken"
       ],
       "request": [
         "MintEnrollTokenRequest"
@@ -4549,8 +4408,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/external-members",
       "sdk": [
-        "OpenGeniEmbeddingClient.addExternalWorkspaceMember",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.addExternalWorkspaceMember"
       ],
       "request": [
         "AddWorkspaceMemberRequest"
@@ -4563,8 +4421,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/feedback",
       "sdk": [
-        "OpenGeniClient.listOwnFeedback",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listOwnFeedback"
       ],
       "request": [],
       "response": [
@@ -4575,8 +4432,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/feedback",
       "sdk": [
-        "OpenGeniClient.createFeedback",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createFeedback"
       ],
       "request": [
         "CreateFeedbackRequest"
@@ -4589,8 +4445,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/files",
       "sdk": [
-        "OpenGeniClient.listFiles",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listFiles"
       ],
       "request": [
         "FileListRequest"
@@ -4603,8 +4458,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/files/:fileId",
       "sdk": [
-        "OpenGeniClient.getFile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getFile"
       ],
       "request": [],
       "response": [
@@ -4615,8 +4469,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/files/:fileId/download-url",
       "sdk": [
-        "OpenGeniClient.createFileDownloadUrl",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createFileDownloadUrl"
       ],
       "request": [],
       "response": [
@@ -4640,8 +4493,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/files/uploads",
       "sdk": [
-        "OpenGeniClient.beginFileUpload",
-        "createSessionProxyHandler"
+        "OpenGeniClient.beginFileUpload"
       ],
       "request": [
         "CreateFileUploadRequest"
@@ -4654,8 +4506,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/files/uploads/:uploadId/complete",
       "sdk": [
-        "OpenGeniClient.completeFileUpload",
-        "createSessionProxyHandler"
+        "OpenGeniClient.completeFileUpload"
       ],
       "request": [],
       "response": [
@@ -4667,8 +4518,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/gateway-custom-models",
       "sdk": [
-        "OpenGeniClient.listWorkspaceGatewayCustomModels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceGatewayCustomModels"
       ],
       "request": [],
       "response": [
@@ -4679,8 +4529,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/gateway-custom-models",
       "sdk": [
-        "OpenGeniClient.createWorkspaceGatewayCustomModel",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceGatewayCustomModel"
       ],
       "request": [
         "CreateWorkspaceGatewayCustomModelRequest"
@@ -4704,8 +4553,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/action-policies",
       "sdk": [
-        "OpenGeniClient.getGitHubActionPolicies",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getGitHubActionPolicies"
       ],
       "request": [],
       "response": [
@@ -4716,8 +4564,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/github/action-policies",
       "sdk": [
-        "OpenGeniClient.updateGitHubActionPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateGitHubActionPolicy"
       ],
       "request": [
         "UpdateGitHubActionPolicyRequest"
@@ -4730,8 +4577,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/app",
       "sdk": [
-        "OpenGeniClient.getGitHubApp",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getGitHubApp"
       ],
       "request": [],
       "response": [
@@ -4742,8 +4588,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/github/app-manifest",
       "sdk": [
-        "OpenGeniClient.createGitHubAppManifest",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createGitHubAppManifest"
       ],
       "request": [],
       "response": []
@@ -4752,17 +4597,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/connect",
       "sdk": [
-        "OpenGeniClient.githubConnectUrl",
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/github/installations",
-      "sdk": [
-        "createSessionProxyHandler"
+        "OpenGeniClient.githubConnectUrl"
       ],
       "request": [],
       "response": []
@@ -4814,8 +4649,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/github/repositories",
       "sdk": [
-        "OpenGeniClient.listGitHubRepositories",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listGitHubRepositories"
       ],
       "request": [],
       "response": [
@@ -4837,8 +4671,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/identity-links",
       "sdk": [
-        "OpenGeniEmbeddingClient.listIdentityLinks",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.listIdentityLinks"
       ],
       "request": [],
       "response": [
@@ -4849,8 +4682,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/identity-links",
       "sdk": [
-        "OpenGeniEmbeddingClient.beginIdentityLink",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.beginIdentityLink"
       ],
       "request": [
         "BeginExternalIdentityLinkRequest"
@@ -4863,22 +4695,12 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/identity-links/:linkId",
       "sdk": [
-        "OpenGeniEmbeddingClient.getIdentityLink",
-        "createSessionProxyHandler"
+        "OpenGeniEmbeddingClient.getIdentityLink"
       ],
       "request": [],
       "response": [
         "ExternalIdentityLink"
       ]
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/identity-links/:linkId",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
     },
     {
       "method": "POST",
@@ -4900,8 +4722,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
       "sdk": [
-        "OpenGeniClient.getMemberNotifications",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getMemberNotifications"
       ],
       "request": [],
       "response": [
@@ -4912,8 +4733,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
       "sdk": [
-        "OpenGeniClient.updateMemberNotifications",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateMemberNotifications"
       ],
       "request": [
         "MemberNotificationsSetting"
@@ -4926,8 +4746,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/inference-control",
       "sdk": [
-        "OpenGeniClient.setWorkspaceInferenceState",
-        "createSessionProxyHandler"
+        "OpenGeniClient.setWorkspaceInferenceState"
       ],
       "request": [],
       "response": [
@@ -4938,7 +4757,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/inherited-integrations",
       "sdk": [
-        "createSessionProxyHandler",
         "getWorkspaceInheritedIntegrations"
       ],
       "request": [],
@@ -4950,8 +4768,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/insights",
       "sdk": [
-        "OpenGeniClient.getWorkspaceInsights",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceInsights"
       ],
       "request": [
         "InsightsRange"
@@ -4964,8 +4781,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/insights/calls",
       "sdk": [
-        "OpenGeniClient.listInsightsCalls",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listInsightsCalls"
       ],
       "request": [],
       "response": [
@@ -4976,8 +4792,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/insights/sites",
       "sdk": [
-        "OpenGeniClient.getWorkspaceInsightsSiteUsage",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceInsightsSiteUsage"
       ],
       "request": [
         "InsightsSiteUsageQuery"
@@ -4990,8 +4805,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/insights/usage",
       "sdk": [
-        "OpenGeniClient.getWorkspaceInsightsUsage",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceInsightsUsage"
       ],
       "request": [],
       "response": [
@@ -5002,8 +4816,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/instruction-policies",
       "sdk": [
-        "OpenGeniClient.listWorkspaceInstructionPolicies",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceInstructionPolicies"
       ],
       "request": [],
       "response": [
@@ -5016,8 +4829,7 @@
       "sdk": [
         "OpenGeniClient.diffWorkspaceInstructionPolicyRevisions",
         "OpenGeniClient.getWorkspaceInstructionPolicyRevision",
-        "OpenGeniClient.listWorkspaceInstructionPolicyOnboardingProposals",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceInstructionPolicyOnboardingProposals"
       ],
       "request": [
         "WorkspaceInstructionPolicyDiffRequest"
@@ -5045,8 +4857,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/diff",
       "sdk": [
-        "OpenGeniClient.diffWorkspaceInstructionPolicyRevisions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.diffWorkspaceInstructionPolicyRevisions"
       ],
       "request": [
         "WorkspaceInstructionPolicyDiffRequest"
@@ -5059,8 +4870,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/drafts",
       "sdk": [
-        "OpenGeniClient.createWorkspaceInstructionPolicyDraft",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceInstructionPolicyDraft"
       ],
       "request": [
         "CreateWorkspaceInstructionPolicyDraftRequest"
@@ -5073,8 +4883,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/import-legacy",
       "sdk": [
-        "OpenGeniClient.importLegacyWorkspaceInstructionPolicyDraft",
-        "createSessionProxyHandler"
+        "OpenGeniClient.importLegacyWorkspaceInstructionPolicyDraft"
       ],
       "request": [
         "ImportLegacyWorkspaceInstructionPolicyDraftRequest"
@@ -5087,8 +4896,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals",
       "sdk": [
-        "OpenGeniClient.listWorkspaceInstructionPolicyOnboardingProposals",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceInstructionPolicyOnboardingProposals"
       ],
       "request": [],
       "response": [
@@ -5099,8 +4907,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals",
       "sdk": [
-        "OpenGeniClient.createWorkspaceInstructionPolicyOnboardingProposal",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceInstructionPolicyOnboardingProposal"
       ],
       "request": [
         "CreateWorkspaceInstructionPolicyOnboardingProposalRequest"
@@ -5113,8 +4920,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/instruction-policies/rollback",
       "sdk": [
-        "OpenGeniClient.rollbackWorkspaceInstructionPolicyRevision",
-        "createSessionProxyHandler"
+        "OpenGeniClient.rollbackWorkspaceInstructionPolicyRevision"
       ],
       "request": [
         "RollbackWorkspaceInstructionPolicyRequest"
@@ -5127,8 +4933,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/integrations",
       "sdk": [
-        "OpenGeniClient.listApiIntegrations",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listApiIntegrations"
       ],
       "request": [],
       "response": [
@@ -5224,8 +5029,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/integrations/definitions",
       "sdk": [
-        "OpenGeniClient.listIntegrationDefinitions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listIntegrationDefinitions"
       ],
       "request": [],
       "response": [
@@ -5236,8 +5040,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/install",
       "sdk": [
-        "OpenGeniClient.installApiIntegration",
-        "createSessionProxyHandler"
+        "OpenGeniClient.installApiIntegration"
       ],
       "request": [
         "InstallApiIntegrationRequest"
@@ -5263,8 +5066,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/preview",
       "sdk": [
-        "OpenGeniClient.previewApiIntegration",
-        "createSessionProxyHandler"
+        "OpenGeniClient.previewApiIntegration"
       ],
       "request": [
         "PreviewApiIntegrationRequest"
@@ -5360,8 +5162,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
       "sdk": [
-        "OpenGeniClient.openWorkspaceInteractionRevisionStream",
-        "createSessionProxyHandler"
+        "OpenGeniClient.openWorkspaceInteractionRevisionStream"
       ],
       "request": [],
       "response": []
@@ -5370,8 +5171,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-interventions",
       "sdk": [
-        "OpenGeniClient.listInteractionInterventions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listInteractionInterventions"
       ],
       "request": [],
       "response": [
@@ -5382,8 +5182,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/interaction-interventions",
       "sdk": [
-        "OpenGeniClient.createInteractionIntervention",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createInteractionIntervention"
       ],
       "request": [
         "CreateInteractionInterventionRequest"
@@ -5396,8 +5195,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId",
       "sdk": [
-        "OpenGeniClient.getInteractionIntervention",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getInteractionIntervention"
       ],
       "request": [],
       "response": [
@@ -5421,8 +5219,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/knowledge/drops",
       "sdk": [
-        "OpenGeniClient.createKnowledgeDrop",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createKnowledgeDrop"
       ],
       "request": [
         "CreateKnowledgeDropRequest"
@@ -5432,20 +5229,10 @@
       ]
     },
     {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/knowledge/entries",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/knowledge/entries",
       "sdk": [
-        "OpenGeniClient.saveKnowledgeEntry",
-        "createSessionProxyHandler"
+        "OpenGeniClient.saveKnowledgeEntry"
       ],
       "request": [
         "KnowledgeEntrySaveRequest"
@@ -5578,8 +5365,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/knowledge/review-groups",
       "sdk": [
-        "OpenGeniClient.listKnowledgeReviewBatches",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listKnowledgeReviewBatches"
       ],
       "request": [
         "KnowledgeReviewBatchListRequest"
@@ -5589,20 +5375,10 @@
       ]
     },
     {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/knowledge/search",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/learning",
       "sdk": [
-        "OpenGeniClient.getWorkspaceLearningHistory",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceLearningHistory"
       ],
       "request": [],
       "response": [
@@ -5621,29 +5397,10 @@
       ]
     },
     {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/learning/revisions",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/learning/rollback",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/live-events/stream",
       "sdk": [
-        "OpenGeniClient.openWorkspaceLiveEventStream",
-        "createSessionProxyHandler"
+        "OpenGeniClient.openWorkspaceLiveEventStream"
       ],
       "request": [],
       "response": []
@@ -5652,8 +5409,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/machines",
       "sdk": [
-        "OpenGeniClient.listMachines",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listMachines"
       ],
       "request": [],
       "response": [
@@ -5750,8 +5506,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/member-candidates",
       "sdk": [
-        "OpenGeniClient.listWorkspaceMemberCandidates",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceMemberCandidates"
       ],
       "request": [],
       "response": [
@@ -5763,8 +5518,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/members",
       "sdk": [
-        "OpenGeniClient.listWorkspaceMembers",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceMembers"
       ],
       "request": [],
       "response": [
@@ -5776,8 +5530,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/members",
       "sdk": [
-        "OpenGeniClient.addWorkspaceMember",
-        "createSessionProxyHandler"
+        "OpenGeniClient.addWorkspaceMember"
       ],
       "request": [
         "AddWorkspaceMemberRequest"
@@ -5799,8 +5552,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/members/:subjectId",
       "sdk": [
-        "OpenGeniClient.updateWorkspaceMember",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateWorkspaceMember"
       ],
       "request": [
         "UpdateWorkspaceMemberRequest"
@@ -5865,8 +5617,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/memory-slack-publications",
       "sdk": [
-        "OpenGeniMemorySlackClient.listMemorySlackPublications",
-        "createSessionProxyHandler"
+        "OpenGeniMemorySlackClient.listMemorySlackPublications"
       ],
       "request": [],
       "response": [
@@ -5890,8 +5641,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/memory-slack-publications/channels",
       "sdk": [
-        "OpenGeniMemorySlackClient.listMemorySlackPublicationChannels",
-        "createSessionProxyHandler"
+        "OpenGeniMemorySlackClient.listMemorySlackPublicationChannels"
       ],
       "request": [],
       "response": [
@@ -5902,8 +5652,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/memory-slack-publications/configuration",
       "sdk": [
-        "OpenGeniMemorySlackClient.getMemorySlackPublicationConfiguration",
-        "createSessionProxyHandler"
+        "OpenGeniMemorySlackClient.getMemorySlackPublicationConfiguration"
       ],
       "request": [],
       "response": [
@@ -5914,8 +5663,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/memory-slack-publications/configuration",
       "sdk": [
-        "OpenGeniMemorySlackClient.updateMemorySlackPublicationConfiguration",
-        "createSessionProxyHandler"
+        "OpenGeniMemorySlackClient.updateMemorySlackPublicationConfiguration"
       ],
       "request": [
         "UpdateMemorySlackPublicationConfigurationRequest"
@@ -5928,8 +5676,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/model-account-settings",
       "sdk": [
-        "OpenGeniClient.getWorkspaceModelAccountSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceModelAccountSettings"
       ],
       "request": [],
       "response": [
@@ -5940,8 +5687,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/model-account-settings",
       "sdk": [
-        "OpenGeniClient.updateWorkspaceModelAccountSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateWorkspaceModelAccountSettings"
       ],
       "request": [
         "UpdateWorkspaceModelAccountSettingsRequest"
@@ -5954,8 +5700,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/model-catalog",
       "sdk": [
-        "OpenGeniClient.getWorkspaceModelCatalog",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceModelCatalog"
       ],
       "request": [],
       "response": [
@@ -5975,8 +5720,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/model-policy",
       "sdk": [
-        "OpenGeniClient.getWorkspaceModelAccessPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceModelAccessPolicy"
       ],
       "request": [],
       "response": []
@@ -5985,8 +5729,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/model-policy",
       "sdk": [
-        "OpenGeniClient.updateWorkspaceModelAccessPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateWorkspaceModelAccessPolicy"
       ],
       "request": [],
       "response": []
@@ -6076,19 +5819,9 @@
     },
     {
       "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/models",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/network-routes",
       "sdk": [
-        "OpenGeniClient.listNetworkRoutes",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listNetworkRoutes"
       ],
       "request": [],
       "response": [
@@ -6099,8 +5832,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/network-routes",
       "sdk": [
-        "OpenGeniClient.createNetworkRoute",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createNetworkRoute"
       ],
       "request": [
         "CreateNetworkRouteRequest"
@@ -6113,8 +5845,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
       "sdk": [
-        "OpenGeniClient.getNetworkRoute",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getNetworkRoute"
       ],
       "request": [],
       "response": [
@@ -6125,8 +5856,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
       "sdk": [
-        "OpenGeniClient.updateNetworkRoute",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateNetworkRoute"
       ],
       "request": [
         "UpdateNetworkRouteRequest"
@@ -6139,8 +5869,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/new-session-draft",
       "sdk": [
-        "OpenGeniClient.getNewSessionDraft",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getNewSessionDraft"
       ],
       "request": [],
       "response": [
@@ -6151,8 +5880,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/new-session-draft",
       "sdk": [
-        "OpenGeniClient.saveNewSessionDraft",
-        "createSessionProxyHandler"
+        "OpenGeniClient.saveNewSessionDraft"
       ],
       "request": [
         "SaveNewSessionDraftRequest"
@@ -6165,8 +5893,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/office/workbook-tickets",
       "sdk": [
-        "OpenGeniClient.createOfficeWorkbookTicket",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createOfficeWorkbookTicket"
       ],
       "request": [],
       "response": []
@@ -6175,8 +5902,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/office/workbooks",
       "sdk": [
-        "OpenGeniClient.listOfficeWorkbooks",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listOfficeWorkbooks"
       ],
       "request": [],
       "response": []
@@ -6185,8 +5911,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/openrouter-custom-models",
       "sdk": [
-        "OpenGeniClient.listWorkspaceOpenRouterCustomModels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceOpenRouterCustomModels"
       ],
       "request": [],
       "response": [
@@ -6197,8 +5922,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/openrouter-custom-models",
       "sdk": [
-        "OpenGeniClient.createWorkspaceOpenRouterCustomModel",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceOpenRouterCustomModel"
       ],
       "request": [
         "CreateWorkspaceOpenRouterCustomModelRequest"
@@ -6222,8 +5946,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/opper-custom-models",
       "sdk": [
-        "OpenGeniClient.listWorkspaceOpperCustomModels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceOpperCustomModels"
       ],
       "request": [],
       "response": [
@@ -6234,8 +5957,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/opper-custom-models",
       "sdk": [
-        "OpenGeniClient.createWorkspaceOpperCustomModel",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceOpperCustomModel"
       ],
       "request": [
         "CreateWorkspaceOpperCustomModelRequest"
@@ -6257,8 +5979,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/pause-timer",
       "sdk": [
-        "OpenGeniClient.setWorkspacePauseTimer",
-        "createSessionProxyHandler"
+        "OpenGeniClient.setWorkspacePauseTimer"
       ],
       "request": [
         "WorkspacePauseTimerRequest"
@@ -6269,8 +5990,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/plugins",
       "sdk": [
-        "OpenGeniClient.listInstalledPlugins",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listInstalledPlugins"
       ],
       "request": [],
       "response": [
@@ -6305,8 +6025,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/plugins/details",
       "sdk": [
-        "OpenGeniClient.getInstalledPluginDetails",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getInstalledPluginDetails"
       ],
       "request": [],
       "response": []
@@ -6315,8 +6034,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/plugins/install",
       "sdk": [
-        "OpenGeniClient.installPlugin",
-        "createSessionProxyHandler"
+        "OpenGeniClient.installPlugin"
       ],
       "request": [
         "InstallPluginRequest"
@@ -6329,8 +6047,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/plugins/preview",
       "sdk": [
-        "OpenGeniClient.previewPlugin",
-        "createSessionProxyHandler"
+        "OpenGeniClient.previewPlugin"
       ],
       "request": [
         "PreviewPluginRequest"
@@ -6343,8 +6060,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/github",
       "sdk": [
-        "OpenGeniPrReviewClient.getManagedGitHubSetup",
-        "createSessionProxyHandler"
+        "OpenGeniPrReviewClient.getManagedGitHubSetup"
       ],
       "request": [],
       "response": [
@@ -6355,8 +6071,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/pr-review/registrations",
       "sdk": [
-        "OpenGeniPrReviewClient.listConfiguration",
-        "createSessionProxyHandler"
+        "OpenGeniPrReviewClient.listConfiguration"
       ],
       "request": [],
       "response": []
@@ -6365,8 +6080,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/pr-review/registrations",
       "sdk": [
-        "OpenGeniPrReviewClient.createAppRegistration",
-        "createSessionProxyHandler"
+        "OpenGeniPrReviewClient.createAppRegistration"
       ],
       "request": [
         "CreatePrReviewAppRegistrationRequest"
@@ -6402,8 +6116,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/pr-review/repositories",
       "sdk": [
-        "OpenGeniPrReviewClient.createRepositoryBinding",
-        "createSessionProxyHandler"
+        "OpenGeniPrReviewClient.createRepositoryBinding"
       ],
       "request": [
         "CreatePrReviewRepositoryBindingRequest"
@@ -6438,8 +6151,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/preferences",
       "sdk": [
-        "OpenGeniClient.listPreferenceRegistry",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listPreferenceRegistry"
       ],
       "request": [],
       "response": [
@@ -6451,8 +6163,7 @@
       "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId",
       "sdk": [
         "OpenGeniClient.getPreferenceRegistry",
-        "OpenGeniClient.getPreferenceRegistrySummary",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getPreferenceRegistrySummary"
       ],
       "request": [],
       "response": [
@@ -6542,8 +6253,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/preferences/full-content",
       "sdk": [
-        "OpenGeniClient.getPreferenceRegistryFullContent",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getPreferenceRegistryFullContent"
       ],
       "request": [],
       "response": [
@@ -6554,8 +6264,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/preferences/proposals",
       "sdk": [
-        "OpenGeniClient.createPreferenceRegistryProposal",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createPreferenceRegistryProposal"
       ],
       "request": [
         "CreatePreferenceRegistryProposalRequest"
@@ -6568,8 +6277,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/preferences/summary",
       "sdk": [
-        "OpenGeniClient.getPreferenceRegistrySummary",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getPreferenceRegistrySummary"
       ],
       "request": [],
       "response": [
@@ -6580,8 +6288,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts",
       "sdk": [
-        "OpenGeniClient.listWorkspaceArtifacts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceArtifacts"
       ],
       "request": [],
       "response": [
@@ -6592,8 +6299,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/published-artifacts",
       "sdk": [
-        "OpenGeniClient.createWorkspaceArtifact",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceArtifact"
       ],
       "request": [
         "CreateWorkspaceArtifactRequest"
@@ -6607,7 +6313,6 @@
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId",
       "sdk": [
         "OpenGeniClient.getWorkspaceArtifact",
-        "createSessionProxyHandler",
         "siteDataPath"
       ],
       "request": [],
@@ -6750,8 +6455,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/html",
       "sdk": [
-        "OpenGeniClient.getWorkspaceArtifactHtml",
-        "downloadSessionProxySiteHtml"
+        "OpenGeniClient.getWorkspaceArtifactHtml"
       ],
       "request": [],
       "response": []
@@ -6980,20 +6684,10 @@
       "response": []
     },
     {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/published-artifacts/uploads",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/realtime-model-catalog",
       "sdk": [
-        "OpenGeniClient.getWorkspaceRealtimeModelCatalog",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceRealtimeModelCatalog"
       ],
       "request": [],
       "response": [
@@ -7004,8 +6698,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/rigs",
       "sdk": [
-        "OpenGeniClient.listRigs",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listRigs"
       ],
       "request": [],
       "response": [
@@ -7016,8 +6709,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/rigs",
       "sdk": [
-        "OpenGeniClient.createRig",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createRig"
       ],
       "request": [
         "CreateRigRequest"
@@ -7039,8 +6731,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/rigs/:rigId",
       "sdk": [
-        "OpenGeniClient.getRig",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getRig"
       ],
       "request": [],
       "response": [
@@ -7051,8 +6742,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/rigs/:rigId",
       "sdk": [
-        "OpenGeniClient.updateRig",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateRig"
       ],
       "request": [
         "UpdateRigRequest"
@@ -7153,8 +6843,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sandbox-images",
       "sdk": [
-        "OpenGeniClient.listWorkspaceSandboxImages",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceSandboxImages"
       ],
       "request": [],
       "response": []
@@ -7163,8 +6852,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/scheduled-task-slack-channels",
       "sdk": [
-        "OpenGeniClient.listScheduledTaskSlackChannels",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listScheduledTaskSlackChannels"
       ],
       "request": [],
       "response": [
@@ -7175,8 +6863,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/scheduled-tasks",
       "sdk": [
-        "OpenGeniClient.listScheduledTasks",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listScheduledTasks"
       ],
       "request": [],
       "response": [
@@ -7187,8 +6874,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/scheduled-tasks",
       "sdk": [
-        "OpenGeniClient.createScheduledTask",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createScheduledTask"
       ],
       "request": [
         "CreateScheduledTaskRequest"
@@ -7212,8 +6898,7 @@
       "sdk": [
         "OpenGeniClient.getScheduledTask",
         "OpenGeniClient.listPrivateScheduledTaskSummaries",
-        "OpenGeniClient.listScheduledTaskAccessAttention",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listScheduledTaskAccessAttention"
       ],
       "request": [],
       "response": [
@@ -7226,8 +6911,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/scheduled-tasks/:taskId",
       "sdk": [
-        "OpenGeniClient.updateScheduledTask",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateScheduledTask"
       ],
       "request": [
         "UpdateScheduledTaskRequest"
@@ -7297,8 +6981,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/scheduled-tasks/attention",
       "sdk": [
-        "OpenGeniClient.listScheduledTaskAccessAttention",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listScheduledTaskAccessAttention"
       ],
       "request": [],
       "response": [
@@ -7309,8 +6992,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries",
       "sdk": [
-        "OpenGeniClient.listPrivateScheduledTaskSummaries",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listPrivateScheduledTaskSummaries"
       ],
       "request": [],
       "response": [
@@ -7332,7 +7014,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/session-imports",
       "sdk": [
-        "createSessionProxyHandler",
         "importArchivedSession"
       ],
       "request": [
@@ -7359,8 +7040,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/session-mcp-tool-permissions",
       "sdk": [
-        "OpenGeniClient.getSessionMcpToolPermissions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getSessionMcpToolPermissions"
       ],
       "request": [],
       "response": [
@@ -7371,8 +7051,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/session-mcp-tool-permissions",
       "sdk": [
-        "OpenGeniClient.updateSessionMcpToolPermissions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateSessionMcpToolPermissions"
       ],
       "request": [
         "UpdateSessionMcpToolPermissionsRequest"
@@ -7383,8 +7062,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/session-message-search",
       "sdk": [
-        "OpenGeniClient.searchSessionMessages",
-        "createSessionProxyHandler"
+        "OpenGeniClient.searchSessionMessages"
       ],
       "request": [
         "SessionMessageSearchRequest"
@@ -7397,8 +7075,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/session-tenancy/capabilities",
       "sdk": [
-        "OpenGeniClient.getSessionTenancyCreateCapabilities",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getSessionTenancyCreateCapabilities"
       ],
       "request": [],
       "response": [
@@ -7411,8 +7088,7 @@
       "sdk": [
         "OpenGeniClient.listSessionPage",
         "OpenGeniClient.listSessionSummaryPage",
-        "OpenGeniClient.listSessions",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listSessions"
       ],
       "request": [
         "SessionScopeSubjectId"
@@ -7427,8 +7103,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/sessions",
       "sdk": [
-        "OpenGeniClient.createSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createSession"
       ],
       "request": [
         "CreateSessionRequest"
@@ -7451,7 +7126,6 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
       "sdk": [
         "OpenGeniClient.getSession",
-        "createSessionProxyHandler",
         "sessionPath"
       ],
       "request": [],
@@ -7463,8 +7137,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
       "sdk": [
-        "OpenGeniClient.updateSession",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateSession"
       ],
       "request": [
         "UpdateSessionRequest"
@@ -8685,6 +8358,17 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",
+      "sdk": [
+        "OpenGeniClient.continueSessionWaitingWork"
+      ],
+      "request": [],
+      "response": [
+        "ContinueSessionWaitingWorkResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture",
       "sdk": [
@@ -8710,8 +8394,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/settings",
       "sdk": [
-        "OpenGeniClient.updateWorkspaceSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateWorkspaceSettings"
       ],
       "request": [
         "UpdateWorkspaceSettingsRequest"
@@ -8724,8 +8407,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/site-auth-connections",
       "sdk": [
-        "OpenGeniClient.listSiteAuthConnections",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listSiteAuthConnections"
       ],
       "request": [],
       "response": [
@@ -8736,8 +8418,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/site-auth-connections",
       "sdk": [
-        "OpenGeniClient.createSiteAuthConnection",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createSiteAuthConnection"
       ],
       "request": [
         "CreateSiteAuthConnectionRequest"
@@ -8750,8 +8431,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
       "sdk": [
-        "OpenGeniClient.getSiteAuthConnection",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getSiteAuthConnection"
       ],
       "request": [],
       "response": [
@@ -8762,8 +8442,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
       "sdk": [
-        "OpenGeniClient.updateSiteAuthConnection",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateSiteAuthConnection"
       ],
       "request": [
         "UpdateSiteAuthConnectionRequest"
@@ -8776,8 +8455,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
       "sdk": [
-        "OpenGeniClient.checkSiteHostname",
-        "createSessionProxyHandler"
+        "OpenGeniClient.checkSiteHostname"
       ],
       "request": [],
       "response": [
@@ -8788,8 +8466,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/site-limit-profile",
       "sdk": [
-        "OpenGeniClient.getSiteLimitProfile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getSiteLimitProfile"
       ],
       "request": [],
       "response": [
@@ -8800,8 +8477,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/site-limit-profile",
       "sdk": [
-        "OpenGeniClient.updateSiteLimitProfile",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateSiteLimitProfile"
       ],
       "request": [
         "SiteLimitProfile"
@@ -8814,8 +8490,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/site-platform-usage",
       "sdk": [
-        "OpenGeniClient.getSitePlatformUsage",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getSitePlatformUsage"
       ],
       "request": [],
       "response": [
@@ -8826,8 +8501,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/skills",
       "sdk": [
-        "OpenGeniClient.listInstalledSkills",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listInstalledSkills"
       ],
       "request": [],
       "response": [
@@ -8862,8 +8536,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/skills/content",
       "sdk": [
-        "OpenGeniClient.listWorkspaceSkills",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceSkills"
       ],
       "request": [],
       "response": []
@@ -8936,8 +8609,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/skills/install",
       "sdk": [
-        "OpenGeniClient.installSkill",
-        "createSessionProxyHandler"
+        "OpenGeniClient.installSkill"
       ],
       "request": [
         "InstallSkillRequest"
@@ -8963,8 +8635,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/skills/preview",
       "sdk": [
-        "OpenGeniClient.previewSkillImport",
-        "createSessionProxyHandler"
+        "OpenGeniClient.previewSkillImport"
       ],
       "request": [
         "PreviewSkillImportRequest"
@@ -8977,26 +8648,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/skills/search",
       "sdk": [
-        "OpenGeniClient.searchPublicSkills",
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/slack-task-policy",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "PUT",
-      "path": "/v1/workspaces/:workspaceId/slack-task-policy",
-      "sdk": [
-        "createSessionProxyHandler"
+        "OpenGeniClient.searchPublicSkills"
       ],
       "request": [],
       "response": []
@@ -9005,22 +8657,12 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/social/connections",
       "sdk": [
-        "OpenGeniClient.listSocialConnections",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listSocialConnections"
       ],
       "request": [],
       "response": [
         "SocialConnection"
       ]
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/social/connections",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
     },
     {
       "method": "DELETE",
@@ -9048,28 +8690,9 @@
     },
     {
       "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/social/posts",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "POST",
-      "path": "/v1/workspaces/:workspaceId/social/posts",
-      "sdk": [
-        "createSessionProxyHandler"
-      ],
-      "request": [],
-      "response": []
-    },
-    {
-      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/subscription-usage-pools",
       "sdk": [
-        "OpenGeniClient.getWorkspaceSubscriptionUsagePools",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceSubscriptionUsagePools"
       ],
       "request": [],
       "response": [
@@ -9080,8 +8703,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/supergrok/accounts",
       "sdk": [
-        "OpenGeniClient.listSuperGrokAccounts",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listSuperGrokAccounts"
       ],
       "request": [],
       "response": []
@@ -9144,8 +8766,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/supergrok/settings",
       "sdk": [
-        "OpenGeniClient.setSuperGrokRotationSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.setSuperGrokRotationSettings"
       ],
       "request": [],
       "response": []
@@ -9154,8 +8775,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/supergrok/status",
       "sdk": [
-        "OpenGeniClient.supergrokStatus",
-        "createSessionProxyHandler"
+        "OpenGeniClient.supergrokStatus"
       ],
       "request": [],
       "response": []
@@ -9164,8 +8784,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/approvals",
       "sdk": [
-        "OpenGeniToolsClient.forWorkspace",
-        "createSessionProxyHandler"
+        "OpenGeniToolsClient.forWorkspace"
       ],
       "request": [],
       "response": [
@@ -9180,8 +8799,7 @@
       "path": "/v1/workspaces/:workspaceId/tools/calls",
       "sdk": [
         "OpenGeniClient.callWorkspaceSiteTool",
-        "OpenGeniToolsClient.forWorkspace",
-        "createSessionProxyHandler"
+        "OpenGeniToolsClient.forWorkspace"
       ],
       "request": [],
       "response": [
@@ -9195,8 +8813,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/tools/catalog",
       "sdk": [
-        "OpenGeniToolsClient.forWorkspace",
-        "createSessionProxyHandler"
+        "OpenGeniToolsClient.forWorkspace"
       ],
       "request": [],
       "response": [
@@ -9210,8 +8827,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/tools/declarations",
       "sdk": [
-        "OpenGeniToolsClient.forWorkspace",
-        "createSessionProxyHandler"
+        "OpenGeniToolsClient.forWorkspace"
       ],
       "request": [],
       "response": [
@@ -9225,8 +8841,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/invoke",
       "sdk": [
-        "createKnownWorkspaceTools",
-        "createSessionProxyHandler"
+        "createKnownWorkspaceTools"
       ],
       "request": [],
       "response": [
@@ -9240,8 +8855,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/manifest",
       "sdk": [
-        "createKnownWorkspaceTools",
-        "createSessionProxyHandler"
+        "createKnownWorkspaceTools"
       ],
       "request": [],
       "response": [
@@ -9255,8 +8869,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/resolve",
       "sdk": [
-        "createKnownWorkspaceTools",
-        "createSessionProxyHandler"
+        "createKnownWorkspaceTools"
       ],
       "request": [],
       "response": [
@@ -9270,8 +8883,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
       "sdk": [
-        "createKnownWorkspaceTools",
-        "createSessionProxyHandler"
+        "createKnownWorkspaceTools"
       ],
       "request": [],
       "response": [
@@ -9285,8 +8897,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/transcription-recordings",
       "sdk": [
-        "OpenGeniClient.listTranscriptionRecordings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listTranscriptionRecordings"
       ],
       "request": [],
       "response": [
@@ -9297,8 +8908,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/transcription-recordings",
       "sdk": [
-        "OpenGeniClient.createTranscriptionRecording",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createTranscriptionRecording"
       ],
       "request": [],
       "response": [
@@ -9320,8 +8930,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId",
       "sdk": [
-        "OpenGeniClient.getTranscriptionRecording",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getTranscriptionRecording"
       ],
       "request": [],
       "response": [
@@ -9365,8 +8974,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/transcriptions",
       "sdk": [
-        "OpenGeniClient.transcribeAudio",
-        "createSessionProxyHandler"
+        "OpenGeniClient.transcribeAudio"
       ],
       "request": [],
       "response": [
@@ -9378,7 +8986,6 @@
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
         "OpenGeniEmbeddingClient.getUsage",
-        "createSessionProxyHandler",
         "getUsage"
       ],
       "request": [
@@ -9393,7 +9000,6 @@
       "path": "/v1/workspaces/:workspaceId/usage/me",
       "sdk": [
         "OpenGeniEmbeddingClient.getMyUsage",
-        "createSessionProxyHandler",
         "getMyUsage"
       ],
       "request": [
@@ -9407,8 +9013,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/user-resource-authorities",
       "sdk": [
-        "OpenGeniClient.listUserResourceAuthorities",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listUserResourceAuthorities"
       ],
       "request": [],
       "response": [
@@ -9441,7 +9046,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9466,7 +9070,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9563,7 +9166,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/vaults",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9588,7 +9190,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/vaults",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9637,7 +9238,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9662,7 +9262,6 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9687,7 +9286,6 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/vaults/link",
       "sdk": [
-        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
@@ -9712,8 +9310,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/video-generation",
       "sdk": [
-        "OpenGeniClient.getVideoGenerationSettings",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getVideoGenerationSettings"
       ],
       "request": [],
       "response": [
@@ -9735,8 +9332,7 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/video-generation/policy",
       "sdk": [
-        "OpenGeniClient.updateVideoGenerationPolicy",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateVideoGenerationPolicy"
       ],
       "request": [
         "UpdateVideoGenerationPolicyRequest"
@@ -9749,8 +9345,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/webhooks",
       "sdk": [
-        "OpenGeniClient.listWorkspaceWebhooks",
-        "createSessionProxyHandler"
+        "OpenGeniClient.listWorkspaceWebhooks"
       ],
       "request": [],
       "response": [
@@ -9761,8 +9356,7 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/webhooks",
       "sdk": [
-        "OpenGeniClient.createWorkspaceWebhook",
-        "createSessionProxyHandler"
+        "OpenGeniClient.createWorkspaceWebhook"
       ],
       "request": [
         "CreateWorkspaceWebhookRequest"
@@ -9784,7 +9378,6 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
       "sdk": [
-        "createSessionProxyHandler",
         "getWorkspaceWebhook"
       ],
       "request": [],
@@ -9796,8 +9389,7 @@
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
       "sdk": [
-        "OpenGeniClient.updateWorkspaceWebhook",
-        "createSessionProxyHandler"
+        "OpenGeniClient.updateWorkspaceWebhook"
       ],
       "request": [
         "UpdateWorkspaceWebhookRequest"
@@ -9854,8 +9446,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/workspace-state",
       "sdk": [
-        "OpenGeniClient.getWorkspaceState",
-        "createSessionProxyHandler"
+        "OpenGeniClient.getWorkspaceState"
       ],
       "request": [],
       "response": [
@@ -9866,8 +9457,7 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/workspace-state/export",
       "sdk": [
-        "OpenGeniClient.exportWorkspaceState",
-        "createSessionProxyHandler"
+        "OpenGeniClient.exportWorkspaceState"
       ],
       "request": [],
       "response": [
@@ -14432,6 +14022,15 @@
         "$.serverId": "string!",
         "$.tools": "array!",
         "$.tools[]": "ref(ConnectorToolPermissionEntry)"
+      }
+    },
+    "ContinueSessionWaitingWorkResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.continued": "integer!"
       }
     },
     "CorrectPreferenceRegistryRequest": {
@@ -19938,6 +19537,7 @@
         "$.id": "string!",
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
+        "$.personalWorkspacesEnabled": "boolean?",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },
@@ -21359,6 +20959,7 @@
         "$.limits.defaultVisibilityLocked": "boolean!",
         "$.limits.onlyMeAllowed": "boolean!",
         "$.organizationId": "string!",
+        "$.personalWorkspaces": "boolean!",
         "$.updatedAt": "string! null"
       }
     },
@@ -24985,7 +24586,12 @@
         "$.machineName": "string!",
         "$.ownerName": "string! null",
         "$.queuedTurnBlocked": "boolean!",
-        "$.sandboxId": "string!"
+        "$.sandboxId": "string!",
+        "$.waitingWork": "array?",
+        "$.waitingWork[]": "object",
+        "$.waitingWork[].isYou": "boolean!",
+        "$.waitingWork[].name": "string! null",
+        "$.waitingWork[].results": "integer!"
       }
     },
     "SessionMcpApprovalPolicy": {
@@ -28320,7 +27926,8 @@
       "shape": {
         "$": "object",
         "$.adminsSeePrivateSchedules": "boolean?",
-        "$.defaultVisibility": "ref(SessionVisibility)?"
+        "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.personalWorkspaces": "boolean?"
       }
     },
     "UpdateOrganizationPrivateSessionSettingsRequest": {
@@ -28475,7 +28082,10 @@
       "shape": {
         "$": "object",
         "$.archived": "boolean!",
-        "$.expectedVersion": "integer?"
+        "$.clientEventId": "string?",
+        "$.confirmPause": "boolean?",
+        "$.expectedVersion": "integer?",
+        "$.mode": "enum?=[\"\\\"hide_for_me\\\"\",\"\\\"pause_and_archive\\\"\"]"
       }
     },
     "UpdateSessionAttentionRequest": {
@@ -32440,6 +32050,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
+      "SessionProxyRoute": "type",
       "SessionProxyToolServer": "type",
       "SessionQueueMutationResponse": "type",
       "SessionQueueSnapshot": "type",
@@ -33954,10 +33565,8 @@
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",
       "createSessionProxyHandler": "value",
-      "downloadSessionProxySiteHtml": "value",
       "getSessionProxyArtifactAssociation": "value",
       "getSessionProxyWorkspaceGrant": "value",
-      "SESSION_PROXY_SITE_HTML_MAX_BYTES": "value",
       "SessionProxyContext": "type",
       "SessionProxyCreateInput": "type",
       "SessionProxyHandlerOptions": "type",
@@ -33965,7 +33574,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
-      "SessionProxySiteHtmlTooLargeError": "value",
+      "SessionProxyRoute": "type",
       "SessionProxyToolServer": "type"
     },
     "@opengeni/sdk/session-usage-limits": {
@@ -36747,6 +36356,10 @@
       "toDate": "value",
       "useMinuteNow": "value"
     },
+    "@opengeni/react/ui/resize-handle": {
+      "ResizeHandle": "value",
+      "ResizeHandleProps": "type"
+    },
     "@opengeni/react/ui/revision-history": {
       "previousContent": "value",
       "Revision": "type",
@@ -37373,6 +36986,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -38098,6 +37712,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -38823,6 +38438,7 @@
       "connectClaudeSubscriptionSetupToken",
       "connectOrganizationClaudeSubscriptionSetupToken",
       "connectTransport",
+      "continueSessionWaitingWork",
       "controlSession",
       "correctPreferenceRegistry",
       "createAdditionalOrganization",
@@ -39576,10 +39192,6 @@
     "OpenGeniToolsClient": [
       "forWorkspace"
     ],
-    "SessionProxySiteHtmlTooLargeError": [
-      "code",
-      "limitBytes"
-    ],
     "SiteAuthConnectionCollection": [
       "connection",
       "create",
@@ -40215,6 +39827,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -42676,6 +42291,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -44947,6 +44565,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -47350,6 +46971,9 @@
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
       ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49575,6 +49199,9 @@
       ],
       "connectTransport": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"qualifier\":{\"name\":\"ConnectTransport\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/connect\"},\"type\":\"TSImportType\"}}"
+      ],
+      "continueSessionWaitingWork": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ContinueSessionWaitingWorkResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "controlSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"action\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"cancel\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"pause\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"resume\"},\"type\":\"TSLiteralType\"}]}},{\"computed\":false,\"key\":{\"name\":\"reason\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"clientEventId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"expectedControlEtag\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionControlResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52002,14 +51629,6 @@
       ]
     },
     "@opengeni/sdk/realtime:CodexRealtimeMicrophoneError": {},
-    "@opengeni/sdk/session-proxy:SessionProxySiteHtmlTooLargeError": {
-      "code": [
-        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
-      ],
-      "limitBytes": [
-        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
-      ]
-    },
     "@opengeni/sdk/site-bridge-host:SiteBridgeDocumentLease": {
       "close": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"

@@ -10,6 +10,9 @@ import {
   createSession,
   createSessionGoal,
   getSessionMcpMonitoringSummary,
+  getSessionQueueSnapshot,
+  getSessionQueueMonitoringSummary,
+  withWorkspaceSessionActivityRls,
   listSessionDiscoverySummaries,
   setSessionGoalStatusWithEvent,
   updateSessionTitle,
@@ -240,6 +243,121 @@ describe("compact session MCP database boundary", () => {
     expect(full).toHaveProperty("effectiveToolPolicy");
     expect(full.initialMessage).toBe("NEVER SHOW THIS PROMPT");
     expect(full).toHaveProperty("projection");
+  });
+
+  test("compact queue reads count mixed routing and pending inputs without loading bodies", async () => {
+    if (!shared || !client) return;
+    const target = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const large = "UNUSED QUEUE BODY ".repeat(4096);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, async (db) => {
+      await db.insert(schema.sessionTurns).values(
+        Array.from({ length: 24 }, (_, i) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${target.id}`,
+          status: i >= 22 ? "completed" : "queued",
+          source: i === 22 ? "system" : i % 2 ? "api" : "user",
+          promptRouting:
+            i % 3 === 0 ? null : i % 3 === 1 ? "queued_for_execution" : "accepted_for_execution",
+          position: i + 1,
+          prompt: large,
+          model: "test-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata:
+            i === 0
+              ? { delivery: "steer", replacedAttemptId: "malformed", interruptionCount: 2 }
+              : {},
+        })),
+      );
+      await db.insert(schema.sessionSystemUpdates).values(
+        Array.from({ length: 12 }, (_, i) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          kind: "child_terminal_result",
+          classification: "info",
+          sourceId: crypto.randomUUID(),
+          dedupeKey: crypto.randomUUID(),
+          state: i === 11 ? "cancelled" : "pending",
+          summary: "Pending input",
+          payload: {
+            type: "child_terminal_result",
+            childSessionId: crypto.randomUUID(),
+            status: "idle",
+            finalAnswer: large,
+          },
+        })),
+      );
+    });
+    const full = await getSessionQueueSnapshot(client.db, grant.workspaceId, target.id);
+    const summary = await getSessionQueueMonitoringSummary(client.db, grant.workspaceId, target.id);
+    expect(summary).toEqual({
+      effectiveControl: full!.effectiveControl,
+      queuedTurns: full!.items.length,
+      pendingInputs: full!.pendingInputs.length,
+      stoppingPreviousAttempt: full!.stoppingPreviousAttempt,
+    });
+    expect(summary!.queuedTurns).toBe(15);
+    expect(summary!.pendingInputs).toBe(11);
+    const compact = await call("session_get", { sessionId: target.id });
+    expect(compact.queue).toEqual({ queuedTurns: 15, pendingInputs: 11 });
+    const turnRead = queries.find(
+      (q) => q.includes('from "session_turns"') && q.includes('"prompt_routing"'),
+    )!;
+    expect(turnRead).toBeDefined();
+    expect(turnRead).not.toContain('"prompt"');
+    expect(turnRead).not.toContain('"resources"');
+    const inboxRead = queries.find((q) => q.includes('from "session_system_updates"'))!;
+    expect(inboxRead).toContain("count(*)");
+    expect(inboxRead).not.toContain('"payload"');
+    expect(inboxRead).not.toContain("order by");
+    expect(queries.some((q) => q.includes('from "scheduled_task_runs"'))).toBeFalse();
+    console.info(
+      "compact-queue-fixture",
+      JSON.stringify({
+        queuedRows: 24,
+        pendingRows: 12,
+        unusedPromptBytes: Buffer.byteLength(large) * 22,
+        unusedPendingAnswerBytes: Buffer.byteLength(large) * 11,
+        summaryBytes: Buffer.byteLength(JSON.stringify(summary)),
+        fullQueueBytes: Buffer.byteLength(JSON.stringify(full)),
+      }),
+    );
+    const other = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Other",
+      workspaceExternalSource: "test",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Other",
+      subjectId: `user:${crypto.randomUUID()}`,
+    });
+    const foreign = other.workspaceGrants[0]!;
+    for (const [workspaceId, id] of [
+      [foreign.workspaceId, target.id],
+      [grant.workspaceId, crypto.randomUUID()],
+    ]) {
+      // Both readers fail closed at the same native control boundary.
+      await expect(getSessionQueueSnapshot(client.db, workspaceId!, id!)).rejects.toMatchObject({
+        code: "SESSION_CONTROL_INVARIANT",
+      });
+      await expect(
+        getSessionQueueMonitoringSummary(client.db, workspaceId!, id!),
+      ).rejects.toMatchObject({ code: "SESSION_CONTROL_INVARIANT" });
+    }
   });
 
   test("progress reads decode only a bounded scalar and retain canonical truncation facts", async () => {

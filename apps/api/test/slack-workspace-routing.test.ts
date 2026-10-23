@@ -15,6 +15,7 @@ import {
   splitSlackLeadingMention,
   parseSlackWorkspacePrefix,
   resolveSlackWorkspaceRoute,
+  slackRouteChoicesForPersonalWorkspaces,
   slackRoutedRequestText,
   type SlackRouteInputs,
 } from "../src/integrations/slack-routing";
@@ -581,5 +582,46 @@ describe("the workspace line", () => {
     expect(first.text).toBe(second.text);
     expect(first.text.endsWith("\n-> Platform")).toBe(true);
     expect(first.text.length).toBeLessThanOrEqual(3_500);
+  });
+});
+
+describe("an organization with Personal workspaces turned off", () => {
+  const dm = { ...inputs().entry, triggerKind: "dm" as const, slackChannelId: "D-SAM" };
+  function routeDm(dmRoute: ReturnType<typeof channelRoute> | null, enabled: boolean) {
+    const choices = slackRouteChoicesForPersonalWorkspaces({
+      personalWorkspacesEnabled: enabled,
+      candidates: [ACME, PERSONAL],
+      dmRoute,
+    });
+    return resolveSlackWorkspaceRoute(
+      inputs({
+        entry: dm,
+        ...choices,
+        personalWorkspaceId:
+          choices.candidates.find((candidate) => candidate.personal)?.workspaceId ?? null,
+      }),
+    );
+  }
+
+  test("a direct message goes to the shared workspace instead of the hidden Personal one", () => {
+    expect(routeDm(null, true)).toMatchObject({
+      workspaceId: PERSONAL.workspaceId,
+      source: "dm_personal",
+    });
+    expect(routeDm(null, false)).toMatchObject({
+      kind: "resolved",
+      workspaceId: ACME.workspaceId,
+      source: "sole_candidate",
+    });
+  });
+
+  test("a remembered direct-message answer pointing at the Personal workspace is set aside", () => {
+    const toPersonal = { ...channelRoute(PERSONAL.workspaceId), slackUserId: "U-SAM" };
+    expect(routeDm(toPersonal, false)).toMatchObject({ workspaceId: ACME.workspaceId });
+    const toAcme = { ...channelRoute(ACME.workspaceId), slackUserId: "U-SAM" };
+    expect(routeDm(toAcme, false)).toMatchObject({
+      workspaceId: ACME.workspaceId,
+      source: "dm_route",
+    });
   });
 });

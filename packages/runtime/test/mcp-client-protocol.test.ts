@@ -168,11 +168,16 @@ function startModernServer(): Started {
   return entry;
 }
 
-function connectV2(url: string, firstParty = false, timeout?: number): MCPServerStreamableHttp {
+function connectV2(
+  url: string,
+  firstParty = false,
+  timeout?: number,
+  codexApps = false,
+): MCPServerStreamableHttp {
   return new MCPServerStreamableHttp({
     url,
     name: "fixture",
-    ...mcpStreamableHttpClientOptions({ firstParty }),
+    ...mcpStreamableHttpClientOptions({ firstParty, codexApps }),
     ...(timeout ? { timeout } : {}),
   });
 }
@@ -216,6 +221,24 @@ test("first-party servers skip the era probe", async () => {
   const server = connectV2(fixture.url, true);
   await server.connect();
   await server.close();
+  expect(fixture.methods[0]).toBe("initialize");
+  expect(fixture.methods).not.toContain("server/discover");
+});
+
+test("the ChatGPT apps server skips the era probe and lists its tools", async () => {
+  // ChatGPT's apps server answers server/discover but returns 2025-era tool
+  // lists without resultType, which a 2026-07-28 client rejects.
+  expect(
+    mcpStreamableHttpClientOptions({ firstParty: false, codexApps: true }).versionNegotiation,
+  ).toEqual({ mode: "legacy" });
+  const fixture = startLegacyServer();
+  const server = connectV2(fixture.url, false, undefined, true);
+  await server.connect();
+  try {
+    expect((await server.listTools()).map((tool) => tool.name)).toEqual(["search", "fail", "slow"]);
+  } finally {
+    await server.close();
+  }
   expect(fixture.methods[0]).toBe("initialize");
   expect(fixture.methods).not.toContain("server/discover");
 });

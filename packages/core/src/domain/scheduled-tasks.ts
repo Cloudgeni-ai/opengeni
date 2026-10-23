@@ -134,6 +134,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
@@ -421,6 +422,13 @@ export async function createValidatedScheduledTask(input: {
   }
   const validatedAgentConfig: ScheduledTaskAgentConfig = await validateScheduledTaskAgentConfig({
     ...input,
+    workspaceId: input.grant.workspaceId,
+  });
+  // Nobody starts a new schedule in a Personal workspace the organization
+  // turned off; schedules made before keep running. Checked after the
+  // model allow-list guard, which must reject a curated-out model first.
+  await requirePersonalWorkspaceOpenToNewWork(input, {
+    accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
   });
   // A schedule created from a Site page records which Site. Each run's

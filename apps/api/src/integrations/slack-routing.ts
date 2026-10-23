@@ -161,6 +161,31 @@ export type SlackRouteInputs = {
   askEnabled: boolean;
 };
 
+/**
+ * What a Slack message may route to once the organization turned Personal
+ * workspaces off: no Personal candidate, and a remembered DM answer that
+ * points at one is forgotten, so the DM goes where a channel message would.
+ * Mapped threads are decided before this and keep their workspace.
+ */
+export function slackRouteChoicesForPersonalWorkspaces(input: {
+  personalWorkspacesEnabled: boolean;
+  candidates: readonly SlackRoutableWorkspace[];
+  dmRoute: SlackUserDmRoute | null;
+}): { candidates: SlackRoutableWorkspace[]; dmRoute: SlackUserDmRoute | null } {
+  if (input.personalWorkspacesEnabled) {
+    return { candidates: [...input.candidates], dmRoute: input.dmRoute };
+  }
+  const personal = new Set(
+    input.candidates
+      .filter((candidate) => candidate.personal)
+      .map((candidate) => candidate.workspaceId),
+  );
+  return {
+    candidates: input.candidates.filter((candidate) => !candidate.personal),
+    dmRoute: input.dmRoute && personal.has(input.dmRoute.targetWorkspaceId) ? null : input.dmRoute,
+  };
+}
+
 function labelFor(
   candidates: readonly SlackRoutableWorkspace[],
   workspaceId: string,

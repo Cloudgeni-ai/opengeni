@@ -2708,10 +2708,18 @@ export const englishMessages = {
   "secretRefChip.secret": "Secret:",
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
+  "sessionAdmission.aMember": "another member",
   "sessionAdmission.cantRecheckNote":
     "Someone with permission to control this session can recheck after the issue is resolved.",
   "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
   "sessionAdmission.chooseMachine": "Choose machine",
+  "sessionAdmission.continueWaitingWork_one": "Continue with it",
+  "sessionAdmission.continueWaitingWork_other": "Continue with them",
+  "sessionAdmission.continueWaitingWorkFailed":
+    "That could not be confirmed. Refresh the chat and try again.",
+  "sessionAdmission.continueWaitingWorkNeedsYourTurn":
+    "Send a message in this chat first. The agent can then continue with them under your access.",
+  "sessionAdmission.continuingWaitingWork": "Continuing…",
   "sessionAdmission.copyRequestTo": "Copy request to {owner}",
   "sessionAdmission.genericBody":
     "{product} couldn't start the next step. Your queued work is saved.",
@@ -2744,6 +2752,13 @@ export const englishMessages = {
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
   "sessionAdmission.otherMachineQueuedNext":
     "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.otherMachineWorkNote":
+    "Updates from agents you start here also wait for {owner}.",
+  "sessionAdmission.othersUpdatesWaitingNext": "Only {owner} can let the agent continue with them.",
+  "sessionAdmission.othersUpdatesWaitingTitle_one":
+    "An update from {people}’s agents is waiting for {owner}",
+  "sessionAdmission.othersUpdatesWaitingTitle_other":
+    "{count} updates from {people}’s agents are waiting for {owner}",
   "sessionAdmission.ownMachineDraftNext":
     "Your draft stays here. Choose a workspace or cloud machine, or ask a workspace admin to share this machine.",
   "sessionAdmission.ownMachineExplanation":
@@ -2776,6 +2791,21 @@ export const englishMessages = {
     "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
   "sessionAdmission.theMachineOwner": "the machine owner",
   "sessionAdmission.tryAgain": "Try again",
+  "sessionAdmission.updatesWaitingExplanation":
+    "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can let the agent use it, so updates from other people’s agents wait until {owner} continues.",
+  "sessionAdmission.waitingForYouExplanation":
+    "This chat runs on your personal machine “{machine}”, and only you can let the agent use it.",
+  "sessionAdmission.waitingForYouNext":
+    "Continue to let the agent read them now, with your access.",
+  "sessionAdmission.waitingForYouTitle_one": "An update from {people}’s agents is waiting for you",
+  "sessionAdmission.waitingForYouTitle_other":
+    "{count} updates from {people}’s agents are waiting for you",
+  "sessionAdmission.yourUpdatesWaitingNext":
+    "{owner} can continue with them from this chat. To run your own work now, move the chat to a machine you can use.",
+  "sessionAdmission.yourUpdatesWaitingTitle_one":
+    "An update from your agents is waiting for {owner}",
+  "sessionAdmission.yourUpdatesWaitingTitle_other":
+    "{count} updates from your agents are waiting for {owner}",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
   "sessionAgentsModel.couldNotStartItsNextStep": "Could not start its next step",
@@ -2992,7 +3022,7 @@ export const englishMessages = {
   "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
-  "sessionList.archive": "Archive",
+  "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
   "sessionList.loadingChats": "Loading chats…",

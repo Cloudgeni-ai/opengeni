@@ -1741,6 +1741,11 @@ export const ManagedOrganizationMembershipProjection = /* @__PURE__ */ defineSch
     organizationId: z.string().uuid(),
     status: z.literal("active"),
     personalWorkspaceId: z.string().uuid(),
+    /**
+     * False when the organization turned Personal workspaces off: the person
+     * no longer sees or starts new work there. Absent means on.
+     */
+    personalWorkspacesEnabled: z.boolean().optional(),
   }),
 );
 export type ManagedOrganizationMembershipProjection = z.infer<
@@ -8441,6 +8446,12 @@ export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: z.boolean(),
+      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      clientEventId: z.string().min(1).max(200).optional(),
+      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
+      /** Required when the locked chat tree has active work. Restore never resumes. */
+      confirmPause: z.boolean().optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -8731,6 +8742,10 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       connectionEpoch: z.number().int().positive(),
       startupFenceSequence: z.number().int().nonnegative(),
       modeVersion: z.number().int().positive(),
+      /**
+       * @deprecated Always empty: the prior conversation travels in the
+       * provider's session instructions. Kept for clients of earlier releases.
+       */
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       /**
@@ -17291,17 +17306,20 @@ type InboxAccessContextShape = {
 };
 
 /**
- * Who has an inbox: a signed-in person (`user:`), or the one human of a local
- * install. API keys, services, configured or development subjects and agents
- * act through sessions and have none. This is the shape the web uses to show
- * the Inbox; the API also checks verified managed-human or local-bootstrap
- * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
+ * Who has an inbox: a signed-in person (`user:`), a product's external user
+ * (`external_user:`, signed in to the product, which relays as them), or the
+ * one human of a local install. API keys, services, configured or development
+ * subjects and agents act through sessions and have none. This is the shape
+ * the web uses to show the Inbox; the API also checks verified managed-human,
+ * external-actor or local-bootstrap provenance (see `inboxSubjectForContext`
+ * in `@opengeni/core`).
  */
 export function accessContextHasInbox(
   context: InboxAccessContextShape | null | undefined,
 ): boolean {
   if (!context || context.credential) return false;
-  if (context.subjectId.startsWith("user:")) return true;
+  if (context.subjectId.startsWith("user:") || context.subjectId.startsWith("external_user:"))
+    return true;
   const grants = context.workspaceGrants ?? [];
   return (
     context.mode === "local" &&
@@ -21472,9 +21490,34 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
     ownerName: z.string().nullable(),
     isOwner: z.boolean(),
     queuedTurnBlocked: z.boolean(),
+    /**
+     * Results from other people's work (their workers' results and agent
+     * messages) waiting because only the machine's owner may start work on
+     * it, grouped by whose work it is. Older servers omit it.
+     */
+    waitingWork: z
+      .array(
+        z.object({
+          /** The person's display name, when known. */
+          name: z.string().nullable(),
+          /** The waiting results come from the caller's own work. */
+          isYou: z.boolean(),
+          results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export const ContinueSessionWaitingWorkResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** How many waiting results the agent now continues with under the caller's authority. */
+    continued: z.number().int().nonnegative(),
+  }),
+);
+export type ContinueSessionWaitingWorkResponse = z.infer<typeof ContinueSessionWaitingWorkResponse>;
 
 /** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>

@@ -2,7 +2,7 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
-export { getSessionMachineAccess } from "./session-machine-access";
+export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
@@ -809,6 +809,7 @@ import type {
   SessionToolPolicy,
   SessionTurn,
   SessionQueueSnapshot,
+  SessionMcpQueueSummary,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
   SessionSystemUpdateState,
@@ -2516,19 +2517,24 @@ async function projectManagedOrganizationAccess(
   }
 
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
-  // Preserve the final scope of the old per-organization loop. These authority
-  // tables are non-RLS: every join is explicitly limited to the subject and the
-  // active organization ids just returned by the canonical membership helper.
-  await setRlsContext(db, {
-    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
-    workspaceId: null,
-  });
+  const finalAccountId = activeOrganizationMemberships.at(-1)!.organizationId;
+  // The authority tables below are non-RLS: every join is explicitly limited to
+  // the subject and the active organization ids just returned by the canonical
+  // membership helper. The default organization's account-scoped privacy row
+  // (0918: Personal workspaces off lands people in a shared workspace) rides
+  // in the same read under that organization's scope.
+  await setRlsContext(db, { accountId: defaultAccountId, workspaceId: null });
   const rows = await db
     .select({
       accountId: schema.managedAccounts.id,
       accountName: schema.managedAccounts.name,
       workspaceId: schema.workspaces.id,
       permissions: schema.workspaceMemberships.permissions,
+      defaultPersonalWorkspacesEnabled: sql<boolean | null>`(
+        select privacy.personal_workspaces_enabled
+        from ${schema.organizationPrivacyPreferences} privacy
+        where privacy.account_id = ${defaultAccountId}::uuid
+      )`,
       preferredDefaultWorkspaceId: sql<string | null>`(
         select legacy.id from ${schema.workspaces} legacy
         join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
@@ -2562,6 +2568,11 @@ async function projectManagedOrganizationAccess(
       ),
     )
     .orderBy(desc(schema.workspaces.createdAt));
+  // Preserve the final scope of the old per-organization loop.
+  if (finalAccountId !== defaultAccountId) {
+    await setRlsContext(db, { accountId: finalAccountId, workspaceId: null });
+  }
+  const defaultPersonalWorkspacesEnabled = rows[0]?.defaultPersonalWorkspacesEnabled ?? true;
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
     workspaceGrants.push(
@@ -2598,12 +2609,24 @@ async function projectManagedOrganizationAccess(
   }
   const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
+  // Rows are newest first, so the last shared grant is the organization's oldest.
+  const defaultSharedWorkspaceId = defaultPersonalWorkspacesEnabled
+    ? undefined
+    : [...workspaceGrants]
+        .reverse()
+        .find(
+          (grant) =>
+            grant.accountId === defaultAccountId &&
+            grant.workspaceId !== defaultPersonalWorkspaceId,
+        )?.workspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
         grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
-    )?.workspaceId ?? defaultPersonalWorkspaceId;
+    )?.workspaceId ??
+    defaultSharedWorkspaceId ??
+    defaultPersonalWorkspaceId;
   return {
     accessContext: {
       mode: "managed",
@@ -35357,40 +35380,142 @@ export async function setSessionArchive(
     sessionId: string;
     archived: boolean;
     expectedVersion?: number | undefined;
+    /** Trusted composition hook, inside the personal-state fence and before hiding. */
+    beforeArchive?:
+      | ((tx: SessionActivityDatabase, archiveVersion: number) => Promise<boolean | void>)
+      | undefined;
     /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
     personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
-  return await withWorkspaceSubjectRls(
+  return await withWorkspaceSubjectSessionActivityRls(
     db,
     input.workspaceId,
     input.subjectId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        await requireSessionPersonalStateWriteAuthority(tx, input);
+    async (tx) => {
+      await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
+      await requireSessionPersonalStateWriteAuthority(tx, input);
 
-        const [storedSession] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              isNull(schema.sessions.parentSessionId),
-            ),
-          )
-          .limit(1);
-        if (!storedSession) return null;
-        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
-          storedSession,
-        ]);
-        if (!session)
-          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
+      const [storedSession] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!storedSession) return null;
+      const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+        storedSession,
+      ]);
+      if (!session) throw new Error(`Session event cursor missing for session ${input.sessionId}`);
 
-        const [existing] = await tx
-          .select()
-          .from(schema.sessionPins)
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionPins)
+        .where(
+          and(
+            eq(schema.sessionPins.workspaceId, input.workspaceId),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+            eq(schema.sessionPins.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      const current = mapSessionArchive(existing);
+      if (current.archived === input.archived) {
+        if (input.archived && input.beforeArchive) {
+          const replay = await input.beforeArchive(tx, current.archiveVersion);
+          // An identical receipt may replay the original pre-transition CAS.
+          // A fresh pause intent must not bypass a stale archive precondition.
+          if (
+            input.expectedVersion !== undefined &&
+            input.expectedVersion !== current.archiveVersion &&
+            !replay
+          ) {
+            throw new SessionArchiveVersionConflictError(current);
+          }
+        }
+        return await mapSessionWithControl(
+          tx as unknown as Database,
+          session,
+          [],
+          mapSessionPin(existing),
+          mapSessionAttention(session, existing),
+          current,
+        );
+      }
+      if (input.expectedVersion !== undefined && input.expectedVersion !== current.archiveVersion) {
+        throw new SessionArchiveVersionConflictError(current);
+      }
+
+      if (input.archived && input.beforeArchive) {
+        await input.beforeArchive(tx, current.archiveVersion + 1);
+      }
+
+      let state = existing ?? null;
+      if (!existing) {
+        const [inserted] = await tx
+          .insert(schema.sessionPins)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            sessionId: input.sessionId,
+            pinned: false,
+            pinnedAt: null,
+            version: 0,
+            activelyWorking: false,
+            archived: true,
+            archivedAt: new Date(),
+            attentionVersion: 0,
+            archiveVersion: 1,
+          })
+          // A turn claim may have created this subject's row for the same
+          // session between the read above and here, to acknowledge a consumed
+          // child lifecycle notice. That row is archive-neutral and pin-neutral
+          // (the absent-row projection), so this is the same false -> true
+          // archive transition; its attention fence and version stay untouched.
+          .onConflictDoUpdate({
+            target: [
+              schema.sessionPins.subjectId,
+              schema.sessionPins.workspaceId,
+              schema.sessionPins.sessionId,
+            ],
+            set: {
+              archived: true,
+              archivedAt: new Date(),
+              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+              pinned: false,
+              pinnedAt: null,
+              activelyWorking: false,
+            },
+          })
+          .returning();
+        state = inserted ?? null;
+      } else {
+        const [updated] = await tx
+          .update(schema.sessionPins)
+          .set({
+            archived: input.archived,
+            archivedAt: input.archived ? new Date() : null,
+            archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+            ...(input.archived
+              ? {
+                  pinned: false,
+                  pinnedAt: null,
+                  activelyWorking: false,
+                  version: existing.pinned
+                    ? sql`${schema.sessionPins.version} + 1`
+                    : sql`${schema.sessionPins.version}`,
+                  attentionVersion: existing.activelyWorking
+                    ? sql`${schema.sessionPins.attentionVersion} + 1`
+                    : sql`${schema.sessionPins.attentionVersion}`,
+                }
+              : {}),
+          })
           .where(
             and(
               eq(schema.sessionPins.workspaceId, input.workspaceId),
@@ -35398,108 +35523,21 @@ export async function setSessionArchive(
               eq(schema.sessionPins.sessionId, input.sessionId),
             ),
           )
-          .limit(1);
-        const current = mapSessionArchive(existing);
-        if (current.archived === input.archived) {
-          return await mapSessionWithControl(
-            tx as unknown as Database,
-            session,
-            [],
-            mapSessionPin(existing),
-            mapSessionAttention(session, existing),
-            current,
-          );
-        }
-        if (
-          input.expectedVersion !== undefined &&
-          input.expectedVersion !== current.archiveVersion
-        ) {
-          throw new SessionArchiveVersionConflictError(current);
-        }
-
-        let state = existing ?? null;
-        if (!existing) {
-          const [inserted] = await tx
-            .insert(schema.sessionPins)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: input.subjectId,
-              sessionId: input.sessionId,
-              pinned: false,
-              pinnedAt: null,
-              version: 0,
-              activelyWorking: false,
-              archived: true,
-              archivedAt: new Date(),
-              attentionVersion: 0,
-              archiveVersion: 1,
-            })
-            // A turn claim may have created this subject's row for the same
-            // session between the read above and here, to acknowledge a consumed
-            // child lifecycle notice. That row is archive-neutral and pin-neutral
-            // (the absent-row projection), so this is the same false -> true
-            // archive transition; its attention fence and version stay untouched.
-            .onConflictDoUpdate({
-              target: [
-                schema.sessionPins.subjectId,
-                schema.sessionPins.workspaceId,
-                schema.sessionPins.sessionId,
-              ],
-              set: {
-                archived: true,
-                archivedAt: new Date(),
-                archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-                pinned: false,
-                pinnedAt: null,
-                activelyWorking: false,
-              },
-            })
-            .returning();
-          state = inserted ?? null;
-        } else {
-          const [updated] = await tx
-            .update(schema.sessionPins)
-            .set({
-              archived: input.archived,
-              archivedAt: input.archived ? new Date() : null,
-              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-              ...(input.archived
-                ? {
-                    pinned: false,
-                    pinnedAt: null,
-                    activelyWorking: false,
-                    version: existing.pinned
-                      ? sql`${schema.sessionPins.version} + 1`
-                      : sql`${schema.sessionPins.version}`,
-                    attentionVersion: existing.activelyWorking
-                      ? sql`${schema.sessionPins.attentionVersion} + 1`
-                      : sql`${schema.sessionPins.attentionVersion}`,
-                  }
-                : {}),
-            })
-            .where(
-              and(
-                eq(schema.sessionPins.workspaceId, input.workspaceId),
-                eq(schema.sessionPins.subjectId, input.subjectId),
-                eq(schema.sessionPins.sessionId, input.sessionId),
-              ),
-            )
-            .returning();
-          state = updated ?? null;
-        }
-        const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
-          session.id,
-        ]);
-        return await mapSessionWithControl(
-          tx as unknown as Database,
-          session,
-          mcpServers.get(session.id) ?? [],
-          mapSessionPin(state),
-          mapSessionAttention(session, state),
-          mapSessionArchive(state),
-        );
-      }),
+          .returning();
+        state = updated ?? null;
+      }
+      const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+        session.id,
+      ]);
+      return await mapSessionWithControl(
+        tx as unknown as Database,
+        session,
+        mcpServers.get(session.id) ?? [],
+        mapSessionPin(state),
+        mapSessionAttention(session, state),
+        mapSessionArchive(state),
+      );
+    },
   );
 }
 
@@ -83747,6 +83785,85 @@ export async function listPendingSessionTurns(
   });
 }
 
+/** Compact MCP monitoring never needs prompt bodies or inbox attachment planning.
+ * Keep the same control lock and stopping proof as the full queue projection. */
+export async function getSessionQueueMonitoringSummary(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<(SessionMcpQueueSummary & Pick<SessionQueueSnapshot, "effectiveControl">) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+      lock: "share",
+    });
+    const [session] = await scopedDb
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return null;
+    const rows = await scopedDb
+      .select({
+        promptRouting: schema.sessionTurns.promptRouting,
+        metadata: schema.sessionTurns.metadata,
+      })
+      .from(schema.sessionTurns)
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId));
+    const [pending] = await scopedDb
+      .select({ count: sql<string>`count(*)` })
+      .from(schema.sessionSystemUpdates)
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId));
+    return {
+      effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      queuedTurns: rows.filter(
+        (row) => row.promptRouting === null || row.promptRouting === "queued_for_execution",
+      ).length,
+      pendingInputs: Number(pending!.count),
+      stoppingPreviousAttempt: await sessionQueueStoppingPreviousAttempt(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        rows.map((row) => row.metadata),
+      ),
+    };
+  });
+}
+
+function sessionQueueTurnsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    eq(schema.sessionTurns.sessionId, sessionId),
+    eq(schema.sessionTurns.status, "queued"),
+    inArray(schema.sessionTurns.source, ["user", "api"]),
+  );
+}
+
+function sessionQueuePendingInputsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+    eq(schema.sessionSystemUpdates.sessionId, sessionId),
+    eq(schema.sessionSystemUpdates.state, "pending"),
+  );
+}
+
+async function sessionQueueStoppingPreviousAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  queuedMetadata: Record<string, unknown>[],
+): Promise<boolean> {
+  const latestInterruption = await latestSessionAttemptInterruption(db, workspaceId, sessionId);
+  const predecessorIds = queuedMetadata
+    .map(queuedSteerReplacementAttemptId)
+    .filter((attemptId): attemptId is string => attemptId !== null);
+  return (
+    (latestInterruption !== null &&
+      latestInterruption.interruptionState !== "rejected_stale" &&
+      latestInterruption.quiescedAt === null) ||
+    (await queuedSteerHasUnquiescedPredecessor(db, workspaceId, sessionId, predecessorIds))
+  );
+}
+
 export async function getSessionQueueSnapshot(
   db: Database,
   workspaceId: string,
@@ -83775,25 +83892,12 @@ export async function getSessionQueueSnapshot(
     const rows = await scopedDb
       .select()
       .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId))
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
     const pendingInputs = await scopedDb
       .select()
       .from(schema.sessionSystemUpdates)
-      .where(
-        and(
-          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
-        ),
-      )
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId))
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
@@ -83810,24 +83914,12 @@ export async function getSessionQueueSnapshot(
     const items = rows
       .filter((row) => row.promptRouting === null || row.promptRouting === "queued_for_execution")
       .map(mapSessionTurn);
-    const latestInterruption = await latestSessionAttemptInterruption(
+    const stoppingPreviousAttempt = await sessionQueueStoppingPreviousAttempt(
       scopedDb,
       workspaceId,
       sessionId,
+      physicalItems.map((turn) => turn.metadata),
     );
-    const queuedSteerPredecessorIds = physicalItems
-      .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
-      .filter((attemptId): attemptId is string => attemptId !== null);
-    const stoppingPreviousAttempt =
-      (latestInterruption !== null &&
-        latestInterruption.interruptionState !== "rejected_stale" &&
-        latestInterruption.quiescedAt === null) ||
-      (await queuedSteerHasUnquiescedPredecessor(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        queuedSteerPredecessorIds,
-      ));
 
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",

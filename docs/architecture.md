@@ -3162,3 +3162,11 @@ Deployment operator context is configured through
 `OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` and composed by runtime persistent
 instruction inspection for both modular and legacy agents. Persona overrides
 do not remove it. See `docs/local-development.md`.
+
+Personal sidebar Archive is an atomic composition of native Pause and personal
+visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
+Its personal-state fence precedes the normal control/workspace/session locks;
+post-commit fanout uses the existing durable control outboxes. Shared-chat control
+authority is independent of creator identity. Restore never resumes, and explicit
+Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
+background-command semantics.

@@ -363,30 +363,59 @@ function testShardWeights(
     }
     if (!parsed.entries || Array.isArray(parsed.entries))
       throw new Error("entries must be an object");
-    const discovered = discoverTestFiles(root)[tier];
-    const paths = Object.keys(parsed.entries).sort();
-    if (JSON.stringify(paths) !== JSON.stringify(discovered)) {
-      throw new Error(`profile file set does not exactly match discovered ${tier} tests`);
-    }
-    const weights = new Map<string, number>();
-    for (const path of paths) {
-      const entry = parsed.entries[path];
+    for (const [path, entry] of Object.entries(parsed.entries)) {
       if (!entry || typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
         throw new Error(`invalid content hash for ${path}`);
       }
       if (!Number.isSafeInteger(entry.planningWeight) || Number(entry.planningWeight) < 1) {
         throw new Error(`invalid planning weight for ${path}`);
       }
+    }
+    // Ordinary test edits must not discard every other file's timing: a single
+    // global fallback to source bytes puts the slowest suites together and
+    // overruns the shard deadline. A changed file keeps its last measured
+    // time (its closest estimate); a new file is estimated from its size at
+    // the profile's median milliseconds per byte. The environment fences above
+    // still invalidate the whole profile.
+    const discovered = discoverTestFiles(root)[tier];
+    const sizeOf = (path: string) => Math.max(1, statSync(join(root, path)).size);
+    const weights = new Map<string, number>();
+    const changed: string[] = [];
+    const added: string[] = [];
+    const millisecondsPerByte: number[] = [];
+    for (const path of discovered) {
+      const entry = parsed.entries[path];
+      if (!entry) {
+        added.push(path);
+        continue;
+      }
       const actual = createHash("sha256")
         .update(readFileSync(join(root, path)))
         .digest("hex");
-      if (actual !== entry.sha256) throw new Error(`stale content hash for ${path}`);
-      weights.set(path, Number(entry.planningWeight));
+      const weight = Number(entry.planningWeight);
+      if (actual === entry.sha256) millisecondsPerByte.push(weight / sizeOf(path));
+      else changed.push(path);
+      weights.set(path, weight);
     }
+    if (discovered.length > 0 && weights.size === 0) {
+      throw new Error(`profile has no entry for any discovered ${tier} test`);
+    }
+    if (added.length > 0) {
+      if (millisecondsPerByte.length === 0) {
+        throw new Error(`profile has no current entry to estimate new ${tier} tests from`);
+      }
+      millisecondsPerByte.sort((left, right) => left - right);
+      const median = millisecondsPerByte[Math.floor((millisecondsPerByte.length - 1) / 2)]!;
+      for (const path of added) weights.set(path, Math.max(1, Math.round(median * sizeOf(path))));
+    }
+    const estimated =
+      changed.length + added.length > 0
+        ? `; estimated ${changed.length} changed file(s) from their last timing and ${added.length} new file(s) from size`
+        : "";
     return {
       mode: "profile",
       weights,
-      reason: `content-fenced ${tier} planning profile`,
+      reason: `content-fenced ${tier} planning profile${estimated}`,
       profileSha256: createHash("sha256").update(bytes).digest("hex"),
     };
   } catch (error) {

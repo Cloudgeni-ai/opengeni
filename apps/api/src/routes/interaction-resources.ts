@@ -69,6 +69,7 @@ import {
   sseWorkspaceLiveStream,
 } from "../http/sse";
 import { observeInterventionMutation } from "../interaction-metrics";
+import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/live-events/stream", async (context) => {
@@ -96,6 +97,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
         ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
+        visibleControlEvents: workspaceControlEventVisibility(deps, workspaceId, authorization),
         sessionLists: source
           ? {
               source,

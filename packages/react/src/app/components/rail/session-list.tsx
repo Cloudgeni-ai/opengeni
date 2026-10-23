@@ -1,3 +1,8 @@
+import {
+  archiveActionLabel,
+  requestSessionArchive,
+  useArchiveConfirmation,
+} from "../../lib/archive-session";
 // The session list — the rail's home. Uses workspace discovery for search and
 // independently paged project folders for browsing, with pins above the tree.
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
@@ -356,6 +361,7 @@ export function SessionList() {
   const windowEvents = useUiEventTarget("window");
   const rail = useRail();
   const context = useAppContext();
+  const confirmArchive = useArchiveConfirmation();
   const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
   const listHintsAvailable =
     workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
@@ -619,18 +625,38 @@ export function SessionList() {
       (groupFill.generation === pageGeneration ? groupFill.counts.get(key) : undefined) ?? 0,
     [groupFill, pageGeneration],
   );
+  const [archiveWindowReductions, setArchiveWindowReductions] = useState<{
+    generation: number;
+    counts: ReadonlyMap<string, number>;
+  }>({ generation: -1, counts: new Map() });
+  const archiveFillFreeze = useRef<{ generation: number; height: number } | null>(null);
+  const archiveReduction = useCallback(
+    (key: string) =>
+      archiveWindowReductions.generation === pageGeneration
+        ? (archiveWindowReductions.counts.get(key) ?? 0)
+        : 0,
+    [archiveWindowReductions, pageGeneration],
+  );
   const baseCountForGroup = useCallback(
     (key: string) => activeGroupWindows.get(key) ?? SESSION_GROUP_VISIBLE_STEP,
     [activeGroupWindows],
   );
   const visibleCountForGroup = useCallback(
-    (key: string) => baseCountForGroup(key) + fillCountForGroup(key),
-    [baseCountForGroup, fillCountForGroup],
+    (key: string) =>
+      Math.max(0, baseCountForGroup(key) + fillCountForGroup(key) - archiveReduction(key)),
+    [baseCountForGroup, fillCountForGroup, archiveReduction],
   );
   const visibleNodesForGroup = useCallback(
     (key: string, nodes: SessionTreeNode[]) =>
-      search ? nodes : sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId),
-    [activeSessionId, search, visibleCountForGroup],
+      search
+        ? nodes
+        : sessionGroupWindowNodes(
+            nodes,
+            visibleCountForGroup(key),
+            activeSessionId,
+            archiveReduction(key) > 0 ? 0 : SESSION_GROUP_VISIBLE_STEP,
+          ),
+    [activeSessionId, search, visibleCountForGroup, archiveReduction],
   );
   const [archiveFolder, setArchiveFolder] = useState({
     generation: pageGeneration,
@@ -800,6 +826,35 @@ export function SessionList() {
     refreshLocalDeliveryAttention();
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
   }, [rail.workspaceId]);
+  const archivedWindowRows = useRef(new Map<string, string[]>());
+  useEffect(() => {
+    archivedWindowRows.current.clear();
+  }, [pageGeneration]);
+  const preserveArchiveWindow = useCallback(
+    (sessionId: string, archived: boolean, capturedKeys?: string[]) => {
+      if (archived && archivedWindowRows.current.has(sessionId)) return;
+      const keys = archived
+        ? (capturedKeys ??
+          fillTargetsRef.current
+            .filter((target) => target.visibleSessionIds.includes(sessionId))
+            .map((target) => target.key))
+        : (archivedWindowRows.current.get(sessionId) ?? []);
+      if (archived) archivedWindowRows.current.set(sessionId, keys);
+      else archivedWindowRows.current.delete(sessionId);
+      if (keys.length === 0) return;
+      const height = listRef.current?.closest<HTMLElement>(
+        "[data-rail-scroll-viewport]",
+      )?.clientHeight;
+      if (height !== undefined) archiveFillFreeze.current = { generation: pageGeneration, height };
+      setArchiveWindowReductions((current) => {
+        const counts = new Map(current.generation === pageGeneration ? current.counts : []);
+        for (const key of keys)
+          counts.set(key, Math.max(0, (counts.get(key) ?? 0) + (archived ? 1 : -1)));
+        return { generation: pageGeneration, counts };
+      });
+    },
+    [pageGeneration],
+  );
   const archiving = useRef(new Set<string>());
   useEffect(
     () =>
@@ -808,9 +863,11 @@ export function SessionList() {
         // its optimistic transition. Other mounted producers, including For
         // You Dismiss/Stop, need the same prompt re-read immediately.
         if (archiving.current.has(invalidation.sessionId)) return;
+        if (invalidation.archived !== undefined)
+          preserveArchiveWindow(invalidation.sessionId, invalidation.archived);
         void refreshSessionPages();
       }),
-    [rail.workspaceId, refreshSessionPages],
+    [rail.workspaceId, refreshSessionPages, preserveArchiveWindow],
   );
   const moveRequestOwner = useRef({});
   const pinOperation = useRef(0);
@@ -1820,6 +1877,9 @@ export function SessionList() {
   );
   const onArchive = useCallback<ArchiveFn>(
     async function archiveSession(session, archived, restoreFocusTo = "row") {
+      const archiveWindowKeys = fillTargetsRef.current
+        .filter((target) => target.visibleSessionIds.includes(session.id))
+        .map((target) => target.key);
       if (archiving.current.has(session.id)) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
@@ -1832,14 +1892,28 @@ export function SessionList() {
         settled: false,
       };
       archiving.current.add(session.id);
+      if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
       setArchiveTransitions((current) => new Set(current).add(session.id));
       let archivedResult: Session | undefined;
       try {
-        const updated = await context.client.updateSessionArchive(rail.workspaceId, session.id, {
-          archived,
-          expectedVersion: session.archiveVersion ?? 0,
+        const updated = await requestSessionArchive(context, session, archived, async (input) => {
+          // A confirmation is not an archive: retain the row and its window while deciding.
+          if (archived) preserveArchiveWindow(session.id, false);
+          setArchiveTransitions((current) => {
+            const next = new Set(current);
+            next.delete(session.id);
+            return next;
+          });
+          const confirmed = await confirmArchive(input);
+          if (confirmed) {
+            if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
+            setArchiveTransitions((current) => new Set(current).add(session.id));
+          }
+          return confirmed;
         });
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        preserveArchiveWindow(session.id, archived, archiveWindowKeys);
         const completedGeneration = context.sessionChannelProjectionAuthority.beginRead();
         setArchiveOverrides((current) => {
           const next = new Map(current).set(updated.id, { session: updated, completedGeneration });
@@ -1865,6 +1939,7 @@ export function SessionList() {
         });
         await refreshSessionPages();
       } finally {
+        if (archived && !archivedResult) preserveArchiveWindow(session.id, false);
         archiving.current.delete(session.id);
         const pending = pendingSessionFocus.current;
         if (
@@ -1902,7 +1977,7 @@ export function SessionList() {
         }
       }
     },
-    [context, rail.workspaceId, refreshSessionPages],
+    [context, rail.workspaceId, refreshSessionPages, confirmArchive, preserveArchiveWindow],
   );
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
@@ -3033,6 +3108,11 @@ export function SessionList() {
         // A current failure keeps its Retry control, but never advances the
         // disclosure window. Stale/no-op loads still return no focus outcome.
         if (result.failed) return false;
+        setArchiveWindowReductions((current) => {
+          const counts = new Map(current.counts);
+          counts.delete(group.key);
+          return { ...current, counts };
+        });
         // Manual disclosure stacks on the automatic fill shown when clicked.
         setGroupWindows((current) => ({
           generation: pageGeneration,
@@ -3120,6 +3200,7 @@ export function SessionList() {
   const fillTargets: (SessionGroupFillCandidate & {
     group: SessionPaginationGroup | null;
     loading: boolean;
+    visibleSessionIds: string[];
   })[] = [];
   const addFillTarget = (
     key: string,
@@ -3133,7 +3214,13 @@ export function SessionList() {
       key,
       group,
       loaded: nodes.length,
-      base: baseCountForGroup(key),
+      base: Math.max(0, baseCountForGroup(key) - archiveReduction(key)),
+      visibleSessionIds: sessionGroupWindowNodes(
+        nodes,
+        visibleCountForGroup(key),
+        activeSessionId,
+        0,
+      ).map((node) => node.session.id),
       // Failed pages keep their Retry control. Active sessions are filtered
       // client-side across the whole workspace, so fill uses only loaded rows.
       hasMore:
@@ -3195,6 +3282,10 @@ export function SessionList() {
     const gap = rows[1] ? rows[1].top - first.top : 0;
     const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
     const viewportHeight = viewport.clientHeight;
+    const frozen = archiveFillFreeze.current;
+    if (frozen?.generation === fillGenerationRef.current && frozen.height === viewportHeight)
+      return;
+    archiveFillFreeze.current = null;
     const previousHeight = lastFillViewportHeight.current;
     lastFillViewportHeight.current = viewportHeight;
     const contentBottom =
@@ -5010,7 +5101,7 @@ function SessionRow(props: {
             onSelect={() => void props.onArchive(props.session, !props.session.archived)}
           >
             <ArchiveIcon className="size-4" />
-            {props.session.archived ? "Restore" : "Archive"}
+            {archiveActionLabel(context, props.session)}
           </ContextMenuItem>
         ) : null}
         {props.session.parentSessionId === null && props.session.archived ? (
@@ -5080,6 +5171,7 @@ export function RowQuickActions({
   onPin: PinFn;
   onArchive: ArchiveFn;
 }) {
+  const archiveContext = useAppContext();
   const canPin = !session.archived;
   const canArchive = session.parentSessionId === null;
   if (!canPin && !canArchive) return null;
@@ -5113,8 +5205,14 @@ export function RowQuickActions({
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label={session.archived ? "Restore session" : "Archive session"}
-          title={session.archived ? "Restore" : "Archive"}
+          aria-label={
+            archiveActionLabel(archiveContext, session) === "Hide for me"
+              ? "Hide for me"
+              : session.archived
+                ? "Restore session"
+                : "Archive session"
+          }
+          title={archiveActionLabel(archiveContext, session)}
           data-session-actions={session.id}
           data-session-actions-mode="quick"
           data-session-action="archive"
@@ -5154,6 +5252,7 @@ function RowActionsMenu({
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
 }) {
+  const archiveContext = useAppContext();
   const remountSelection = useRef(false);
   const chatOps = useChatOperations();
   const copyLinkKeys = useActionShortcut("chat.copyLink");
@@ -5250,7 +5349,7 @@ function RowActionsMenu({
             onClick={(event) => event.stopPropagation()}
           >
             <ArchiveIcon className="size-4" />
-            {session.archived ? "Restore" : "Archive"}
+            {archiveActionLabel(archiveContext, session)}
           </DropdownMenuItem>
         ) : null}
         {session.parentSessionId === null && session.archived ? (

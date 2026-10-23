@@ -122,6 +122,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
+import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
@@ -992,7 +993,12 @@ function RootIndexRoute() {
     rememberedWorkspaceId: readLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
     ),
-    workspaces: context.workspaces,
+    // Never land in a Personal workspace the organization turned off.
+    workspaces: navigableWorkspaces(
+      context.workspaces,
+      context.managedSelfContext,
+      requestedWorkspaceId,
+    ),
     accessContext: context.accessContext,
   });
   if (!workspaceId) {

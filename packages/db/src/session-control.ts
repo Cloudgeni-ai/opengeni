@@ -3718,6 +3718,14 @@ async function cancelSessionSubtreeInTransaction(
   };
 }
 
+/** Archive must never silently interrupt work that started after the UI's idle snapshot. */
+export class SessionArchiveConfirmationRequiredError extends Error {
+  readonly code = "session_archive_confirmation_required";
+  constructor() {
+    super("This chat has active work. Confirm Pause and archive to stop it for everyone.");
+  }
+}
+
 export async function mutateSessionControlInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -3731,6 +3739,8 @@ export async function mutateSessionControlInTransaction(
     expectedControlEtag?: string | null;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
+    /** Personal archive only: verify idle under the same control fence as Pause. */
+    requireIdleForArchive?: boolean;
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
@@ -3846,6 +3856,29 @@ export async function mutateSessionControlInTransaction(
       outcome: "replayed",
       replay: true,
     };
+  }
+  if (input.requireIdleForArchive && input.action === "pause") {
+    {
+      const [activity] = await db.execute<{ active: boolean }>(sql`
+        select exists (
+          select 1 from ${schema.sessions} session
+          where session.workspace_id = ${input.workspaceId}
+            and (session.id = ${input.sessionId} or session.root_session_id = ${input.sessionId})
+            and (
+              session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+              or session.active_turn_id is not null
+              or session.input_wait_turn_id is not null
+              or exists (select 1 from ${schema.sessionGoals} goal
+                where goal.workspace_id = session.workspace_id and goal.session_id = session.id
+                  and goal.status = 'active')
+              or exists (select 1 from ${schema.sessionBackgroundCommands} command
+                where command.workspace_id = session.workspace_id and command.session_id = session.id
+                  and command.state in ('running', 'stopping'))
+            )
+        ) as active
+      `);
+      if (activity?.active) throw new SessionArchiveConfirmationRequiredError();
+    }
   }
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {

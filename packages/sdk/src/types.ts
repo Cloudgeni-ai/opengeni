@@ -166,6 +166,10 @@ export type SessionRealtimeWebsocketResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
+  /**
+   * @deprecated Always empty: the prior conversation travels in the
+   * provider's session instructions. Kept for clients of earlier releases.
+   */
   initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
   /**
@@ -2242,6 +2246,9 @@ export type UpdateSessionRetentionRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  clientEventId?: string;
+  mode?: "pause_and_archive" | "hide_for_me";
+  confirmPause?: boolean;
   expectedVersion?: number;
 };
 
@@ -4802,6 +4809,8 @@ export type OrganizationPrivacySettings = {
   organizationId: string;
   /** Who sees new chats and schedules unless the person picks otherwise. */
   defaultVisibility: "private" | "workspace";
+  /** Whether people have their own Personal workspace to see and work in. */
+  personalWorkspaces: boolean;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -4818,6 +4827,8 @@ export type OrganizationPrivacySettings = {
 export type UpdateOrganizationPrivacySettingsRequest = {
   defaultVisibility?: "private" | "workspace";
   adminsSeePrivateSchedules?: boolean;
+  /** Off: people no longer see or start new work in their Personal workspace. */
+  personalWorkspaces?: boolean;
 };
 
 /**
@@ -5648,6 +5659,11 @@ export type ManagedOrganizationMembership = {
   organizationId: string;
   status: "active";
   personalWorkspaceId: string;
+  /**
+   * False when the organization turned Personal workspaces off: the person no
+   * longer sees or starts new work there. Absent means on.
+   */
+  personalWorkspacesEnabled?: boolean | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {
@@ -10426,6 +10442,24 @@ export type SessionMachineAccess = {
   ownerName: string | null;
   isOwner: boolean;
   queuedTurnBlocked: boolean;
+  /** Results from other people's work (their workers' results and agent
+   *  messages) waiting because only the machine's owner may start work on it,
+   *  grouped by whose work it is. Older servers omit it. */
+  waitingWork?: SessionWaitingWork[] | undefined;
+};
+
+export type SessionWaitingWork = {
+  /** The person's display name, when known. */
+  name: string | null;
+  /** The waiting results come from the caller's own work. */
+  isYou: boolean;
+  results: number;
+};
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export type ContinueSessionWaitingWorkResponse = {
+  /** How many waiting results the agent now continues with under your authority. */
+  continued: number;
 };
 
 export type MachinesResponse = {

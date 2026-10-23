@@ -68,7 +68,7 @@ try {
           ?.textContent?.includes("Launch checklist") === true
       );
     });
-    await page.getByRole("complementary", { name: "Conversations" }).waitFor();
+    await page.getByRole("complementary", { name: "Chat", exact: true }).waitFor();
     await capture(page, `site-rows-opened-${theme}`);
     await page.close();
   }

@@ -731,6 +731,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "continueSessionWaitingWork",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",
+    "request": [],
+    "response": [
+      "ContinueSessionWaitingWorkResponse"
+    ]
+  },
+  {
     "id": "controlSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/control",

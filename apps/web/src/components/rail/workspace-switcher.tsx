@@ -1,7 +1,7 @@
 import { t } from "@opengeni/react/app/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
-import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { forwardRef, useMemo, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
@@ -27,6 +27,7 @@ import {
 import { useActionShortcut } from "@opengeni/react/app/lib/actions/actions-provider";
 import {
   isPersonalWorkspace,
+  navigableWorkspaces,
   type ManagedSelfContext,
 } from "@opengeni/react/app/lib/managed-self-context";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
@@ -200,7 +201,13 @@ export function WorkspaceSwitcherMenu(props: {
     context.workspaces.find((workspace) => workspace.id === props.workspaceId) ?? null;
   const activeAccountId =
     activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
-  const orgs = organizationsForSubject(t, context.accessContext, context.workspaces);
+  // A Personal workspace the organization turned off is not offered, unless
+  // a link brought the person into it.
+  const workspaces = useMemo(
+    () => navigableWorkspaces(context.workspaces, context.managedSelfContext, props.workspaceId),
+    [context.workspaces, context.managedSelfContext, props.workspaceId],
+  );
+  const orgs = organizationsForSubject(t, context.accessContext, workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const administers = useCanCreateWorkspaceIn(activeAccountId);
@@ -242,7 +249,7 @@ export function WorkspaceSwitcherMenu(props: {
       <WorkspaceMenu
         collapsed={props.collapsed}
         orgs={orgs}
-        workspaces={context.workspaces}
+        workspaces={workspaces}
         activeWorkspaceId={props.workspaceId}
         activeAccountId={activeAccountId}
         onCreateHere={createHereAccountId ? () => setCreateOpen(true) : undefined}

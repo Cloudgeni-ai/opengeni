@@ -207,8 +207,10 @@ describe("bootstrap error surface", () => {
       expect(document.body.textContent?.match(/Updating/gu)).toHaveLength(1);
       expect(configRequests).toBe(3);
 
-      // A long park keeps checking on its own, about every ten seconds.
-      for (let i = 0; i < 60; i++) await act(async () => jest.advanceTimersByTime(10_000));
+      // A long park keeps checking on its own, about every ten seconds. Each
+      // retry is scheduled only after the previous read settles, so advance in
+      // small steps: a coarse step fires at most one jittered (8-12 s) retry.
+      for (let i = 0; i < 600; i++) await act(async () => jest.advanceTimersByTime(1_000));
       expect(configRequests).toBeGreaterThan(40);
       expect(container.textContent).toContain("Updating");
 

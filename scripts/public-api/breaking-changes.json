@@ -244,5 +244,47 @@
     "removedInMajor": 2,
     "sunset": "2026-10-12",
     "reason": "Variable Sets are replaced by vaults: legacy routes answer 410 variable_sets_removed and legacy selection fields 422; vault routes, client.vaults(workspaceId), {{secret:...}} references and vaultPolicy replace them (SDK 2.0.0 exception to the 90-day deprecation window)."
+  },
+  {
+    "ids": [
+      "route:POST /v1/workspaces/:workspaceId/chat/completions",
+      "route:POST /v1/workspaces/:workspaceId/codemode/calls",
+      "route:GET /v1/workspaces/:workspaceId/codemode/catalog",
+      "route:GET /v1/workspaces/:workspaceId/codex/source",
+      "route:PATCH /v1/workspaces/:workspaceId/codex/source",
+      "route:GET /v1/workspaces/:workspaceId/enrollments",
+      "route:POST /v1/workspaces/:workspaceId/github/installations",
+      "route:POST /v1/workspaces/:workspaceId/identity-links/:linkId",
+      "route:GET /v1/workspaces/:workspaceId/knowledge/entries",
+      "route:POST /v1/workspaces/:workspaceId/knowledge/search",
+      "route:POST /v1/workspaces/:workspaceId/learning/revisions",
+      "route:POST /v1/workspaces/:workspaceId/learning/rollback",
+      "route:GET /v1/workspaces/:workspaceId/models",
+      "route:POST /v1/workspaces/:workspaceId/published-artifacts/uploads",
+      "route:GET /v1/workspaces/:workspaceId/slack-task-policy",
+      "route:PUT /v1/workspaces/:workspaceId/slack-task-policy",
+      "route:POST /v1/workspaces/:workspaceId/social/connections",
+      "route:GET /v1/workspaces/:workspaceId/social/posts",
+      "route:POST /v1/workspaces/:workspaceId/social/posts"
+    ],
+    "deprecation": ".changeset/product-relay-pass-through.md",
+    "removedInMajor": 5,
+    "sunset": "2026-10-23",
+    "reason": "Not a removal: the API still serves these routes, and the session proxy still forwards them (now generically, with every other workspace route, as the resolved user under Opengeni's permissions). They leave the SDK call-site inventory only because the relay no longer names them in its own requests."
+  },
+  {
+    "ids": [
+      "export:@opengeni/sdk/session-proxy:downloadSessionProxySiteHtml",
+      "export:@opengeni/sdk/session-proxy:SESSION_PROXY_SITE_HTML_MAX_BYTES",
+      "export:@opengeni/sdk/session-proxy:SessionProxySiteHtmlTooLargeError",
+      "member:SessionProxySiteHtmlTooLargeError.code",
+      "member:SessionProxySiteHtmlTooLargeError.limitBytes",
+      "signature:@opengeni/sdk/session-proxy:SessionProxySiteHtmlTooLargeError.code",
+      "signature:@opengeni/sdk/session-proxy:SessionProxySiteHtmlTooLargeError.limitBytes"
+    ],
+    "deprecation": ".changeset/product-relay-pass-through.md",
+    "removedInMajor": 5,
+    "sunset": "2026-10-23",
+    "reason": "The session proxy no longer re-streams Site HTML: it relays Opengeni's response with Opengeni's own sandbox and download headers, so the Site HTML download and size-limit helpers have no remaining use."
   }
 ]

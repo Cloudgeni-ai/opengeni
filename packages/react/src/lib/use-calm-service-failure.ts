@@ -55,14 +55,22 @@ export const STREAM_RECONNECTING_NOTICE_DELAY_MS = 2_000;
 /**
  * True once the session's event stream has been reconnecting for a moment
  * after the first load: Opengeni is updating or briefly unreachable. A quick
- * reconnect never shows.
+ * reconnect never shows, and neither does a first connection that has not
+ * reported "live" yet (a slow open, or a client that never reports its
+ * state): only a stream that was live and dropped is reconnecting.
  */
 export function useStreamReconnecting(
   connectionState: string | undefined,
   initialLoading: boolean,
 ): boolean {
+  const wasLiveRef = useRef(false);
+  if (initialLoading) wasLiveRef.current = false;
+  else if (connectionState === "live" || connectionState === "reconnecting") {
+    wasLiveRef.current = true;
+  }
   return useDelayedFlag(
-    connectionState === "reconnecting" || (connectionState === "connecting" && !initialLoading),
+    connectionState === "reconnecting" ||
+      (connectionState === "connecting" && !initialLoading && wasLiveRef.current),
     STREAM_RECONNECTING_NOTICE_DELAY_MS,
   );
 }

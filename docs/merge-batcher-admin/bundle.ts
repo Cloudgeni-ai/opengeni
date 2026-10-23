@@ -11,7 +11,7 @@ export type Snapshot = {
   classic: { nodes: Json[]; pageInfo: { hasNextPage: boolean } };
 };
 export type Plan = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   appId: number;
   installationId: number;
   before: Snapshot;
@@ -24,7 +24,7 @@ export type Plan = {
 export type Phase = "original" | "guard" | "namespace" | "applied" | "restored";
 const writableKeys = ["name", "target", "enforcement", "bypass_actors", "conditions", "rules"];
 const guardName = "Opengeni batcher immutable refs";
-const namespaceName = "Opengeni batcher dedicated writer";
+const namespaceName = "Merges go through the batcher: add the queue-ready label";
 const refs = ["refs/heads/queue/live/**", "refs/heads/batcher-state"];
 
 function object(value: Json | undefined): ObjectValue {
@@ -97,7 +97,14 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
     throw new Error("Classic protection needs separate review; do not replace it");
   }
   index(before.rulesets);
-  if (before.rulesets.some((r) => r.name === guardName || r.name === namespaceName))
+  if (
+    before.rulesets.some(
+      (r) =>
+        r.name === guardName ||
+        r.name === namespaceName ||
+        r.name === "Opengeni batcher dedicated writer",
+    )
+  )
     throw new Error("Prepared ruleset name already exists; reconcile prior execution first");
   const matches = before.rulesets.filter(
     (r) =>
@@ -120,7 +127,11 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
   const pr = original.rules.find((rule) => object(rule).type === "pull_request")!;
   equal(object(object(pr).parameters).allowed_merge_methods!, ["squash"], "Manual merge methods");
   const restore = writable(original);
-  const bypass = [{ actor_id: appId, actor_type: "Integration", bypass_mode: "always" }];
+  const bypass = [
+    { actor_id: appId, actor_type: "Integration", bypass_mode: "always" },
+    // GitHub ignores actor_id for OrganizationAdmin; this is not an assigned ID.
+    { actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always" },
+  ];
   const admission = { ...restore, rules: [pr], bypass_actors: bypass };
   const guard = {
     name: guardName,
@@ -142,7 +153,7 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
     ],
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     appId,
     installationId,
     before,
@@ -182,10 +193,10 @@ export function verify(
   for (const [id, payload] of expected) equal(actual.get(id)!, payload, `Ruleset ${id}`);
 }
 
-/** Version 1 allowed normal manual merges; never silently activate that plan. */
+/** Older plans have different bypass policy; never silently upgrade them. */
 export function validatePlan(plan: Plan): void {
-  if (plan.schemaVersion !== 2)
-    throw new Error("Exclusive-main rollout requires a newly reviewed version 2 plan");
+  if (plan.schemaVersion !== 3)
+    throw new Error("Emergency-admin rollout requires a newly reviewed version 3 plan");
   const expected = prepare(plan.before, plan.appId, plan.installationId);
   equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
 }

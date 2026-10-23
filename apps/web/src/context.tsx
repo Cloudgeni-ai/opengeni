@@ -1,3 +1,4 @@
+import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -429,15 +430,17 @@ export function RootRouteComponent() {
     </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
-      <Outlet />
-      <CreditRequiredGate
-        creditRequired={creditRequired}
-        setCreditRequired={setCreditRequired}
-        accessContext={accessContext}
-      />
-      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-        <TanStackRouterDevtools position="bottom-right" />
-      ) : null}
+      <ArchiveConfirmationProvider>
+        <Outlet />
+        <CreditRequiredGate
+          creditRequired={creditRequired}
+          setCreditRequired={setCreditRequired}
+          accessContext={accessContext}
+        />
+        {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+          <TanStackRouterDevtools position="bottom-right" />
+        ) : null}
+      </ArchiveConfirmationProvider>
     </AppContext.Provider>
   );
 

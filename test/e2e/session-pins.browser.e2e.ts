@@ -2120,6 +2120,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         (response) => new URL(response.url()).pathname === archivePath && response.ok(),
       );
       await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      await confirmPauseAndArchive(page);
       const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
       await notification.waitFor();
       const undoRequest = page.waitForRequest(
@@ -2245,6 +2246,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator("xpath=..")
         .getByRole("button", { name: "Archive session", exact: true })
         .press("Enter");
+      await confirmPauseAndArchive(page);
       const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
       await notification.waitFor();
       // Keep the notification alive while another device makes two real writes.
@@ -2253,7 +2255,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       let latest = await (await page.request.get(sessionUrl)).json();
       for (const archived of [false, true]) {
         const response = await page.request.put(`${sessionUrl}/archive`, {
-          data: { archived, expectedVersion: latest.archiveVersion },
+          // The chat is already paused; the other client only moves the archive.
+          data: { archived, expectedVersion: latest.archiveVersion, mode: "hide_for_me" },
         });
         expect(response.ok()).toBe(true);
         latest = await response.json();
@@ -4577,6 +4580,13 @@ async function workspaceFromPage(
       .waitFor();
   }
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
+}
+
+// A fixture chat keeps its queued first turn (no worker runs it), so archiving
+// it as someone who can pause asks to pause its active work first.
+async function confirmPauseAndArchive(page: Page) {
+  const dialog = page.getByRole("dialog", { name: "Pause and archive this chat?" });
+  await dialog.getByRole("button", { name: "Pause and archive", exact: true }).click();
 }
 
 async function createSessionThroughApi(

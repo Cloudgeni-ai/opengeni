@@ -89,6 +89,9 @@ const withheldMigrations = [
   // Redefines a push routine from withheld 0664 and reads the inbox settings
   // columns withheld 0663 and 0665 add.
   "0718_inbox_time_sensitive_needs_you.sql",
+  // Redefines 0718's inbox recipient and 0677's person resolver, which read
+  // scheduled_tasks.owner_subject_id from this cutover.
+  "0923_external_user_inbox.sql",
   // Patches the acceptance writers withheld 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
   // Built from the connect writer withheld 0715 rewrites; it follows 0715.
@@ -124,6 +127,8 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it).
+  "0917_continue_waiting_work.sql",
   "0846_independent_session_titles.sql",
   // Usage history routines live in the subscription schema the withheld 0688
   // creates; the seed reads them. Replay both after it.
