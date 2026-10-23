@@ -54,12 +54,13 @@ of that role uses the one element of the other of the two with that exact name
 (button and link are pressed alike, and on the web models often confuse them),
 and its step report and `role_note` say which element it used and to name its
 role next time. It never does so for a pick by position, a text write or a
-drag, a true match in any window wins, and several such elements fail at once
-as `ambiguous`. It takes the stand-in only once the window has stayed the same
-for 1.5 s (or a wait on that step just held on it), so a button an earlier step
-brings up wins over a link of its name. A wait whose name is shown only on an element of an unrelated
-role stops once the window has stayed the same size for 1.5 s, instead of
-running out its whole timeout.
+drag, and a true match in any window wins. It takes the stand-in only once the
+window has stayed the same for 1.5 s (or a wait on that step just held on it),
+so a button an earlier step brings up wins over a link of its name. Several
+such elements never hold a wait or a lookup: once the window has stayed the
+same for 1.5 s the step fails as `ambiguous`, naming them. A wait whose name is
+shown only on an element of an unrelated role also stops once the window has
+stayed the same for 1.5 s, instead of running out its whole timeout.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
