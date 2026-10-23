@@ -85,11 +85,11 @@ export function meetingStatusLabel(
 export function transcriptErrorText(code: string | null): string {
   switch (code) {
     case "missing_provider_key":
-      return "This workspace has no key for the transcription service. An admin can add one in workspace settings, under Models.";
+      return "No transcription provider is connected for this workspace. An organization admin can connect one in Organization settings, under Models.";
     case "provider_unauthorized":
-      return "The transcription service rejected this workspace's key. An admin can replace it in workspace settings, under Models.";
+      return "The transcription provider didn't accept its key. An organization admin can reconnect it in Organization settings, under Models.";
     case "provider_quota_exceeded":
-      return "The transcription service account is out of credit. Try again once it's topped up.";
+      return "The transcription provider refused the job because its account has no credit left. Ask an organization admin to check it, then transcribe again.";
     case "provider_too_large":
       return "This recording is longer than the model accepts. Try another model.";
     case "provider_not_supported":

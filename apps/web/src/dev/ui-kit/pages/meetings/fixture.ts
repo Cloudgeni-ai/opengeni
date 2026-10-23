@@ -223,6 +223,7 @@ export function createMeetingsFixture(
       segmentCount: segments.length,
     }),
   });
+  const reruns = new Map<string, RecordingTranscriptVersion[]>();
   let recordings: Recording[] =
     options.state === "empty"
       ? []
@@ -320,9 +321,20 @@ export function createMeetingsFixture(
       await delay(undefined);
     },
     listRecordingTranscriptVersions: async (_workspaceId: string, id: string) =>
-      await delay(find(id).transcript ? [find(id).transcript!] : []),
-    createRecordingTranscript: async (_workspaceId: string, id: string) =>
-      await delay(version(id, 2, "queued")),
+      await delay([
+        ...(reruns.get(id) ?? []),
+        ...(find(id).transcript ? [find(id).transcript!] : []),
+      ]),
+    createRecordingTranscript: async (_workspaceId: string, id: string) => {
+      const previous = reruns.get(id) ?? [];
+      const next = version(
+        id,
+        (find(id).transcript?.versionNumber ?? 0) + previous.length + 1,
+        "queued",
+      );
+      reruns.set(id, [next, ...previous]);
+      return await delay(next);
+    },
     setCurrentRecordingTranscript: async (_workspaceId: string, id: string) =>
       await delay(find(id).transcript!),
     getRecordingTranscript: async (_workspaceId: string, id: string) =>

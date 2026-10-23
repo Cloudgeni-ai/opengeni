@@ -62,14 +62,25 @@ export function uploadLine(recorder: MeetingRecorder, online: boolean): string |
   const capturing = recorder.state === "recording" || recorder.state === "paused";
   if (upload?.failed) return `Upload failed: ${upload.failed.message}`;
   if (upload?.finalized) return "Uploaded";
-  if (!online) return "Offline. The audio is saved on this device and uploads when you're back";
-  if (upload?.retryingAfterError) {
-    return "Connection trouble. The audio is saved on this device; retrying";
+  if (!online || upload?.retryingAfterError) {
+    return capturing
+      ? "Not uploading: no connection. Recording continues, and the audio is kept on this device until it uploads."
+      : "Not uploading: no connection. The audio is kept on this device and uploads when you're back.";
   }
-  if (capturing) return "Saved and uploaded as you go, so a dropped connection loses nothing";
+  if (recorder.state === "paused") return "Nothing is recorded while paused.";
+  if (capturing) {
+    return "You can use other pages while it records. The audio is saved as you go, so a dropped connection loses nothing.";
+  }
   if (!upload) return null;
-  if (upload.pendingChunks === 0) return "Finishing the upload";
-  return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio`;
+  if (upload.pendingChunks === 0) return "Finishing the upload.";
+  return `Uploading ${upload.pendingChunks} ${upload.pendingChunks === 1 ? "piece" : "pieces"} of audio.`;
+}
+
+/** True while audio is waiting on this device because the connection is down. */
+export function uploadStalled(recorder: MeetingRecorder, online: boolean): boolean {
+  const upload = recorder.upload;
+  if (upload?.failed || upload?.finalized) return false;
+  return !online || Boolean(upload?.retryingAfterError);
 }
 
 function useOnline(): boolean {
@@ -166,6 +177,7 @@ export function RecorderPanel({
 
   if (recorder && live) {
     const paused = state === "paused";
+    const stalled = uploadStalled(recorder, online);
     const recordingId = recorder.recordingId;
     const line = uploadLine(recorder, online);
     return (
@@ -177,18 +189,29 @@ export function RecorderPanel({
           <div className="flex min-w-0 items-center gap-3">
             <span className="relative flex size-3 shrink-0" aria-hidden="true">
               {!paused ? (
-                <span className="absolute inset-0 animate-ping rounded-full bg-status-failed/60 motion-reduce:animate-none" />
+                <span
+                  className={cn(
+                    "absolute inset-0 animate-ping rounded-full motion-reduce:animate-none",
+                    stalled ? "bg-status-waiting/60" : "bg-status-failed/60",
+                  )}
+                />
               ) : null}
               <span
                 className={cn(
                   "relative size-3 rounded-full",
-                  paused ? "bg-fg-subtle" : "bg-status-failed",
+                  paused ? "bg-fg-subtle" : stalled ? "bg-status-waiting" : "bg-status-failed",
                 )}
               />
             </span>
             <div className="min-w-0">
               <p className="text-sm leading-5 font-medium text-fg">
-                {state === "stopping" ? "Finishing" : paused ? "Paused" : "Recording"}
+                {state === "stopping"
+                  ? "Finishing"
+                  : paused
+                    ? "Paused"
+                    : stalled
+                      ? "Recording · not uploading"
+                      : "Recording"}
               </p>
               <p
                 className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums"
@@ -237,7 +260,13 @@ export function RecorderPanel({
           </div>
         </div>
         {line ? (
-          <p className="mt-3 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+          <p
+            className={cn(
+              "mt-3 text-xs leading-4.5",
+              stalled ? "font-medium text-fg-label" : "text-fg-muted",
+            )}
+            aria-live="polite"
+          >
             {line}
           </p>
         ) : null}
@@ -258,7 +287,7 @@ export function RecorderPanel({
   return (
     <section aria-label="New recording" className="grid gap-3">
       <form
-        className="flex items-center gap-3 rounded-[14px] border border-border bg-surface p-2 pl-4 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:flex-wrap max-sm:p-3"
+        className="flex items-center gap-3 rounded-[14px] border border-border bg-surface p-2 pl-4 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:flex-col max-sm:items-stretch max-sm:gap-2 max-sm:p-3"
         onSubmit={(event) => {
           event.preventDefault();
           void start();
@@ -274,13 +303,13 @@ export function RecorderPanel({
           maxLength={300}
           onChange={(event) => setTitle(event.target.value)}
           placeholder="Name this meeting (optional)"
-          className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0 max-sm:basis-full dark:bg-transparent"
+          className="h-9 min-w-0 flex-1 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0 max-sm:flex-none dark:bg-transparent"
           disabled={starting}
         />
         {recorder?.systemAudioSupported ? (
           <label
             htmlFor={tabAudioId}
-            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11"
+            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11 max-sm:self-start"
             title="Records the other people in a browser call, such as Google Meet or Teams on the web"
           >
             <Checkbox
@@ -301,9 +330,17 @@ export function RecorderPanel({
           {starting ? "Starting" : "Start recording"}
         </Button>
       </form>
-      {tabAudio && !error ? (
-        <p className="px-1 text-xs leading-4.5 text-fg-muted">
-          Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio.
+      {!error ? (
+        <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
+          {starting
+            ? tabAudio
+              ? "Starting. Allow the microphone if your browser asks, then pick the meeting tab and turn on Share tab audio."
+              : "Starting. Allow the microphone if your browser asks."
+            : tabAudio
+              ? "Your browser asks what to share next. Pick the meeting tab and turn on Share tab audio."
+              : recorder?.systemAudioSupported
+                ? "Records your microphone. For a call in another browser tab, such as Meet, Teams or Zoom on the web, include its audio to hear everyone. Let people know you're recording."
+                : "Records your microphone. Let people know you're recording."}
         </p>
       ) : null}
       {error ? (

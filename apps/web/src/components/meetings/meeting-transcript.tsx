@@ -4,9 +4,10 @@
  * this?" (someone from the people directory, or a new name); a turn's ⋯ menu
  * moves it to another speaker or corrects its words.
  */
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   CheckIcon,
+  ChevronDownIcon,
   MoreHorizontalIcon,
   PencilIcon,
   UserPlusIcon,
@@ -89,7 +90,11 @@ async function withToast(failure: string, work: () => Promise<void>): Promise<bo
   }
 }
 
-/** "Who is Speaker 2?": pick a person, add a new name, or clear it. */
+/**
+ * "Who is Speaker 2?": pick a person, add a new name, or clear it. People
+ * already named in this meeting come first as "Same person as …", because
+ * picking one joins the two voices under one name.
+ */
 export function SpeakerNameMenu({
   label,
   displayName,
@@ -111,31 +116,46 @@ export function SpeakerNameMenu({
 }) {
   const current = speakers.find((speaker) => speaker.label === label);
   const named = speakerIsNamed(label, speakers);
-  const sorted = useMemo(
-    () => [...people].sort((a, b) => a.displayName.localeCompare(b.displayName)).slice(0, 12),
-    [people],
+  const inMeeting = useMemo(() => {
+    const ids = new Set(
+      speakers
+        .filter((speaker) => speaker.label !== label && speaker.personId)
+        .map((speaker) => speaker.personId!),
+    );
+    return people.filter((person) => ids.has(person.id) && person.id !== current?.personId);
+  }, [people, speakers, label, current?.personId]);
+  const others = useMemo(
+    () =>
+      people
+        .filter((person) => !inMeeting.includes(person))
+        .sort((a, b) => a.displayName.localeCompare(b.displayName))
+        .slice(0, 12),
+    [people, inMeeting],
   );
+  const pick = (person: RecordingPerson) =>
+    void withToast("Couldn't name this speaker", () =>
+      actions.nameSpeaker(label, { personId: person.id }),
+    );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="max-h-80 min-w-56">
         <DropdownMenuLabel>Who is {displayName}?</DropdownMenuLabel>
-        {sorted.map((person) => (
-          <DropdownMenuItem
-            key={person.id}
-            onSelect={() =>
-              void withToast("Couldn't name this speaker", () =>
-                actions.nameSpeaker(label, { personId: person.id }),
-              )
-            }
-          >
+        {inMeeting.map((person) => (
+          <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
+            <span className="min-w-0 flex-1 truncate">Same person as {person.displayName}</span>
+          </DropdownMenuItem>
+        ))}
+        {inMeeting.length > 0 && others.length > 0 ? <DropdownMenuSeparator /> : null}
+        {others.map((person) => (
+          <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
             <span className="min-w-0 flex-1 truncate">{person.displayName}</span>
             {current?.personId === person.id ? (
               <CheckIcon aria-hidden="true" className="text-brand" />
             ) : null}
           </DropdownMenuItem>
         ))}
-        {sorted.length > 0 ? <DropdownMenuSeparator /> : null}
+        {inMeeting.length + others.length > 0 ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => onAddNew(label)}>
           <UserPlusIcon aria-hidden="true" />
           Someone new…
@@ -180,7 +200,7 @@ export function NewSpeakerNameDialog({
         }
       }}
       title={`Who is ${displayName}?`}
-      description="They're added to your organization's people, so you can pick them in other meetings."
+      description="The name is added to the people list your organization shares, so anyone can pick it in later meetings."
       submitLabel="Save name"
       pendingLabel="Saving…"
       submitDisabled={!name.trim()}
@@ -216,15 +236,21 @@ export function NewSpeakerNameDialog({
 
 function EditTurnDialog({
   turn,
+  speakerName,
   onClose,
   actions,
 }: {
   turn: TranscriptTurn | null;
+  speakerName: string;
   onClose: () => void;
   actions: TranscriptActions;
 }) {
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const formId = useId();
+  const changed =
+    turn?.segments.some(
+      (segment) => drafts[segment.index] !== undefined && drafts[segment.index] !== segment.text,
+    ) ?? false;
   return (
     <FormDialog
       open={turn !== null}
@@ -236,9 +262,10 @@ function EditTurnDialog({
       }}
       size="lg"
       title="Correct the words"
-      description="Fix what the transcript got wrong. The original stays with the transcript version."
+      description="Fix what the transcript got wrong. Everyone sees your correction in this version; the model's original words are kept, and clearing a line brings them back."
       submitLabel="Save"
       pendingLabel="Saving…"
+      submitDisabled={!changed}
       onSubmit={async () => {
         if (!turn) return;
         const changes = turn.segments.filter(
@@ -258,7 +285,10 @@ function EditTurnDialog({
     >
       <FieldStack>
         {turn?.segments.map((segment) => (
-          <Field key={segment.index} label={formatClock(segment.startMilliseconds)}>
+          <Field
+            key={segment.index}
+            label={`${speakerName} at ${formatClock(segment.startMilliseconds)}`}
+          >
             <TextArea
               id={`${formId}-${segment.index}`}
               rows={Math.min(8, Math.max(2, Math.ceil(segment.text.length / 80)))}
@@ -299,12 +329,38 @@ export function MeetingTranscript({
   const [naming, setNaming] = useState<string | null>(null);
   const [editing, setEditing] = useState<TranscriptTurn | null>(null);
   const nameOf = (label: string | null) => speakerDisplayName(label, speakers, tracks);
+  const listRef = useRef<HTMLOListElement>(null);
+  // Follow playback: keep the playing line in view while the reader is
+  // following it, and stop following once they scroll elsewhere.
+  const previousActive = useRef<number | null>(null);
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || activeSegment === null) {
+      previousActive.current = activeSegment;
+      return;
+    }
+    const visible = (element: Element | null) => {
+      if (!element) return false;
+      const box = element.getBoundingClientRect();
+      return box.bottom > 0 && box.top < window.innerHeight;
+    };
+    const previous =
+      previousActive.current === null
+        ? null
+        : list.querySelector(`[data-segment="${previousActive.current}"]`);
+    const next = list.querySelector(`[data-segment="${activeSegment}"]`);
+    previousActive.current = activeSegment;
+    if (!next || visible(next) || (previous && !visible(previous))) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    next.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
+  }, [activeSegment]);
 
   return (
     <>
-      <ol className="grid gap-6" aria-label="Transcript">
+      <ol ref={listRef} className="grid gap-6" aria-label="Transcript">
         {turns.map((turn) => {
           const name = nameOf(turn.speakerLabel);
+          const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
           const active = turn.segments.some((segment) => segment.index === activeSegment);
           return (
             <li key={turn.key} className="group/turn grid min-w-0 gap-1.5">
@@ -320,10 +376,25 @@ export function MeetingTranscript({
                   >
                     <button
                       type="button"
-                      className="-mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover pointer-coarse:min-h-11"
+                      aria-label={
+                        unnamed ? `${name}, name this speaker` : `${name}, change who this is`
+                      }
+                      className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
                     >
                       <SpeakerDot slot={slots.get(turn.speakerLabel)} />
-                      <span className="truncate">{name}</span>
+                      <span
+                        className={cn(
+                          "truncate",
+                          unnamed &&
+                            "underline decoration-fg-subtle decoration-dotted underline-offset-4",
+                        )}
+                      >
+                        {name}
+                      </span>
+                      <ChevronDownIcon
+                        aria-hidden="true"
+                        className="size-3.5 shrink-0 text-fg-subtle opacity-0 transition-opacity duration-[120ms] group-hover/speaker:opacity-100 group-focus-visible/speaker:opacity-100 group-data-[state=open]/speaker:opacity-100 pointer-coarse:opacity-100 motion-reduce:transition-none"
+                      />
                     </button>
                   </SpeakerNameMenu>
                 ) : (
@@ -336,13 +407,13 @@ export function MeetingTranscript({
                   <button
                     type="button"
                     onClick={() => onSeek(turn.startMilliseconds)}
-                    className="rounded-[6px] px-1 text-xs leading-4 text-fg-subtle tabular-nums transition-colors duration-[120ms] hover:text-fg pointer-coarse:min-h-11"
+                    className="rounded-[6px] px-1 text-xs leading-4 text-fg-muted tabular-nums underline-offset-2 transition-colors duration-[120ms] hover:text-fg hover:underline pointer-coarse:min-h-11"
                     aria-label={`Play from ${formatClock(turn.startMilliseconds)}`}
                   >
                     {formatClock(turn.startMilliseconds)}
                   </button>
                 ) : (
-                  <span className="text-xs leading-4 text-fg-subtle tabular-nums">
+                  <span className="text-xs leading-4 text-fg-muted tabular-nums">
                     {formatClock(turn.startMilliseconds)}
                   </span>
                 )}
@@ -403,9 +474,10 @@ export function MeetingTranscript({
                   <span key={segment.index}>
                     {position > 0 ? " " : null}
                     <span
+                      data-segment={segment.index}
                       className={cn(
                         "rounded-[3px] transition-colors duration-[120ms] box-decoration-clone",
-                        segment.index === activeSegment && "bg-brand/10",
+                        segment.index === activeSegment && "bg-brand/15 text-fg",
                         onSeek && "cursor-pointer hover:bg-hover",
                       )}
                       onClick={onSeek ? () => onSeek(segment.startMilliseconds) : undefined}
@@ -426,7 +498,12 @@ export function MeetingTranscript({
         actions={actions}
         onClose={() => setNaming(null)}
       />
-      <EditTurnDialog turn={editing} onClose={() => setEditing(null)} actions={actions} />
+      <EditTurnDialog
+        turn={editing}
+        speakerName={editing ? nameOf(editing.speakerLabel) : ""}
+        onClose={() => setEditing(null)}
+        actions={actions}
+      />
     </>
   );
 }

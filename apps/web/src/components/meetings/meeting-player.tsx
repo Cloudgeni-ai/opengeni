@@ -4,7 +4,7 @@
  * followers within a quarter second of the first track.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { PauseIcon, PlayIcon } from "lucide-react";
+import { PauseIcon, PlayIcon, RotateCcwIcon, RotateCwIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
@@ -20,6 +20,7 @@ export type MeetingPlayerSource = { trackNumber: number; url: string };
 
 const RATES = [1, 1.25, 1.5, 2] as const;
 const MAX_DRIFT_SECONDS = 0.25;
+const SKIP_SECONDS = 15;
 
 export const MeetingPlayer = forwardRef<
   MeetingPlayerHandle,
@@ -126,10 +127,13 @@ export const MeetingPlayer = forwardRef<
 
   const total = Math.max(duration, current);
   const progress = total > 0 ? Math.min(100, (current / total) * 100) : 0;
+  const skip = (seconds: number) => seek(Math.min(Math.max(0, current + seconds), total));
+  const skipClass =
+    "shrink-0 rounded-full text-fg-muted hover:text-fg pointer-coarse:size-11 max-sm:hidden";
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center gap-3 rounded-[14px] border border-border bg-surface px-3 py-2",
+        "flex min-w-0 items-center gap-3 rounded-[14px] border border-border bg-surface px-3 py-2 max-sm:gap-2",
         className,
       )}
     >
@@ -147,6 +151,16 @@ export const MeetingPlayer = forwardRef<
       ))}
       <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => skip(-SKIP_SECONDS)}
+        aria-label={`Back ${SKIP_SECONDS} seconds`}
+        className={skipClass}
+      >
+        <RotateCcwIcon aria-hidden="true" />
+      </Button>
+      <Button
+        type="button"
         size="icon-sm"
         onClick={() => (playing ? pause() : play())}
         aria-label={playing ? "Pause" : "Play"}
@@ -157,6 +171,16 @@ export const MeetingPlayer = forwardRef<
         ) : (
           <PlayIcon aria-hidden="true" className="translate-x-px fill-current" />
         )}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={() => skip(SKIP_SECONDS)}
+        aria-label={`Forward ${SKIP_SECONDS} seconds`}
+        className={skipClass}
+      >
+        <RotateCwIcon aria-hidden="true" />
       </Button>
       <span className="min-w-9 shrink-0 text-right text-xs leading-4 text-fg-muted tabular-nums">
         {formatClock(current * 1000)}
@@ -192,7 +216,8 @@ export const MeetingPlayer = forwardRef<
         size="sm"
         onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length]!)}
         aria-label={`Playback speed ${rate}×`}
-        className="w-11 shrink-0 rounded-[8px] px-0 text-xs text-fg-muted tabular-nums pointer-coarse:h-11"
+        title="Playback speed"
+        className="w-12 min-w-12 shrink-0 justify-center rounded-[8px] px-0 text-xs text-fg-muted tabular-nums pointer-coarse:h-11"
       >
         {rate}×
       </Button>

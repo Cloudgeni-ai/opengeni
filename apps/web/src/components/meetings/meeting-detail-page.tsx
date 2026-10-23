@@ -13,6 +13,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   GlobeIcon,
+  LoaderCircleIcon,
   LockIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -69,6 +70,7 @@ import {
   meetingPhase,
   speakerColorSlots,
   speakerDisplayName,
+  speakerIsNamed,
   transcriptErrorText,
 } from "./meeting-model";
 import {
@@ -241,6 +243,10 @@ function TranscribeAgainDialog({
     disabledReason: entry.available ? undefined : `Connect ${entry.providerName} first`,
   }));
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
+  const estimate =
+    selected?.usdPerHour != null && recording.durationMilliseconds > 0
+      ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
+      : null;
   const languageOptions: SelectOption[] = [
     { value: AUTO, label: "Detect automatically" },
     ...COMMON_LANGUAGES.map((code) => ({ value: code, label: languageName(code) })),
@@ -256,7 +262,7 @@ function TranscribeAgainDialog({
         if (!next) onClose();
       }}
       title="Transcribe again"
-      description="Makes a new version from the full audio. Speaker names carry over; the current version stays until the new one is ready."
+      description="Makes a new version from the full audio. Speaker names carry over; corrected words and moved turns stay with the current version, which you keep reading until the new one is ready."
       submitLabel="Transcribe"
       pendingLabel="Starting…"
       submitDisabled={!selected || !selected.available || speakersInvalid}
@@ -278,7 +284,14 @@ function TranscribeAgainDialog({
       onSubmitted={onClose}
     >
       <FieldStack>
-        <Field label="Model">
+        <Field
+          label="Model"
+          hint={
+            estimate !== null
+              ? `About ${estimate < 0.01 ? "less than $0.01" : `$${estimate.toFixed(2)}`} for this ${formatDuration(recording.durationMilliseconds)} meeting.`
+              : undefined
+          }
+        >
           <NativeSelect options={modelOptions} value={model} onValueChange={setModel} />
         </Field>
         <Field
@@ -289,14 +302,15 @@ function TranscribeAgainDialog({
         </Field>
         {selected?.capabilities.diarization ? (
           <Field
-            label="Most speakers"
+            label="Maximum number of speakers"
             optional
-            hint="The most people who spoke. Leave empty to let the model decide."
+            hint="Leave empty to let the model decide."
             error={speakersInvalid ? "Enter a whole number from 1 to 32." : undefined}
           >
             <TextInput
               inputMode="numeric"
               value={speakers}
+              placeholder="Auto"
               onChange={(event) => setSpeakers(event.target.value.replace(/[^0-9]/gu, ""))}
               className="max-w-24"
             />
@@ -364,6 +378,10 @@ function VisibilityMenu({
   );
 }
 
+const SPINNER = (
+  <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+);
+
 function PhaseNotice({
   recording,
   uploadingHere,
@@ -376,20 +394,20 @@ function PhaseNotice({
   const phase = meetingPhase(recording);
   if (phase.kind === "uploading") {
     return uploadingHere !== null ? (
-      <Notice tone="waiting" title="Uploading the audio" live="polite">
-        {uploadingHere}. Keep this tab open, or come back later: the audio is saved in this browser
+      <Notice tone="waiting" icon={SPINNER} title="Uploading the audio" live="polite">
+        {uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser
         until it's uploaded.
       </Notice>
     ) : (
-      <Notice tone="waiting" title="Still uploading">
+      <Notice tone="waiting" icon={SPINNER} title="Still uploading">
         The audio is on the device that recorded it. The transcript starts once it's uploaded.
       </Notice>
     );
   }
   if (phase.kind === "transcribing") {
     return (
-      <Notice tone="waiting" title="Transcribing" live="polite">
-        This usually takes a minute or two. The page updates when it's done.
+      <Notice tone="waiting" icon={SPINNER} live="polite">
+        Transcribing. This usually takes a minute or two, and the page updates when it's done.
       </Notice>
     );
   }
@@ -400,7 +418,7 @@ function PhaseNotice({
         title="The transcript failed"
         action={
           <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            Try again
+            Transcribe again
           </Button>
         }
       >
@@ -416,8 +434,11 @@ function versionLine(
   modelName: (version: RecordingTranscriptVersion) => string,
 ): string {
   const parts = [`Version ${version.versionNumber}`, modelName(version)];
-  if (version.state === "queued" || version.state === "processing") parts.push("transcribing");
-  if (version.state === "failed") parts.push("failed");
+  if (version.state === "queued" || version.state === "processing") parts.push("Transcribing");
+  if (version.state === "failed") parts.push("Failed");
+  if (version.state === "complete" && version.languages.length > 0) {
+    parts.push(version.languages.map(languageName).join(", "));
+  }
   return parts.join(" · ");
 }
 
@@ -443,7 +464,7 @@ function RerunNotice({
   if (!newest || newest.versionNumber <= shownVersionNumber) return null;
   if (newest.state === "queued" || newest.state === "processing") {
     return (
-      <Notice tone="waiting" live="polite">
+      <Notice tone="waiting" icon={SPINNER} live="polite">
         Transcribing again with {modelName(newest)}. This version stays until the new one is ready.
       </Notice>
     );
@@ -455,7 +476,7 @@ function RerunNotice({
         title="Transcribing again failed"
         action={
           <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            Try again
+            Transcribe again
           </Button>
         }
       >
@@ -597,6 +618,64 @@ export function MeetingDetailPage({
   const slots = speakerColorSlots(segments);
   const activeSegment = sources.length > 0 ? activeSegmentIndex(segments, position) : null;
   const showTranscript = Boolean(transcriptVersionId);
+  const shownVersionNumber = version?.state === "complete" ? version.versionNumber : 0;
+  const rerunPending = meeting.versions.some(
+    (entry) =>
+      entry.versionNumber > shownVersionNumber &&
+      (entry.state === "queued" || entry.state === "processing"),
+  );
+  const audioGone =
+    recording.state !== "capturing" && !recording.tracks.some((track) => track.playable);
+  const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
+  const unnamedCount = speakerLabels.filter(
+    (label) => !speakerIsNamed(label, transcript.speakers),
+  ).length;
+
+  const speakerButtons = (variant: "list" | "chips") =>
+    speakerLabels.map((label) => {
+      const name = speakerDisplayName(label, transcript.speakers, recording.tracks);
+      return (
+        <li key={label} className="min-w-0">
+          <SpeakerNameMenu
+            label={label}
+            displayName={name}
+            speakers={transcript.speakers}
+            people={people.people}
+            actions={actions}
+            onAddNew={setNamingFromAside}
+            align={variant === "list" ? "end" : "start"}
+          >
+            {variant === "list" ? (
+              <button
+                type="button"
+                aria-label={`${name}, change who this is`}
+                className="-mx-1.5 flex w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-1 text-left text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
+              >
+                <SpeakerDot slot={slots.get(label)} />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                <PencilIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label={`${name}, change who this is`}
+                className="flex max-w-52 min-w-0 items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
+              >
+                <SpeakerDot slot={slots.get(label)} />
+                <span className="min-w-0 truncate">{name}</span>
+                <PencilIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
+              </button>
+            )}
+          </SpeakerNameMenu>
+        </li>
+      );
+    });
+  const unnamedHint =
+    unnamedCount > 0
+      ? unnamedCount === 1
+        ? "One speaker has no name yet. Pick a speaker to name them."
+        : `${unnamedCount} speakers have no name yet. Pick a speaker to name them.`
+      : null;
 
   const update = async (
     request: Parameters<typeof meeting.update>[0],
@@ -660,9 +739,9 @@ export function MeetingDetailPage({
               Rename
             </DropdownMenuItem>
             {recording.state !== "capturing" ? (
-              <DropdownMenuItem onSelect={() => setRerunning(true)}>
+              <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
-                Transcribe again
+                {rerunPending ? "Transcribing again…" : "Transcribe again"}
               </DropdownMenuItem>
             ) : null}
             {owner ? (
@@ -685,36 +764,12 @@ export function MeetingDetailPage({
       <DetailAside label="About this transcript">
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label="Speakers">
-            <ul className="grid w-full min-w-0 gap-1">
-              {speakerLabels.map((label) => {
-                const name = speakerDisplayName(label, transcript.speakers, recording.tracks);
-                return (
-                  <li key={label} className="min-w-0">
-                    <SpeakerNameMenu
-                      label={label}
-                      displayName={name}
-                      speakers={transcript.speakers}
-                      people={people.people}
-                      actions={actions}
-                      onAddNew={setNamingFromAside}
-                      align="end"
-                    >
-                      <button
-                        type="button"
-                        className="-mx-1.5 flex w-[calc(100%+0.75rem)] min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-1 text-left text-sm leading-5 text-fg transition-colors duration-[120ms] hover:bg-hover pointer-coarse:min-h-11"
-                      >
-                        <SpeakerDot slot={slots.get(label)} />
-                        <span className="min-w-0 flex-1 truncate">{name}</span>
-                        <PencilIcon
-                          aria-hidden="true"
-                          className="size-3.5 shrink-0 text-fg-subtle"
-                        />
-                      </button>
-                    </SpeakerNameMenu>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="grid w-full min-w-0 gap-2">
+              <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
+              {unnamedHint ? (
+                <p className="text-xs leading-4.5 text-fg-muted">{unnamedHint}</p>
+              ) : null}
+            </div>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (
@@ -742,21 +797,16 @@ export function MeetingDetailPage({
                   {versionLine(meeting.versions[0]!, modelName)}
                 </span>
               )}
-              {version?.languages.length ? (
-                <span className="text-xs leading-4.5 text-fg-muted">
-                  {version.languages.map(languageName).join(", ")}
-                </span>
-              ) : null}
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 onClick={() => setRerunning(true)}
-                disabled={recording.state === "capturing"}
+                disabled={!canRerun}
                 className="w-fit rounded-[10px] pointer-coarse:h-11"
               >
-                <RefreshCwIcon aria-hidden="true" />
-                Transcribe again
+                {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
+                {rerunPending ? "Transcribing again…" : "Transcribe again"}
               </Button>
             </div>
           </DetailAsideItem>
@@ -767,7 +817,7 @@ export function MeetingDetailPage({
   return (
     <DetailPage back={{ label: "Meetings", onClick: onBack }}>
       {header}
-      <div className="mt-6 grid gap-4">
+      <div className="mt-6 grid gap-4 empty:hidden">
         <PhaseNotice
           recording={recording}
           uploadingHere={uploadingHere}
@@ -781,19 +831,41 @@ export function MeetingDetailPage({
             onRetry={() => setRerunning(true)}
           />
         ) : null}
-        {sources.length > 0 ? (
+        {audioGone ? (
+          <Notice tone="muted">
+            The audio for this meeting isn't available anymore, so it can't be played or transcribed
+            again. The transcript stays.
+          </Notice>
+        ) : null}
+      </div>
+      {sources.length > 0 ? (
+        // A direct child of the page, so it stays in view through the whole transcript.
+        <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
           <MeetingPlayer
             ref={player}
             sources={sources}
             durationMilliseconds={recording.durationMilliseconds}
             onTime={setPosition}
             onSourceError={reload}
-            className="sticky top-2 z-10"
           />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       <DetailPageBody aside={aside}>
         <DetailSection title="Transcript">
+          {showTranscript && speakerLabels.length > 0 ? (
+            // Only while the speakers card sits below the transcript. The
+            // wrapper carries no display class, so the container query wins.
+            <div className="mb-5 @[620px]/detail:hidden">
+              <div className="grid gap-2">
+                <ul aria-label="Speakers" className="flex flex-wrap gap-2">
+                  {speakerButtons("chips")}
+                </ul>
+                {unnamedHint ? (
+                  <p className="text-xs leading-4.5 text-fg-muted">{unnamedHint}</p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           {!showTranscript ? (
             <p className="text-sm leading-5 text-fg-muted">
               {phase.kind === "failed"

@@ -162,7 +162,7 @@ export function MeetingsListPage({
               <EmptyState
                 variant="inline"
                 title={`No meetings match “${query}”`}
-                description="Search looks at meeting titles."
+                description="Only meeting titles are searched."
               />
             ) : (
               <EmptyState
@@ -185,7 +185,9 @@ export function MeetingsListPage({
                     title={recording.title}
                     titleAddon={
                       recording.visibility === "private" ? (
-                        <MetaChip icon={<LockIcon />}>Only me</MetaChip>
+                        <MetaChip icon={<LockIcon />}>
+                          <span className={narrow ? "sr-only" : undefined}>Only me</span>
+                        </MetaChip>
                       ) : undefined
                     }
                     status={
@@ -208,7 +210,7 @@ export function MeetingsListPage({
                         ? [
                             <RelativeTime key="recorded" date={recording.startedAt} />,
                             recording.durationMilliseconds > 0
-                              ? formatDuration(recording.durationMilliseconds)
+                              ? `${formatDuration(recording.durationMilliseconds)} long`
                               : null,
                           ].filter(Boolean)
                         : undefined
