@@ -9227,8 +9227,9 @@ export class OpenGeniClient {
 
   /**
    * A Site's web publication: hostname, access, embedded agent, limits,
-   * status and moderation. 404 when the Site was never published; 503
-   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   * status and moderation. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
    */
   async getSitePublication(
     workspaceId: string,
@@ -9247,8 +9248,9 @@ export class OpenGeniClient {
   /**
    * Where a Site is published: its primary public URL, hostname and status.
    * Anyone who can open the Site reads it; the publication's settings need
-   * `getSitePublication`. 404 when the Site was never published; 503
-   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   * `getSitePublication`. 404 `site_not_published` when the Site was never
+   * published; 404 `sites_publishing_disabled` when the deployment has no
+   * Sites domain.
    */
   async getSitePublicationLink(
     workspaceId: string,

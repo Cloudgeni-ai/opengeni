@@ -995,12 +995,33 @@ test("anyone who can open a Site reads where it is published; its settings stay 
   // Without artifacts:read there is no Site to open, and an Only me Site stays hidden.
   const outsider = await f.person(["workspace:read"]);
   expect((await link(outsider)).status).toBe(403);
+  // Another person's Only me Site answers as if it didn't exist (site_not_found, not
+  // site_not_published), while its owner learns it isn't published.
   const mine = await f.publish("Mine only", "private");
-  expect((await link(viewer, mine.id)).status).toBe(404);
+  const unseen = await link(viewer, mine.id);
+  expect(unseen.status).toBe(404);
+  expect(code(unseen)).toBe("site_not_found");
+  expect(code(await link(f.owner, mine.id))).toBe("site_not_published");
+  // A Site in another workspace is not reachable through this one.
+  const elsewhere = await fixture();
+  const theirs = await elsewhere.live("Theirs");
+  const foreign = await link(viewer, theirs.id);
+  expect(foreign.status).toBe(404);
+  expect(code(foreign)).toBe("site_not_found");
 
-  // An unpublished Site says so; the header then offers no link.
+  // Taken-down and unpublished Sites say so, without the moderation details.
+  const takedown = await f.publication(
+    f.owner,
+    site.id,
+    "POST",
+    { reason: "Testing" },
+    "/takedown",
+  );
+  expect(takedown.status, JSON.stringify(takedown.json)).toBe(200);
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "suspended" });
+  expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
   await f.publication(f.owner, site.id, "DELETE");
-  expect((await link(viewer)).json).toMatchObject({ status: "unpublished" });
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "unpublished" });
 });
 
 test("site-runtime checks the gateway signature before anything else", async () => {

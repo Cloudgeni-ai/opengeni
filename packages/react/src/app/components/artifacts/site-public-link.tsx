@@ -5,10 +5,10 @@ import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import { copyTextToClipboard } from "../../../lib/clipboard";
+import { apiErrorFacts } from "../../../ui/api-error";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../../ui/tooltip";
 import { desktopCapability } from "../../lib/desktop";
 import { Link } from "../../lib/navigation";
-import { sitePublicationLoadFromError } from "../../lib/site-publishing";
 import { cn } from "../../lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -41,6 +41,20 @@ export function useSitePublicationLink({
   // Keyed by Site, so moving to another Site never shows the last one's link.
   const key = `${workspaceId}/${siteId}`;
   const [answer, setAnswer] = useState<{ key: string; load: SitePublicationLinkLoad } | null>(null);
+  // Read again when the person comes back to the window, so publishing from
+  // the chat beside the Site or another tab shows here without a reload.
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") setRevision((value) => value + 1);
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
   useEffect(() => {
     const abort = new AbortController();
     client
@@ -49,13 +63,26 @@ export function useSitePublicationLink({
         if (!abort.signal.aborted) setAnswer({ key, load: { state: "ready", link } });
       })
       .catch((error: unknown) => {
-        if (abort.signal.aborted) return;
-        const failed = sitePublicationLoadFromError(error);
-        setAnswer({ key, load: failed.state === "ready" ? { state: "error", error } : failed });
+        if (!abort.signal.aborted)
+          setAnswer({ key, load: sitePublicationLinkLoadFromError(error) });
       });
     return () => abort.abort();
-  }, [client, key, siteId, workspaceId]);
+  }, [client, key, revision, siteId, workspaceId]);
   return answer?.key === key ? answer.load : { state: "loading" };
+}
+
+/**
+ * Only the API's own "not published" answer means not published. Any other
+ * 404 (an older API without this route, publishing off) leaves the plain
+ * "Live" rather than offering Publish for a Site that may be on the web.
+ */
+export function sitePublicationLinkLoadFromError(error: unknown): SitePublicationLinkLoad {
+  const { status, code } = apiErrorFacts(error);
+  if (code === "site_not_published") return { state: "none" };
+  if (status === 404 || status === 503 || code === "sites_publishing_disabled")
+    return { state: "unavailable" };
+  if (status === 403) return { state: "forbidden" };
+  return { state: "error", error };
 }
 
 /** The published address when the Site is on the web now, else null. */
@@ -149,7 +176,7 @@ function PublishedLink({
   hostname: string;
   openExternal: (url: string) => boolean;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copy, setCopy] = useState<"copied" | "failed" | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
   const open = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -158,11 +185,10 @@ function PublishedLink({
       return;
     if (openExternal(url)) event.preventDefault();
   };
-  const copy = async () => {
-    if (!(await copyTextToClipboard(url))) return;
-    setCopied(true);
+  const copyLink = async () => {
+    setCopy((await copyTextToClipboard(url)) ? "copied" : "failed");
     clearTimeout(timer.current ?? undefined);
-    timer.current = setTimeout(() => setCopied(false), 2000);
+    timer.current = setTimeout(() => setCopy(null), 2000);
   };
   return (
     <TooltipProvider delayDuration={300}>
@@ -173,7 +199,7 @@ function PublishedLink({
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Open ${hostname}`}
+              aria-label={`Live: open ${hostname}`}
               onClick={open}
               className={cn(CONTROL, "gap-1.5 px-1.5")}
             >
@@ -192,21 +218,22 @@ function PublishedLink({
             <button
               type="button"
               aria-label="Copy link"
-              onClick={() => void copy()}
-              className={cn(CONTROL, "gap-1 px-1.5", copied && "text-fg")}
+              onClick={() => void copyLink()}
+              className={cn(CONTROL, "gap-1 px-1.5", copy && "text-fg")}
             >
-              {copied ? (
+              {copy === "copied" ? (
                 <CheckIcon aria-hidden="true" className="size-3" />
               ) : (
                 <CopyIcon aria-hidden="true" className="size-3" />
               )}
-              {copied ? <span>Copied</span> : null}
+              {copy === "copied" ? <span>Copied</span> : null}
+              {copy === "failed" ? <span>Couldn't copy</span> : null}
             </button>
           </TooltipTrigger>
           <TooltipContent side="bottom">Copy link</TooltipContent>
         </Tooltip>
         <span role="status" aria-live="polite" className="sr-only">
-          {copied ? "Link copied" : ""}
+          {copy === "copied" ? "Link copied" : copy === "failed" ? "Couldn't copy the link" : ""}
         </span>
       </span>
     </TooltipProvider>
