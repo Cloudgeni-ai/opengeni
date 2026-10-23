@@ -105,6 +105,11 @@ initial clone, not just subsequent sandbox commands.
 
 ## 3. Core invariants
 
+Contracts reuse common eager Zod validators from `packages/contracts/src/primitives.ts`
+instead of constructing identical primitive instances for every field. Validation
+and generated JSON Schema stay unchanged; field-specific constraints and metadata
+belong on derived schemas. This is allocation sharing, not lazy validation or a cache.
+
 The console Machines page also projects live background commands across authorized
 chats through the session-list endpoint (`view=running_commands`). It shares the
 ordinary subject/host list scope, reads immutable command launch targets, and uses

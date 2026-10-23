@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -13,8 +14,8 @@ export const ToolResultSpilledReceipt = /* @__PURE__ */ defineSchema(() =>
     .object({
       type: z.literal(TOOL_RESULT_SPILLED_TYPE),
       sandboxPath: z.string().min(1).max(4_096).nullable(),
-      fileId: z.string().regex(LOWERCASE_UUID),
-      byteSize: z.number().int().positive().safe(),
+      fileId: primitives.string.regex(LOWERCASE_UUID),
+      byteSize: primitives.positiveInteger.safe(),
       mediaType: z.literal(TOOL_RESULT_SPILL_MEDIA_TYPE),
     })
     .strict(),

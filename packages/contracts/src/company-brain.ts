@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -15,7 +16,7 @@ export const COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES = 64 * 1_024;
 
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 const boundedUtf8 = (maxBytes: number) =>
-  z.string().superRefine((value, context) => {
+  primitives.string.superRefine((value, context) => {
     if (utf8Bytes(value) > maxBytes) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -27,29 +28,26 @@ const boundedUtf8 = (maxBytes: number) =>
 export const CompanyBrainContextReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      rootSessionId: z.string().uuid(),
-      turnId: z.string().uuid(),
-      acceptedAt: z.string().datetime(),
-      createdAt: z.string().datetime(),
+      id: primitives.uuid,
+      sessionId: primitives.uuid,
+      rootSessionId: primitives.uuid,
+      turnId: primitives.uuid,
+      acceptedAt: primitives.dateTime,
+      createdAt: primitives.dateTime,
       sessionRole: z.enum(["root", "child"]),
-      memoryEnabled: z.boolean(),
+      memoryEnabled: primitives.boolean,
       // Snapshots are immutable: a turn accepted before the standing block was
       // retired recorded `legacy_standing` and still reads back that way. This
       // is a historical fact about that turn, not a mode anyone can select.
       memoryPromptMode: z.enum(["legacy_standing", "retrieval_only"]),
-      companyProfileIncluded: z.boolean(),
-      instructionPolicyEntryHash: z.string().regex(/^[0-9a-f]{64}$/u),
-      preferenceDescriptorHash: z
-        .string()
-        .regex(/^[0-9a-f]{64}$/u)
-        .nullable(),
-      companyProfileSnapshotHash: z.string().regex(/^[0-9a-f]{64}$/u),
-      turnContextSnapshotId: z.string().uuid(),
-      turnContextSnapshotHash: z.string().regex(/^[0-9a-f]{64}$/u),
+      companyProfileIncluded: primitives.boolean,
+      instructionPolicyEntryHash: primitives.string.regex(/^[0-9a-f]{64}$/u),
+      preferenceDescriptorHash: primitives.string.regex(/^[0-9a-f]{64}$/u).nullable(),
+      companyProfileSnapshotHash: primitives.string.regex(/^[0-9a-f]{64}$/u),
+      turnContextSnapshotId: primitives.uuid,
+      turnContextSnapshotHash: primitives.string.regex(/^[0-9a-f]{64}$/u),
       turnContextSnapshotSource: z.enum(["accepted_turn", "legacy_first_claim"]),
-      selectionHash: z.string().regex(/^[0-9a-f]{64}$/u),
+      selectionHash: primitives.string.regex(/^[0-9a-f]{64}$/u),
       selectedMemoryCount: z.number().int().nonnegative().max(50),
       renderedMemoryCount: z.number().int().nonnegative().max(50),
       budgetOmittedMemoryCount: z.number().int().nonnegative().max(50),
@@ -62,8 +60,10 @@ export const CompanyBrainContextReceiptPage = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       receipts: z.array(CompanyBrainContextReceipt).max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT),
-      nextCursor: z.string().min(1).max(COMPANY_BRAIN_INSPECTOR_CURSOR_MAX_CHARS).nullable(),
-      hasMore: z.boolean(),
+      nextCursor: primitives.nonEmptyString
+        .max(COMPANY_BRAIN_INSPECTOR_CURSOR_MAX_CHARS)
+        .nullable(),
+      hasMore: primitives.boolean,
     })
     .strict(),
 );
@@ -72,19 +72,19 @@ export type CompanyBrainContextReceiptPage = z.infer<typeof CompanyBrainContextR
 export const CompanyBrainKnowledgeProposal = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
+      id: primitives.uuid,
       authority: z.object({ kind: z.enum(["organization", "workspace", "personal"]) }).strict(),
       targetKind: z.enum(["instruction_policy", "preference"]),
       targetScope: z.string().min(1).max(96),
       targetKey: z.string().min(1).max(96).nullable(),
       content: boundedUtf8(COMPANY_BRAIN_PROPOSAL_CONTENT_MAX_BYTES),
-      contentHash: z.string().regex(/^[0-9a-f]{64}$/u),
-      source: z.object({ claimId: z.string().uuid(), evidenceId: z.string().uuid() }).strict(),
+      contentHash: primitives.string.regex(/^[0-9a-f]{64}$/u),
+      source: z.object({ claimId: primitives.uuid, evidenceId: primitives.uuid }).strict(),
       status: z.literal("proposed"),
-      createdAt: z.string().datetime(),
+      createdAt: primitives.dateTime,
       projection: z
         .object({
-          truncated: z.boolean(),
+          truncated: primitives.boolean,
           originalContentUtf8Bytes: z.number().int().nonnegative().max(1_048_576),
         })
         .strict(),
@@ -97,9 +97,9 @@ export const CompanyBrainKnowledgeProposalPage = /* @__PURE__ */ defineSchema(()
   z
     .object({
       proposals: z.array(CompanyBrainKnowledgeProposal).max(COMPANY_BRAIN_INSPECTOR_MAX_LIMIT),
-      truncatedForCount: z.boolean(),
-      truncatedForResponseBytes: z.boolean(),
-      responseBytes: z.number().int().nonnegative().max(COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES),
+      truncatedForCount: primitives.boolean,
+      truncatedForResponseBytes: primitives.boolean,
+      responseBytes: primitives.nonnegativeInteger.max(COMPANY_BRAIN_PROPOSAL_RESPONSE_MAX_BYTES),
     })
     .strict(),
 );
@@ -134,16 +134,16 @@ export const CompanyBrainGuidanceEntry = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: z.string().min(1).max(512),
-      revisionId: z.string().uuid(),
+      revisionId: primitives.uuid,
       path: z.string().min(1).max(512),
       scope: CompanyBrainGuidanceScope,
       classification: CompanyBrainGuidanceClassification,
       title: z.string().min(1).max(160),
       description: z.string().max(512).nullable(),
-      content: z.string().min(1).max(COMPANY_BRAIN_GUIDANCE_CONTENT_MAX_CHARS),
-      contentHash: z.string().regex(/^[0-9a-f]{64}$/),
-      revision: z.number().int().positive(),
-      active: z.boolean(),
+      content: primitives.nonEmptyString.max(COMPANY_BRAIN_GUIDANCE_CONTENT_MAX_CHARS),
+      contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+      revision: primitives.positiveInteger,
+      active: primitives.boolean,
       lifecycle: CompanyBrainGuidanceLifecycle,
       provenance: z
         .object({
@@ -153,7 +153,7 @@ export const CompanyBrainGuidanceEntry = /* @__PURE__ */ defineSchema(() =>
         })
         .strict(),
       relationships: z.array(CompanyBrainGuidanceRelationship).max(32),
-      createdAt: z.string().datetime(),
+      createdAt: primitives.dateTime,
     })
     .strict(),
 );
@@ -178,8 +178,8 @@ export const CompanyBrainOkfPackage = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: z.literal("opengeni.company_brain.okf"),
       schemaVersion: z.literal(COMPANY_BRAIN_OKF_SCHEMA_VERSION),
-      workspaceId: z.string().uuid(),
-      generatedAt: z.string().datetime(),
+      workspaceId: primitives.uuid,
+      generatedAt: primitives.dateTime,
       permissions: z
         .object({
           guidance: z.literal("available"),
@@ -189,7 +189,7 @@ export const CompanyBrainOkfPackage = /* @__PURE__ */ defineSchema(() =>
       guidance: z
         .object({
           entries: z.array(CompanyBrainGuidanceEntry).max(COMPANY_BRAIN_GUIDANCE_MAX_ENTRIES),
-          truncated: z.boolean(),
+          truncated: primitives.boolean,
           truncationReasons: z.array(CompanyBrainGuidanceTruncationReason).max(6),
         })
         .strict(),

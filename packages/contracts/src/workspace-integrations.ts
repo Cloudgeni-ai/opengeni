@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -59,15 +60,16 @@ export type IntegrationWorkspaceFilter = z.infer<typeof IntegrationWorkspaceFilt
 /** Informational attribution only. It never supplies or changes authorization. */
 export const InitiatingHuman = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    subjectId: z.string(),
-    externalIdentity: z.object({ source: z.string(), externalId: z.string() }).nullable(),
+    subjectId: primitives.string,
+    externalIdentity: z
+      .object({ source: primitives.string, externalId: primitives.string })
+      .nullable(),
   }),
 );
 export type InitiatingHuman = z.infer<typeof InitiatingHuman>;
 
 const HttpUrl = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .trim()
     .min(8)
     .max(2048)
@@ -86,14 +88,14 @@ const EventTypes = /* @__PURE__ */ defineSchema(() =>
 export const WorkspaceWebhook = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      url: z.string(),
+      id: primitives.uuid,
+      workspaceId: primitives.uuid,
+      url: primitives.string,
       eventTypes: z.array(WorkspaceWebhookEventType),
-      enabled: z.boolean(),
-      description: z.string().nullable(),
-      createdAt: z.string(),
-      updatedAt: z.string(),
+      enabled: primitives.boolean,
+      description: primitives.nullableString,
+      createdAt: primitives.string,
+      updatedAt: primitives.string,
     })
     .strict(),
 );
@@ -104,8 +106,8 @@ export const CreateWorkspaceWebhookRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       url: HttpUrl,
       eventTypes: EventTypes,
-      enabled: z.boolean().optional(),
-      description: z.string().trim().max(500).nullable().optional(),
+      enabled: primitives.optionalBoolean,
+      description: primitives.string.trim().max(500).nullable().optional(),
     })
     .strict(),
 );
@@ -113,7 +115,7 @@ export type CreateWorkspaceWebhookRequest = z.input<typeof CreateWorkspaceWebhoo
 
 /** The signing secret is returned exactly once, at creation. */
 export const CreateWorkspaceWebhookResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ webhook: WorkspaceWebhook, secret: z.string() }).strict(),
+  z.object({ webhook: WorkspaceWebhook, secret: primitives.string }).strict(),
 );
 export type CreateWorkspaceWebhookResponse = z.infer<typeof CreateWorkspaceWebhookResponse>;
 
@@ -122,8 +124,8 @@ export const UpdateWorkspaceWebhookRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       url: HttpUrl.optional(),
       eventTypes: EventTypes.optional(),
-      enabled: z.boolean().optional(),
-      description: z.string().trim().max(500).nullable().optional(),
+      enabled: primitives.optionalBoolean,
+      description: primitives.string.trim().max(500).nullable().optional(),
     })
     .strict(),
 );
@@ -155,7 +157,7 @@ const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>
 
 export const OrganizationWebhook = /* @__PURE__ */ defineSchema(() =>
   WorkspaceWebhook.omit({ workspaceId: true }).extend({
-    organizationId: z.string().uuid(),
+    organizationId: primitives.uuid,
     eventTypes: z
       .array(WorkspaceWebhookEventType)
       .refine((types) => types.every((type) => !type.startsWith("usage.")), {
@@ -185,7 +187,7 @@ export const UpdateOrganizationWebhookRequest = /* @__PURE__ */ defineSchema(() 
 export type UpdateOrganizationWebhookRequest = z.input<typeof UpdateOrganizationWebhookRequest>;
 
 export const CreateOrganizationWebhookResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ webhook: OrganizationWebhook, secret: z.string() }).strict(),
+  z.object({ webhook: OrganizationWebhook, secret: primitives.string }).strict(),
 );
 export type CreateOrganizationWebhookResponse = z.infer<typeof CreateOrganizationWebhookResponse>;
 
@@ -202,18 +204,18 @@ export type WorkspaceWebhookDeliveryStatus = z.infer<typeof WorkspaceWebhookDeli
 export const WorkspaceWebhookDelivery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: z.string().uuid(),
-      webhookId: z.string().uuid(),
-      eventId: z.string().uuid(),
-      eventType: z.string(),
+      id: primitives.uuid,
+      webhookId: primitives.uuid,
+      eventId: primitives.uuid,
+      eventType: primitives.string,
       status: WorkspaceWebhookDeliveryStatus,
       attempts: z.number().int(),
       lastStatus: z.number().int().nullable(),
-      lastError: z.string().nullable(),
-      nextAttemptAt: z.string().nullable(),
-      deliveredAt: z.string().nullable(),
-      failedAt: z.string().nullable(),
-      createdAt: z.string(),
+      lastError: primitives.nullableString,
+      nextAttemptAt: primitives.nullableString,
+      deliveredAt: primitives.nullableString,
+      failedAt: primitives.nullableString,
+      createdAt: primitives.string,
     })
     .strict(),
 );
@@ -240,21 +242,21 @@ export type ListOrganizationWebhookDeliveriesResponse = z.infer<
 export const SessionWorkspaceWebhookEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     lane: z.enum(["organization", "workspace"]).default("workspace"),
-    id: z.string().uuid(),
-    type: z.string(),
-    workspaceId: z.string().uuid(),
+    id: primitives.uuid,
+    type: primitives.string,
+    workspaceId: primitives.uuid,
     /** Present on new deliveries; optional for receivers of pre-upgrade deliveries. */
     workspace: z
       .object({
-        id: z.string().uuid(),
-        externalSource: z.string().nullable(),
-        externalId: z.string().nullable(),
+        id: primitives.uuid,
+        externalSource: primitives.nullableString,
+        externalId: primitives.nullableString,
       })
       .optional(),
-    sessionId: z.string().uuid(),
-    turnId: z.string().uuid().nullable(),
+    sessionId: primitives.uuid,
+    turnId: primitives.nullableUuid,
     sequence: z.number().int(),
-    occurredAt: z.string(),
+    occurredAt: primitives.string,
     initiatingHuman: InitiatingHuman.nullable().optional(),
     data: z
       .object({
@@ -268,9 +270,9 @@ export const SessionWorkspaceWebhookEvent = /* @__PURE__ */ defineSchema(() =>
         facts: z.array(z.lazy(() => NotificationFact)).optional(),
         link: z.lazy(() => NotificationLink).optional(),
         urgency: z.lazy(() => NotificationUrgency).optional(),
-        replaced: z.boolean().optional(),
+        replaced: primitives.optionalBoolean,
         recipientSubjectId: z.string().optional(),
-        sender: z.object({ subjectId: z.string(), label: z.string() }).optional(),
+        sender: z.object({ subjectId: primitives.string, label: primitives.string }).optional(),
         /** Present when Opengeni notified no one, so the receiver may deliver it. */
         undeliveredReason: z.lazy(() => NotificationUndeliveredReason).optional(),
       })
@@ -283,20 +285,20 @@ export type SessionWorkspaceWebhookEvent = z.infer<typeof SessionWorkspaceWebhoo
 export const WorkspaceUsageWebhookEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     lane: z.literal("workspace").default("workspace"),
-    id: z.string().uuid(),
+    id: primitives.uuid,
     type: z.enum(["usage.threshold_reached", "usage.exhausted", "usage.period_reset"]),
-    workspaceId: z.string().uuid(),
+    workspaceId: primitives.uuid,
     workspace: z
       .object({
-        id: z.string().uuid(),
-        externalSource: z.string().nullable(),
-        externalId: z.string().nullable(),
+        id: primitives.uuid,
+        externalSource: primitives.nullableString,
+        externalId: primitives.nullableString,
       })
       .optional(),
     sessionId: z.null().optional(),
     turnId: z.null().optional(),
     sequence: z.number().int().nonnegative().optional(),
-    occurredAt: z.string(),
+    occurredAt: primitives.string,
     data: z
       .object({
         scope: z.enum(["workspace", "member"]).optional(),
@@ -318,20 +320,20 @@ export type WorkspaceUsageWebhookEvent = z.infer<typeof WorkspaceUsageWebhookEve
 export const WorkspaceTestWebhookEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     lane: z.enum(["organization", "workspace"]).default("workspace"),
-    id: z.string().uuid(),
+    id: primitives.uuid,
     type: z.literal(OPENGENI_WEBHOOK_TEST_EVENT_TYPE),
-    workspaceId: z.string().uuid(),
+    workspaceId: primitives.uuid,
     workspace: z
       .object({
-        id: z.string().uuid(),
-        externalSource: z.string().nullable(),
-        externalId: z.string().nullable(),
+        id: primitives.uuid,
+        externalSource: primitives.nullableString,
+        externalId: primitives.nullableString,
       })
       .optional(),
     sessionId: z.null().optional(),
     turnId: z.null().optional(),
-    occurredAt: z.string(),
-    data: z.object({ webhookId: z.string().uuid().optional() }).passthrough(),
+    occurredAt: primitives.string,
+    data: z.object({ webhookId: primitives.optionalUuid }).passthrough(),
   }),
 );
 export type WorkspaceTestWebhookEvent = z.infer<typeof WorkspaceTestWebhookEvent>;
@@ -343,12 +345,12 @@ export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
 export const WorkspaceCredentialProvider = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      workspaceId: z.string().uuid(),
-      url: z.string(),
-      enabled: z.boolean(),
+      workspaceId: primitives.uuid,
+      url: primitives.string,
+      enabled: primitives.boolean,
       timeoutMs: z.number().int(),
-      createdAt: z.string(),
-      updatedAt: z.string(),
+      createdAt: primitives.string,
+      updatedAt: primitives.string,
     })
     .strict(),
 );
@@ -358,7 +360,7 @@ export const PutWorkspaceCredentialProviderRequest = /* @__PURE__ */ defineSchem
   z
     .object({
       url: HttpUrl,
-      enabled: z.boolean().optional(),
+      enabled: primitives.optionalBoolean,
       timeoutMs: z.number().int().min(1000).max(30000).optional(),
     })
     .strict(),
@@ -386,7 +388,7 @@ export const OrganizationCredentialProvider = /* @__PURE__ */ defineSchema(() =>
   WorkspaceCredentialProvider.omit({
     workspaceId: true,
   }).extend({
-    organizationId: z.string().uuid(),
+    organizationId: primitives.uuid,
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
   }),
 );
@@ -463,7 +465,7 @@ const ProviderAuthNeeded = /* @__PURE__ */ defineSchema(() =>
     reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
     providerDomain: z.string().optional(),
     connectionId: z.string().optional(),
-    scopes: z.array(z.string()).optional(),
+    scopes: z.array(primitives.string).optional(),
     resource: z.string().optional(),
     authorizationUrl: z.string().optional(),
     message: z.string().optional(),
@@ -477,8 +479,7 @@ const ProviderAuthNeeded = /* @__PURE__ */ defineSchema(() =>
  */
 const ProviderGitCredential = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    host: z
-      .string()
+    host: primitives.string
       .trim()
       .min(1)
       .max(253)
@@ -535,7 +536,7 @@ export const CredentialProviderMcpHeaders = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       url: ProviderMcpUrl,
-      headers: z.record(z.string(), z.string()),
+      headers: z.record(primitives.string, primitives.string),
       expiresAt: z.iso.datetime({ offset: true }).optional(),
     })
     .strict()
@@ -588,17 +589,17 @@ export const CredentialProviderResponse = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("status", [
     z.object({
       status: z.literal("ok"),
-      environment: z.record(z.string(), z.string()).optional(),
+      environment: z.record(primitives.string, primitives.string).optional(),
       files: z
         .array(
           z.object({
-            path: z.string(),
-            content: z.string(),
+            path: primitives.string,
+            content: primitives.string,
             mode: z.enum(["0400", "0600"]).optional(),
           }),
         )
         .optional(),
-      fileEnvironment: z.record(z.string(), z.string()).optional(),
+      fileEnvironment: z.record(primitives.string, primitives.string).optional(),
       git: z.array(ProviderGitCredential).max(16).optional(),
       mcp: CredentialProviderMcpMaterial.optional(),
       expiresAt: z.string().nullable().optional(),
@@ -612,13 +613,13 @@ export type CredentialProviderResponse = z.infer<typeof CredentialProviderRespon
 
 /** Immediate signing-secret rotation; the new secret is returned once. */
 export const RotateWorkspaceCredentialProviderSecretResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ provider: WorkspaceCredentialProvider, secret: z.string() }).strict(),
+  z.object({ provider: WorkspaceCredentialProvider, secret: primitives.string }).strict(),
 );
 export type RotateWorkspaceCredentialProviderSecretResponse = z.infer<
   typeof RotateWorkspaceCredentialProviderSecretResponse
 >;
 export const RotateOrganizationCredentialProviderSecretResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ provider: OrganizationCredentialProvider, secret: z.string() }).strict(),
+  z.object({ provider: OrganizationCredentialProvider, secret: primitives.string }).strict(),
 );
 export type RotateOrganizationCredentialProviderSecretResponse = z.infer<
   typeof RotateOrganizationCredentialProviderSecretResponse
@@ -641,29 +642,29 @@ export const IntegrationEndpointTestResult = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       /** A 2xx answer (for a provider, also a valid response body). */
-      ok: z.boolean(),
+      ok: primitives.boolean,
       /** The HTTP status, or null when the endpoint was not reached. */
       status: z.number().int().nullable(),
-      durationMs: z.number().int().nonnegative(),
+      durationMs: primitives.nonnegativeInteger,
       /** What went wrong, in one sentence, or null. */
-      error: z.string().nullable(),
+      error: primitives.nullableString,
       /** The exact JSON body Opengeni signed and sent. */
-      request: z.string(),
+      request: primitives.string,
       /** The start of the endpoint's answer. Omitted for a successful provider answer. */
-      responseBody: z.string().nullable(),
+      responseBody: primitives.nullableString,
       credentials: z
         .object({
           status: z.enum(["ok", "not_applicable", "auth_needed"]),
-          environment: z.array(z.string()),
-          files: z.array(z.string()),
-          git: z.array(z.string()),
-          mcp: z.array(z.string()),
-          expiresAt: z.string().nullable(),
+          environment: z.array(primitives.string),
+          files: z.array(primitives.string),
+          git: z.array(primitives.string),
+          mcp: z.array(primitives.string),
+          expiresAt: primitives.nullableString,
           authNeeded: z.array(
             z.object({
-              reason: z.string(),
-              providerDomain: z.string().nullable(),
-              message: z.string().nullable(),
+              reason: primitives.string,
+              providerDomain: primitives.nullableString,
+              message: primitives.nullableString,
             }),
           ),
         })
@@ -684,7 +685,7 @@ export const TestWorkspaceCredentialProviderResponse = /* @__PURE__ */ defineSch
   z
     .object({
       lane: z.enum(["workspace", "organization"]),
-      url: z.string(),
+      url: primitives.string,
       result: IntegrationEndpointTestResult,
     })
     .strict(),
@@ -703,16 +704,20 @@ export const WorkspaceInheritedIntegrationsResponse = /* @__PURE__ */ defineSche
   z
     .object({
       credentialProvider: z
-        .object({ url: z.string(), timeoutMs: z.number().int(), updatedAt: z.string() })
+        .object({
+          url: primitives.string,
+          timeoutMs: z.number().int(),
+          updatedAt: primitives.string,
+        })
         .strict()
         .nullable(),
       webhooks: z.array(
         z
           .object({
-            id: z.string().uuid(),
-            url: z.string(),
+            id: primitives.uuid,
+            url: primitives.string,
             eventTypes: z.array(WorkspaceWebhookEventType),
-            description: z.string().nullable(),
+            description: primitives.nullableString,
           })
           .strict(),
       ),

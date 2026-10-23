@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -5,8 +6,7 @@ export const VerifyPublicGitHubRepositoryRefRequest = /* @__PURE__ */ defineSche
   z
     .object({
       url: z.string().min(1).max(2048),
-      ref: z
-        .string()
+      ref: primitives.string
         .trim()
         .min(1)
         .max(1024)
@@ -31,7 +31,7 @@ export const VerifyPublicGitHubRepositoryRefResponse = /* @__PURE__ */ defineSch
       cloneUrl: z.string().url(),
       defaultBranch: z.string().min(1).max(1024),
       ref: z.string().min(1).max(1024),
-      commitSha: z.string().regex(/^[0-9a-f]{40}$/u),
+      commitSha: primitives.string.regex(/^[0-9a-f]{40}$/u),
     })
     .strict(),
 );
@@ -60,7 +60,7 @@ export const GitHubRepositoryBranch = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       name: z.string().min(1).max(1024),
-      isDefault: z.boolean(),
+      isDefault: primitives.boolean,
     })
     .strict(),
 );

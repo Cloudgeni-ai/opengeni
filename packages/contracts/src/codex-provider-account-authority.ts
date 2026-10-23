@@ -1,8 +1,9 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 const PositiveSafeInteger = /* @__PURE__ */ defineSchema(() =>
-  z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
 );
 
 /**

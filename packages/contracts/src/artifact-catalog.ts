@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { RetainedArtifactReferenceSchema } from "./retained-output";
@@ -14,21 +15,21 @@ export const ArtifactCatalogItem = /* @__PURE__ */ defineSchema(() =>
       id: z.string().min(1).max(128),
       kind: ArtifactCatalogKind,
       title: z.string().min(1).max(1024),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
       status: z.enum(["active", "archived"]),
       /** Shared workspace metadata, not content-access authority. */
-      pinned: z.boolean().optional(),
+      pinned: primitives.optionalBoolean,
       /** Sites and files: "private" when only its owner (the viewer) can see it. */
       visibility: z.enum(["private", "workspace"]).optional(),
       /** Files only: the viewer owns the file, so they can share or limit it. */
-      ownedByViewer: z.boolean().optional(),
-      sourceSessionId: z.string().uuid().optional(),
+      ownedByViewer: primitives.optionalBoolean,
+      sourceSessionId: primitives.optionalUuid,
       versionId: z.string().min(1).max(128).optional(),
       file: RetainedArtifactReferenceSchema.optional(),
       filename: z.string().max(1024).optional(),
       contentType: z.string().max(127).optional(),
-      sizeBytes: z.number().int().nonnegative().safe().optional(),
+      sizeBytes: primitives.nonnegativeInteger.safe().optional(),
     })
     .strict(),
 );
@@ -37,9 +38,8 @@ export type ArtifactCatalogItem = z.infer<typeof ArtifactCatalogItem>;
 export const ArtifactCatalogListQuery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sourceSessionId: z.string().uuid().optional(),
-      q: z
-        .string()
+      sourceSessionId: primitives.optionalUuid,
+      q: primitives.string
         .trim()
         .max(200)
         .refine((value) => !value.includes("\0"))
@@ -68,7 +68,7 @@ export const ArtifactCatalogListResponse = /* @__PURE__ */ defineSchema(() =>
 export type ArtifactCatalogListResponse = z.infer<typeof ArtifactCatalogListResponse>;
 
 export const UpdateArtifactPinRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ pinned: z.boolean() }).strict(),
+  z.object({ pinned: primitives.boolean }).strict(),
 );
 export type UpdateArtifactPinRequest = z.infer<typeof UpdateArtifactPinRequest>;
 
@@ -77,7 +77,7 @@ export const ArtifactPinResponse = /* @__PURE__ */ defineSchema(() =>
     .object({
       kind: ArtifactCatalogKind,
       artifactId: z.string().min(1).max(128),
-      pinned: z.boolean(),
+      pinned: primitives.boolean,
     })
     .strict(),
 );

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -21,23 +22,25 @@ import {
 import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-policies";
 import { WorkspaceLearningPolicyEffectiveMode } from "./workspace-learning-policy";
 
-const boundedReason = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(4_096));
-const operationId = /* @__PURE__ */ defineSchema(() => z.string().uuid());
+const boundedReason = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.trim().min(1).max(4_096),
+);
+const operationId = /* @__PURE__ */ defineSchema(() => primitives.uuid);
 const exactEvidence = {
-  claimId: z.string().uuid(),
-  evidenceId: z.string().uuid(),
+  claimId: primitives.uuid,
+  evidenceId: primitives.uuid,
 };
 
 /** Exact accepted-attempt authority. It is validated again inside the write transaction. */
 export const CompanyBrainGovernedWriteAttempt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      accountId: z.string().uuid(),
-      workspaceId: z.string().uuid(),
-      sessionId: z.string().uuid(),
-      turnId: z.string().uuid(),
-      attemptId: z.string().uuid(),
-      executionGeneration: z.number().int().positive(),
+      accountId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      turnId: primitives.uuid,
+      attemptId: primitives.uuid,
+      executionGeneration: primitives.positiveInteger,
     })
     .strict(),
 );
@@ -63,7 +66,7 @@ export const CorrectWorkspaceKnowledgeClaimRequest = /* @__PURE__ */ defineSchem
       kind: z.literal("correct_knowledge"),
       operationId,
       ...exactEvidence,
-      replacesClaimId: z.string().uuid(),
+      replacesClaimId: primitives.uuid,
       reason: boundedReason,
     })
     .strict(),
@@ -83,18 +86,16 @@ export const PromoteTaskNoteKnowledgeRequest = /* @__PURE__ */ defineSchema(() =
     .object({
       kind: z.literal("promote_task_note_knowledge"),
       operationId,
-      noteId: z.string().uuid(),
+      noteId: primitives.uuid,
       expectedNoteVersion: z.literal(1),
-      entityType: z
-        .string()
+      entityType: primitives.string
         .trim()
         .min(1)
         .max(96)
         .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-      normalizedKey: z.string().trim().min(1).max(512),
-      displayName: z.string().trim().min(1).max(512),
-      predicateKey: z
-        .string()
+      normalizedKey: primitives.string.trim().min(1).max(512),
+      displayName: primitives.string.trim().min(1).max(512),
+      predicateKey: primitives.string
         .trim()
         .min(1)
         .max(128)
@@ -116,26 +117,24 @@ export const PromoteTaskNoteInstructionPolicyRequest = /* @__PURE__ */ defineSch
     .strictObject({
       kind: z.literal("promote_task_note_instruction_policy"),
       operationId,
-      noteId: z.string().uuid(),
+      noteId: primitives.uuid,
       expectedNoteVersion: z.literal(1),
-      entityType: z
-        .string()
+      entityType: primitives.string
         .trim()
         .min(1)
         .max(96)
         .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-      normalizedKey: z.string().trim().min(1).max(512),
-      displayName: z.string().trim().min(1).max(512),
-      predicateKey: z
-        .string()
+      normalizedKey: primitives.string.trim().min(1).max(512),
+      displayName: primitives.string.trim().min(1).max(512),
+      predicateKey: primitives.string
         .trim()
         .min(1)
         .max(128)
         .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
       confidenceBps: z.number().int().min(0).max(10_000),
       target: WorkspaceInstructionPolicyTarget,
-      expectedCurrentRevisionId: z.string().uuid().nullable(),
-      expectedActivationVersion: z.number().int().nonnegative(),
+      expectedCurrentRevisionId: primitives.nullableUuid,
+      expectedActivationVersion: primitives.nonnegativeInteger,
       reason: boundedReason,
     })
     .superRefine((value, context) => {
@@ -160,30 +159,31 @@ export const PromoteTaskNotePreferenceRequest = /* @__PURE__ */ defineSchema(() 
   z.strictObject({
     kind: z.literal("promote_task_note_preference"),
     operationId,
-    noteId: z.string().uuid(),
+    noteId: primitives.uuid,
     expectedNoteVersion: z.literal(1),
-    entityType: z
-      .string()
+    entityType: primitives.string
       .trim()
       .min(1)
       .max(96)
       .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-    normalizedKey: z.string().trim().min(1).max(512),
-    displayName: z.string().trim().min(1).max(512),
-    predicateKey: z
-      .string()
+    normalizedKey: primitives.string.trim().min(1).max(512),
+    displayName: primitives.string.trim().min(1).max(512),
+    predicateKey: primitives.string
       .trim()
       .min(1)
       .max(128)
       .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
     confidenceBps: z.number().int().min(0).max(10_000),
     stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
-    title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-    description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+    title: primitives.string.trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    description: primitives.string
+      .trim()
+      .min(1)
+      .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
     precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
     conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
     conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
-    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+    expiresAt: primitives.string.datetime({ offset: true }).nullable().default(null),
     reason: boundedReason,
   }),
 );
@@ -198,16 +198,14 @@ export const ProposeWorkspaceInstructionPolicyRequest = /* @__PURE__ */ defineSc
       target: WorkspaceInstructionPolicyTarget,
       // Instruction drafts use the same storage bound as the human editor.
       // Prompt composition retains its separate byte limit after activation.
-      content: z
-        .string()
-        .min(1)
+      content: primitives.nonEmptyString
         .max(
           AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
           AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
         )
         .refine((value) => value.trim().length > 0, "instruction proposal must not be blank"),
-      expectedCurrentRevisionId: z.string().uuid().nullable(),
-      expectedActivationVersion: z.number().int().nonnegative(),
+      expectedCurrentRevisionId: primitives.nullableUuid,
+      expectedActivationVersion: primitives.nonnegativeInteger,
       reason: boundedReason,
     })
     .superRefine((value, context) => {
@@ -229,13 +227,14 @@ export const ProposeWorkspacePreferenceRequest = /* @__PURE__ */ defineSchema(()
     operationId,
     ...exactEvidence,
     stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
-    title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-    description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+    title: primitives.string.trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    description: primitives.string
+      .trim()
+      .min(1)
+      .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
     // Agent-authored: the descriptor pair is prompt-composed in every session and
     // the content is retrieved on demand, so it stays short.
-    content: z
-      .string()
-      .min(1)
+    content: primitives.nonEmptyString
       .max(
         AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
         AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
@@ -244,7 +243,7 @@ export const ProposeWorkspacePreferenceRequest = /* @__PURE__ */ defineSchema(()
     precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
     conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
     conflictsWith: z.array(PreferenceRegistryStableKey).max(32).default([]),
-    expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+    expiresAt: primitives.string.datetime({ offset: true }).nullable().default(null),
     reason: boundedReason,
   }),
 );
@@ -277,23 +276,23 @@ export type CompanyBrainGovernedWriteDestination = z.infer<
 export const CompanyBrainGovernedWriteReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     operationId,
-    inputHash: z.string().regex(/^[0-9a-f]{64}$/),
-    workspaceId: z.string().uuid(),
+    inputHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    workspaceId: primitives.uuid,
     destination: CompanyBrainGovernedWriteDestination,
     outcome: z.literal("proposed"),
-    claimId: z.string().uuid(),
-    evidenceId: z.string().uuid(),
-    relationId: z.string().uuid().nullable(),
-    reviewId: z.string().uuid().nullable(),
-    knowledgeChangeProposalId: z.string().uuid().nullable(),
-    destinationProposalId: z.string().uuid().nullable(),
-    destinationRevisionId: z.string().uuid().nullable(),
+    claimId: primitives.uuid,
+    evidenceId: primitives.uuid,
+    relationId: primitives.nullableUuid,
+    reviewId: primitives.nullableUuid,
+    knowledgeChangeProposalId: primitives.nullableUuid,
+    destinationProposalId: primitives.nullableUuid,
+    destinationRevisionId: primitives.nullableUuid,
     taskNoteSource: z
       .object({
-        noteId: z.string().uuid(),
-        rootSessionId: z.string().uuid(),
+        noteId: primitives.uuid,
+        rootSessionId: primitives.uuid,
         noteVersion: z.literal(1),
-        textHash: z.string().regex(/^[0-9a-f]{64}$/),
+        textHash: primitives.string.regex(/^[0-9a-f]{64}$/),
       })
       .nullable()
       .optional(),
@@ -324,9 +323,9 @@ export type CompanyBrainLearningPolicyDecision = z.infer<typeof CompanyBrainLear
  */
 export const CompanyBrainLearningDecisionSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    receiptId: z.string().uuid(),
+    receiptId: primitives.uuid,
     outcome: GovernedLearningDecisionOutcome,
-    automaticEligible: z.boolean(),
+    automaticEligible: primitives.boolean,
     reasons: z.array(GovernedLearningDecisionReason).max(16),
   }),
 );
@@ -349,15 +348,15 @@ export type CompanyBrainLearningStepFailure = z.infer<typeof CompanyBrainLearnin
 export const CompanyBrainLearningPolicyRouteReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     operationId,
-    workspaceId: z.string().uuid(),
+    workspaceId: primitives.uuid,
     effectivePolicy: WorkspaceLearningPolicyEffectiveMode,
     decision: CompanyBrainLearningPolicyDecision,
     write: CompanyBrainGovernedWriteReceipt.nullable(),
     learning: CompanyBrainLearningDecisionSummary.nullable().default(null),
     learningFailure: CompanyBrainLearningStepFailure.nullable().default(null),
     activation: z.object({
-      requested: z.boolean(),
-      activated: z.boolean(),
+      requested: primitives.boolean,
+      activated: primitives.boolean,
       boundary: z.enum([
         "policy_off",
         "human_review",
@@ -366,9 +365,9 @@ export const CompanyBrainLearningPolicyRouteReceipt = /* @__PURE__ */ defineSche
         "human_activation_required",
         "activated",
       ]),
-      receiptId: z.string().uuid().nullable().default(null),
+      receiptId: primitives.nullableUuid.default(null),
       destination: GovernedLearningActivationDestination.nullable().default(null),
-      destinationRevisionId: z.string().uuid().nullable().default(null),
+      destinationRevisionId: primitives.nullableUuid.default(null),
       effectiveAt: z.string().datetime().nullable().default(null),
     }),
   }),

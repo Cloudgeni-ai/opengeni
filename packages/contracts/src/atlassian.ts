@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ConnectionMetadata } from "./index";
@@ -46,8 +47,8 @@ export const AtlassianConnectionLifecycle = /* @__PURE__ */ defineSchema(() =>
       "reconnect_required",
       "reconsent_required",
     ]),
-    recoverable: z.boolean(),
-    observedAt: z.string().datetime(),
+    recoverable: primitives.boolean,
+    observedAt: primitives.dateTime,
   }),
 );
 export type AtlassianConnectionLifecycle = z.infer<typeof AtlassianConnectionLifecycle>;
@@ -64,10 +65,10 @@ export const AtlassianSelectedSource = /* @__PURE__ */ defineSchema(() =>
     kind: AtlassianSourceKind,
     destination: ConnectorDocumentDestination.optional(),
     syncCadence: AtlassianSyncCadence,
-    syncEnabled: z.boolean(),
-    configGeneration: z.number().int().positive(),
+    syncEnabled: primitives.boolean,
+    configGeneration: primitives.positiveInteger,
     readPolicy: AtlassianReadPolicy,
-    selectedAt: z.string().datetime(),
+    selectedAt: primitives.dateTime,
   }),
 );
 export type AtlassianSelectedSource = z.infer<typeof AtlassianSelectedSource>;
@@ -90,7 +91,7 @@ export const AtlassianConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
       )
       .min(1)
       .max(50),
-    verifiedAt: z.string().datetime(),
+    verifiedAt: primitives.dateTime,
     accessMode: z.literal("readonly"),
     lifecycle: AtlassianConnectionLifecycle.optional(),
     documentDestination: ConnectorDocumentDestination.optional(),
@@ -101,7 +102,7 @@ export type AtlassianConnectionMetadata = z.infer<typeof AtlassianConnectionMeta
 
 export const AtlassianOAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: z.string().uuid().optional(),
+    connectionId: primitives.optionalUuid,
   }),
 );
 export type AtlassianOAuthStartRequest = z.infer<typeof AtlassianOAuthStartRequest>;
@@ -109,7 +110,7 @@ export type AtlassianOAuthStartRequest = z.infer<typeof AtlassianOAuthStartReque
 export const AtlassianOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     authorizationUrl: z.string().url(),
-    expiresAt: z.string().datetime(),
+    expiresAt: primitives.dateTime,
   }),
 );
 export type AtlassianOAuthStartResponse = z.infer<typeof AtlassianOAuthStartResponse>;
@@ -156,10 +157,10 @@ export const SaveAtlassianSourcesRequest = /* @__PURE__ */ defineSchema(() =>
       .max(100),
     destination: z.object({
       authorityKind: z.enum(["organization", "workspace", "personal"]),
-      collectionId: z.string().uuid().nullable().default(null),
+      collectionId: primitives.nullableUuid.default(null),
     }),
     syncCadence: AtlassianSyncCadence,
-    syncEnabled: z.boolean(),
+    syncEnabled: primitives.boolean,
     readPolicy: AtlassianReadPolicy.default("allow"),
   }),
 );
@@ -168,15 +169,15 @@ export type SaveAtlassianSourcesRequest = z.infer<typeof SaveAtlassianSourcesReq
 export const AtlassianLifecycleActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     action: z.enum(["pause", "resume"]),
-    expectedVersion: z.number().int().positive(),
+    expectedVersion: primitives.positiveInteger,
   }),
 );
 export type AtlassianLifecycleActionRequest = z.infer<typeof AtlassianLifecycleActionRequest>;
 
 export const AtlassianDisconnectRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedVersion: z.number().int().positive(),
-    idempotencyKey: z.string().uuid(),
+    expectedVersion: primitives.positiveInteger,
+    idempotencyKey: primitives.uuid,
   }),
 );
 export type AtlassianDisconnectRequest = z.infer<typeof AtlassianDisconnectRequest>;

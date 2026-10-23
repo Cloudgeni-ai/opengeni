@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { KnowledgeEntryListResponse, KnowledgeEntryScope } from "./knowledge-entries";
@@ -6,7 +7,7 @@ import { KnowledgeEntryListResponse, KnowledgeEntryScope } from "./knowledge-ent
 export const KnowledgeSavePreparationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      query: z.string().trim().min(1).max(4096),
+      query: primitives.string.trim().min(1).max(4096),
       limit: z.number().int().positive().max(20).default(8),
       collectionCursors: z
         .object({
@@ -25,12 +26,12 @@ export const KnowledgeCollectionDescriptor = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: z.uuid(),
       revisionId: z.uuid(),
-      version: z.number().int().positive(),
+      version: primitives.positiveInteger,
       scope: KnowledgeEntryScope,
       view: z.enum(["published", "needs_review"]),
-      title: z.string(),
-      description: z.string(),
-      descriptionTruncated: z.boolean(),
+      title: primitives.string,
+      description: primitives.string,
+      descriptionTruncated: primitives.boolean,
       parentIds: z.array(z.uuid()),
     })
     .strict(),
@@ -41,10 +42,10 @@ export const KnowledgeSavePreparationResponse = /* @__PURE__ */ defineSchema(() 
     .object({
       collections: z.object({
         entries: z.array(KnowledgeCollectionDescriptor),
-        complete: z.boolean(),
+        complete: primitives.boolean,
         nextCursors: z.object({
-          published: z.string().nullable(),
-          needs_review: z.string().nullable(),
+          published: primitives.nullableString,
+          needs_review: primitives.nullableString,
         }),
       }),
       matches: z.object({

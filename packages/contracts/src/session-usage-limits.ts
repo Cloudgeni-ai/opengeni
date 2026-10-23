@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { z } from "zod";
 
 /**
@@ -26,18 +27,15 @@ export const SESSION_USAGE_LIMIT_MICROS_PER_DOLLAR = 1_000_000;
 export const SESSION_USAGE_LIMIT_MAX_MICROS = 10_000_000 * SESSION_USAGE_LIMIT_MICROS_PER_DOLLAR;
 
 /** A configured limit. Zero is a valid immediate stop; `null` (not this schema) means no limit. */
-export const SessionUsageLimitMicros = z
-  .number()
-  .int()
-  .nonnegative()
+export const SessionUsageLimitMicros = primitives.nonnegativeInteger
   .safe()
   .max(SESSION_USAGE_LIMIT_MAX_MICROS);
 export type SessionUsageLimitMicros = z.infer<typeof SessionUsageLimitMicros>;
 
 /** Recorded usage is a non-negative safe integer and may exceed the configured maximum. */
-const UsageMicros = z.number().int().nonnegative().safe();
-const Count = z.number().int().nonnegative().safe();
-const Version = z.number().int().nonnegative().safe();
+const UsageMicros = primitives.nonnegativeInteger.safe();
+const Count = primitives.nonnegativeInteger.safe();
+const Version = primitives.nonnegativeInteger.safe();
 
 const OperationId = z
   .string()
@@ -83,9 +81,9 @@ export const SessionUsageLimit = z
   .object({
     basis: SessionUsageLimitBasis,
     /** The task root whose limit applies. Equal to the session id for a root. */
-    rootSessionId: z.string().uuid(),
+    rootSessionId: primitives.uuid,
     /** True when this projection was read through a descendant: edit the root's limit instead. */
-    inherited: z.boolean(),
+    inherited: primitives.boolean,
     status: SessionUsageLimitStatus,
     /** Configured limit; null means no limit. Meaningless while `status` is `unavailable`. */
     limitMicros: SessionUsageLimitMicros.nullable(),
@@ -107,7 +105,7 @@ export const SessionUsageLimit = z
     freeCalls: Count,
     /** Responses whose cost is unknown; they are excluded from `usedMicros`. */
     unpricedCalls: Count,
-    updatedAt: z.string().datetime({ offset: true }).nullable(),
+    updatedAt: primitives.string.datetime({ offset: true }).nullable(),
   })
   .strict();
 export type SessionUsageLimit = z.infer<typeof SessionUsageLimit>;
@@ -131,7 +129,7 @@ export const SessionUsageLimitReachedRefusal = z
   .object({
     code: z.literal("session_usage_limit_reached"),
     basis: SessionUsageLimitBasis,
-    rootSessionId: z.string().uuid(),
+    rootSessionId: primitives.uuid,
     limitMicros: SessionUsageLimitMicros,
     usedMicros: UsageMicros,
     message: z.string().max(1_024),
