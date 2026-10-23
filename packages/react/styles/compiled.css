@@ -3168,6 +3168,9 @@
       border-color: color-mix(in oklab, var(--color-danger) 70%, transparent);
     }
   }
+:where(.og-root).border-fg-subtle,:where(.og-root) .border-fg-subtle {
+    border-color: var(--color-fg-subtle);
+  }
 :where(.og-root).border-fg-subtle\/40,:where(.og-root) .border-fg-subtle\/40 {
     border-color: var(--color-fg-subtle);
     @supports (color: color-mix(in lab, red, red)) {
