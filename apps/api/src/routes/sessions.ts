@@ -2083,6 +2083,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,
         modeVersion: claimed.modeVersion,
+        // The prior conversation travels in the provider's instructions;
+        // clients from earlier releases still read this list.
+        initialItems: [],
         replay: false as const,
       });
     } catch (error) {
