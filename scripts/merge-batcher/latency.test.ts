@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   config,
+  digest,
   emptyLedger,
   ejectionKey,
   type Observation,
+  type Candidate,
   type Pull,
   type StageSample,
 } from "./model";
@@ -113,6 +115,86 @@ async function setup() {
   };
   return { settings, observation };
 }
+test("other demand that independently blocks capacity earns no main-wait credit", async () => {
+  for (const hold of [
+    "repository-budget",
+    "provider-limit",
+    "main-queued",
+    "main-pre-fanout",
+  ] as const) {
+    const { settings, observation: o } = await setup();
+    o.headroom!.occupied = 65; // main45 plus other20; removing main still blocks.
+    o.headroom!.capacity!.hold = hold;
+    const journal = new ObservationJournal(settings);
+    await journal.observe(o);
+    await journal.observe({ ...o, now: at(3) });
+    expect((await journal.records(at(3))).stages.one!.mainCapacityWaits ?? []).toEqual([]);
+  }
+});
+test("pre-credit latency stop cannot be bypassed to earn capacity credits", async () => {
+  const { settings, observation: o } = await setup();
+  o.ledger.stages.slow = { ...sample(), batchId: "slow" };
+  o.ledger.stages.slow!.readyBindings![0]!.key = "different-binding";
+  o.now = at(42);
+  const journal = new ObservationJournal(settings);
+  expect((await journal.observe(o)).telemetry!.status).toBe("stop");
+  expect((await journal.observe({ ...o, now: at(44) })).telemetry!.status).toBe("stop");
+  expect((await journal.records(at(44))).stages.one!.mainCapacityWaits ?? []).toEqual([]);
+});
+test("journal-derived abandoned missing run prevents credit with spare configured slots", async () => {
+  const { settings, observation: o } = await setup();
+  settings.maxInflight = 3;
+  settings.speculationDepth = 3;
+  settings.missingRunSeconds = 60;
+  const p = (number: number): Pull => ({ ...pull, number, headSha: String(number).repeat(40) });
+  const candidate = (
+    member: Pull,
+    baseSha: string,
+    predecessor: string | null,
+    tip: string,
+  ): Candidate => {
+    const spec = {
+      schemaVersion: 1 as const,
+      baseSha,
+      predecessor,
+      recoveryOf: null,
+      createdAt: at(0),
+      pulls: [member],
+    };
+    const batchId = digest(spec);
+    return {
+      manifest: { ...spec, batchId, tipSha: tip, pulls: [{ ...member, mergeSha: tip }] },
+      branch: `${settings.branchPrefix}${batchId}`,
+      runs: [],
+      containedInBase: false,
+    };
+  };
+  const a = candidate(p(5), o.baseSha, null, "c".repeat(40));
+  a.runs = [
+    {
+      id: 1,
+      attempt: 1,
+      headSha: a.manifest.tipSha,
+      branch: a.branch,
+      workflow: settings.workflow,
+      status: "in_progress",
+      outcome: "unknown",
+      completedAt: null,
+      trusted: false,
+      retryable: false,
+      startedAt: at(0),
+    },
+  ];
+  const b = candidate(p(6), a.manifest.tipSha, a.manifest.batchId, "d".repeat(40));
+  o.candidates = [a, b];
+  o.ready = [p(5), p(6), pull];
+  const journal = new ObservationJournal(settings);
+  await journal.observe({ ...o, now: at(0) });
+  const observed = await journal.observe({ ...o, now: at(2) });
+  expect(observed.missingRuns![b.manifest.batchId]!.status).toBe("abandoned");
+  await journal.observe({ ...o, now: at(4) });
+  expect((await journal.records(at(4))).stages.one!.mainCapacityWaits ?? []).toEqual([]);
+});
 test("recorded main holds survive journal restart and durable stage reconstruction", async () => {
   const { settings, observation: o } = await setup();
   await new ObservationJournal(settings).observe(o);

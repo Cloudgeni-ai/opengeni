@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { plan } from "./planner";
 import {
+  capacityDecision,
   digest,
   ejectionKey,
   type Config,
@@ -267,7 +268,24 @@ export class ObservationJournal {
     const runId = capacity?.latestMain?.runId;
     // Unknown/incomplete scans and demand attributable only to other work earn
     // no credit. Both endpoints must show main alone blocking admission.
+    const otherDemand = h ? h.occupied - (demand ?? 0) : NaN;
+    const withoutMain =
+      h && capacity && Number.isSafeInteger(otherDemand) && otherDemand >= 0
+        ? capacityDecision({
+            mainDemand: 0,
+            otherDemand,
+            latestMain: null,
+            mainQueuedJobs: 0,
+            preFanoutMainRuns: [],
+            runnerBudget: h.budget ?? 0,
+            mainReserve: this.config.mainReserve ?? 0,
+            providerJobLimit: capacity.providerJobLimit ?? 0,
+            otherRepositoryAllowance: capacity.otherRepositoryAllowance ?? -1,
+          }).allowed
+        : false;
+    const beforeCredit = latencySummary(data.stages, o.now);
     const mainHold =
+      withoutMain &&
       o.mainBusy === true &&
       h?.allowed === false &&
       Number.isSafeInteger(demand) &&
@@ -291,14 +309,21 @@ export class ObservationJournal {
           {
             ...o,
             ready: o.ready.filter((p) => !data.conflicts[ejectionKey(p)]),
+            missingRuns: structuredClone(data.missing),
             mainBusy: false,
             headroom: { ...h!, allowed: true },
             telemetry: {
-              status: "unknown",
-              p95ReadyToCiSeconds: null,
-              samples: 0,
-              coverageSince: o.now,
-              completeWindow: false,
+              status:
+                beforeCredit.p95 === null
+                  ? "unknown"
+                  : beforeCredit.p95 > 1800
+                    ? "stop"
+                    : "within-threshold",
+              p95ReadyToCiSeconds: beforeCredit.p95,
+              samples: beforeCredit.samples,
+              coverageSince: data.coverageSince,
+              completeWindow:
+                Date.parse(o.now) - Date.parse(data.coverageSince) >= LATENCY_WINDOW_MS,
             },
           },
           this.config,
