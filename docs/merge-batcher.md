@@ -359,12 +359,14 @@ code failure needs `failure`. Missing/expired/ambiguous/malformed artifacts,
 wrong attempts/branches/workflows and other conclusions are unknown, never
 evidence against a PR. Archive reading is bounded and never extracts paths.
 
-Code/test failures are **never retried**. Only the candidate's own first completed
-Batch CI attempt with positive infrastructure-only evidence may request one
+Only the candidate's own first completed
+Batch CI attempt with trusted code-failure or positive exact-attempt
+failed/timed-out job evidence may request one
 whole-workflow retry; main, Version and release runs are excluded. The exact
 run/attempt, request time and reason are durably recorded in Git and stage evidence.
 Ambiguous or partial receipts hold rather than authorize a retry or blame a PR.
-A second infrastructure failure holds. Invalidated, landed or obsolete-base
+A trusted second code failure splits the cohort or parks a failing singleton;
+a second infrastructure or unknown outcome holds. Invalidated, landed or obsolete-base
 candidates cannot submit pending retries: the candidate must still be rooted in
 current main or an exact live predecessor chain, checked before and after the
 durable submission claim. An unknown POST outcome remains reconciliation-only,
@@ -491,10 +493,10 @@ Failed speculative descendants may be invalidated, but running CI is never cance
 Main advancement or readiness changes still invalidate unparked candidates normally.
 Merge-tree conflicts retain their distinct
 conflict reason and comment path, not a fabricated CI failure. Legacy receipt
-`retryable` flags do not override the controller's no-code-retry policy.
+`retryable` flags do not override the controller's single exact-attempt retry policy.
 
-Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible positive
-infrastructure evidence waits at least 60 seconds and for admission headroom
+Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible trusted
+code-failure or positive failed/timed-out job evidence waits at least 60 seconds and for admission headroom
 before the single allowed retry; unknown evidence cannot request it. Retry intent
 is durable before effect submission. An uncertain effect uses bounded, backed-off
 provider observations, not additional CI attempts, and is never blindly replayed
