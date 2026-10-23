@@ -1,5 +1,13 @@
 # @opengeni/tool-gateway
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [fb72b9d]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/observability@5.2.0
+
 ## 5.1.2
 
 ### Patch Changes

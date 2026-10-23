@@ -1,5 +1,15 @@
 # @opengeni/browserd
 
+## 0.4.8
+
+### Patch Changes
+
+- 2752a36: On macOS a web page's number field (`<input type=number>`) now shows as a `spinbutton` that offers `set_value`, instead of a raw `AXIncrementor` offering only invoke and a focus that failed. Its value is written as text and checked afterwards: a field that reads its old value or nothing instead of the number it was given fails the action, and CUA puts back the old value of a field a value emptied and refuses the write, so `set_value` (also as a later batch step that names the field) never silently clears it. `focus` on it works. A web range input given a value is stepped to it; a value outside its range is refused without moving it, a run that stops short fails saying what it reads now, and a slider that reads anything but the value it was given fails the action. A value write CUA refused and put back is reported as a definite failure rather than an unknown outcome. The parts of a date or time field stay as they were, and a web date field that already had a value now reads the date typed into it (Chrome keeps the field's own value at the first one), so filling it no longer reports a failure (parts that form no calendar date, such as 31 February, do not count).
+- a800c15: On macOS a `set_value` that CUA refuses because the value is outside a control's range, or because stepping stopped short of it, no longer repeats the value in its message, since it may be a secret such as a PIN in a number field.
+- Updated dependencies [fb72b9d]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/interaction@5.2.0
+
 ## 0.4.7
 
 ### Patch Changes
