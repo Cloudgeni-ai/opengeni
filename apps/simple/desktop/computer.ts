@@ -279,7 +279,8 @@ export function createSimpleComputer(options: SimpleComputerOptions): SimpleComp
   let permissionAskedAt = 0;
   handle(SIMPLE_IPC.computerRequestPermission, (_account, id) => {
     if (!THIS_COMPUTER_PERMISSION_ORDER.includes(id as ThisComputerPermissionId)) return;
-    permissionAskedAt = Date.now();
+    // Only screen permissions make macOS offer to quit and reopen the app.
+    if (id !== "files") permissionAskedAt = Date.now();
     return computer.requestPermission(id as ThisComputerPermissionId);
   });
   handle(SIMPLE_IPC.computerDisconnect, (account, workspaceId) =>

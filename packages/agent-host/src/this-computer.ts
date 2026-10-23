@@ -12,6 +12,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { once } from "node:events";
 import { dirname, join } from "node:path";
@@ -313,6 +314,7 @@ export class ThisComputer {
   /** Helper processes opening guarded folders, stopped when the app ends. */
   private readonly folderChecks = new Set<ChildProcess>();
   private installing: Promise<string> | null = null;
+  private replacing: Promise<void> | null = null;
   /** How much of the agent has downloaded, from 0 to 1, while it downloads. */
   private progress: number | null = null;
   private busy = false;
@@ -1072,12 +1074,9 @@ export class ThisComputer {
     const version = await this.versionOf(this.hostedPath);
     if (version && !this.tooOld(version)) return this.hostedPath;
     if (version) {
-      // An agent that works but is older than the app needs: replace it from
-      // the server it serves. Without one to reach, it keeps running as is.
-      if (this.deps.bundledAgent) return this.hostedPath;
-      const from = server ?? (await this.connections(true))[0]?.apiUrl ?? null;
-      if (!from) return this.hostedPath;
-      await this.download(from).catch(() => undefined);
+      // An agent that works but is older than the app needs keeps running
+      // while a newer one downloads; it then starts again on the new one.
+      if (!this.deps.bundledAgent) this.replaceOldAgent(server);
       return this.hostedPath;
     }
     if (this.deps.bundledAgent) {
@@ -1095,8 +1094,68 @@ export class ThisComputer {
         "download_failed",
         "Couldn't save this computer's setup state. Check the app's data-folder access and try again.",
       );
-    await this.download(from);
+    await this.downloadCurrent(from, { keepOld: true });
     return this.hostedPath;
+  }
+
+  /** Replaces the working but too old agent in the background, once at a time. */
+  private replaceOldAgent(server: string | null): void {
+    if (this.replacing) return;
+    this.replacing = (async () => {
+      const from = server ?? (await this.connections(true))[0]?.apiUrl ?? null;
+      if (!from) return;
+      try {
+        const version = await this.downloadCurrent(from, { keepOld: false });
+        this.note(`replaced the old agent with ${version}`);
+        await this.agent.restart();
+        this.deps.onChange();
+      } catch (caught) {
+        this.note(`couldn't replace the old agent: ${errorText(caught)}`);
+      }
+    })().finally(() => {
+      this.replacing = null;
+    });
+  }
+
+  /**
+   * Downloads the server's stable agent, or the oldest release this app works
+   * with when the stable one is older than that. With `keepOld`, a stable agent
+   * that is too old is still kept when that release can't be had: an older
+   * agent beats none. Returns the version now in place.
+   */
+  private async downloadCurrent(server: string, options: { keepOld: boolean }): Promise<string> {
+    const minimum = this.deps.minimumAgentVersion;
+    if (!minimum) return await this.download(server, "latest");
+    let stable: string | Error;
+    try {
+      stable = await this.download(
+        server,
+        "latest",
+        options.keepOld ? undefined : (version) => !this.tooOld(version),
+      );
+      if (!this.tooOld(stable)) return stable;
+    } catch (caught) {
+      stable = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    try {
+      return await this.download(server, `v${minimum}`);
+    } catch (caught) {
+      if (typeof stable === "string") return stable;
+      throw caught;
+    }
+  }
+
+  /** A line in the agent's log, for what the app does to the agent itself. */
+  private note(line: string): void {
+    const log = this.openLog();
+    if (log === null) return;
+    try {
+      writeSync(log, `${new Date().toISOString()}  app: ${line}\n`);
+    } catch {
+      // The log is best effort.
+    } finally {
+      closeSync(log);
+    }
   }
 
   private tooOld(version: string): boolean {
@@ -1111,16 +1170,20 @@ export class ThisComputer {
   }
 
   /**
-   * Downloads the server's current agent next to where it goes, checks its
-   * signature, then moves it into place, so there is never a half-written or
-   * unverified agent to run.
+   * Downloads an agent `release` ("latest" or "v1.2.3") next to where it goes,
+   * checks its signature (and with `accept`, its version), then moves it into
+   * place, so there is never a half-written or unverified agent to run.
+   * Returns its version.
    */
-  private async download(server: string): Promise<void> {
+  private async download(
+    server: string,
+    release: string,
+    accept?: (version: string) => boolean,
+  ): Promise<string> {
     const asset = agentAssetName(this.deps.platform, this.deps.arch);
     if (!asset) {
       throw new ThisComputerError("unsupported", "Agents can't use this kind of computer yet.");
     }
-    const release = this.deps.minimumAgentVersion ? `v${this.deps.minimumAgentVersion}` : "latest";
     const url = new URL(`/agent/${release}/${asset}`, server).toString();
     const [file, signature] = await Promise.all([
       this.deps.fetch(url),
@@ -1175,7 +1238,18 @@ export class ThisComputer {
         },
       );
     }
+    const version = await this.versionOf(staged);
+    if (!version || (accept && !accept(version))) {
+      rmSync(staged, { force: true });
+      throw new ThisComputerError(
+        "download_failed",
+        version
+          ? `The agent from ${new URL(server).host} is too old (${version}).`
+          : `The agent from ${new URL(server).host} doesn't run on this computer.`,
+      );
+    }
     this.moveIntoPlace(staged);
+    return version;
   }
 
   private setProgress(progress: number): void {

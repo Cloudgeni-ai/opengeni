@@ -1,7 +1,7 @@
 import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
 import { McpConnectionCard } from "@opengeni/react/connect";
-import { ThisComputerCard, thisComputerView } from "@opengeni/react/this-computer";
+import { ThisComputerCard } from "@opengeni/react/this-computer";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import { AppWindow, Check, GitBranch, Monitor, Plug } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -123,10 +123,12 @@ function ChromeCard({
 }) {
   const app = useAppComputer();
   const status = app?.computer.status ?? null;
-  const enrollmentId = thisComputerView(status) === "ready" ? (status?.enrollmentId ?? null) : null;
+  // Chrome needs this computer connected, not its screen permissions.
+  const enrollmentId = status?.state === "connected" ? (status.enrollmentId ?? null) : null;
   const [linked, setLinked] = useState<string | null>(null);
   const [watchSince, setWatchSince] = useState<number | null>(null);
   const told = useRef(false);
+  const [sent, setSent] = useState(false);
 
   useEffect(() => {
     if (!enrollmentId || linked) return;
@@ -142,7 +144,8 @@ function ChromeCard({
     void read();
     if (watchSince === null) return () => void (cancelled = true);
     const timer = window.setInterval(() => {
-      if (Date.now() - watchSince > CHROME_WATCH_MS) window.clearInterval(timer);
+      // After a while, stop looking; "Add to Chrome" starts it again.
+      if (Date.now() - watchSince > CHROME_WATCH_MS) setWatchSince(null);
       else if (document.visibilityState !== "hidden") void read();
     }, CHROME_POLL_MS);
     return () => {
@@ -151,12 +154,18 @@ function ChromeCard({
     };
   }, [enrollmentId, linked, watchSince, workspaceId]);
 
+  // Linked after "Add to Chrome": tell the agent. Linked already when the card
+  // showed: the person says when to go on.
+  const tell = () => {
+    if (told.current) return;
+    told.current = true;
+    setSent(true);
+    onReady?.();
+  };
   useEffect(() => {
-    if (linked && watchSince !== null && !told.current) {
-      told.current = true;
-      onReady?.();
-    }
-  }, [linked, onReady, watchSince]);
+    if (linked && watchSince !== null) tell();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one message per card
+  }, [linked, watchSince]);
 
   if (!app) {
     return (
@@ -176,7 +185,19 @@ function ChromeCard({
         icon={<AppWindow size={18} />}
         title="Chrome is connected"
         rationale={`Agents can use ${linked} on ${status?.machineName ?? "this Mac"}.`}
-        action={<Check size={16} className="shrink-0 text-[var(--app-accent)]" />}
+        action={
+          watchSince === null && onReady && !sent ? (
+            <button
+              type="button"
+              onClick={tell}
+              className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1.5 text-xs font-medium text-white"
+            >
+              Go ahead
+            </button>
+          ) : (
+            <Check size={16} className="shrink-0 text-[var(--app-accent)]" />
+          )
+        }
       />
     );
   }
