@@ -855,6 +855,89 @@ describe("child lifecycle notices", () => {
     );
   });
 
+  test("compact questions never carry a secret spec, and a Skill review is marked human-only", () => {
+    const payload = buildChildRequiresActionPayload({
+      childSessionId: crypto.randomUUID(),
+      childTurnId: crypto.randomUUID(),
+      childTurnGeneration: 1,
+      humanInputRequests: [
+        {
+          id: crypto.randomUUID(),
+          allowSkip: false,
+          questions: [
+            {
+              id: "github_password",
+              kind: "secret",
+              prompt: "GitHub password",
+              options: [{ id: "never", label: "never copied" }],
+              required: true,
+              allowOther: false,
+              secret: {
+                item: "GitHub",
+                field: "password",
+                fieldKind: "concealed",
+                itemType: "login",
+                website: "https://github.com",
+                username: { prompt: "Email", value: "owner@example.com" },
+                looksLike: "ghp_...",
+                saveTo: "user",
+                allowGenerate: true,
+                autocomplete: "current-password",
+              },
+            },
+            {
+              id: "skill:review",
+              kind: "single_select",
+              prompt: "Save this exact Skill revision for this workspace?",
+              options: [{ id: "approve", label: "Save" }],
+              required: true,
+              allowOther: false,
+              skillReview: {
+                sourceOperationId: crypto.randomUUID(),
+                skillId: crypto.randomUUID(),
+                revisionId: crypto.randomUUID(),
+                expectedRevisionId: null,
+                expectedScopeVersion: 1,
+              },
+            },
+          ],
+        },
+      ],
+      pendingApprovals: [],
+    });
+    const [request] = payload.requests;
+    expect(request && "questions" in request ? request.questions : undefined).toEqual([
+      {
+        id: "github_password",
+        kind: "secret",
+        prompt: "GitHub password",
+        required: true,
+        options: [],
+      },
+      {
+        id: "skill:review",
+        kind: "single_select",
+        prompt: "Save this exact Skill revision for this workspace?",
+        required: true,
+        options: [{ id: "approve", label: "Save" }],
+        humanOnly: true,
+      },
+    ]);
+    const serialized = JSON.stringify(payload);
+    for (const leaked of [
+      '"secret":',
+      '"username":',
+      '"website":',
+      '"looksLike":',
+      "owner@example.com",
+      "github.com",
+      "skillReview",
+      "never copied",
+    ]) {
+      expect(serialized).not.toContain(leaked);
+    }
+  });
+
   test("child_progress is deferred: pending row without a wake, newer note supersedes older", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });

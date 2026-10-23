@@ -10198,6 +10198,8 @@ export const ChildRequiresActionQuestion = /* @__PURE__ */ defineSchema(() =>
         }),
       )
       .max(20),
+    /** Only a person can answer it (a Skill review); an agent's answer is refused. */
+    humanOnly: z.literal(true).optional(),
   }),
 );
 export type ChildRequiresActionQuestion = z.infer<typeof ChildRequiresActionQuestion>;

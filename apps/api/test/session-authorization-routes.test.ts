@@ -1742,86 +1742,140 @@ describe("embedding host session authorization routes", () => {
   });
 
   test("a person's answer and the parent agent's answer race: exactly one wins, the loser is told", async () => {
-    if (!available) return;
-    for (const round of [0, 1, 2, 3]) {
-      const { value, attemptId, requestId, server } = await childHumanInputFixture();
-      const human = () =>
-        acceptSessionHumanInputResponse(client.db, {
-          accountId: value.grant.accountId,
-          workspaceId: value.grant.workspaceId,
-          sessionId: value.child.id,
-          requestId,
-          response: {
-            outcome: "answered",
-            answers: [{ questionId: "env", values: ["production"] }],
-          },
-          respondedBy: value.grant.subjectId,
-          respondedByKind: "human",
-          clientEventId: crypto.randomUUID(),
-        });
-      const agent = () =>
-        callMcpTool<McpMutationReceiptType>(server, "session_human_input_respond", {
-          sessionId: value.child.id,
-          requestId,
-          response: {
-            outcome: "answered",
-            answers: [{ questionId: "env", values: ["staging"] }],
-          },
-          idempotencyKey: crypto.randomUUID(),
-        });
-      // Alternate who starts first; both run concurrently against the row lock.
-      const [humanResult, agentReceipt] =
-        round % 2 === 0
-          ? await Promise.all([human(), agent()])
-          : await (async () => {
-              const agentRun = agent();
-              const humanRun = human();
-              return [await humanRun, await agentRun] as const;
-            })();
-      const request = await getSessionHumanInputRequest(
-        client.db,
-        value.grant.workspaceId,
-        value.child.id,
-        requestId,
-      );
-      const events = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
-      const responses = events.filter((event) => event.type === "user.humanInputResponse");
-      // Exactly one durable answer, whoever won.
-      expect(responses).toHaveLength(1);
-      if (request?.respondedBy === value.grant.subjectId) {
-        expect(humanResult.action).toBe("accepted");
-        expect(request.response).toMatchObject({
-          answers: [{ questionId: "env", values: ["production"] }],
-        });
-        expect(responses[0]!.payload).toMatchObject({
-          respondedByKind: "human",
-        });
-        expect(agentReceipt).toMatchObject({
-          outcome: "unchanged",
-          changed: false,
-          facts: {
-            alreadyAnswered: true,
-            answeredBy: "person",
-            outcome: "answered",
-          },
-        });
-      } else {
-        expect(request?.respondedBy).toBe(`agent_attempt:${attemptId}`);
-        expect(agentReceipt).toMatchObject({
-          outcome: "updated",
-          changed: true,
-        });
-        expect(responses[0]!.payload).toMatchObject({
-          respondedByKind: "agent_attempt",
-        });
-        // The person's late submission returns the winning event, not theirs,
-        // so a client can tell that someone else answered first.
-        expect(humanResult.action).toBe("completed");
-        if (humanResult.action !== "completed") throw new Error("unreachable");
-        expect(humanResult.settledBy).toBe("earlier_response");
-        expect(humanResult.event.id).toBe(responses[0]!.id);
+    if (!available || !shared) return;
+    // The agent's call does authorization work before it reaches the database,
+    // so a plain Promise.all almost always lets the person win. Force each
+    // order instead: hold the request row lock, start the first answer and
+    // wait until it is queued on that lock, then start the second and wait
+    // until it is queued too, and only then release. Both answers are in
+    // flight together; the first in line must win and the other must be told.
+    const blocker = postgres(shared.adminUrl, { max: 1 });
+    const monitor = postgres(shared.adminUrl, { max: 1 });
+    const lockWaiters = async () => {
+      const [row] = await monitor<{ waiting: number }[]>`
+        select count(*)::int as waiting from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'
+      `;
+      return row?.waiting ?? 0;
+    };
+    const waitForLockWaiters = async (count: number) => {
+      const deadline = Date.now() + 20_000;
+      while ((await lockWaiters()) < count) {
+        if (Date.now() > deadline)
+          throw new Error(`fewer than ${count} answers queued on the lock`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
+    };
+    const raceInOrder = async <First, Second>(
+      requestId: string,
+      first: () => Promise<First>,
+      second: () => Promise<Second>,
+    ): Promise<[First, Second]> => {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => (locked = resolve));
+      const holder = blocker.begin(async (tx) => {
+        await tx`select id from session_human_input_requests where id = ${requestId} for update`;
+        locked();
+        await released;
+      });
+      await lockHeld;
+      const baseline = await lockWaiters();
+      const firstRun = first();
+      await waitForLockWaiters(baseline + 1);
+      const secondRun = second();
+      await waitForLockWaiters(baseline + 2);
+      release();
+      await holder;
+      return [await firstRun, await secondRun];
+    };
+    const seen = new Set<string>();
+    try {
+      for (const round of [0, 1, 2, 3]) {
+        const { value, attemptId, requestId, server } = await childHumanInputFixture();
+        const human = () =>
+          acceptSessionHumanInputResponse(client.db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId,
+            sessionId: value.child.id,
+            requestId,
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "env", values: ["production"] }],
+            },
+            respondedBy: value.grant.subjectId,
+            respondedByKind: "human",
+            clientEventId: crypto.randomUUID(),
+          });
+        const agent = () =>
+          callMcpTool<McpMutationReceiptType>(server, "session_human_input_respond", {
+            sessionId: value.child.id,
+            requestId,
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "env", values: ["staging"] }],
+            },
+            idempotencyKey: crypto.randomUUID(),
+          });
+        // Alternate who is first in line; both are in flight when the lock opens.
+        const humanFirst = round % 2 === 0;
+        const [humanResult, agentReceipt] = humanFirst
+          ? await raceInOrder(requestId, human, agent)
+          : await raceInOrder(requestId, agent, human).then(
+              ([agentRun, humanRun]) => [humanRun, agentRun] as const,
+            );
+        const request = await getSessionHumanInputRequest(
+          client.db,
+          value.grant.workspaceId,
+          value.child.id,
+          requestId,
+        );
+        const events = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
+        const responses = events.filter((event) => event.type === "user.humanInputResponse");
+        // Exactly one durable answer, whoever won.
+        expect(responses).toHaveLength(1);
+        seen.add(humanFirst ? "person" : "agent");
+        if (humanFirst) {
+          expect(request?.respondedBy).toBe(value.grant.subjectId);
+          expect(humanResult.action).toBe("accepted");
+          expect(request.response).toMatchObject({
+            answers: [{ questionId: "env", values: ["production"] }],
+          });
+          expect(responses[0]!.payload).toMatchObject({
+            respondedByKind: "human",
+          });
+          expect(agentReceipt).toMatchObject({
+            outcome: "unchanged",
+            changed: false,
+            facts: {
+              alreadyAnswered: true,
+              answeredBy: "person",
+              outcome: "answered",
+            },
+          });
+        } else {
+          expect(request?.respondedBy).toBe(`agent_attempt:${attemptId}`);
+          expect(agentReceipt).toMatchObject({
+            outcome: "updated",
+            changed: true,
+          });
+          expect(responses[0]!.payload).toMatchObject({
+            respondedByKind: "agent_attempt",
+          });
+          // The person's late submission returns the winning event, not theirs,
+          // so a client can tell that someone else answered first.
+          expect(humanResult.action).toBe("completed");
+          if (humanResult.action !== "completed") throw new Error("unreachable");
+          expect(humanResult.settledBy).toBe("earlier_response");
+          expect(humanResult.event.id).toBe(responses[0]!.id);
+        }
+      }
+    } finally {
+      await blocker.end();
+      await monitor.end();
     }
+    expect([...seen].sort()).toEqual(["agent", "person"]);
   });
 
   test("a parent agent answering after the person answered gets alreadyAnswered", async () => {
@@ -1877,6 +1931,45 @@ describe("embedding host session authorization routes", () => {
       respondedBy: value.grant.subjectId,
       response: { answers: [{ questionId: "env", values: ["production"] }] },
     });
+  });
+
+  test("a parent agent answering after an API client answered is told it was an API client", async () => {
+    if (!available) return;
+    const { value, requestId, server } = await childHumanInputFixture();
+    const api = await acceptSessionHumanInputResponse(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "env", values: ["production"] }],
+      },
+      respondedBy: "api_key:test-key",
+      respondedByKind: "api",
+      clientEventId: crypto.randomUUID(),
+    });
+    expect(api.action).toBe("accepted");
+    const receipt = await callMcpTool<McpMutationReceiptType>(
+      server,
+      "session_human_input_respond",
+      {
+        sessionId: value.child.id,
+        requestId,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "env", values: ["staging"] }],
+        },
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(receipt).toMatchObject({
+      outcome: "unchanged",
+      facts: { alreadyAnswered: true, answeredBy: "api", outcome: "answered" },
+    });
+    expect(receipt.warnings).toEqual([
+      "Already answered by an API client; this answer was not used. Do not answer again.",
+    ]);
   });
 
   test("lets a live agent address peer sessions while host policy can only narrow", async () => {

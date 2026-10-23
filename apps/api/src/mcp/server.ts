@@ -6316,7 +6316,7 @@ function registerWorkspaceOrchestrationTools(
         "session_human_input_respond",
         {
           description:
-            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId and questions. The person is shown the same question, and the first answer wins. Answer when you can from your task context; leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer on their behalf a question meant for them. Tool approvals are decided by humans only and cannot be answered here. An accepted response is recorded as an agent answer and resumes that session's blocked turn. If the result reports alreadyAnswered, someone answered first and your answer was not used; do not answer again.",
+            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId and questions. The person is shown the same question, and the first answer wins. Answer when you can from your task context; leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf. Tool approvals and questions marked humanOnly are decided by humans only and cannot be answered here. An accepted response is recorded as an agent answer and resumes that session's blocked turn. If the result reports alreadyAnswered, someone answered first and your answer was not used; do not answer again.",
           inputSchema: {
             sessionId: z4.string().uuid(),
             requestId: z4.string().uuid(),
@@ -6410,22 +6410,37 @@ function registerWorkspaceOrchestrationTools(
             // or been cancelled): a clear non-error result, so the agent does
             // not retry or assume its answer was used.
             const winner = accepted.request.respondedBy ?? "";
+            const winnerPayload = accepted.event.payload as { respondedByKind?: unknown } | null;
+            // The kind the winning response recorded; older rows fall back to
+            // the responder string.
+            const winnerKind =
+              typeof winnerPayload?.respondedByKind === "string"
+                ? winnerPayload.respondedByKind
+                : winner.startsWith("agent_attempt:")
+                  ? "agent_attempt"
+                  : winner.startsWith("system:")
+                    ? "system"
+                    : "human";
             const answeredBy =
-              accepted.request.status === "expired" || winner.startsWith("system:")
+              accepted.request.status === "expired" || winnerKind === "system"
                 ? "system"
                 : winner === `agent_attempt:${context.callerAttemptId}`
                   ? "you"
-                  : winner.startsWith("agent_attempt:")
+                  : winnerKind === "agent_attempt"
                     ? "agent"
-                    : "person";
+                    : winnerKind === "api"
+                      ? "api"
+                      : "person";
             const answeredByText =
               answeredBy === "person"
                 ? "a person"
                 : answeredBy === "agent"
                   ? "another agent"
-                  : answeredBy === "you"
-                    ? "your earlier call"
-                    : "the system";
+                  : answeredBy === "api"
+                    ? "an API client"
+                    : answeredBy === "you"
+                      ? "your earlier call"
+                      : "the system";
             const state = accepted.request.status;
             return json(
               mcpMutationReceipt({

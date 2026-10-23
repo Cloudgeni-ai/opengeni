@@ -131,6 +131,7 @@ function compactChildQuestion(question: HumanInputQuestion): ChildRequiresAction
               CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES,
             ).text,
           })),
+    ...(question.skillReview != null ? { humanOnly: true as const } : {}),
   };
 }
 

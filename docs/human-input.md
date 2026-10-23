@@ -265,22 +265,24 @@ The parent agent may answer the same request. When child lifecycle notices are
 enabled (`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`), the child's
 `requires_action` settlement sends the parent a `child_requires_action` update
 carrying each request's compact questions (id, kind, prompt, required, option
-ids and labels; secret questions carry no options or secret spec), so the
-parent can call `session_human_input_respond` without reading the child's
-history. That update wakes an idle parent that has an active goal, a held wait, or no
-goal at all;
-a mid-turn parent receives it at its next claim, and a waiting parent's
-`wait_for_input` ends. The first accepted answer wins under the request row
-lock: a later human submission returns `200` with the winning event, and a
-later agent call returns `outcome: "unchanged"` with
-`facts.alreadyAnswered: true`, `facts.answeredBy`
-(`person | agent | you | system`), and a warning not to answer again. Either
-answer refreshes the human's card, which then disappears, and the parent gets
-a deferred `child_requires_action_resolved` update. The
+ids and labels; secret questions carry no options or secret spec, and a Skill
+review question is marked `humanOnly`), so the parent can call
+`session_human_input_respond` without reading the child's history. That update
+wakes an idle parent that has an active goal, a held wait, or no goal at all. A
+mid-turn parent receives it at its next claim, and a waiting parent's
+`wait_for_input` ends.
+
+The first accepted answer wins under the request row lock. A later human
+submission returns `200` with the winning event. A later agent call returns
+`outcome: "unchanged"` with `facts.alreadyAnswered: true`, `facts.answeredBy`
+(`person | api | agent | you | system`) and a warning not to answer again.
+Either answer refreshes the human's card, which then disappears, and the parent
+gets a deferred `child_requires_action_resolved` update. The
 `user.humanInputResponse` event records `respondedByKind`
-(`human | api | agent_attempt | system`). Agents are told to answer a child's
-question only from their task context and to leave questions only a person can
-answer (decisions, preferences, credentials, approvals) to the person.
+(`human | api | agent_attempt | system`), and the conversation says "Agent
+answered" for an agent's answer. Agents are told to answer a child's question
+only from their task context and to leave questions only a person can answer
+(decisions, preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary
 

@@ -202,8 +202,9 @@ child results, an immediate child notice may autonomously wake a parent with eit
 an active goal or a current session-level wait. Like `child_terminal_result`, a
 `child_requires_action` also wakes an idle parent that has no goal at all, so
 the parent can answer the child's question while the person sees the same card;
-a parent whose goal is paused or completed is not woken by it. Without such an obligation, other child lifecycle notices remain
-pending until new intent arrives.
+a parent whose goal is paused or completed is not woken by it. Without such an
+obligation, other child lifecycle notices remain pending until new intent
+arrives.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal

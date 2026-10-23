@@ -5,9 +5,10 @@ the first answer wins. The Session coordination guidance gains one paragraph,
 shown when `session_human_input_respond` is available: the parent answers a
 child's `child_requires_action` question from its task context when it can,
 leaves questions only a person can answer (decisions, preferences, credentials,
-approvals) to the person, and never answers on their behalf a question meant
-for them. The `request_human_input` description adds that in a sub-session the
-parent agent sees the request too and the first answer wins. Before, the
+approvals) to the person, and never answers a question meant for the person on
+their behalf. The `request_human_input` description adds that in a sub-session
+the parent agent may also see and answer the request, and the first answer
+wins. Before, the
 instructions did not say who answers, and a parent only learned of a child's
 question from the generated goal-continuation prompt. Both compositions change
 identically; legacy prompt digests are refreshed for this reviewed change.
