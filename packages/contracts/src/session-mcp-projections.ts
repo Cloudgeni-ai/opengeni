@@ -2,6 +2,13 @@ import type { SessionGoalStatus, SessionStatus } from "./session-topology-primit
 import type { WorkDiscoveryProjection } from "./work-claims";
 import type { Session, SessionQueueSnapshot } from "./index";
 
+/** Counts used by compact monitoring; full queue previews remain a separate read. */
+export type SessionMcpQueueSummary = {
+  queuedTurns: number;
+  pendingInputs: number;
+  stoppingPreviousAttempt: boolean;
+};
+
 /** MCP-only presentation choice. REST/SDK session shapes keep their own defaults. */
 export type SessionMcpDetail = "compact" | "full";
 
@@ -176,7 +183,7 @@ export type SessionMcpMonitoringSource = {
 export function compactSessionMcpDetail(
   session: Session,
   monitoring: SessionMcpMonitoringSource,
-  queue: SessionQueueSnapshot | null,
+  queue: SessionQueueSnapshot | SessionMcpQueueSummary | null,
 ) {
   const title = boundSessionMcpText(session.title, 200);
   const pause = compactSessionMcpPause(session.effectiveControl);
@@ -255,8 +262,8 @@ export function compactSessionMcpDetail(
     ...(queue
       ? {
           queue: {
-            queuedTurns: queue.items.length,
-            pendingInputs: queue.pendingInputs.length,
+            queuedTurns: "items" in queue ? queue.items.length : queue.queuedTurns,
+            pendingInputs: "items" in queue ? queue.pendingInputs.length : queue.pendingInputs,
             ...(queue.stoppingPreviousAttempt ? { stoppingPreviousAttempt: true } : {}),
           },
         }
