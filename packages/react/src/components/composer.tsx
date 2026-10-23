@@ -620,7 +620,7 @@ export function useChatComposerController({
             (delivery.annotations?.length ?? 0) > 0 ||
             (draft?.restoredResources.length ?? 0) > 0 ||
             (attachments?.attachments.length ?? 0) > 0,
-          popupOpen: paletteMounted,
+          popupOpen: paletteEnabled && paletteMounted && palette.open,
         })
       ) {
         event.preventDefault();

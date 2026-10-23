@@ -17,6 +17,7 @@ import {
   type QueuedPromptRecallOutcome,
 } from "../src/hooks/use-queued-prompt-recall";
 import { useTurnQueue, type UseTurnQueueResult } from "../src/hooks/use-turn-queue";
+import type { SlashCommandContext } from "../src/hooks/use-slash-commands";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   flush,
@@ -29,6 +30,13 @@ import {
 registerDom();
 
 const noEvents: SessionEvent[] = [];
+const commandContext: SlashCommandContext = {
+  client: fakeClient({}),
+  workspaceId: WORKSPACE_ID,
+  sessionId: SESSION_ID,
+  status: null,
+  permissions: [],
+};
 const ME = "user:test";
 
 let mounted: RenderedComponent | null = null;
@@ -469,14 +477,17 @@ describe("composer Up-arrow recall", () => {
   async function mountComposer(
     value: string,
     queuedRecall: ComposerQueuedRecall,
+    options: { withPalette?: boolean } = {},
   ): Promise<HTMLTextAreaElement> {
     function Harness() {
       const controller = Composer.useChatComposerController({
         delivery: delivery(value),
         queuedRecall,
+        ...(options.withPalette ? { commandContext } : {}),
       });
       return (
         <Composer.Root controller={controller}>
+          {options.withPalette ? <Composer.CommandPalette /> : null}
           <Composer.Input />
           <Composer.Status />
         </Composer.Root>
@@ -521,6 +532,14 @@ describe("composer Up-arrow recall", () => {
   test("Up in an empty composer recalls and suppresses caret movement", async () => {
     const { recall, value } = fakeRecall("recalled");
     const textarea = await mountComposer("", value);
+    const event = await pressUp(textarea);
+    expect(recall.calls).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  test("a mounted but closed command palette does not block recall", async () => {
+    const { recall, value } = fakeRecall("recalled");
+    const textarea = await mountComposer("", value, { withPalette: true });
     const event = await pressUp(textarea);
     expect(recall.calls).toBe(1);
     expect(event.defaultPrevented).toBe(true);
