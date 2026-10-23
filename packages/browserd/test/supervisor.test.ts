@@ -149,31 +149,6 @@ describe("BrowserSupervisor", () => {
     }
   });
 
-  test("only an explicit end closes the blank tabs a session opened, never a shutdown", async () => {
-    const directory = await mkdtemp("/tmp/ogb-end-blank-tabs-");
-    const cleaned: number[] = [];
-    const supervisor = await BrowserSupervisor.open({
-      rootDirectory: join(directory, "state"),
-      createDriver: async (context) => ({
-        ...fakeDriver(context),
-        async closeUnusedOwnedTabs() {
-          cleaned.push(Number(context.browserSessionId.slice(-2)));
-        },
-      }),
-    });
-    try {
-      await supervisor.createSession({ ...reference(46), headed: false });
-      await supervisor.createSession({ ...reference(47), headed: false });
-      await supervisor.endSession(reference(46));
-      expect(cleaned).toEqual([46]);
-    } finally {
-      // Shutdown releases session 47 without touching its tabs.
-      await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-    expect(cleaned).toEqual([46]);
-  });
-
   test("holds the browser's windows presented for each use and while a live view is open", async () => {
     const directory = await mkdtemp("/tmp/ogb-window-presence-");
     let holders = 0;

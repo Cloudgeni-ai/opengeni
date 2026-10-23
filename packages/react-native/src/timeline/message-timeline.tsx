@@ -1400,7 +1400,9 @@ function HumanInputRow({
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
   const settled =
     item.response.outcome === "answered"
-      ? m.humanInputOutcome.answered
+      ? item.answeredByAgent
+        ? (m.humanInputOutcome.agentAnswered ?? m.humanInputOutcome.answered)
+        : m.humanInputOutcome.answered
       : item.response.outcome === "skipped"
         ? m.humanInputOutcome.skipped
         : item.response.outcome === "expired"

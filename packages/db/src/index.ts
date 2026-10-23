@@ -23,6 +23,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
+export * from "./workspace-model-catalog-inputs";
 import {
   modelCallTimingColumns,
   modelCallTimingOrNull,
@@ -33338,16 +33339,21 @@ async function sessionListTotalsInScope(
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
       -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its own changes and this person opening
-      -- it. One extra row reports truncation.
+      -- latest of its conversations, its newest published version (creation
+      -- is version 1) and this person opening it. Archive, restore, rollback
+      -- and other updates to the Site's record are not activity, so they
+      -- never lift a Site for everyone. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
+        greatest(key.updated_at, site.published_at, opened.opened_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt"
       from site_keys key
       left join lateral (
-        select artifact.title, artifact.status, artifact.created_at, artifact.updated_at
+        select artifact.title, artifact.status, artifact.created_at,
+          (select version.created_at from ${schema.workspaceArtifactVersions} version
+            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
@@ -39164,6 +39170,13 @@ export type AcceptSessionHumanInputResponseResult =
       event: SessionEvent;
       events: SessionEvent[];
       workflowWakeRevision: number | null;
+      /**
+       * `same_submission`: this exact submission (its clientEventId) already
+       * committed and is replayed. `earlier_response`: another response, an
+       * expiry or a cancellation settled the request first; this submission
+       * was not used.
+       */
+      settledBy: "same_submission" | "earlier_response";
     }
   | {
       action: "conflict";
@@ -39380,6 +39393,7 @@ export async function acceptSessionHumanInputResponse(
               event: mapEvent(existing),
               events: [],
               workflowWakeRevision: null,
+              settledBy: "same_submission",
             } as const;
           }
         }
@@ -39487,6 +39501,7 @@ export async function acceptSessionHumanInputResponse(
             event,
             events: repairedEvents,
             workflowWakeRevision: null,
+            settledBy: "earlier_response",
           } as const;
         }
         const [turnPreview] = session.activeTurnId
@@ -39663,6 +39678,11 @@ export async function acceptSessionHumanInputResponse(
           tx as unknown as Database,
           input,
         );
+        // Bounded responder kind (never a subject id): lets the conversation
+        // say who answered, and the parent notice report the same.
+        const respondedByKind = expired
+          ? ("system" as const)
+          : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind);
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -39676,7 +39696,7 @@ export async function acceptSessionHumanInputResponse(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.humanInputResponse",
-                payload: { requestId: request.id, response },
+                payload: { requestId: request.id, response, respondedByKind },
                 clientEventId: expired ? null : (input.clientEventId ?? null),
                 occurredAt: now,
               },
@@ -39696,9 +39716,7 @@ export async function acceptSessionHumanInputResponse(
             requestId: request.id,
             approvalId: null,
             outcome: response.outcome,
-            respondedByKind: expired
-              ? "system"
-              : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+            respondedByKind,
           },
         );
         await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
@@ -85801,7 +85819,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // explicit durable obligation, independent of whether the session has
         // a goal, so an immediate child result may wake it. A parent with no
         // goal at all (an ordinary chat that started a worker and promised its
-        // result) is woken by the child's terminal result.
+        // result) is woken by the child's terminal result, and by the child's
+        // blocking question so it can answer it or tell the person; the person
+        // sees the question too, and the first answer wins.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -85812,7 +85832,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
           (session.status !== "failed" &&
             (goalStatus === "active" ||
               waitingForInput ||
-              (input.kind === "child_terminal_result" && goalStatus === null)));
+              ((input.kind === "child_terminal_result" || input.kind === "child_requires_action") &&
+                goalStatus === null)));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&

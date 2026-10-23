@@ -86,6 +86,8 @@ type EnrollmentVisibility = {
   active: Set<string>;
   /** Revoked machines the viewer may still see, with when they were revoked. */
   revoked: Map<string, Date | null>;
+  /** Each visible machine's sandbox and plain name, as the Machines list shows it. */
+  machines: Map<string, { sandboxId: string | null; machineName: string }>;
 };
 
 /** The machines this viewer may see here, through the same owner-aware
@@ -96,20 +98,39 @@ async function visibleEnrollments(
 ): Promise<EnrollmentVisibility> {
   return await withRlsContext(db, viewer, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, viewer.subjectId);
-    const rows = await rawRows<{ id: string; status: string; revokedAt: string | null }>(
+    const rows = await rawRows<{
+      id: string;
+      status: string;
+      revokedAt: string | null;
+      sandboxId: string | null;
+      sandboxName: string | null;
+      os: string;
+    }>(
       scopedDb,
-      sql`select value->>'id' as id, value->>'status' as status, value->>'revokedAt' as "revokedAt"
+      sql`select value->>'id' as id, value->>'status' as status, value->>'revokedAt' as "revokedAt",
+          value->>'sandboxId' as "sandboxId", value->>'sandboxName' as "sandboxName",
+          value->>'os' as os
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'active') value
         union all
-        select value->>'id', value->>'status', value->>'revokedAt'
+        select value->>'id', value->>'status', value->>'revokedAt',
+          value->>'sandboxId', value->>'sandboxName', value->>'os'
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value`,
     );
-    const visibility: EnrollmentVisibility = { active: new Set(), revoked: new Map() };
+    const visibility: EnrollmentVisibility = {
+      active: new Set(),
+      revoked: new Map(),
+      machines: new Map(),
+    };
     for (const row of rows) {
       if (row.status === "active") visibility.active.add(row.id);
       else visibility.revoked.set(row.id, row.revokedAt ? new Date(row.revokedAt) : null);
+      // The same name the Machines list gives this machine.
+      visibility.machines.set(row.id, {
+        sandboxId: row.sandboxId,
+        machineName: row.sandboxName ?? `${row.os} machine`,
+      });
     }
     return visibility;
   });
@@ -819,6 +840,8 @@ export async function listAttachedBrowserDevices(
           )
           .map((inventory) => ({
             enrollmentId: inventory.enrollmentId,
+            sandboxId: visibility.machines.get(inventory.enrollmentId)?.sandboxId ?? null,
+            machineName: visibility.machines.get(inventory.enrollmentId)?.machineName ?? null,
             state:
               inventory.enrollmentStatus === "active" &&
               inventory.wentOfflineAt === null &&

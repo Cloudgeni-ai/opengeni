@@ -2038,6 +2038,7 @@ function humanInputItemFromResponse(
     questions,
     response: normalizedResponse,
     answers,
+    answeredByAgent: payload.respondedByKind === "agent_attempt",
     occurredAt: event.occurredAt,
   };
 }

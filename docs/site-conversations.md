@@ -72,10 +72,19 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open. A row's activity is the latest of its conversations, the
-  Site's own changes and that open, so Sites in use rise and untouched ones
-  sort down like old sessions, without being hidden. Opens are personal and
-  never visible to anyone else; a Site page cannot record one. Without
+  latest open. A row's activity is the latest of its conversations, its
+  newest published version (creation is the first) and that open, so Sites
+  in use rise and untouched ones sort down like old sessions, without being
+  hidden. Archiving, restoring, rolling back or any other write to the Site's
+  record is not activity. Opens are personal and never visible to anyone
+  else; a Site page cannot record one. The console records one open per page
+  (router history entry) that shows the Site view: not again when its client
+  is replaced, only once a page that loaded hidden is shown, and not again
+  when a reload, a restored tab or going Back shows a page where this tab
+  already recorded it (remembered in `sessionStorage` after the write
+  succeeds). Pages the open Site view moves to, such as choosing a
+  conversation, belong to the same open. Without a router history key, every
+  visit counts. Without
   conversations a row has no count and nothing to disclose; it opens the
   Site view. Conversations someone moved to another project still nest under
   the Site's row in that project.

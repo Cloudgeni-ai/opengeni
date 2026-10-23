@@ -112,7 +112,10 @@ Structured human input versus tool approvals: a live attempt holding
 pending structured human-input request through `session_human_input_respond`
 (`session.human_input.write`); the answer is recorded as
 `respondedBy: agent_attempt:<attemptId>` and resumes that session's blocked
-turn exactly like a human answer. A pending tool approval
+turn exactly like a human answer. The first accepted answer wins; an agent
+whose answer arrives after another one gets `outcome: "unchanged"` with
+`facts.alreadyAnswered: true` and `facts.answeredBy`, and its answer is not
+used. A pending tool approval
 (`session.approval.write`) is denied to every agent attempt on every surface,
 including a child the caller spawned, and an embedding-host port cannot widen
 that. The parent learns that a child is blocked through the

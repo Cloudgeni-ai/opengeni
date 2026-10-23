@@ -10167,6 +10167,8 @@ export function childPausedClassification(
 export const CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES = 8 * 1024;
 /** Bounded first-question preview inside a child_requires_action notice. */
 export const CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES = 512;
+/** Bounded option label inside a child_requires_action question. */
+export const CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES = 128;
 export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
 export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
@@ -10175,6 +10177,32 @@ const boundedUtf8String = (maxBytes: number) =>
   z.string().refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
     message: `must be at most ${maxBytes} UTF-8 bytes`,
   });
+
+/**
+ * Compact copy of one question of a child's blocking request: enough for the
+ * parent agent to build a valid `session_human_input_respond` answer (question
+ * and option ids) without reading the child's history. Never carries secret
+ * specs, help text, or option descriptions.
+ */
+export const ChildRequiresActionQuestion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    kind: z.string().min(1).max(32),
+    prompt: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    required: z.boolean(),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: boundedUtf8String(CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES),
+        }),
+      )
+      .max(20),
+    /** Only a person can answer it (a Skill review); an agent's answer is refused. */
+    humanOnly: z.literal(true).optional(),
+  }),
+);
+export type ChildRequiresActionQuestion = z.infer<typeof ChildRequiresActionQuestion>;
 
 export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -10185,6 +10213,12 @@ export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
       firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
       allowSkip: z.boolean(),
       expiresAt: z.string().nullable(),
+      /**
+       * Every question, compact. Absent on older rows and when the whole
+       * notice would exceed its byte bound; the parent then reads the
+       * child's request itself.
+       */
+      questions: z.array(ChildRequiresActionQuestion).max(20).optional(),
     }),
     z.object({
       kind: z.literal("approval"),
@@ -16261,7 +16295,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: z.string(),
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: z.number().int().nonnegative(),
-    /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+    /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
     updatedAt: z.string().datetime(),
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: z.string().datetime(),

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { AgentBrowserDriver, type BrowserCdpConnection } from "../src";
+import type { OwnedTabsState } from "../src/attached-tab-ledger";
 
 test("metadata-only tab opening returns owned navigated inventory without scanning accessibility", async () => {
   const fixture = inventoryFixture();
@@ -82,20 +83,74 @@ test("closing a tab returns inventory without it even while the browser still li
   }
 });
 
-test("ending a session in the person's browser closes only the blank tabs it opened", async () => {
-  const fixture = inventoryFixture(false, 0, { closeUnusedOwnedTabsOnEnd: true });
+test("closing the driver in the person's browser closes only the blank tabs it opened", async () => {
+  const reported: OwnedTabsState[] = [];
+  const settledOnClose: boolean[] = [];
+  const fixture = inventoryFixture(false, 0, {
+    targetLifecycle: "cdp",
+    ownedTabs: {
+      onChange: (tabs) => reported.push(tabs),
+      onClosed: (settled) => {
+        settledOnClose.push(settled);
+      },
+    },
+  });
+  // The session's own blank tab, another blank tab it opened, and a tab it
+  // opened and used.
+  await fixture.driver.start();
+  await fixture.driver.openTargetWithInventory("about:blank");
+  await fixture.driver.openTarget("https://navigation.example.test/used");
+  // Each tab is recorded as soon as the browser creates it.
+  expect(reported[0]).toEqual({ created: ["opened-1"], selected: null, closedBlank: [] });
+  // Any close (an end, an idle release or a controller shutdown) cleans up.
+  await fixture.driver.close();
+  const closed = fixture.calls
+    .filter((call) => call.method === "Target.closeTarget")
+    .map((call) => call.params.targetId);
+  // The person's own tab (prior) and the used tab stay open.
+  expect(closed).toEqual(["opened-1", "opened-2"]);
+  expect(settledOnClose).toEqual([true]);
+  expect(reported.at(-1)).toEqual({
+    created: ["opened-3"],
+    selected: "opened-3",
+    closedBlank: ["opened-1", "opened-2"],
+  });
+});
+
+test("a session continuing in the person's browser carries on in the tab it was using", async () => {
+  const fixture = inventoryFixture(false, 0, {
+    targetLifecycle: "cdp",
+    ownedTabs: { previous: { created: [], selected: "prior", closedBlank: [] } },
+  });
   try {
-    // A blank tab the session opened, and a tab it opened and used.
-    await fixture.driver.openTargetWithInventory("about:blank");
-    await fixture.driver.openTarget("https://navigation.example.test/used");
-    await fixture.driver.closeUnusedOwnedTabs();
-    const closed = fixture.calls
-      .filter((call) => call.method === "Target.closeTarget")
-      .map((call) => call.params.targetId);
-    // The person's own tab (prior) and the used tab stay open.
-    expect(closed).toEqual(["opened-1"]);
+    const observation = await fixture.driver.start();
+    expect(observation.target.id).toBe("prior");
+    expect(observation.target.selected).toBe(true);
+    expect(fixture.calls.some((call) => call.method === "Target.createTarget")).toBe(false);
   } finally {
-    await fixture.driver.detach();
+    await fixture.driver.close();
+  }
+  // It never opened the person's tab, so it never closes it.
+  expect(fixture.calls.some((call) => call.method === "Target.closeTarget")).toBe(false);
+});
+
+test("a continuing session whose empty tab was closed opens one and names it for the closed tab", async () => {
+  const fixture = inventoryFixture(false, 0, {
+    targetLifecycle: "cdp",
+    ownedTabs: { previous: { created: [], selected: "closed-1", closedBlank: ["closed-1"] } },
+  });
+  try {
+    const observation = await fixture.driver.start();
+    expect(observation.target.id).toBe("opened-1");
+    await expect(fixture.driver.observe("closed-1")).rejects.toThrow(
+      "browser target does not exist: this session closed this empty tab when it last released the browser; its current tab is opened-1",
+    );
+    // Any other missing tab keeps the plain answer.
+    await expect(fixture.driver.observe("never-seen")).rejects.toThrow(
+      /^browser target does not exist$/u,
+    );
+  } finally {
+    await fixture.driver.close();
   }
 });
 
@@ -113,7 +168,7 @@ test("a managed browser's end never closes tabs one by one", async () => {
 function inventoryFixture(
   failInventory = false,
   closedTabListings = 0,
-  driverOptions: { closeUnusedOwnedTabsOnEnd?: boolean } = {},
+  driverOptions: Partial<ConstructorParameters<typeof AgentBrowserDriver>[0]> = {},
 ) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
