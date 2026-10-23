@@ -364,7 +364,9 @@ export class CuaComputerBackend implements ComputerBackend {
             throw (
               (command.action.type === "keyboard"
                 ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
-                : null) ?? error
+                : null) ??
+              this.otherWindowRefusal(command.targetId, error.cuaCode, error.code, error.message) ??
+              error
             );
           // macOS answers an accessibility action with "cannot complete"
           // (-25205) even when it pressed the button or opened the item, often
@@ -580,15 +582,22 @@ export class CuaComputerBackend implements ComputerBackend {
     const definite = outcome.definite && actionOf.indexOf(action) === step;
     const stoppedAction =
       command.action.type === "batch" ? command.action.actions[action] : undefined;
-    const refusal =
-      definite && stoppedAction?.type === "keyboard"
-        ? this.keyboardRefusal(
-            command.targetId,
-            outcome.cuaCode,
-            outcome.code ?? "invalid_action",
-            observed,
-          )
-        : null;
+    const refusal = definite
+      ? ((stoppedAction?.type === "keyboard"
+          ? this.keyboardRefusal(
+              command.targetId,
+              outcome.cuaCode,
+              outcome.code ?? "invalid_action",
+              observed,
+            )
+          : null) ??
+        this.otherWindowRefusal(
+          command.targetId,
+          outcome.cuaCode,
+          outcome.code ?? "invalid_action",
+          outcome.message,
+        ))
+      : null;
     const reason = refusal?.message ?? outcome.message;
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
@@ -945,6 +954,29 @@ export class CuaComputerBackend implements ComputerBackend {
       `Keys reach only the focused window of a background app, and another of its windows has focus${
         others.length ? ` (one of ${others.slice(0, 5).join(", ")})` : ""
       }, so none were sent: act on that window, or close it first`,
+      false,
+      false,
+    );
+  }
+
+  /** CUA refuses an element of another window of the app than the one
+   * addressed (one the addressed window does not show as its own, unlike the
+   * bubbles and popovers it does) and names that window by CUA's number. Name
+   * it as the target the caller can observe and act on. */
+  private otherWindowRefusal(
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
+    message: string,
+  ): ComputerBackendError | null {
+    const target = this.targetsById.get(targetId);
+    if (!target || cuaCode !== "element_outside_target_window") return null;
+    const owner = /belongs to window (\d{1,10})\b/.exec(message)?.[1];
+    if (!owner) return null;
+    const other = `cua:window:${target.pid}:${owner}`;
+    return new ComputerBackendError(
+      code,
+      `That element is in another window of this app (${other}), not in ${targetId}, so nothing was done: observe ${other} and act on its refs there`,
       false,
       false,
     );

@@ -953,6 +953,26 @@ describe("CUA desktop boundary", () => {
         message:
           "CUA refused the element reference because the window was read again since; observe it again and act on a ref from that observation",
       });
+      // An element CUA places in another window of the app: name that window
+      // as the target to observe and act on, not CUA's own tool.
+      fixture.mutation = result(
+        {
+          effect: "refused",
+          refusal: {
+            code: "element_outside_target_window",
+            message:
+              "Background input refused (element_outside_target_window): the addressed element belongs to window 9, a separate window of this app, not to window 1; read window 9 with get_window_state and address the element there",
+          },
+        },
+        true,
+      );
+      await expect(
+        backend.dispatch(command(await backend.observe(target.id))),
+      ).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message: `That element is in another window of this app (cua:window:42:9), not in ${target.id}, so nothing was done: observe cua:window:42:9 and act on its refs there`,
+      });
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       fixture.applyLabel = "Apply";
       fixture.fieldLabel = "Password";
@@ -2736,6 +2756,39 @@ describe("CUA desktop boundary", () => {
           }),
           expected: { code: "driver_failed", dispatched: true },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // An element of another window of the app was refused before
+        // anything was sent: the failure names that window as a target.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_outside_target_window",
+            message:
+              "Background input refused (element_outside_target_window): the addressed element belongs to window 7, a separate window of this app, not to window 1; read window 7 with get_window_state and address the element there",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in another window of this app (cua:window:42:7), not in cua:window:42:1, so nothing was done: observe cua:window:42:7 and act on its refs there",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // One that could not be proven to be in the window at all keeps
+        // CUA's own reason, and is still a definite refusal.
+        {
+          reply: step(0, {
+            phase: "action",
+            code: "element_outside_target_window",
+            message: "the addressed element could not be proven to belong to window 1",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: false,
+            message:
+              "CUA stopped the batch at action 1: the addressed element could not be proven to belong to window 1",
+          },
+          details: undefined,
         },
       ]) {
         const fixture = new BatchFixture();

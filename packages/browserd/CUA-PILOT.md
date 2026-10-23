@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`14127a52d11a9a353255c299c5350509dbbcbdb3`: upstream `cua-driver-rs-v0.37.0`
+`f5017ba40a706fdadf7c6786360d77dd835d4a47`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -34,6 +34,12 @@ number field a value emptied reports `write_cleared`), so Opengeni maps it to
 a definite failure.
 These refusals never repeat the value given, since it may be a secret such as a
 PIN in a number field.
+On macOS an element of a bubble or popover that a window lists as its own (Chrome's
+Save password?, translate, site permission and download bubbles are separate
+windows whose content the browser window lists among its accessibility
+children) belongs to that window, so it can be acted on through it; an element
+of an unrelated window of the app is still refused, now naming the window it
+belongs to.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -150,7 +156,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/14127a52d11a9a353255c299c5350509dbbcbdb3/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/f5017ba40a706fdadf7c6786360d77dd835d4a47/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
