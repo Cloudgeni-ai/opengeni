@@ -3467,9 +3467,10 @@ async function assertNoPendingChangesets(api, tree) {
     listing.sha === directorySha && listing.truncated === false && Array.isArray(listing.tree),
     "Version-head .changeset tree listing is incomplete",
   );
-  const pending = listing.tree.filter(
-    (entry) => entry?.type === "blob" && entry.path.endsWith(".md") && entry.path !== "README.md",
-  );
+  const pending = listing.tree.filter((entry) => {
+    const path = assertString(entry?.path, "Version-head .changeset entry path");
+    return entry.type === "blob" && path.endsWith(".md") && path !== "README.md";
+  });
   invariant(
     pending.length === 0,
     `Version-head release source still contains ${pending.length} pending changeset(s)`,

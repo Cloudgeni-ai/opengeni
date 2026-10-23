@@ -3963,6 +3963,7 @@ function versionHeadFixture(
     listingTotalCount?: number;
     jobsByRun?: Record<number, Array<Record<string, unknown>>>;
     logsByJob?: Record<number, string | Uint8Array>;
+    logDelivery?: "redirect" | "direct" | "insecure-redirect";
     releaseHeadRefSha?: string | null;
     mergeEvent?: Record<string, unknown> | null;
   } = {},
@@ -4205,10 +4206,20 @@ function versionHeadFixture(
       return response({ total_count: jobs.length, jobs });
     }
     const logMatch = url.pathname.match(new RegExp(`^${prefix}/actions/jobs/([1-9][0-9]*)/logs$`));
+    if (logMatch && options.logDelivery === "direct") {
+      const body = logsByJob[Number(logMatch[1])];
+      if (body === undefined) return new Response("missing", { status: 404 });
+      return new Response(body, { status: 200 });
+    }
     if (logMatch)
       return new Response(null, {
         status: 302,
-        headers: { location: `${versionHeadLogHost}/job-logs/${logMatch[1]}` },
+        headers: {
+          location:
+            options.logDelivery === "insecure-redirect"
+              ? `http://logs.example.test/job-logs/${logMatch[1]}`
+              : `${versionHeadLogHost}/job-logs/${logMatch[1]}`,
+        },
       });
     return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
   }
@@ -4750,6 +4761,35 @@ describe("Version-head release from its merge commit", () => {
         new TextEncoder().encode(versionHeadReportLog({ bom: false, error: true })),
       ),
     ).toMatchObject({ clean: false });
+  });
+
+  test("reads a directly served report log and refuses a non-HTTPS log location", async () => {
+    const direct = versionHeadFixture({ logDelivery: "direct" });
+    await expect(admitVersionHead(direct)).resolves.toMatchObject({
+      mergeMethod: "merge-version-head",
+    });
+    const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+    const logRequest = direct.requests.find(
+      (request) =>
+        request.path ===
+        `${prefix}/actions/jobs/${versionHeadJobIds(versionHeadRunId).report}/logs`,
+    );
+    expect(logRequest?.authorized).toBe(true);
+    expect(direct.requests.some((request) => request.path.startsWith("/job-logs/"))).toBe(false);
+
+    const insecure = versionHeadFixture({ logDelivery: "insecure-redirect" });
+    await expect(admitVersionHead(insecure)).rejects.toThrow("job log download must use HTTPS");
+    expect(insecure.requests.some((request) => request.path.startsWith("/job-logs/"))).toBe(false);
+  });
+
+  test("rejects a changeset tree entry without a path", async () => {
+    await expect(
+      admitVersionHead(
+        versionHeadFixture({
+          changesetEntries: [{ mode: "100644", type: "blob", sha: "3".repeat(40) }],
+        }),
+      ),
+    ).rejects.toThrow("Version-head .changeset entry path");
   });
 });
 

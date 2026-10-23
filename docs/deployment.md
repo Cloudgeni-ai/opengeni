@@ -2122,7 +2122,9 @@ Admission requires, fail-closed:
   `workflow_dispatch` CI run on `main` at the Version base binds this PR, head and
   base in its `Report exact-head automation CI` job log, with the admission,
   required source and report jobs green in its latest attempt (the newest bound
-  run is recorded; every bound run must be green);
+  run is recorded; every successful run that binds this head must record a
+  successful exact-head completion, and a later failed completion turns the
+  exact-head check red and fails admission);
 - the source-admission check, retained `opengeni-release-head-<source_sha>`
   evidence and no pending `.changeset/*.md` at `source_sha`.
 
