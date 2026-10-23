@@ -1744,6 +1744,10 @@ Summary collection IDs use that same body-visibility helper with only the
 `groupIds` input; they do not clone retained content or inspect discarded
 relationships. Full entry bodies keep their complete visibility projection.
 
+Root and collection membership filters resolve distinct parent revisions through
+the same batched visibility helper within the read. Parent checks precede candidate
+visibility, ranking and pagination; no parent authority is cached across reads.
+
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),
