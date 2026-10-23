@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/decisions",
-  "version": "4.7.1",
+  "version": "4.7.2",
   "description": "Provider-neutral typed decision models for application judgments, not prose generation.",
   "license": "Apache-2.0",
   "repository": {

@@ -1,5 +1,16 @@
 # @opengeni/vaults-onepassword
 
+## 4.7.2
+
+### Patch Changes
+
+- 7892bb5: Saving a 1Password note with websites now fails right away with a clear reason, instead of a "may have been applied" error after 1Password refused it.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/vaults@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes
