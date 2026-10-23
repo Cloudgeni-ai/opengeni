@@ -126,7 +126,7 @@ contract rather than falsely advertising stronger capabilities.
 After landing, the adapter records and comments the exact tested head and landed
 tip, then rereads the actual source branch (including forks). Open newer heads
 retaining landed ancestry automatically re-enter normal admission: they need
-their **own** exact-head VM/review evidence, and the next merge against main
+their **own** required exact-head GitHub-hosted checks, and the next merge against main
 contains only the remaining delta. Old evidence is never inherited. Divergent
 history is held with a rebase explanation. The adapter never closes/reopens PRs.
 **GitHub may auto-close a PR when its old head reaches main, before a newer push
@@ -134,7 +134,7 @@ is observed.** For an original marked merged and associated with the batcher's
 landed snapshot, the adapter durably creates or reuses a follow-up PR on the exact
 observed source repository/branch. It never does this for an externally closed,
 unmerged PR. New work must retain landed ancestry and still needs normal fresh
-exact-head VM/review evidence and readiness; neither is fabricated or copied.
+exact-head GitHub-hosted checks and readiness; neither is fabricated or copied.
 The follow-up intent is keyed by source repository/branch/head, reconciled by its
 marker or an existing open PR for that exact source/head, and never blindly
 replayed after an ambiguous POST. Permission/source-access/provider failures
@@ -158,13 +158,13 @@ No branch/ruleset/permission/cloud activation is performed by this code change.
 
 The [administration bundle](merge-batcher-admin/README.md) prepares the dedicated
 App and reversible split rulesets offline. It is not an activation mechanism.
-Main control remains held through the second production release until the
-rollout owner explicitly authorizes it; candidate-only CI shadow does not lift
-that hold. The tested-descendant release-lane ops change also has its own held
-merge/rollout decision. Preserve the existing manual squash and full-main release
-proof paths until those coordinated decisions are made.
-The version 2 admin plan makes the App the only normal main writer while active,
-including PR merges; administrators have no standing writer bypass. The same
+Main control requires the rollout owner's explicit authorization; candidate-only
+CI shadow does not authorize it. Preserve the existing manual squash and full-main
+release proof paths until the coordinated controller/rules activation.
+The version 3 admin plan makes the App the only normal main writer while active,
+including PR merges; organization administrators have emergency writer/admission
+bypass, but no bypass on the separate non-FF/deletion guard. GitHub enforces the
+grant, not emergency intent; routine administrator queue bypass is prohibited. The same
 verified activation receipt selects AGENTS' queue-only instructions. Partial
 transitions hold merges. Emergency OFF must prove runtime stop **and** exact
 original ruleset restoration before instructions return to normal manual squash.
@@ -252,39 +252,31 @@ service does not interpret an incomplete observation as an empty queue.
 
 ## Admission and FIFO
 
-An open, non-draft PR needs auto-merge enabled **or** `queue-ready`, plus a
-repository collaborator's human-readable evidence comment identifying:
+The GitHub-only admission contract is an open, non-draft PR with `queue-ready`
+and successful configured required GitHub-hosted checks on its exact current head.
+Agent evidence comments, VM attestations and reviewer session UUIDs are not intake
+gates. Approval requirements remain those of existing repository protection;
+the batcher adds no separate approval requirement. Required checks must be trusted
+workflow results, not copied comments or old-head success. Changed heads need fresh
+checks and candidate CI. This documentation/admin change must be deployed together
+with the matching reviewed core/workflow implementation; it does not change an
+already running controller or authorize activation.
 
-- The full exact PR head SHA.
-- VM/virtual-machine/Connected Machine test commands/results with a successful
-  test/suite/typecheck result.
-- Independent agent review and a reviewer session UUID.
-
-For example: `Exact head <40sha>. VM tests passed: bun test …; typecheck passed.
-Independent agent review passed, reviewer session <uuid>. Limitations: …`.
-Recognition is deliberately prose-tolerant; it is an attestation, not a formal
-GitHub approval requirement or an independent proof that commands ran. It
-rejects missing/malformed/oversized/untrusted comments and explicit pending or
-failed evidence, recording a human-readable exclusion reason. Instructions in
-comments are never evaluated. Evidence author association, body and update time
-are hashed into the exact readiness binding; an edit invalidates an old batch.
-The newest collaborator comment naming the exact head decides (ordered by update
-time, not list position). A newer failing or incomplete statement revokes an
-older pass; the reader does not search backward for more convenient evidence.
-The batcher's own marked landing/ejection/reconciliation receipts are bookkeeping,
-not VM/review attestations; they neither satisfy nor revoke the human evidence.
+For a parked singleton, open the failed GitHub check and its logs, fix the cause,
+push a new head and let required checks finish before signalling readiness. A
+label toggle alone does not retry the same parked head. Parking comments identify
+the failed check without assigning blame; do not rerun/cancel Batch CI manually.
 
 FIFO uses actual GraphQL ready timeline events, never PR creation time or the
 time a controller first saw it. Turning readiness off then on creates a new
-event. When both signals are active the earliest still-active signal wins.
+event, but does not release a parked unchanged head.
 Missing/partial event history prevents admission with an explicit reason.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
-Auto-merge is only an admission signal. Before enabling a real writer, protections
-must prevent native/direct auto-merge from bypassing this batcher. Prefer the
-label during rollout if auto-merge cannot safely remain enabled. Only the
-authorized batcher principal may update queue/state refs; PR authors must not
+Use `queue-ready`, not native auto-merge, for the normal queue path. Protections
+must prevent native/direct auto-merge from bypassing this batcher. Only the
+authorized batcher principal may normally update queue/state refs; PR authors must not
 be able to forge those refs or the trusted candidate workflow/result artifact.
 The batch CI workflow must be trusted policy, not replaced by PR-controlled
 workflow changes. The parent owns that workflow/ruleset enforcement.
@@ -297,8 +289,8 @@ non-coalescing main-CI lane. PRs touching `.github/workflows/batch-ci.yml`,
 The same rule covers `scripts/ci/impact*`, `run-unit-shard*`, `profile-command*`,
 `shared-pg*`, `packages/testing/src/shared-pg.ts` and `.bun-version`, including
 renamed previous paths.
-Their normal exact-head VM/independent-review comment must explicitly mention
-**control-plane** review; generic review alone does not admit these changes.
+Review these control-plane changes independently as development work; there is
+no special comment phrase or reviewer UUID admission requirement.
 
 Each member is one two-parent merge commit built with `git merge-tree --write-tree`
 and `git commit-tree`. Parent 1 is the preceding tested/base tip; parent 2 is the
@@ -745,6 +737,6 @@ the active writer is proven stopped. Leave running CI untouched, retain state/
 queue/result evidence, and inspect main's exact landed SHA. Do not delete refs,
 force-reset main or rotate credentials.
 
-Full VM/monorepo testing, exact-head independent agent review and the repository's
-evidence comment remain required before this batcher itself lands. Focused core
+Full VM/monorepo testing and exact-head independent review remain appropriate
+development validation for the batcher, not comment-based intake gates. Focused core
 tests do not replace that parent-owned admission requirement.
