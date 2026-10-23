@@ -125,14 +125,27 @@ configuration; it is not generated from ambient credentials or an old activation
 
 The runtime-owned, source-digest-pinned bridge exports
 `createWatchdogBridge(config, stateToken, providerEvidence)` and implements `CoreBridge`:
-`observe`, `claimStop`, `verifyClaim` and `verifyOffReceipt`. Its third argument is
+`observe`, `claimStop`, `verifyClaim`, `verifyBeforeRestore` and `verifyOffReceipt`. Its third argument is
 `ProviderEvidencePort`: authenticated Cloud Run service data plus complete rules
 classification and a real reviewed STOP-proof verifier. Missing reads throw;
 they are never synthesized as Manual or stopped. The core validates provider
 UID/image/config digest/generation/revision against the immutable binding, plus
 repository/state-ref and incident evidence. `observe.revision`
 is the full stable Git state SHA. `claimStop` must set the actual shared Git fence,
-not return a synthetic token. `verifyOffReceipt` must freshly bind current
+not return a synthetic token. The real OFF path calls
+`verifyBeforeRestore(incidentId, drainedReceipt, action)` after verified drain and
+before **each** reverse mutation, including reverse reissues, and before completion.
+The callback must use `providerEvidence.verifyDrained` for authenticated service
+data and real STOP verification, then reconcile the exact Git incident, activation,
+current state and all unknown/in-flight effects. Rejection retains STOP and the
+remaining protections; a prior successful callback is never cached. This callback
+does not inherit the rules-administration credential. `verifyDrained` deliberately
+does not require Manual policy: intermediate inventory is checked by the OFF
+stages, and core must validate actual post-STOP identity/scaling rather than guess
+a generation increment. Manual verification remains mandatory in `verifyStopped`.
+The optional hook on the ordinary operator API preserves its existing invocation;
+the watchdog bridge hook is required and missing implementations fail closed.
+`verifyOffReceipt` must freshly bind current
 reconciliation to that incident so an old same-image drain proof cannot qualify.
 These are adapter interfaces for the proposed runtime-health/v1 contract, not a
 claim that the runtime module already supplies these exports. Until its exact

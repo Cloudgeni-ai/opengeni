@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { off, verifyStop } from "./off";
+import { off, verifyStop, type DrainedReceipt } from "./off";
 import { verify, type Plan, type RuleSet, type Snapshot } from "./bundle";
 import { type Archive, hydrate } from "./watchdog-journal";
 import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
@@ -28,6 +28,10 @@ export type CoreBridge = {
   }>;
   /** Authenticated live identity/control/claim check immediately before OFF. */
   verifyClaim(incidentId: string, activation: string): Promise<void>;
+  /** Required BEFORE each reverse mutation (including reissue) and completion.
+   * Verify fresh provider drain evidence and exact Git incident/activation,
+   * current state and durable effects. Unknown/inflight holds must reject. */
+  verifyBeforeRestore(incidentId: string, receipt: DrainedReceipt, action: string): Promise<void>;
   /** Fresh current Git/effect reconciliation must bind the saved STOP proof to
    * this incident; an old same-image drain receipt is not sufficient. */
   verifyOffReceipt(incidentId: string, receipt: unknown): Promise<void>;
@@ -59,6 +63,10 @@ export type ProviderEvidence = {
 };
 export type ProviderEvidencePort = {
   read(): Promise<ProviderEvidence>;
+  /** Real STOP proof and authenticated service read, without circular Manual
+   * prerequisite. Core must validate returned service identity/config/scaling
+   * and durable Git safety; this alone never authorizes restoration. */
+  verifyDrained(receipt: unknown): Promise<ProviderEvidence>;
   /** Real reviewed STOP verifier plus fresh Manual inventory; core additionally
    * binds its Git incident/activation/effect reconciliation. */
   verifyStopped(receipt: unknown): Promise<ProviderEvidence>;
@@ -223,7 +231,7 @@ export async function createProvider(
   }
   const evidence: ProviderEvidencePort = {
     read: readEvidence,
-    verifyStopped: async (receipt) => {
+    verifyDrained: async (receipt) => {
       const admin = await materialize(false);
       const contract = JSON.parse(await readFile(join(admin, "stop-contract.json"), "utf8"));
       const operator = JSON.parse(
@@ -232,7 +240,10 @@ export async function createProvider(
       const result = receipt as { stop?: Parameters<typeof verifyStop>[0] };
       if (!result?.stop) throw Error("Real STOP receipt required");
       verifyStop(result.stop, operator, contract.deployment);
-      const current = await readEvidence();
+      return readEvidence();
+    },
+    verifyStopped: async (receipt) => {
+      const current = await evidence.verifyDrained(receipt);
       if (current.policy !== "manual") throw Error("Original Manual inventory not proven");
       return current;
     },
@@ -292,7 +303,28 @@ export async function createProvider(
       try {
         process.env.GH_TOKEN = await github.token();
         process.env.BATCHER_ADMIN_JOURNAL_CONFIG = join(admin, "journal-config.json");
-        const receipt = await dependencies.off(admin, "--apply-after-go");
+        if (typeof core.verifyBeforeRestore !== "function")
+          throw Error("Core pre-restoration verifier missing; integration unqualified");
+        const receipt = await dependencies.off(
+          admin,
+          "--apply-after-go",
+          async (drained, action) => {
+            // The core callback uses only its state credential, never the ambient
+            // rules-administration token used by the real OFF subprocesses.
+            const adminToken = process.env.GH_TOKEN;
+            const adminJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+            if (oldToken === undefined) delete process.env.GH_TOKEN;
+            else process.env.GH_TOKEN = oldToken;
+            if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+            else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
+            try {
+              await core.verifyBeforeRestore(incidentId, drained, action);
+            } finally {
+              process.env.GH_TOKEN = adminToken;
+              process.env.BATCHER_ADMIN_JOURNAL_CONFIG = adminJournal;
+            }
+          },
+        );
         bytes = await readFile(receipt);
       } finally {
         if (oldToken === undefined) delete process.env.GH_TOKEN;

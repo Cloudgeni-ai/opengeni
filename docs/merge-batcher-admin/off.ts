@@ -251,7 +251,17 @@ async function command(args: string[], directory: string, name: string): Promise
     );
   return out;
 }
-export async function off(adminPath: string, optIn: string): Promise<string> {
+export type DrainedReceipt = {
+  runtime: Contract["deployment"];
+  stop: Stop;
+  operator: Deployment;
+};
+export type RestoreGate = (receipt: DrainedReceipt, action: string) => Promise<void>;
+export async function off(
+  adminPath: string,
+  optIn: string,
+  beforeRestore?: RestoreGate,
+): Promise<string> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
   const admin = resolve(adminPath),
@@ -289,6 +299,7 @@ export async function off(adminPath: string, optIn: string): Promise<string> {
       mode: 0o600,
     });
     verifyStop(result, operatorReceipt, contract.deployment);
+    const drained = { runtime: contract.deployment, stop: result, operator: operatorReceipt };
     const plan = await json<Plan>(join(planDir, "plan.json"));
     validatePlan(plan);
     let serial = 0;
@@ -327,11 +338,18 @@ export async function off(adminPath: string, optIn: string): Promise<string> {
     ] as const) {
       if (current !== before) continue;
       const prior = await exists(join(planDir, `${action}-attempt`, "intent"));
-      await stage(prior ? `reissue-${action}` : action, "--apply-after-go");
+      const reverse = prior ? `reissue-${action}` : action;
+      // Watchdog callers must freshly reconcile their durable fence/effects
+      // after drain, including every recovery/reissue. Never cache acceptance.
+      if (beforeRestore) await beforeRestore(drained, reverse);
+      await stage(reverse, "--apply-after-go");
       current = await phase();
     }
     if (current !== "restored") throw new Error("Restoration incomplete; hold manual merges");
     await stage("check-stable", "restored");
+    // Also gate already-restored/reentrant completion: it is not permission to
+    // turn an unresolved durable hold into a successful watchdog receipt.
+    if (beforeRestore) await beforeRestore(drained, "verify-restored");
     await writeFile(
       join(attempt, "off-verified.json"),
       JSON.stringify(

@@ -130,6 +130,7 @@ function bridge(): CoreBridge {
       stateSha: "c".repeat(40),
     }),
     verifyClaim: async () => {},
+    verifyBeforeRestore: async () => {},
     verifyOffReceipt: async () => {},
   };
 }
@@ -258,11 +259,17 @@ test("core callbacks never inherit temporary restoration identity; seed is gener
     core.verifyOffReceipt = async () => {
       check("receipt");
     };
+    core.verifyBeforeRestore = async () => {
+      check("before-restore");
+    };
     const provider = await createProvider(config, cloud, {
       loadBridge: async () => core,
       transport,
-      off: async (admin) => {
+      off: async (admin, _flag, gate) => {
         directory = admin;
+        expect(process.env.GH_TOKEN).toBe("fixture-admin");
+        expect(gate).toBeDefined();
+        await gate!({} as Parameters<NonNullable<typeof gate>>[0], "restore-admission");
         expect(process.env.GH_TOKEN).toBe("fixture-admin");
         const receipt = join(admin, "receipt.json");
         await writeFile(receipt, "{}");
@@ -272,7 +279,7 @@ test("core callbacks never inherit temporary restoration identity; seed is gener
     expect(await provider.ports.off({ revision: "d".repeat(40) } as Observation, "incident")).toBe(
       digest("{}"),
     );
-    expect(calls).toEqual(["claim", "verify", "receipt"]);
+    expect(calls).toEqual(["claim", "verify", "before-restore", "receipt"]);
     expect(
       cloud.requests.some((url) => url.includes("seed?") && url.includes("generation=7")),
     ).toBe(true);
@@ -284,6 +291,38 @@ test("core callbacks never inherit temporary restoration identity; seed is gener
     if (directory) await rm(directory, { recursive: true });
   }
 });
+test("unknown pre-restoration reconciliation rejects without final verification or simulated restore", async () => {
+  let directory: string | undefined,
+    restored = 0,
+    verified = 0;
+  const core = bridge();
+  core.verifyBeforeRestore = async () => {
+    throw Error("unknown durable hold");
+  };
+  core.verifyOffReceipt = async () => {
+    verified++;
+  };
+  try {
+    const provider = await createProvider(config, seeded(), {
+      loadBridge: async () => core,
+      transport,
+      off: async (admin, _flag, gate) => {
+        directory = admin;
+        await gate!({} as Parameters<NonNullable<typeof gate>>[0], "reissue-restore-admission");
+        restored++;
+        throw Error("must not reach restoration");
+      },
+    });
+    await expect(
+      provider.ports.off({ revision: "d".repeat(40) } as Observation, "incident"),
+    ).rejects.toThrow("unknown durable hold");
+    expect(restored).toBe(0);
+    expect(verified).toBe(0);
+  } finally {
+    if (directory) await rm(directory, { recursive: true });
+  }
+});
+
 test("unknown fence submits no OFF and restart missing journal or claim is null without seed reconstruction", async () => {
   for (const outcome of ["conflict", "unknown"] as const) {
     const core = bridge(),

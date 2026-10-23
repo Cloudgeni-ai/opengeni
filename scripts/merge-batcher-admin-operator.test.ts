@@ -59,6 +59,31 @@ if(process.env.STOP_FAILURE)process.exitCode=2;
   await bindStop(h.root, runtime);
   return {
     runtime,
+    async gated(extra: Record<string, string> = {}) {
+      const runner = join(h.root, "gated-off.ts");
+      await writeFile(
+        runner,
+        `
+import { off } from ${JSON.stringify(join(directory, "off.ts"))};
+await off(${JSON.stringify(h.root)}, '--apply-after-go', async (receipt, action) => {
+  if (!receipt.stop.disabled || receipt.operator.uid !== receipt.runtime.uid) throw Error('bad drain');
+  await Bun.write(process.env.FIXTURE_LOG, await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify({endpoint:action,method:'GATE'})+'\\n');
+  if (process.env.REJECT_GATE === action || process.env.REJECT_GATE === 'all') throw Error('unknown durable hold');
+});
+`,
+      );
+      const child = Bun.spawn(["bun", runner], {
+        env: { ...h.fixtureEnv, ...extra },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      return code;
+    },
     async run(extra: Record<string, string> = {}, flag = "--apply-after-go") {
       const child = Bun.spawn(["bun", join(directory, "off.ts"), "run", h.root, flag], {
         env: { ...h.fixtureEnv, ...extra },
@@ -811,6 +836,63 @@ test("observed applied forward PUT can be reconciled before reverse restoration"
     expect((await h.run("reconcile-admit")).code).toBe(0);
     for (const action of ["restore-admission", "delete-namespace", "delete-guard"])
       expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("pre-restoration rejection retains protections after drain and gates each reverse stage and completion", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "all" })).not.toBe(0);
+    expect((await h.events())[0]?.method).toBe("STOP");
+    expect(
+      (await h.events()).filter((e) => ["PUT", "DELETE", "POST"].includes(e.method)),
+    ).toHaveLength(0);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "delete-namespace" })).not.toBe(0);
+    expect(
+      (await h.events())
+        .filter((e) => ["PUT", "DELETE", "POST"].includes(e.method))
+        .map((e) => e.method),
+    ).toEqual(["PUT"]);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated()).toBe(0);
+    expect((await h.events()).filter((e) => e.method === "GATE").map((e) => e.endpoint)).toEqual([
+      "delete-namespace",
+      "delete-guard",
+      "verify-restored",
+    ]);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(await operator.gated({ REJECT_GATE: "verify-restored" })).not.toBe(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("pre-restoration gate also rejects reverse reissue after an unapplied failure", async () => {
+  const h = await harness();
+  try {
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    expect(await operator.gated({ FAIL_WRITE: "before" })).not.toBe(0);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect(await operator.gated({ REJECT_GATE: "reissue-restore-admission" })).not.toBe(0);
+    expect(
+      (await h.events()).filter((e) => ["PUT", "DELETE", "POST"].includes(e.method)),
+    ).toHaveLength(0);
+    expect(
+      (await h.events()).some(
+        (e) => e.method === "GATE" && e.endpoint === "reissue-restore-admission",
+      ),
+    ).toBe(true);
+    expect(await operator.gated()).toBe(0);
   } finally {
     await h.close();
   }
