@@ -21,9 +21,11 @@ import {
   createDb,
   databasePoolOptions,
   defaultDatabasePreparedStatements,
+  eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   type Database,
+  type EventOccurrenceToStart,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
@@ -62,6 +64,7 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
+import { startEventIntakePrunePump, startEventTriggerDispatchPump } from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -118,6 +121,7 @@ export async function createTemporalWorkflowClient(
 ): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
+  startScheduledTaskEventRun: (occurrence: EventOccurrenceToStart) => Promise<void>;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect(temporalConnectionOptions(settings));
@@ -349,6 +353,27 @@ export async function createTemporalWorkflowClient(
   return {
     client,
     documentIndexer,
+    // An event occurrence's run. The workflow id is the occurrence's producer
+    // key, so a retried start collides instead of starting a second run.
+    startScheduledTaskEventRun: async (occurrence: EventOccurrenceToStart) => {
+      try {
+        await temporal.workflow.start("scheduledTaskFireWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: eventOccurrenceProducerKey(occurrence.id),
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: occurrence.accountId,
+              workspaceId: occurrence.workspaceId,
+              taskId: occurrence.taskId,
+              triggerType: "event",
+            },
+          ],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     close: async () => {
       await connection.close();
     },
@@ -593,6 +618,14 @@ export async function startApi(
     bus,
     observability,
   });
+  const stopEventTriggerDispatchPump = startEventTriggerDispatchPump({
+    db: dbClient.db,
+    settings,
+    bus,
+    startRun: (occurrence) => workflowClient.startScheduledTaskEventRun(occurrence),
+    observability,
+  });
+  const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -671,6 +704,8 @@ export async function startApi(
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopScheduledTaskLifecyclePump();
+      await stopEventTriggerDispatchPump();
+      await stopEventIntakePrunePump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.

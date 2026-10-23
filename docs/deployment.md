@@ -19,6 +19,15 @@ every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
+Event triggers for automations (migration 0929) are off by default. Apply the
+migration, upgrade every API and worker, then set
+`OPENGENI_EVENT_TRIGGERS_ENABLED=true` on the API to turn on event sources, the
+public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
+is off, the intake answers 404, automations cannot be given event triggers, and
+no event runs start; stored deliveries and events still expire on schedule
+(delivery bodies after 7 days, events after 30). See
+[automations and events](design/automations-and-events.md).
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these

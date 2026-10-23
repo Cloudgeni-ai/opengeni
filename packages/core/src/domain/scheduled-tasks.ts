@@ -134,6 +134,12 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
+import {
+  rearmScheduledTaskEventsOnResume,
+  validateScheduledTaskEvents,
+  validateScheduleForExistingEvents,
+  writeScheduledTaskEvents,
+} from "./event-triggers/automation-events";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import { variableSetsRemovedError } from "./encryption-key";
 import {
@@ -638,6 +644,22 @@ export async function createValidatedScheduledTask(input: {
           claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot,
         })
       : undefined;
+  const ownerSubjectId =
+    action.kind === "agent_turn"
+      ? (await scheduledTaskViewerForGrant(input.db, input.grant, input.settings)).subjectId
+      : null;
+  const requestedEvents = "events" in input.payload ? input.payload.events : undefined;
+  const events = requestedEvents
+    ? await validateScheduledTaskEvents({
+        settings: input.settings,
+        db: input.db,
+        workspaceId: input.grant.workspaceId,
+        ownerSubjectId,
+        schedule: input.payload.schedule,
+        action,
+        events: requestedEvents,
+      })
+    : null;
   const visibility = await resolveScheduledTaskVisibility({
     db: input.db,
     settings: input.settings,
@@ -646,10 +668,7 @@ export async function createValidatedScheduledTask(input: {
     current: null,
     targetSessionId: target?.id ?? null,
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
-    ownerSubjectId:
-      action.kind === "agent_turn"
-        ? (await scheduledTaskViewerForGrant(input.db, input.grant, input.settings)).subjectId
-        : null,
+    ownerSubjectId,
   });
   await requirePersonalMachineAudience({
     db: input.db,
@@ -695,6 +714,8 @@ export async function createValidatedScheduledTask(input: {
         before: null,
         after: task.agentConfig,
       });
+      if (events && events.triggers.length > 0)
+        await writeScheduledTaskEvents(transaction, task, events);
       if (learning && learningContext)
         await saveAgentLearningSettings(transaction, learningContext, {
           scope: learning.scope,
@@ -1401,7 +1422,53 @@ export async function validatedScheduledTaskUpdate(
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
   const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
-  return visibility === current ? audited : { ...audited, visibility };
+  const withEvents = await withScheduledTaskEventsUpdate(input, audited);
+  return visibility === current ? withEvents : { ...withEvents, visibility };
+}
+
+/**
+ * Validate an edit's event triggers with the rest of it and write them in the
+ * transaction that commits it. Resuming an automation re-arms its events.
+ */
+async function withScheduledTaskEventsUpdate(
+  input: Pick<
+    Parameters<typeof validatedScheduledTaskUpdateWithoutAudience>[0],
+    "settings" | "db" | "existing" | "payload"
+  >,
+  update: UpdateScheduledTaskInput,
+): Promise<UpdateScheduledTaskInput> {
+  const { existing } = input;
+  const schedule = update.schedule ?? existing.schedule;
+  const events = input.payload.events
+    ? await validateScheduledTaskEvents({
+        settings: input.settings,
+        db: input.db,
+        workspaceId: existing.workspaceId,
+        ownerSubjectId: existing.ownerSubjectId,
+        schedule,
+        action: update.action ?? existing.action,
+        events: input.payload.events,
+      })
+    : null;
+  if (!events && update.schedule) {
+    await validateScheduleForExistingEvents({
+      db: input.db,
+      workspaceId: existing.workspaceId,
+      taskId: existing.id,
+      schedule,
+    });
+  }
+  const resumes = update.status === "active" && existing.status !== "active";
+  if (!events && !resumes) return update;
+  const prior = update.beforeUpdateCommit;
+  return {
+    ...update,
+    beforeUpdateCommit: async (tx) => {
+      await prior?.(tx);
+      if (events) await writeScheduledTaskEvents(tx, existing, events);
+      if (resumes) await rearmScheduledTaskEventsOnResume(tx, existing);
+    },
+  };
 }
 
 /**

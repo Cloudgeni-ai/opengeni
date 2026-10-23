@@ -43,7 +43,7 @@ export async function retireExhaustedScheduledTask(
               select run.id, run.status from scheduled_task_runs run
               where run.workspace_id = ${workspaceId} and run.task_id = ${taskId}
                 and run.account_id = scheduled_tasks.account_id
-                and run.trigger_type = 'scheduled' and run.action_kind = 'agent_turn'
+                and run.trigger_type in ('scheduled', 'event') and run.action_kind = 'agent_turn'
               order by run.created_at desc, run.id desc limit 1
             ) latest
             left join scheduled_task_blocker_reviews review
