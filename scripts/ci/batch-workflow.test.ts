@@ -6,6 +6,49 @@ import { join } from "node:path";
 const raw = readFileSync(".github/workflows/batch-ci.yml", "utf8");
 const workflow = Bun.YAML.parse(raw) as any;
 
+test("previous-binary unavailable database records infrastructure, not PR blame", () => {
+  const directory = mkdtempSync(join(tmpdir(), "batch-posture-infra-"));
+  const step = workflow.jobs.source.steps.find((s: any) =>
+    s.run?.includes("batch-setup.ts postgres"),
+  );
+  try {
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        `
+      bun() {
+        if [ "$1" = scripts/ci/batch-result.ts ]; then "$REAL_BUN" "$@"; else return 75; fi
+      }
+      export -f bun
+      ${step.run.replace("-- bun scripts/ci/batch-setup.ts postgres", "-- bash -c 'bun scripts/ci/batch-setup.ts postgres'")}
+    `,
+      ],
+      {
+        env: {
+          ...process.env,
+          REAL_BUN: process.execPath,
+          RUNNER_TEMP: directory,
+          BATCH_ID: "batch-posture",
+          GITHUB_SHA: "a".repeat(40),
+          GITHUB_RUN_ID: "123",
+          GITHUB_RUN_ATTEMPT: "1",
+        },
+        encoding: "utf8",
+      },
+    );
+    expect(result.status).toBe(75);
+    expect(JSON.parse(readFileSync(join(directory, "receipt-source.json"), "utf8"))).toMatchObject({
+      job: "source",
+      outcome: "infrastructure",
+      exitCode: 75,
+      retryable: false,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("one push-tip batch workflow does not run per PR or cancel active work", () => {
   expect(workflow.on).toEqual({ push: { branches: ["queue/**"] } });
   expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
@@ -78,6 +121,11 @@ test("required source job runs the actual pinned previous-binary database check 
   expect(step.if).toBeUndefined();
   expect(step["continue-on-error"]).toBeUndefined();
   expect(source.services.postgres.image).toBe("pgvector/pgvector:pg17");
+  const setup = source.steps.find((s: any) => s.run?.includes("batch-setup.ts postgres"));
+  expect(setup.run).toContain("--failure-only --job source");
+  expect(setup.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
+  expect(setup.env.OPENGENI_TEST_PG_URL).toBe(step.env.OPENGENI_TEST_PG_URL);
+  expect(source.steps.indexOf(setup)).toBeLessThan(source.steps.indexOf(step));
   expect(step.env.BASE_SHA).toBe("${{ needs.plan.outputs.base_sha }}");
   expect(step.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
   expect(step.run).toContain('bun scripts/runtime-posture-baseline.ts "$BASE_SHA"');
@@ -115,6 +163,7 @@ test.each([0, 1])(
         case "$1" in
           scripts/ci/batch-result.ts) "$REAL_BUN" "$@" ;;
           -e) printf '%040d\\n' 0 ;;
+          run) cat >/dev/null ;;
           *) if [[ "$*" == *runtime-posture-compatibility-postgres.test.ts* ]]; then return "$READINESS_EXIT"; fi ;;
         esac
       }
