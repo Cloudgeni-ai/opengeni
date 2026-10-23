@@ -29,6 +29,11 @@ export type {
   OrganizationInsightsCallsOptions,
   InsightsCallsScope,
 } from "./insights-usage";
+import type {
+  ScheduledTaskEvents,
+  ScheduledTaskEventsInput,
+  ScheduledTaskRunEventOccurrence,
+} from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -894,7 +899,10 @@ export type RotateSessionMcpCredentialsRequest = {
       expectedServerUrl: string;
     } & (
       | { headers: Record<string, string> }
-      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+      | {
+          nativeConnectionId: string;
+          replacementServerUrl?: string | undefined;
+        }
     )
   >;
 };
@@ -2237,7 +2245,10 @@ export type UpdateSessionAttentionRequest = {
 export type SessionRetention = {
   /** Never archive this session, however long it stays idle. */
   keepLive: boolean;
-  archive: { state: "archiving" | "archived"; archivedAt: string | null } | null;
+  archive: {
+    state: "archiving" | "archived";
+    archivedAt: string | null;
+  } | null;
 };
 
 export type UpdateSessionRetentionRequest = {
@@ -3668,6 +3679,8 @@ export type ScheduledTask = {
   accountPlan?: ScheduledTaskAccountPlan | undefined;
   /** Read-only: why it paused itself, or why its owner was told its runs keep failing. */
   blocker?: ScheduledTaskBlocker | undefined;
+  /** Read-only: its event triggers and event run policy; absent without event triggers. */
+  events?: ScheduledTaskEvents | undefined;
 };
 
 /**
@@ -4522,7 +4535,10 @@ export type WorkspaceModelAccessPolicy = {
    */
   source?: "workspace" | "organization" | "none" | undefined;
   /** The organization default the workspace follows without its own policy. */
-  organization?: { allowedProviders: string[] | null; allowedModels: string[] | null } | null;
+  organization?: {
+    allowedProviders: string[] | null;
+    allowedModels: string[] | null;
+  } | null;
   /**
    * The workspace's credit switch (its `allowCreditModels` setting). False
    * blocks every model billed in Opengeni credits, including ones added later,
@@ -4558,7 +4574,10 @@ export type OrganizationModelDefaults = {
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
   modelPolicy?:
-    | { allowedProviders?: string[] | null | undefined; allowedModels?: string[] | null }
+    | {
+        allowedProviders?: string[] | null | undefined;
+        allowedModels?: string[] | null;
+      }
     | null
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
@@ -4588,7 +4607,10 @@ export type ModelAccountSettingValues = {
   /** How the shared core spreads load across eligible accounts, per provider. */
   rotation: Record<
     string,
-    { mode: ModelAccountRotationMode; primaryConnectionId?: string | null | undefined }
+    {
+      mode: ModelAccountRotationMode;
+      primaryConnectionId?: string | null | undefined;
+    }
   >;
   providers: Record<
     string,
@@ -4677,7 +4699,10 @@ export type UpdateWorkspaceModelAccountSettingsRequest = {
 /** Every shared workspace's effective settings and sources, one page. */
 export type ModelAccountSettingsOverview = {
   organization: OrganizationModelAccountSettings;
-  workspaces: (ModelAccountSettingsView & { workspaceId: string; name: string })[];
+  workspaces: (ModelAccountSettingsView & {
+    workspaceId: string;
+    name: string;
+  })[];
   nextCursor: string | null;
 };
 
@@ -5389,7 +5414,11 @@ export type ClientConfig = {
   artifacts?:
     | {
         editableLiveUrl: string;
-        cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
+        cachePartition: {
+          accountId: string;
+          principalId: string;
+          authorizationEpoch: string;
+        };
       }
     | false
     | undefined;
@@ -5422,6 +5451,11 @@ export type ClientConfig = {
    * ones. Omitted by older servers, which ignore `usageLimitMicros`.
    */
   sessionUsageLimits?: { enabled: boolean } | undefined;
+  /**
+   * Whether automations can have event triggers on this server: event sources,
+   * the webhook intake and event runs. Omitted by older servers.
+   */
+  eventTriggers?: { enabled: boolean } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
@@ -6533,7 +6567,11 @@ export type McpConnectionRequest = {
 
 export type McpConnectionDecision =
   | { decision: "deny" }
-  | { decision: "approve"; organizationId: string; access: OrganizationAccessPolicy };
+  | {
+      decision: "approve";
+      organizationId: string;
+      access: OrganizationAccessPolicy;
+    };
 
 // --- Inbox ---------------------------------------------------------------------------------------
 
@@ -7499,6 +7537,8 @@ export type CreateAgentScheduledTaskRequest = {
   pinnedAccountsRequired?: boolean | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
+  /** Event triggers and the event run policy. Use schedule `{ type: "manual" }` for an event-only automation. */
+  events?: ScheduledTaskEventsInput | undefined;
   status?: ScheduledTaskStatus | undefined;
   /**
    * Sandbox Environment each run binds to; its active version is resolved per
@@ -7532,6 +7572,8 @@ export type CreateSessionScheduledTaskRequest = {
   runMode?: "existing_session" | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   status?: ScheduledTaskStatus | undefined;
+  /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
+  events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -7572,6 +7614,8 @@ export type UpdateScheduledTaskRequest = {
   rigId?: string | null | undefined;
   /** Vault narrowing for every run. */
   vaultPolicy?: VaultPolicy | undefined;
+  /** Replace the event triggers and event run policy; `{ triggers: [] }` removes every trigger. */
+  events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -7618,7 +7662,8 @@ export type ScheduledTaskTriggerType =
   | "initial"
   | "provider_event"
   | "retry"
-  | "repair";
+  | "repair"
+  | "event";
 
 export type ScheduledTaskRun = {
   id: string;
@@ -7694,6 +7739,8 @@ export type ScheduledTaskRun = {
   updatedAt: string;
   /** Connectors this run could not use; projected only for a viewer who can act on the task. */
   accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+  /** Event runs only: the trigger and events that caused the run. */
+  eventOccurrence?: ScheduledTaskRunEventOccurrence | null | undefined;
 };
 
 export type ScheduledTaskRunAwaitingHuman = {
@@ -7956,7 +8003,10 @@ export type FileListRequest = {
   limit?: number;
   cursor?: string;
 };
-export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
+export type FileListResponse = {
+  files: FileAsset[];
+  nextCursor: string | null;
+};
 
 /**
  * Who can open a file: only its owner ("private", Only me) or everyone in the
@@ -8026,7 +8076,9 @@ export type FileAsset = {
   appShot?: AppShotCapture | undefined;
 };
 
-export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
+export type UpdateFileVisibilityRequest = {
+  visibility: "private" | "workspace";
+};
 export type UpdateFileVisibilityResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
@@ -9513,7 +9565,10 @@ export type PluginUninstallComponentImpact = {
   name: string;
   disposition: "removed" | "retained" | "inactive";
   retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
-  remainingOwners: Array<{ kind: "direct" | "plugin" | "migration"; name: string }>;
+  remainingOwners: Array<{
+    kind: "direct" | "plugin" | "migration";
+    name: string;
+  }>;
   skillId?: string | undefined;
 };
 
@@ -10294,7 +10349,9 @@ export type EnableMachineScreenControlResponse = {
 export type MachinePrivacySettingsPane = "screen_recording" | "accessibility" | "input_monitoring";
 
 /** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings body. */
-export type OpenMachinePrivacySettingsRequest = { pane: MachinePrivacySettingsPane };
+export type OpenMachinePrivacySettingsRequest = {
+  pane: MachinePrivacySettingsPane;
+};
 
 /** Who can use a Connected Machine: everyone in its workspace, or one person. */
 export type MachineAudience = "workspace" | "only_me";
@@ -10380,7 +10437,10 @@ export type ChangeMachineAudienceResponse = {
 };
 
 /** POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings response. */
-export type OpenMachinePrivacySettingsResponse = { opened: boolean; message: string | null };
+export type OpenMachinePrivacySettingsResponse = {
+  opened: boolean;
+  message: string | null;
+};
 
 export type MachineOperationPolicy = {
   memoryMaxBytes: number | null;
@@ -10693,7 +10753,10 @@ export type ConnectorToolPermissionEntry = {
   approvalRequired: boolean;
   source?: "recommended" | "connector_default" | "tool" | "action" | "conflict";
   conditional?: boolean;
-  actionPermissions?: Array<{ actionName: string; permission: ConnectorToolPermission }>;
+  actionPermissions?: Array<{
+    actionName: string;
+    permission: ConnectorToolPermission;
+  }>;
 };
 export type ConnectorToolPermissionsResponse = {
   connectionId: string;
@@ -10887,7 +10950,11 @@ export type ClientAgentConfig = {
   enabled: boolean;
   /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
   defaultForNewSessions: boolean;
-  capabilities: Array<{ id: AgentCapabilityId; available: boolean; reason?: string | undefined }>;
+  capabilities: Array<{
+    id: AgentCapabilityId;
+    available: boolean;
+    reason?: string | undefined;
+  }>;
 };
 
 /** `error.details.code` of a 422 agent-configuration failure. */

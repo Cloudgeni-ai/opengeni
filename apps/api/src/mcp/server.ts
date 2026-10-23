@@ -662,6 +662,8 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
           .optional(),
       })
       // Only a person pins connector accounts; agents never do.
+      // Event triggers are not part of this tool; how agents set them is
+      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -669,6 +671,7 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
+        events: true,
       })
       .strict(),
     UpdateScheduledTaskRequest,

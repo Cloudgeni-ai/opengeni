@@ -713,6 +713,12 @@ const SettingsSchema = z.object({
   // to the installation's own workspace.
   // Env: OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED.
   slackWorkspaceRoutingEnabled: EnvBoolean.default(true),
+  // Event triggers for automations: event sources (webhook endpoints, apps,
+  // MCP servers), the public webhook intake and event runs. Off (default)
+  // refuses new sources and event triggers, answers the intake with 404 and
+  // pauses event dispatch; stored sources, triggers and events are kept.
+  // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
+  eventTriggersEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -5161,6 +5167,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
+    eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),

@@ -47,7 +47,7 @@ export type ScheduledTaskBlockerFacts = {
     schedule: unknown;
   };
   review: ScheduledTaskBlockerReview | null;
-  /** Newest first: scheduled (not manual) agent-turn runs only. */
+  /** Newest first: scheduled and event (not manual) agent-turn runs only. */
   runs: ScheduledTaskBlockerRun[];
 };
 
@@ -166,7 +166,7 @@ export async function reviewScheduledTaskBlockers(
             from scheduled_task_runs
             where workspace_id = ${workspaceId} and task_id = ${taskId}
               and account_id = ${task.account_id}
-              and trigger_type = 'scheduled' and action_kind = 'agent_turn'
+              and trigger_type in ('scheduled', 'event') and action_kind = 'agent_turn'
             order by created_at desc, id desc
             limit ${SCHEDULED_TASK_BLOCKER_REVIEW_RUNS}`,
       );
