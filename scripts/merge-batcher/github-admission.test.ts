@@ -1,0 +1,125 @@
+import { describe, test, expect } from "bun:test";
+import { admitGitHub, type GitHubAdmissionInput, type HostedCheck } from "./github-admission";
+const head = "a".repeat(40);
+const check: HostedCheck = {
+  id: 100,
+  name: "PR CI",
+  headSha: head,
+  status: "completed",
+  conclusion: "success",
+  appId: 15368,
+  appSlug: "github-actions",
+  runId: 200,
+  attempt: 1,
+  workflow: ".github/workflows/pr-ci.yml",
+  runHeadSha: head,
+  hosted: true,
+};
+const input = (): GitHubAdmissionInput => ({
+  number: 42,
+  headSha: head,
+  headRef: "feature",
+  draft: false,
+  queueReady: true,
+  events: [{ id: "label-1", at: "2026-10-23T00:00:00Z", source: "queue-ready", enabled: true }],
+  checks: [{ ...check }],
+  required: [],
+  reviewRequired: false,
+  reviewDecision: null,
+  unresolvedThreads: false,
+  conversationResolutionRequired: false,
+});
+describe("GitHub-only admission", () => {
+  test("label and hosted exact-head CI suffice without comments, VM evidence or reviewer IDs", () => {
+    const admitted = admitGitHub(input());
+    expect(admitted.ready?.headSha).toBe(head);
+    expect(admitted.ready?.binding.evidenceId).toBe("github-ci:100");
+  });
+  test("only the queue-ready event admits; auto-merge does not", () => {
+    const value = input();
+    value.queueReady = false;
+    expect(admitGitHub(value).ready).toBeNull();
+    value.queueReady = true;
+    value.events[0]!.source = "auto-merge";
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("unlabel/relabel changes readiness binding, unrelated comment churn cannot", () => {
+    const value = input(),
+      first = admitGitHub(value).ready!;
+    value.events.push({
+      id: "remove",
+      at: "2026-10-23T00:01:00Z",
+      source: "queue-ready",
+      enabled: false,
+    });
+    expect(admitGitHub(value).ready).toBeNull();
+    value.events.push({
+      id: "again",
+      at: "2026-10-23T00:02:00Z",
+      source: "queue-ready",
+      enabled: true,
+    });
+    expect(admitGitHub(value).ready!.binding.eventId).not.toBe(first.binding.eventId);
+  });
+  for (const [name, patch] of Object.entries({
+    staleHead: { headSha: "b".repeat(40) },
+    staleRun: { runHeadSha: "b".repeat(40) },
+    selfHosted: { hosted: false },
+    pending: { status: "in_progress", conclusion: null },
+    failure: { conclusion: "failure" },
+    skipped: { conclusion: "skipped" },
+    neutral: { conclusion: "neutral" },
+    wrongApp: { appId: 999, appSlug: "other" },
+    wrongWorkflow: { workflow: ".github/workflows/other.yml" },
+    invalidAttempt: { attempt: 0 },
+  }))
+    test(`refuses ${name}`, () => {
+      const value = input();
+      Object.assign(value.checks[0]!, patch);
+      expect(admitGitHub(value).ready).toBeNull();
+    });
+  test("new failure revokes older success for same required context", () => {
+    const value = input();
+    value.checks.push({ ...check, id: 101, conclusion: "failure" });
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("requires every current branch-rule check", () => {
+    const value = input();
+    value.required = [{ context: "Security", integrationId: 15368 }];
+    expect(admitGitHub(value).ready).toBeNull();
+    value.checks.push({
+      ...check,
+      id: 102,
+      name: "Security",
+      workflow: ".github/workflows/security.yml",
+    });
+    expect(admitGitHub(value).ready).not.toBeNull();
+  });
+  test("review and conversation requirements only apply when native branch policy requires", () => {
+    const value = input();
+    value.reviewDecision = "REVIEW_REQUIRED";
+    value.unresolvedThreads = true;
+    expect(admitGitHub(value).ready).not.toBeNull();
+    value.reviewRequired = true;
+    expect(admitGitHub(value).ready).toBeNull();
+    value.reviewDecision = "APPROVED";
+    expect(admitGitHub(value).ready).not.toBeNull();
+    value.conversationResolutionRequired = true;
+    expect(admitGitHub(value).ready).toBeNull();
+    value.unresolvedThreads = false;
+    expect(admitGitHub(value).ready).not.toBeNull();
+  });
+  test("Version PR uses same hosted proof, no magic author/comment exemption", () => {
+    const value = input();
+    value.headRef = "changeset-release/main";
+    expect(admitGitHub(value).ready).not.toBeNull();
+    value.checks = [];
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("rerun proof changes immutable evidence binding", () => {
+    const value = input();
+    const before = admitGitHub(value).ready!.binding.evidenceDigest;
+    value.checks[0]!.attempt++;
+    expect(admitGitHub(value).ready!.binding.evidenceDigest).not.toBe(before);
+  });
+});

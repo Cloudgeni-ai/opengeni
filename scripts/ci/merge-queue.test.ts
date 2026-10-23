@@ -118,7 +118,9 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
     "github.event.pull_request.head.ref != 'changeset-release/main'",
   );
   expect(queue.jobs.entry.name).toContain("'PR entry (not applicable)'");
-  expect(queue.jobs.entry.steps[0].run).toContain("not test or review evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("not test evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("exact-head PR CI");
+  expect(queue.jobs.entry.steps[0].run).not.toContain("VM test evidence");
   expect(queue.jobs.plan.if).toContain("github.event_name != 'pull_request'");
   expect(queue.jobs.plan.if).toContain("queue-shadow");
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
@@ -143,7 +145,7 @@ test("ordinary PR events cannot starve reconciliation or publish public alerts",
 
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
   expect(ci.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
   );
   expect(ci.concurrency.group).not.toContain("ci-main-push");
   expect(ci.concurrency.group).not.toContain("queue-");
@@ -173,6 +175,7 @@ function ciConcurrency(context: {
   head_commit_message?: string;
   pull_request_number?: number;
   automation_pr_number?: string;
+  action?: string;
 }): { group: string; cancel: boolean } {
   const compile = (expression: string) => {
     const body = /^\$\{\{ (.+) \}\}$/su.exec(expression)?.[1];
@@ -198,6 +201,7 @@ function ciConcurrency(context: {
     run_id: context.run_id,
     run_attempt: context.run_attempt,
     event: {
+      action: context.action,
       head_commit: { message: context.head_commit_message ?? "" },
       pull_request: { number: context.pull_request_number },
     },
@@ -252,6 +256,7 @@ test("every main push, retry and Version merge commit runs in its own non-cancel
       run_id: "300",
       run_attempt: "1",
       pull_request_number: 7,
+      action: "synchronize",
     }),
   ).toEqual({ group: "ci-pr-7", cancel: true });
   expect(
@@ -262,7 +267,7 @@ test("every main push, retry and Version merge commit runs in its own non-cancel
       run_attempt: "1",
       automation_pr_number: "42",
     }),
-  ).toEqual({ group: "ci-automation-42", cancel: true });
+  ).toEqual({ group: "ci-301-1", cancel: false });
   expect(
     ciConcurrency({
       event_name: "workflow_dispatch",
@@ -271,7 +276,7 @@ test("every main push, retry and Version merge commit runs in its own non-cancel
       run_attempt: "2",
       automation_pr_number: "42",
     }).group,
-  ).toBe("ci-automation-42");
+  ).toBe("ci-302-2");
 });
 
 test("full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {

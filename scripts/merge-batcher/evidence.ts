@@ -1,4 +1,6 @@
 import { compareText, digest, SHA, type Pull, type ReadyBinding } from "./model";
+// Historical attestation parser retained only for old-format regression fixtures.
+// Runtime intake MUST use github-admission.ts; this parser is not an admission path.
 export interface Comment {
   id: string;
   body: unknown;

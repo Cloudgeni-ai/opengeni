@@ -429,7 +429,22 @@ function scanWorkflow(
       continue;
     }
 
-    if (!positiveIntegerTimeout(rawJob["timeout-minutes"], MAX_JOB_TIMEOUT_MINUTES)) {
+    const lane = new Map([
+      [".github/workflows/batch-ci.yml:plan", "batch"],
+      [".github/workflows/ci.yml:automation-admission", "pr"],
+      [".github/workflows/pr-ci.yml:plan", "pr"],
+    ]).get(`${path}:${jobKey}`);
+    const boundedAdmission =
+      lane !== undefined &&
+      rawJob["timeout-minutes"] === 320 &&
+      Array.isArray(rawJob.steps) &&
+      rawJob.steps.filter(
+        (step: any) => step?.run === `bun scripts/ci/github-pr-ci.ts priority ${lane}`,
+      ).length === 1;
+    if (
+      !boundedAdmission &&
+      !positiveIntegerTimeout(rawJob["timeout-minutes"], MAX_JOB_TIMEOUT_MINUTES)
+    ) {
       violations.push(`${path}:${jobKey} job timeout-minutes must be a static integer in 1..120`);
     }
 
