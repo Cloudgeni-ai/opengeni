@@ -515,7 +515,7 @@ export function recordingChunkObjectKey(input: {
   chunkNumber: number;
   sha256: string;
 }): string {
-  return `recordings/${input.workspaceId}/${input.recordingId}/${input.trackNumber}/${input.chunkNumber}-${input.sha256}`;
+  return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/${input.trackNumber}/${input.chunkNumber}-${input.sha256}`;
 }
 
 /**

@@ -434,7 +434,7 @@ describe("recordings", () => {
       recordingId: recording.recordingId,
     });
     expect(keys).toHaveLength(4);
-    expect(keys!.every((key) => key.startsWith(`recordings/${scope.workspaceId}/${recording.recordingId}/`))).toBe(
+    expect(keys!.every((key) => key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`))).toBe(
       true,
     );
     expect(await purgeDeletingRecording(db, { ...recording.actor, recordingId: recording.recordingId })).toBe(true);
