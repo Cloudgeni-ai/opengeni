@@ -63,6 +63,7 @@ const { worker, connection } = await createOpenGeniWorker({
     signalCodexCapacityWorkflow: workflowSignaler.signalCodexCapacityWorkflow,
     startSandboxReaperWorkflow: workflowSignaler.startSandboxReaperWorkflow,
     startVideoGenerationWorkflow: workflowSignaler.startVideoGenerationWorkflow,
+    startRecordingWorkflow: workflowSignaler.startRecordingWorkflow,
   },
 });
 

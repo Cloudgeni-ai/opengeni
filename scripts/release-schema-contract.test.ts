@@ -2340,8 +2340,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0931_event_capability_posture.sql",
-      "0930_teams_conversations.sql",
+      "0933_background_capability_posture.sql",
+      "0932_teams_conversations.sql",
+      "0931_recordings_webhook_event_types_validate.sql",
+      "0930_recordings.sql",
       "0929_event_triggers.sql",
       "0928_workspace_deletion_foreign_keys_validate.sql",
       "0927_workspace_deletion_deferrable_foreign_keys.sql",

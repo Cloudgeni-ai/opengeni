@@ -361,8 +361,13 @@ observations. Historical retirement retains records without input/wakes.
 Terminal proof atomically commits settlement/audit. Connected Machine runners
 push `OperationCompleted` independently of output attachment and credit; API
 ingestion claims the original process/operation, captures retained output through
-its verified exit frontier, then uses the same fenced settlement. Pushes cannot
-steal an active reaper claim; a racing push preserves an immediate retry. The runner
+its verified exit frontier, then uses the same fenced settlement.
+`sandbox/completion-locator.ts` combines only
+pending exact-process lookups within one event-loop turn using the existing
+inventory classifier. Results are discarded after resolution, arrivals during a
+read start a fresh batch, and claims still revalidate the command. Missing rows
+remain unacknowledged so exits racing adoption retain their heartbeat retry.
+Pushes cannot steal an active reaper claim; a racing push preserves an immediate retry. The runner
 retries unacknowledged terminal records on reconnect and its existing heartbeat
 cadence over the bulk connection. Completion collectors use independent ingestion
 capacity and yield before their claim expires, preserving heartbeat/control liveness.
@@ -3195,14 +3200,18 @@ authority is independent of creator identity. Restore never resumes, and explici
 Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
 background-command semantics.
 
-### Event capability repair (0931)
+### Background capability repair (0933)
 
-Migration 0931 is a maintenance cutover for the event-trigger capabilities introduced by 0929.
-Stop every API, control worker and turn worker before the release's middle migration span,
-supply the complete old/new runtime login list through
+Migration 0933 is a maintenance cutover for the event-trigger and recording capabilities
+introduced by 0929 and 0930. Stop every API, control worker and turn worker before the release's
+middle migration span, supply the complete old/new runtime login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply migrations and provision the current
 role, then start only the matching binary. The previous evaluator rejects these callable
 SECURITY DEFINER capabilities and the new non-RLS event ingress routing table's CRUD contract;
-never restart a pre-0931 binary or use one as rollback. The forward repair hardens the function
-search paths and strips inherited runtime grants; 0929 remains immutable. Teams migration 0930
-remains independently rolling-safe.
+never restart a pre-0933 binary or use one as rollback. The forward repair hardens the function
+search paths and strips inherited runtime grants; 0929 and 0930 remain immutable. Teams
+migration 0932 remains independently rolling-safe.
+
+The recording recovery inventory additionally receives exact table-owner SELECT policies on
+recordings and transcript versions. Runtime roles remain subject to workspace/private-owner RLS;
+the bounded inventory emits identifiers only.

@@ -53,6 +53,11 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
+  {
+    pattern:
+      /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
+    reason: "meeting recordings reach agents through their own reviewed tools, added separately",
+  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {

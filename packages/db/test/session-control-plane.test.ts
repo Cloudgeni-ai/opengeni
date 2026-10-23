@@ -62,7 +62,7 @@ import {
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
   insertRecording,
-  getRecording,
+  getSessionRecording,
   getLatestRunState,
   peekSessionWork,
   prepareConnectorActionApproval,
@@ -9303,7 +9303,7 @@ describe("clean session control plane", () => {
         dimensions: [1280, 800],
       },
     });
-    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+    expect(await getSessionRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
       state: "available",
       storageKey: `recordings/${recordingId}.mp4`,
       sizeBytes: 42_000,
@@ -9365,7 +9365,7 @@ describe("clean session control plane", () => {
       ]);
     }
     expect(
-      await getRecording(client.db, failed.grant.workspaceId!, failedRecordingId),
+      await getSessionRecording(client.db, failed.grant.workspaceId!, failedRecordingId),
     ).toMatchObject({ state: "failed", reason: "bounded upload timeout" });
 
     const approval = await fixture();
@@ -9406,9 +9406,9 @@ describe("clean session control plane", () => {
       action: "settled",
       recordingMutationApplied: true,
     });
-    expect(await getRecording(client.db, approval.grant.workspaceId!, discardedRecordingId)).toBe(
-      null,
-    );
+    expect(
+      await getSessionRecording(client.db, approval.grant.workspaceId!, discardedRecordingId),
+    ).toBe(null);
     if (suspended.action === "settled") {
       expect(suspended.events.map((event) => event.type)).toEqual(["session.requiresAction"]);
     }
@@ -9463,7 +9463,7 @@ describe("clean session control plane", () => {
       turnStatus: "running",
       activeTurnId: turn.id,
     });
-    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+    expect(await getSessionRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
       state: "recording",
       storageKey: null,
     });
@@ -9516,7 +9516,7 @@ describe("clean session control plane", () => {
         reason: "exact owner cleanup",
       }),
     ).toBe(true);
-    expect(await getRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
+    expect(await getSessionRecording(client.db, grant.workspaceId!, recordingId)).toMatchObject({
       state: "failed",
       reason: "exact owner cleanup",
     });
@@ -9569,6 +9569,6 @@ describe("clean session control plane", () => {
         reason: "no computer use",
       }),
     ).toBe(true);
-    expect(await getRecording(client.db, grant.workspaceId!, discardId)).toBeNull();
+    expect(await getSessionRecording(client.db, grant.workspaceId!, discardId)).toBeNull();
   });
 });

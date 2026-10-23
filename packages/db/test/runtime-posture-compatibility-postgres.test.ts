@@ -28,6 +28,7 @@ const maintenanceBaselineCommit = "c4092a7156ddcb54d6863f021eea3d0fc2c2a0e6";
 const maintenanceBaselineViolations = [
   "table event_ingress_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
   "unknown routine opengeni_private.list_due_event_trigger_tasks_v1(integer) exposes SECURITY DEFINER execution",
+  "unknown routine opengeni_private.list_stalled_recording_work_v1(integer) exposes SECURITY DEFINER execution",
   "unknown routine opengeni_private.prune_event_intake_v1(integer, integer, integer) exposes SECURITY DEFINER execution",
 ];
 
@@ -86,7 +87,7 @@ realTest("readiness inspects both namespaces once without caching posture", asyn
 });
 
 realTest(
-  "0931 maintenance keeps current readiness and refuses the exact previous binary",
+  "0933 maintenance keeps current readiness and refuses the exact previous binary",
   async () => {
     await assertRuntimeDatabasePosture(client!.db, options);
     const previous = await baseline!.module.inspectRuntimeDatabasePosture(client!.db, options);
@@ -99,9 +100,9 @@ realTest(
   },
 );
 
-realTest("the exact 0931 maintenance fence refuses a live listed runtime", async () => {
+realTest("the exact 0933 maintenance fence refuses a live listed runtime", async () => {
   const source = await readFile(
-    new URL("../drizzle/0931_event_capability_posture.sql", import.meta.url),
+    new URL("../drizzle/0933_background_capability_posture.sql", import.meta.url),
     "utf8",
   );
   expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");

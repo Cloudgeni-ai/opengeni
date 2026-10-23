@@ -757,7 +757,17 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "scheduled_task_event_occurrences",
       "scheduled_task_event_settings",
       "event_ingress_routes",
-      // 0930 adds the Teams conversation tables to both posture inventories.
+      // 0930 recording tables are also withheld.
+      "recordings",
+      "recording_tracks",
+      "recording_chunks",
+      "recording_transcript_versions",
+      "recording_transcript_segments",
+      "recording_people",
+      "recording_speaker_assignments",
+      "recording_segment_edits",
+      "recording_events",
+      // 0932 adds the Teams conversation tables to both posture inventories.
       "teams_bot_inbox",
       "teams_bot_installations",
       "teams_bot_links",

@@ -1893,6 +1893,15 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_revisions",
   "preference_registry_snapshots",
   "private_session_create_capabilities",
+  "recording_chunks",
+  "recording_events",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_tracks",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recordings",
   "remember_knowledge_confirmation_receipts",
   "remember_knowledge_memory_materializations",
   "retained_screenshot_artifacts",
@@ -2250,6 +2259,14 @@ export const RUNTIME_FULL_DML_TABLES = [
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
+  "recording_chunks",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_tracks",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recordings",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -2499,6 +2516,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "recording_events",
   "session_attempt_tool_catalogs",
   "session_content_blobs",
   "session_goal_revisions",
@@ -2756,13 +2774,14 @@ const DECLARED_TARGET_TABLES = new Set<string>([
 // inventory, NOT a new grant list; all named checks below remain authoritative.
 // New private capabilities must be explicitly registered here as known and get
 // their own authority checks. Do not refresh this inventory from a live catalog.
-export const EVENT_TRIGGER_RUNTIME_ROUTINES = [
+export const BACKGROUND_RUNTIME_ROUTINES = [
   "list_due_event_trigger_tasks_v1(integer)",
   "prune_event_intake_v1(integer, integer, integer)",
+  "list_stalled_recording_work_v1(integer)",
 ] as const;
 
 const DECLARED_PRIVATE_ROUTINES = new Set<string>([
-  ...EVENT_TRIGGER_RUNTIME_ROUTINES,
+  ...BACKGROUND_RUNTIME_ROUTINES,
   ...legacyRoutines.private,
   ...OWNER_INTERNAL_PRIVATE_ROUTINES,
   ...RETIRED_PRIVATE_ROUTINES,
@@ -6024,13 +6043,16 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
-  for (const name of EVENT_TRIGGER_RUNTIME_ROUTINES) {
-    if (!tableByName.has("scheduled_task_event_settings")) continue;
+  for (const name of BACKGROUND_RUNTIME_ROUTINES) {
+    const recording = name === "list_stalled_recording_work_v1(integer)";
+    if (!tableByName.has(recording ? "recordings" : "scheduled_task_event_settings")) continue;
     const routines = posture.privateRoutines.filter((routine) => routine.name === name);
     const routine = routines[0];
-    const owners = ["scheduled_task_event_settings", "event_deliveries", "inbound_events"].map(
-      (table) => tableByName.get(table)?.owner,
-    );
+    const owners = (
+      recording
+        ? ["recordings", "recording_transcript_versions"]
+        : ["scheduled_task_event_settings", "event_deliveries", "inbound_events"]
+    ).map((table) => tableByName.get(table)?.owner);
     if (
       routines.length !== 1 ||
       !routine ||
@@ -6041,7 +6063,7 @@ export function evaluateRuntimeDatabasePosture(
       owners.some((owner) => !owner || owner !== routine.owner) ||
       !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
     ) {
-      violations.push(`event trigger capability ${name} is missing or unsafe`);
+      violations.push(`background capability ${name} is missing or unsafe`);
     }
   }
   // Read-only maintenance work checks hold exactly the authority of the claim

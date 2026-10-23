@@ -573,7 +573,7 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
-      ...runtimePosture.EVENT_TRIGGER_RUNTIME_ROUTINES.map((name) => ({
+      ...runtimePosture.BACKGROUND_RUNTIME_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
         execute: true,
@@ -787,7 +787,13 @@ describe("runtime database posture evaluator", () => {
   });
 
   test("requires exact event trigger capabilities with safe ownership, ACLs and search paths", () => {
-    const names = ["scheduled_task_event_settings", "event_deliveries", "inbound_events"];
+    const names = [
+      "scheduled_task_event_settings",
+      "event_deliveries",
+      "inbound_events",
+      "recordings",
+      "recording_transcript_versions",
+    ];
     const eventOptions: RuntimeDatabasePostureOptions = {
       ...options,
       protectedTables: ["tenant_rows", ...names],
@@ -800,12 +806,18 @@ describe("runtime database posture evaluator", () => {
     };
     function eventPosture() {
       const posture = safePosture();
-      for (const name of ["scheduled_task_event_settings", "event_deliveries", "inbound_events"])
+      for (const name of [
+        "scheduled_task_event_settings",
+        "event_deliveries",
+        "inbound_events",
+        "recordings",
+        "recording_transcript_versions",
+      ])
         posture.tables.push({ ...posture.tables[0]!, name });
       return posture;
     }
     expect(evaluateRuntimeDatabasePosture(eventPosture(), eventOptions)).toEqual([]);
-    for (const name of runtimePosture.EVENT_TRIGGER_RUNTIME_ROUTINES) {
+    for (const name of runtimePosture.BACKGROUND_RUNTIME_ROUTINES) {
       for (const unsafe of [
         null,
         { execute: false },
@@ -824,7 +836,7 @@ describe("runtime database posture evaluator", () => {
             (routine) => routine.name !== name,
           );
         expect(evaluateRuntimeDatabasePosture(posture, eventOptions)).toContain(
-          `event trigger capability ${name} is missing or unsafe`,
+          `background capability ${name} is missing or unsafe`,
         );
       }
     }
@@ -1837,6 +1849,15 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0930 meeting recordings: FORCE RLS; eight full-DML tables and an
+          // append-only event log.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 9
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 8
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1885,8 +1906,9 @@ describe("runtime database posture evaluator", () => {
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
         1 + // 0909 session message search texts: read and insert, FORCE-RLS.
-        6 + // 0930 Teams durable integration state: full-DML, FORCE-RLS.
-        8; // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+        6 + // 0932 Teams durable integration state: full-DML, FORCE-RLS.
+        8 + // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+        9; // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
       expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");

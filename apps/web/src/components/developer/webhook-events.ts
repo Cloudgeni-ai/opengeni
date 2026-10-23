@@ -86,6 +86,46 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
       },
     ],
   },
+  {
+    label: "Meetings",
+    events: [
+      {
+        type: "recording.started",
+        label: "Recording started",
+        description: "Someone started recording a meeting.",
+      },
+      {
+        type: "recording.finished",
+        label: "Recording finished",
+        description: "A recording stopped and all its audio was uploaded.",
+      },
+      {
+        type: "recording.transcript.ready",
+        label: "Transcript ready",
+        description: "A transcript finished, including re-runs on another model.",
+      },
+      {
+        type: "recording.transcript.failed",
+        label: "Transcript failed",
+        description: "A transcript could not be made.",
+      },
+      {
+        type: "recording.transcript.current_changed",
+        label: "Transcript version switched",
+        description: "Someone chose a different transcript version to show.",
+      },
+      {
+        type: "recording.speakers.updated",
+        label: "Speakers edited",
+        description: "Someone named, merged or moved speakers, or edited the text.",
+      },
+      {
+        type: "recording.deleted",
+        label: "Recording deleted",
+        description: "A recording and its audio and transcripts were deleted.",
+      },
+    ],
+  },
 ];
 
 const ALL_EVENTS = WEBHOOK_EVENT_GROUPS.flatMap((group) => group.events);
