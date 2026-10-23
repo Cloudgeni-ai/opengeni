@@ -2105,6 +2105,30 @@ later change to a reviewed Version path fails closed; choose an earlier green
 tip. The admission job reports `release_source_sha`, `version_provenance_sha`
 and `release_admission_mode`; the candidate receipt schema is unchanged.
 
+A reviewed, green Version PR that lands as a merge commit stays releasable from
+its exact head. With an empty `provenance_sha`, `source_sha` may be the bot
+Version PR head itself instead of its merge result (`release_admission_mode`
+`merge-version-head`). The candidate then builds that head's own tree; the merge
+commit is used only to prove how the head landed, never as release content, so
+changesets merged to `main` after the Version base cannot reach the candidate.
+Admission requires, fail-closed:
+
+- `source_sha` is the second parent of a two-parent merge commit retained by
+  `main`, and that merge commit is the `merge_commit_sha` of exactly one merged
+  `github-actions[bot]` PR from `changeset-release/main` into `main` whose single
+  commit is `source_sha`, directly on its reviewed base; any other PR head,
+  including an ordinary feature PR, is rejected;
+- the exact-head `Automation PR CI` check on `source_sha` succeeded, and a green
+  `workflow_dispatch` CI run on `main` at the Version base binds this PR, head and
+  base in its `Report exact-head automation CI` job log, with the admission,
+  required source and report jobs green in its latest attempt (the newest bound
+  run is recorded; every bound run must be green);
+- the source-admission check, retained `opengeni-release-head-<source_sha>`
+  evidence and no pending `.changeset/*.md` at `source_sha`.
+
+The controller must descend from `source_sha` on `main`, as on the exact-source
+lane. Re-checking this evidence depends on GitHub retaining the job log.
+
 Recover a failed full-main run intended for release with **Re-run all jobs**, not
 "Re-run failed jobs": the canary image and full-green receipts must come from the
 same selected attempt. A green provider run with stale image receipts is still
