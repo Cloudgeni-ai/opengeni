@@ -205,6 +205,29 @@ e2e(
     } finally {
       await toolbar.close();
     }
+    // The list stays, but its items are rebuilt without item 1, so item 2's
+    // identical button takes item 1's place.
+    const list = await openFixture(
+      '<!doctype html><title>List</title><style>body{margin:0}button{display:block;width:120px;height:30px}</style><div id="list"><button data-id="1">Delete</button><button data-id="2">Delete</button></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.dataset.id)});list.firstElementChild.addEventListener("pointerover",()=>{list.innerHTML="<button data-id=2>Delete</button>"});</script>',
+    );
+    try {
+      const refused = await list.click(list.initial, "Delete", "click", '[data-id="1"]');
+      expect(refused.state).not.toBe("completed");
+      expect(await list.evaluate("deleted")).toEqual([]);
+    } finally {
+      await list.close();
+    }
+    // Index-keyed rows: row 1 stays and is rebuilt to show invoice 2.
+    const invoices = await openFixture(
+      '<!doctype html><title>Invoices</title><style>body{margin:0}.row{height:40px}</style><div class="row" id="r1"><span>Invoice 1</span><button>Delete</button></div><div class="row" id="r2"><span>Invoice 2</span><button>Delete</button></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.previousElementSibling.textContent)});r1.querySelector("button").addEventListener("pointerover",()=>{r1.innerHTML="<span>Invoice 2</span><button>Delete</button>";r2.remove()});</script>',
+    );
+    try {
+      const refused = await invoices.click(invoices.initial, "Delete", "click", "#r1 button");
+      expect(refused.state).not.toBe("completed");
+      expect(await invoices.evaluate("deleted")).toEqual([]);
+    } finally {
+      await invoices.close();
+    }
   },
   60_000,
 );

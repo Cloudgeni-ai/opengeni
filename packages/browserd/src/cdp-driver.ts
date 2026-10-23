@@ -7478,19 +7478,15 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
   const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
-  // What the target is by itself (not by the ancestor describe() names),
-  // and where it sits: a copy must match both.
-  const identity = (node) =>
-    [
-      node.tagName,
-      node.getAttribute("role") || "",
-      String(node.getAttribute("aria-label") || node.getAttribute("title") || node.textContent || "")
-        .replace(/\\s+/g, " ")
-        .trim()
-        .slice(0, 200),
-    ].join("|");
-  const original = identity(element);
+  // The target's own markup and its parent's text, as found: a copy must
+  // match both, so a re-render that shifted other data into the target's
+  // place (the next item's button, a row now showing another invoice) does
+  // not pass for it.
+  const markup = (node) => String(node.outerHTML || "").slice(0, 8192);
+  const text = (node) => String(node.textContent || "").slice(0, 8192);
+  const original = markup(element);
   const parent = element.parentElement;
+  const parentText = parent ? text(parent) : "";
   const position = parent ? Array.prototype.indexOf.call(parent.children, element) : -1;
   const reaches = (hit) => {
     if (hit instanceof Node && owns(element, hit)) return true;
@@ -7507,9 +7503,9 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
     // a copy in the same place of the same parent: the press reaches the
     // copy, as it would a person's. A lookalike elsewhere (the next row's
     // identical button once this row is removed) is not the target.
-    if (!element.isConnected && parent && parent.isConnected) {
+    if (!element.isConnected && parent && parent.isConnected && text(parent) === parentText) {
       const copy = parent.children[position];
-      if (copy && identity(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
+      if (copy && markup(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
     }
     return false;
   };
