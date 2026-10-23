@@ -134,6 +134,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
@@ -365,6 +366,12 @@ export async function createValidatedScheduledTask(input: {
 }): Promise<ScheduledTask> {
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
+  // Nobody starts a new schedule in a Personal workspace the organization
+  // turned off; schedules made before keep running.
+  await requirePersonalWorkspaceOpenToNewWork(input, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+  });
   if (input.payload.runMode === "existing_session") {
     const target = await validateScheduledTaskTarget({
       ...input,

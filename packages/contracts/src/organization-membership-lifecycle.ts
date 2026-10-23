@@ -157,6 +157,8 @@ export const OrganizationPrivacySettings = /* @__PURE__ */ defineSchema(() =>
     organizationId: z.string().uuid(),
     /** Who can see new chats and schedules unless the person picks otherwise. */
     defaultVisibility: z.enum(["private", "workspace"]),
+    /** Whether people have their own Personal workspace to see and work in. */
+    personalWorkspaces: z.boolean(),
     /** Whether admins see that other people's Only me schedules exist, and can pause them. */
     adminsSeePrivateSchedules: z.boolean(),
     limits: z.object({
@@ -177,11 +179,14 @@ export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSc
     .object({
       defaultVisibility: z.enum(["private", "workspace"]).optional(),
       adminsSeePrivateSchedules: z.boolean().optional(),
+      personalWorkspaces: z.boolean().optional(),
     })
     .strict()
     .refine(
       (value) =>
-        value.defaultVisibility !== undefined || value.adminsSeePrivateSchedules !== undefined,
+        value.defaultVisibility !== undefined ||
+        value.adminsSeePrivateSchedules !== undefined ||
+        value.personalWorkspaces !== undefined,
       { message: "Change at least one setting." },
     ),
 );

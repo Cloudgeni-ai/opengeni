@@ -1741,6 +1741,11 @@ export const ManagedOrganizationMembershipProjection = /* @__PURE__ */ defineSch
     organizationId: z.string().uuid(),
     status: z.literal("active"),
     personalWorkspaceId: z.string().uuid(),
+    /**
+     * False when the organization turned Personal workspaces off: the person
+     * no longer sees or starts new work there. Absent means on.
+     */
+    personalWorkspacesEnabled: z.boolean().optional(),
   }),
 );
 export type ManagedOrganizationMembershipProjection = z.infer<

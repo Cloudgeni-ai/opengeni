@@ -4809,6 +4809,8 @@ export type OrganizationPrivacySettings = {
   organizationId: string;
   /** Who sees new chats and schedules unless the person picks otherwise. */
   defaultVisibility: "private" | "workspace";
+  /** Whether people have their own Personal workspace to see and work in. */
+  personalWorkspaces: boolean;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -4825,6 +4827,8 @@ export type OrganizationPrivacySettings = {
 export type UpdateOrganizationPrivacySettingsRequest = {
   defaultVisibility?: "private" | "workspace";
   adminsSeePrivateSchedules?: boolean;
+  /** Off: people no longer see or start new work in their Personal workspace. */
+  personalWorkspaces?: boolean;
 };
 
 /**
@@ -5655,6 +5659,11 @@ export type ManagedOrganizationMembership = {
   organizationId: string;
   status: "active";
   personalWorkspaceId: string;
+  /**
+   * False when the organization turned Personal workspaces off: the person no
+   * longer sees or starts new work there. Absent means on.
+   */
+  personalWorkspacesEnabled?: boolean | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {

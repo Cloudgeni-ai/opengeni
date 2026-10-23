@@ -279,6 +279,7 @@ import {
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
@@ -2629,6 +2630,15 @@ async function createSessionForRequestInFileScope(
       }
       throw error;
     }
+  }
+  // A new root chat needs the workspace open to new work: once the
+  // organization turned Personal workspaces off, nobody starts one there.
+  // Workers of an existing chat still start, so existing chats keep working.
+  if (!parentSessionId) {
+    await requirePersonalWorkspaceOpenToNewWork(unresolvedDeps, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
   }
   // a create-time usage limit belongs to a new ROOT task and only a
   // person or the trusted host may set it. Agents (including children, which
