@@ -206,3 +206,70 @@ test("the words come from the host's message catalog, English otherwise", () => 
     "Agents can now use Ada's Mac. Pause any time from the menu bar.",
   );
 });
+
+const removed = status({
+  errorCode: "removed",
+  error: "This computer was removed from this workspace. Reconnect it to let agents use it again.",
+  management: "service",
+});
+
+test("a computer removed on the server has its own view, not off or connecting", () => {
+  expect(thisComputerView(removed)).toBe("removed");
+  // Reconnecting it is setting it up again.
+  expect(thisComputerView({ ...removed, busy: true })).toBe("setting_up");
+  // An action that failed since then is just off, with that error.
+  expect(thisComputerView({ ...removed, errorCode: "connect_failed" })).toBe("off");
+});
+
+test("the settings panel, the sidebar and the chat card agree that it was removed", () => {
+  const removedComputer = computer(removed);
+  const panel = renderToStaticMarkup(
+    <ThisComputerPanel computer={removedComputer} platform="macos" onSetup={() => undefined} />,
+  );
+  const offer = renderToStaticMarkup(
+    <ThisComputerOffer computer={removedComputer} onSetup={() => undefined} />,
+  );
+  const card = renderToStaticMarkup(
+    <ThisComputerCard computer={removedComputer} productName="Acme" />,
+  );
+  for (const html of [panel, offer, card]) {
+    expect(html).toContain("Kari&#x27;s Mac was removed from this workspace.");
+    expect(html).toContain(">Reconnect</button>");
+    expect(html).not.toContain("Connecting");
+    expect(html).not.toContain("Couldn&#x27;t reach");
+    // The line says it; it isn't repeated as an error.
+    expect(html).not.toContain('role="alert"');
+  }
+  // One action: no pause, turn off or existing-agent explanation beside it.
+  expect(panel).not.toContain("Pause");
+  expect(panel).not.toContain("Turn off");
+  expect(panel).not.toContain("installation and permissions stay in place");
+});
+
+test("a connection the app can't verify says why, and only a network failure says offline", () => {
+  const labels = defaultThisComputerLabels();
+  expect(labels.error("offline", "x")).toContain("Couldn't reach the server");
+  expect(labels.error("removed", "x")).toContain("removed from this workspace");
+  expect(labels.error("signed_out", "x")).toContain("Sign in again");
+  expect(labels.error("unknown", "Couldn't check this computer's connection: API 503")).toBe(
+    "Couldn't check this computer's connection: API 503",
+  );
+  const signedOut = renderToStaticMarkup(
+    <ThisComputerPanel
+      computer={computer(
+        status({
+          state: "connected",
+          management: "service",
+          reconnecting: true,
+          errorCode: "signed_out",
+          error: "Sign in again to check this computer's connection.",
+        }),
+      )}
+      platform="macos"
+      onSetup={() => undefined}
+    />,
+  );
+  expect(signedOut).toContain("Connecting Kari&#x27;s Mac");
+  expect(signedOut).toContain("Sign in again");
+  expect(signedOut).not.toContain("Couldn&#x27;t reach");
+});

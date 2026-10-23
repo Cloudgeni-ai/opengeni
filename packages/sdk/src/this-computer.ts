@@ -127,6 +127,14 @@ export type ThisComputerErrorCode =
   | "connect_failed"
   /** The server or the network couldn't be reached. */
   | "offline"
+  /**
+   * The server no longer lists this computer (it was removed there), so its
+   * local connection is stale; connecting again enrolls it afresh. Comes
+   * with state `not_connected`.
+   */
+  | "removed"
+  /** The account in the app needs to sign in again. */
+  | "signed_out"
   /** This kind of computer can't be used yet. */
   | "unsupported"
   /** Another agent already serves this computer and couldn't be taken over. */

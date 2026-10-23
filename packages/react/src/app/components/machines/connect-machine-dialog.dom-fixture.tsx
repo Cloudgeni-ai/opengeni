@@ -30,6 +30,9 @@ const copyTextToClipboard = mock(async (_text: string) => true);
 const context = { client: { mintEnrollToken }, accessContext: { subjectId: "person" } };
 mock.module("../../app-context", () => ({ useAppContext: () => context }));
 mock.module("../../../clipboard", () => ({ copyTextToClipboard }));
+// Outside the desktop app (the web) unless a test puts this computer here.
+let desktop: unknown = null;
+mock.module("../desktop/this-computer", () => ({ useDesktopThisComputer: () => desktop }));
 GlobalRegistrator.register();
 const { createRoot } = await import("react-dom/client");
 const { ConnectMachineDialog } = await import("./connect-machine-dialog");
@@ -73,6 +76,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 beforeEach(() => {
+  desktop = null;
   mintCount = 0;
   mintImpl = async (input) => echo(`oget_preview${++mintCount}.sig`, input);
   mintEnrollToken.mockClear();
@@ -499,6 +503,114 @@ describe("Connect a machine dialog", () => {
       expect(onUse).toHaveBeenCalledTimes(1);
       expect(onUse.mock.calls[0]![0].sandboxId).toBe("pc");
       expect(h.dialog()).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+const { defaultThisComputerLabels } = await import("../../../this-computer");
+describe("Connect a machine inside the desktop app", () => {
+  const labels = defaultThisComputerLabels();
+  function inDesktop(
+    status: Record<string, unknown> | null,
+    options: { connect?: () => unknown } = {},
+  ) {
+    const openSetup = mock(() => {});
+    const connect = mock(async () => options.connect?.() ?? null);
+    const resume = mock(async () => {});
+    desktop = {
+      workspaceId: "workspace",
+      platform: "macos",
+      productName: "Opengeni",
+      labels,
+      openSetup,
+      computer: {
+        status: status && {
+          busy: false,
+          error: null,
+          machineName: "Kari's Mac",
+          management: "service",
+          ...status,
+        },
+        acting: false,
+        actionError: null,
+        canDisconnect: true,
+        refresh: () => {},
+        connect,
+        pause: async () => {},
+        resume,
+        disconnect: async () => {},
+        requestPermission: async () => {},
+      },
+    };
+    return { openSetup, connect, resume };
+  }
+
+  test("never offers a download or the app hand-off for the computer it runs on", async () => {
+    const { openSetup } = inDesktop({ state: "not_connected" });
+    const h = await render({ advanced: false });
+    try {
+      expect(h.text()).toContain("Connect a machine");
+      expect(h.text()).toContain("Use this computer");
+      expect(h.text()).not.toContain("Download for Mac");
+      expect(h.text()).not.toContain("Open app and connect");
+      expect(h.dialog()!.querySelectorAll("a")).toHaveLength(0);
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+      // One action for this computer: its own setup steps, in place of this dialog.
+      await click(h.button("Turn on"));
+      expect(openSetup).toHaveBeenCalledTimes(1);
+      expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("says when this computer is already connected, and other machines still connect with a command", async () => {
+    inDesktop({ state: "connected" });
+    const h = await render({ advanced: false });
+    try {
+      expect(h.text()).toContain("Agents can use Kari's Mac");
+      expect(h.button("Turn on")).toBeNull();
+      const other = [...h.dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent?.startsWith("Connect another computer or server"),
+      );
+      await click(other!);
+      expect(h.dialog()?.querySelector("[data-connect-machine-setup]")).not.toBeNull();
+      expect(h.text()).not.toContain("Use this computer");
+      await h.flush();
+      expect(h.command()).toContain("oget_preview1.sig");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a computer removed on the server reconnects in one step, without a network error", async () => {
+    const { connect, openSetup } = inDesktop({
+      state: "not_connected",
+      errorCode: "removed",
+      error: "This computer was removed from this workspace.",
+    });
+    const h = await render({ advanced: false });
+    try {
+      expect(h.text()).toContain("Kari's Mac was removed from this workspace.");
+      expect(h.text()).not.toContain("Couldn't reach");
+      expect(h.dialog()!.querySelector('[role="alert"]')).toBeNull();
+      await click(h.button("Reconnect"));
+      expect(connect).toHaveBeenCalledWith({ screenControl: true });
+      expect(openSetup).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a computer that can't be used here leaves only other machines", async () => {
+    inDesktop({ state: "unavailable" });
+    const h = await render({ advanced: false });
+    try {
+      expect(h.text()).not.toContain("Use this computer");
+      expect(h.text()).not.toContain("Download for Mac");
+      expect(h.dialog()?.querySelector("[data-connect-machine-setup]")).not.toBeNull();
     } finally {
       await h.close();
     }

@@ -166,6 +166,20 @@ installation is service-backed instead: changing its responsible process would
 discard the usefulness of its existing macOS grants. Launch and status reads
 are non-mutating; only explicit signed-in setup enables desktop management.
 
+The server decides whether the local connection is still valid. Status reads
+the account's Machines view (`readMachine`): a machine the server no longer
+lists was removed there, so the screens show it as removed with one
+**Reconnect** action, which mints a fresh token and runs `connect
+--non-interactive` again (the agent replaces that deployment/workspace
+connection in place and a running service reloads it). A failed read keeps its
+own meaning (offline, signed out, or the server's error) and is never shown as
+a network failure when the server answered. A just-made enrollment the server
+doesn't list yet is still connecting, not removed. The setup dialog shows one
+state at a time and follows the computer's own status, so "You're all set"
+only stands while it is ready. Inside the app, **Connect a machine** shows this
+computer's state and one action instead of downloads and the app hand-off;
+other computers and servers still connect with a command or a code.
+
 ### What the agent needs
 
 - To run while the person works, including with the window closed, and again

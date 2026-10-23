@@ -12,7 +12,7 @@ import {
   UserIcon,
   UsersIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "../../../ui/button";
 import { ChoiceCard, ChoiceCards } from "../../../ui/choice-cards";
@@ -29,6 +29,7 @@ import { LogoTile } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { StatusBadge } from "../../../ui/status-badge";
+import { StatusDot } from "../../../ui/status-dot";
 import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { userErrorText } from "../../../ui/api-error";
@@ -41,6 +42,12 @@ import {
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { computerConnectUrl } from "@opengeni/sdk/app-links";
 import { desktopDownloadsFor, desktopDownloadUrl } from "../../lib/desktop-download";
+import { useDesktopThisComputer, type DesktopThisComputer } from "../desktop/this-computer";
+import {
+  reconnect,
+  thisComputerError,
+  thisComputerView,
+} from "../../../components/this-computer/this-computer-status";
 
 /** Who can use the machine: the person connecting it, or the whole workspace. */
 export type ConnectMachineScope = "user" | "workspace";
@@ -275,6 +282,7 @@ function ConnectMachineBody({
   const [scope, setScope] = useState<ConnectMachineScope>(defaultScope);
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
   const [advanced, setAdvanced] = useState(defaultAllowScreenControl);
+  const desktop = useDesktopThisComputer();
   const connected = useNewlyConnectedMachine(
     machines,
     machinesLoading,
@@ -292,6 +300,65 @@ function ConnectMachineBody({
 
   if (connected) {
     return <ConnectedStep machine={connected} useInChat={useInChat} onClose={onClose} />;
+  }
+  const serverSetup = advanced ? (
+    <ConnectSetup
+      workspaceId={workspaceId}
+      origin={origin}
+      personalWorkspace={personalWorkspace}
+      scope={scope}
+      onScopeChange={setScope}
+      allowScreenControl={allowScreenControl}
+      onAllowScreenControlChange={setAllowScreenControl}
+    />
+  ) : null;
+  // Inside the desktop app this computer is already here: no download or
+  // hand-off to the app, just its own state and one action. Other computers
+  // and servers connect with a command, as on the web.
+  if (desktop && desktop.computer.status?.state !== "unavailable") {
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle>Connect a machine</DialogTitle>
+          <DialogDescription>
+            {advanced
+              ? "Run the command below on the computer or server you want to connect."
+              : "Let agents use this computer, or connect another one."}
+          </DialogDescription>
+        </DialogHeader>
+        {!advanced ? <ThisComputerChoice desktop={desktop} onClose={onClose} /> : null}
+        <Disclosure
+          title="Connect another computer or server"
+          summary="Run a command on it, or pair it with a code."
+          open={advanced}
+          onOpenChange={setAdvanced}
+        >
+          {serverSetup}
+        </Disclosure>
+      </>
+    );
+  }
+  if (desktop) {
+    // This kind of computer can't be used here: other machines are what's left.
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle>Connect a machine</DialogTitle>
+          <DialogDescription>
+            Run the command below on the computer or server you want to connect.
+          </DialogDescription>
+        </DialogHeader>
+        <ConnectSetup
+          workspaceId={workspaceId}
+          origin={origin}
+          personalWorkspace={personalWorkspace}
+          scope={scope}
+          onScopeChange={setScope}
+          allowScreenControl={allowScreenControl}
+          onAllowScreenControlChange={setAllowScreenControl}
+        />
+      </>
+    );
   }
   return (
     <>
@@ -312,19 +379,121 @@ function ConnectMachineBody({
         open={advanced}
         onOpenChange={setAdvanced}
       >
-        {advanced ? (
-          <ConnectSetup
-            workspaceId={workspaceId}
-            origin={origin}
-            personalWorkspace={personalWorkspace}
-            scope={scope}
-            onScopeChange={setScope}
-            allowScreenControl={allowScreenControl}
-            onAllowScreenControlChange={setAllowScreenControl}
-          />
-        ) : null}
+        {serverSetup}
       </Disclosure>
     </>
+  );
+}
+
+/**
+ * This computer, inside the desktop app: where it stands and the one thing to
+ * do next. Turning it on or finishing setup continues in the app's own steps.
+ */
+function ThisComputerChoice({
+  desktop,
+  onClose,
+}: {
+  desktop: DesktopThisComputer;
+  onClose: () => void;
+}) {
+  const { computer, labels } = desktop;
+  const status = computer.status;
+  const view = thisComputerView(status);
+  const name = status?.machineName || "this computer";
+  const error = status ? thisComputerError(computer, labels) : null;
+  const openSetup = () => {
+    onClose();
+    desktop.openSetup();
+  };
+  let line: string;
+  let waiting = false;
+  let action: ReactNode = null;
+  switch (view) {
+    case "ready":
+      line = labels.ready(name);
+      break;
+    case "reconnecting":
+      line = labels.reconnecting(name);
+      waiting = true;
+      break;
+    case "setting_up":
+      line = status?.management === "service" ? labels.reconnecting(name) : labels.settingUp(name);
+      waiting = true;
+      break;
+    case "resuming":
+      line = labels.resuming;
+      waiting = true;
+      break;
+    case "paused":
+      line = labels.paused(name);
+      action = (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={computer.acting}
+          onClick={() => void computer.resume()}
+        >
+          {labels.resume}
+        </Button>
+      );
+      break;
+    case "finish_setup":
+      line = labels.finishSetupDetail;
+      action = (
+        <Button type="button" size="sm" onClick={openSetup}>
+          {labels.finishSetup}
+        </Button>
+      );
+      break;
+    case "removed":
+      line = labels.removed?.(name) ?? `${name} was removed from this workspace.`;
+      action = (
+        <Button
+          type="button"
+          size="sm"
+          disabled={computer.acting}
+          onClick={() => reconnect(computer, openSetup)}
+        >
+          {labels.reconnect ?? "Reconnect"}
+        </Button>
+      );
+      break;
+    case "off":
+      line = labels.offer(name);
+      action = (
+        <Button type="button" size="sm" onClick={openSetup}>
+          {labels.turnOn}
+        </Button>
+      );
+      break;
+    default:
+      line = "Checking this computer…";
+      waiting = true;
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-2" data-this-computer={view}>
+      <div className="flex min-w-0 items-center gap-3 rounded-[10px] border border-border px-3 py-2.5">
+        <LogoTile size="md" icon={<LaptopIcon />} />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-sm font-medium text-fg">{labels.title}</span>
+          <span
+            className="flex min-w-0 items-center gap-1.5 text-xs leading-4.5 text-fg-muted"
+            role="status"
+          >
+            {view === "ready" ? <StatusDot tone="success" size="sm" /> : null}
+            {waiting ? <Loader2Icon aria-hidden className="size-3 shrink-0 animate-spin" /> : null}
+            <span className="min-w-0">{line}</span>
+          </span>
+        </div>
+        {action}
+      </div>
+      {error ? (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

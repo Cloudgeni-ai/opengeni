@@ -4,7 +4,11 @@ import { ArrowUpRightIcon, CheckIcon, LaptopIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useOpenGeniText } from "../../messages/runtime";
 import { defaultThisComputerLabels, type ThisComputerLabels } from "./labels";
-import { thisComputerView } from "./this-computer-status";
+import {
+  thisComputerError,
+  thisComputerRemovedLine,
+  thisComputerView,
+} from "./this-computer-status";
 import type { UseThisComputerResult } from "./use-this-computer";
 
 /** A personal machine that can take work now. */
@@ -129,11 +133,16 @@ export function ThisComputerCard({
   if (readyName !== null) {
     copy = card.canUse(readyName);
   } else if (computer && view !== "hidden") {
-    error =
-      computer.actionError !== null || status?.error
-        ? labels.error(status?.errorCode ?? null, status?.error || computer.actionError || null)
-        : null;
+    error = thisComputerError(computer, labels);
     switch (view) {
+      case "removed":
+        copy = thisComputerRemovedLine(labels, machineName, catalogText);
+        action = (
+          <button type="button" disabled={computer.acting} onClick={connect}>
+            {labels.reconnect ?? catalogText("thisComputer.reconnect")}
+          </button>
+        );
+        break;
       case "paused":
         copy = labels.paused(machineName);
         action = (

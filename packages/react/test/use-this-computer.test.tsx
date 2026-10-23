@@ -240,3 +240,74 @@ test("shows a change even when reading the status takes longer than polling", as
   expect(calls).toBe(2);
   await hook.unmount();
 });
+
+test("turning it on shows one state at a time and follows the computer back when it falls back", async () => {
+  const noop = async () => undefined;
+  const off: ThisComputerStatus = { ...connected, state: "not_connected", management: "service" };
+  const waiting: ThisComputerStatus = { ...connected, management: "service", reconnecting: true };
+  const ready: ThisComputerStatus = { ...connected, management: "service" };
+  const removed: ThisComputerStatus = {
+    ...off,
+    errorCode: "removed",
+    error: "This computer was removed from this workspace.",
+  };
+  const render = (status: ThisComputerStatus) => {
+    const computer: UseThisComputerResult = {
+      status,
+      acting: false,
+      actionError: null,
+      canDisconnect: true,
+      refresh: () => undefined,
+      connect: async () => waiting,
+      pause: noop,
+      resume: noop,
+      disconnect: noop,
+      requestPermission: noop,
+    };
+    return (
+      <ThisComputerSetup
+        open
+        onOpenChange={() => undefined}
+        computer={computer}
+        platform="macos"
+        productName="Desktop App"
+        container={document.body}
+      />
+    );
+  };
+  const text = () => document.body.textContent ?? "";
+  const view = await renderComponent(render(off));
+  try {
+    const turnOn = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Turn on",
+    );
+    await actRun(() => turnOn!.click());
+    await flush();
+    await view.rerender(render(waiting));
+    expect(text()).toContain("Connecting studio…");
+    expect(text()).toContain("Waiting for the Opengeni agent on this computer to come online.");
+    expect(text()).not.toContain("You're all set");
+
+    await view.rerender(render(ready));
+    expect(text()).toContain("You're all set");
+    expect(text()).not.toContain("Waiting for");
+    expect(text()).not.toContain("Connecting");
+
+    // The agent stopped reporting: not all set any more.
+    await view.rerender(render(waiting));
+    expect(text()).toContain("Connecting studio…");
+    expect(text()).not.toContain("You're all set");
+
+    // Removed elsewhere meanwhile: back to the start, with one way on.
+    await view.rerender(render(removed));
+    expect(text()).toContain("studio was removed from this workspace.");
+    expect(text()).not.toContain("You're all set");
+    expect(text()).not.toContain("Waiting for");
+    const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")].map(
+      (button) => button.textContent,
+    );
+    expect(buttons).toContain("Reconnect");
+  } finally {
+    await view.unmount();
+  }
+});

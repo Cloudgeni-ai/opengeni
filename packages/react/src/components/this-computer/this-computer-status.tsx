@@ -1,4 +1,5 @@
 import {
+  thisComputerNeedsPermissions,
   thisComputerReady,
   type ThisComputerPlatform,
   type ThisComputerStatus,
@@ -13,6 +14,8 @@ import type { UseThisComputerResult } from "./use-this-computer";
 export type ThisComputerView =
   | "hidden"
   | "off"
+  /** It was connected, then removed on the server (e.g. from Machines). */
+  | "removed"
   | "setting_up"
   | "finish_setup"
   | "ready"
@@ -27,11 +30,63 @@ export function thisComputerView(status: ThisComputerStatus | null): ThisCompute
     if (!thisComputerReady(status)) return "finish_setup";
     return status.reconnecting ? "reconnecting" : "ready";
   }
-  return status.busy ? "setting_up" : "off";
+  if (status.busy) return "setting_up";
+  return status.errorCode === "removed" ? "removed" : "off";
+}
+
+/**
+ * The error to show beside a view, or null. A removed computer's line already
+ * says so, so its standing reason isn't repeated as an error.
+ */
+export function thisComputerError(
+  computer: Pick<UseThisComputerResult, "status" | "actionError">,
+  labels: ThisComputerLabels,
+): string | null {
+  const { status, actionError } = computer;
+  if (status?.errorCode === "removed" && !status.busy) {
+    return actionError ? labels.error(null, actionError) : null;
+  }
+  return actionError !== null || status?.error
+    ? labels.error(status?.errorCode ?? null, status?.error || actionError || null)
+    : null;
+}
+
+/** "… was removed from this workspace", from the labels or the catalog. */
+export function thisComputerRemovedLine(
+  labels: ThisComputerLabels,
+  machineName: string,
+  text: ReturnType<typeof useOpenGeniText>,
+): string {
+  return labels.removed?.(machineName) ?? text("thisComputer.removed", { machineName });
 }
 
 function percent(status: ThisComputerStatus | null): string {
   return status?.setupProgress === undefined ? "" : ` ${Math.round(status.setupProgress * 100)}%`;
+}
+
+/**
+ * While turning it on: the download's progress for the app's own agent, or
+ * connecting for an existing agent, which has nothing to download.
+ */
+function settingUpLine(status: ThisComputerStatus | null, labels: ThisComputerLabels): string {
+  const machineName = status?.machineName ?? "";
+  return status?.management === "service"
+    ? labels.reconnecting(machineName)
+    : `${labels.settingUp(machineName)}${percent(status)}`;
+}
+
+/**
+ * Connects a removed computer again in one step: the person already chose to
+ * use it, so there is nothing to explain first. The setup steps open only
+ * when a permission still needs the person.
+ */
+export function reconnect(
+  computer: Pick<UseThisComputerResult, "connect">,
+  onSetup: () => void,
+): void {
+  void computer.connect({ screenControl: true }).then((next) => {
+    if (thisComputerNeedsPermissions(next)) onSetup();
+  });
 }
 
 function storageKey(workspaceId: string) {
@@ -96,16 +151,53 @@ export function ThisComputerOffer({
   const classes = ["og-tc-offer", className].filter(Boolean).join(" ");
 
   if (view === "setting_up" || view === "resuming" || view === "reconnecting") {
+    // A connection the app can't verify says why, like the settings panel does.
+    const error = view === "reconnecting" ? thisComputerError(computer, labels) : null;
     return (
-      <div className={classes} data-view={view} role="status">
+      <div className={classes} data-view={view} role="status" title={error ?? undefined}>
         <span className="og-tc-spinner" aria-hidden />
         <span className="og-tc-offer-line">
           {view === "resuming"
             ? labels.resuming
             : view === "reconnecting"
               ? labels.reconnecting(machineName)
-              : `${labels.settingUp(machineName)}${percent(status)}`}
+              : settingUpLine(status, labels)}
         </span>
+      </div>
+    );
+  }
+  if (view === "removed" && !dismissed) {
+    return (
+      <div className={classes} data-view={view} data-card="">
+        <div className="og-tc-offer-head">
+          <span className="og-tc-offer-mark">{mark}</span>
+          <div>
+            <p className="og-tc-offer-title">{labels.title}</p>
+            <p className="og-tc-offer-text">
+              {thisComputerRemovedLine(labels, machineName, catalogText)}
+            </p>
+          </div>
+          {onDismiss ? (
+            <button
+              type="button"
+              className="og-tc-offer-dismiss"
+              aria-label={labels.notNow}
+              onClick={onDismiss}
+            >
+              <XIcon aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <div className="og-tc-offer-actions">
+          <button
+            type="button"
+            className="og-tc-button og-tc-primary og-tc-small"
+            disabled={computer.acting}
+            onClick={() => reconnect(computer, onSetup)}
+          >
+            {labels.reconnect ?? catalogText("thisComputer.reconnect")}
+          </button>
+        </div>
       </div>
     );
   }
@@ -210,10 +302,7 @@ export function ThisComputerPanel({
   }, [view]);
   if (view === "hidden") return null;
   const machineName = status?.machineName ?? "";
-  const error =
-    computer.actionError !== null || status?.error
-      ? labels.error(status?.errorCode ?? null, status?.error || computer.actionError || null)
-      : null;
+  const error = thisComputerError(computer, labels);
 
   let line: string;
   let actions: ReactNode;
@@ -258,8 +347,21 @@ export function ThisComputerPanel({
       );
       break;
     case "setting_up":
-      line = `${labels.settingUp(machineName)}${percent(status)}`;
+      line = settingUpLine(status, labels);
       actions = <span className="og-tc-spinner" aria-hidden />;
+      break;
+    case "removed":
+      line = thisComputerRemovedLine(labels, machineName, catalogText);
+      actions = (
+        <button
+          type="button"
+          className="og-tc-button og-tc-primary og-tc-small"
+          disabled={computer.acting}
+          onClick={() => reconnect(computer, onSetup)}
+        >
+          {labels.reconnect ?? catalogText("thisComputer.reconnect")}
+        </button>
+      );
       break;
     default:
       line = labels.offer(machineName);
@@ -328,7 +430,7 @@ export function ThisComputerPanel({
           </p>
         )
       ) : null}
-      {!connected && status?.management === "service" ? (
+      {view === "off" && status?.management === "service" ? (
         <p className="og-tc-panel-foot">{catalogText("thisComputer.existingService")}</p>
       ) : null}
     </section>

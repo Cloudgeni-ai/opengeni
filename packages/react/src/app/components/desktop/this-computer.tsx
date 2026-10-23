@@ -21,7 +21,7 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useAppContext } from "../../app-context";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
 
-interface DesktopThisComputer {
+export interface DesktopThisComputer {
   workspaceId: string;
   computer: UseThisComputerResult;
   platform: ThisComputerPlatform;

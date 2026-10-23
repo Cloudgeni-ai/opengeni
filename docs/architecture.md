@@ -2546,7 +2546,12 @@ signed-in setup reuses their live-reloaded connection store; native
 persists in the service manager across logins. Quitting the desktop leaves the
 service alone. Permission status comes from the current account's Machines
 view, preserving the service's own macOS responsible-process identity. New
-app-hosted installations retain the existing child-supervision model.
+app-hosted installations retain the existing child-supervision model. That
+Machines view is also the server's word on the enrollment: when it answers
+without it (the machine was removed there), the status is `not_connected` with
+`errorCode: "removed"` and connecting again enrolls afresh with a new token
+instead of reusing the stale local connection; a read that fails (network,
+sign-in, server error) is reported as such and never taken as removal.
 
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without

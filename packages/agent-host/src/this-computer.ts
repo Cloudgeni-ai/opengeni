@@ -139,7 +139,12 @@ export interface ThisComputerDeps {
    * true; an isolated app with its own agent leaves other agents alone.
    */
   adoptStandaloneAgent?: boolean;
-  /** Read the enrolled service's own live status, never a child-process TCC probe. */
+  /**
+   * Read the enrolled machine as the server lists it, never a child-process
+   * TCC probe. Resolve null only when the server answered and doesn't list
+   * this enrollment (it was removed there); reject when it couldn't be read
+   * (offline, signed out, a server error), so the screens can tell those apart.
+   */
   readMachine?(
     accountId: string,
     baseUrl: string,
@@ -276,6 +281,30 @@ const LOG_LIMIT_BYTES = 10 * 1024 * 1024;
 
 type Permissions = ReturnType<typeof parsePermissions>;
 
+/** What `readMachine` resolves with when the server lists the machine. */
+type ListedMachine = NonNullable<Awaited<ReturnType<NonNullable<ThisComputerDeps["readMachine"]>>>>;
+
+/**
+ * The server's view of this computer's enrollment: listed, no longer listed
+ * (removed there, so the local connection is stale), or unknown because it
+ * couldn't be read.
+ */
+type MachineReading =
+  | { kind: "listed"; machine: ListedMachine }
+  | { kind: "missing" }
+  | { kind: "unread"; failure: ThisComputerError };
+
+/**
+ * Right after connecting, the server may not list the new enrollment yet;
+ * until then a missing machine isn't taken as removed.
+ */
+const NEW_ENROLLMENT_GRACE_MS = 60_000;
+/** A machine read that takes longer says nothing, so status reads stay quick. */
+const MACHINE_READ_TIMEOUT_MS = 10_000;
+
+const REMOVED_MESSAGE =
+  "This computer was removed from this workspace. Reconnect it to let agents use it again.";
+
 /**
  * This computer as a place agents can work. The app ships the
  * connected-machine agent, keeps a copy where the command line expects it (so
@@ -292,8 +321,12 @@ export class ThisComputer {
   private machineCache: {
     at: number;
     key: string;
-    value: Awaited<ReturnType<NonNullable<ThisComputerDeps["readMachine"]>>>;
+    value: MachineReading;
   } | null = null;
+  /** Enrollments this app made, by when, so a not-yet-listed one isn't called removed. */
+  private readonly enrolledAt = new Map<string, number>();
+  /** Enrollments the server answered it no longer lists: their local connection is stale. */
+  private readonly removed = new Set<string>();
   private readonly statePath: string;
   private state: ComputerState;
   private connectionsCache: { at: number; value: AgentConnection[] } | null = null;
@@ -410,20 +443,60 @@ export class ThisComputer {
     baseUrl: string,
     workspaceId: string,
     connection: AgentConnection,
-  ) {
+  ): Promise<MachineReading | null> {
+    const read = this.deps.readMachine;
+    if (!read) return null;
     const key = JSON.stringify([accountId, baseUrl, workspaceId, connection.agentId]);
     if (this.machineCache?.key === key && Date.now() - this.machineCache.at < 5_000)
       return this.machineCache.value;
-    let value = await this.deps
-      .readMachine?.(accountId, baseUrl, connection.workspaceId, connection.agentId)
-      .catch(() => null);
-    if (!value && connection.workspaceId !== workspaceId) {
-      value = await this.deps
-        .readMachine?.(accountId, baseUrl, workspaceId, connection.agentId)
-        .catch(() => null);
+    const readIn = async (workspace: string): Promise<MachineReading> => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const machine = await Promise.race([
+          read(accountId, baseUrl, workspace, connection.agentId),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new ThisComputerError(
+                    "offline",
+                    "Couldn't reach the server to check this computer's connection. Check your connection and try again.",
+                  ),
+                ),
+              MACHINE_READ_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        return machine ? { kind: "listed", machine } : { kind: "missing" };
+      } catch (caught) {
+        return { kind: "unread", failure: machineReadFailure(caught) };
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    let value = await readIn(connection.workspaceId);
+    if (value.kind !== "listed" && connection.workspaceId !== workspaceId) {
+      const here = await readIn(workspaceId);
+      // Removed only when every server answer says so; a failed read decides nothing.
+      if (here.kind === "listed" || value.kind === "missing") value = here;
     }
-    this.machineCache = { at: Date.now(), key, value: value ?? null };
-    return value ?? null;
+    if (value.kind === "listed") this.removed.delete(connection.agentId);
+    this.machineCache = { at: Date.now(), key, value };
+    return value;
+  }
+
+  /**
+   * The server answered that it no longer lists this connection's enrollment:
+   * it was removed there (e.g. from Machines), so the local connection is
+   * stale and only a fresh enrollment brings it back. Not for one this app
+   * just made, which the server may not list yet.
+   */
+  private removedOnServer(reading: MachineReading | null, connection: AgentConnection): boolean {
+    if (reading?.kind !== "missing") return false;
+    const enrolled = this.enrolledAt.get(connection.agentId);
+    if (enrolled !== undefined && Date.now() - enrolled < NEW_ENROLLMENT_GRACE_MS) return false;
+    this.removed.add(connection.agentId);
+    return true;
   }
 
   private async requireService(): Promise<AgentServiceStatus> {
@@ -517,6 +590,12 @@ export class ThisComputer {
     if (!connection) {
       return { ...base, state: "not_connected" };
     }
+    // A failed action's own error says more than the standing condition.
+    const removed = (): ThisComputerStatus => ({
+      ...base,
+      state: "not_connected",
+      ...(base.error ? {} : { error: REMOVED_MESSAGE, errorCode: "removed" as const }),
+    });
     if (this.serviceBacked) {
       let service: AgentServiceStatus;
       try {
@@ -530,9 +609,12 @@ export class ThisComputer {
           errorCode: "unknown",
         };
       }
-      const machine = accountId
+      const reading = accountId
         ? await this.reportedMachine(accountId, baseUrl, workspaceId, connection)
         : null;
+      if (this.removedOnServer(reading, connection)) return removed();
+      const machine = reading?.kind === "listed" ? reading.machine : null;
+      const unread = reading?.kind === "unread" ? reading.failure : null;
       const permissions =
         machine?.permissions && (machine.online || (service?.installed && !service.enabled))
           ? SCREEN_PERMISSIONS.flatMap((id) =>
@@ -549,15 +631,17 @@ export class ThisComputer {
           !machine?.online ||
           (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions),
         ...(permissions ? { permissions } : {}),
-        ...(!machine && service.enabled && !base.error
-          ? {
-              error:
-                "Couldn't verify this agent's connection. Check your sign-in and network, then try again.",
-              errorCode: "offline" as const,
-            }
+        // Only a read that failed is an error; a listed machine that is offline
+        // is still connecting, and its own reason is unknown here.
+        ...(unread && service.enabled && !base.error
+          ? { error: unread.message, errorCode: unread.code }
           : {}),
       };
     }
+    const reading = accountId
+      ? await this.reportedMachine(accountId, baseUrl, workspaceId, connection)
+      : null;
+    if (this.removedOnServer(reading, connection)) return removed();
     const permissions = await this.permissionList();
     const missing = permissions?.some((permission) => !permission.granted) ?? false;
     return {
@@ -598,7 +682,7 @@ export class ThisComputer {
       };
     }
     if (this.serviceBacked) {
-      const connections = this.state.adopted ? await this.connections() : [];
+      const connections = this.state.adopted ? this.live(await this.connections()) : [];
       const service = this.state.adopted ? await this.serviceStatus().catch(() => null) : null;
       return {
         installed: true,
@@ -610,7 +694,7 @@ export class ThisComputer {
         management: "service",
       };
     }
-    const connections = await this.connections();
+    const connections = this.live(await this.connections());
     const permissions = connections.length > 0 ? await this.permissionList() : null;
     const missingPermissions = (permissions ?? [])
       .filter((permission) => !permission.granted)
@@ -632,6 +716,8 @@ export class ThisComputer {
     options: ThisComputerConnectOptions,
   ): Promise<ThisComputerStatus> {
     await this.act(async () => {
+      // Whether the server still lists this computer decides how to reconnect.
+      this.machineCache = null;
       // Read-only compatibility check before granting access; never replace an
       // older standalone agent to make this setup action succeed.
       if (this.serviceBacked) await this.requireService();
@@ -679,6 +765,8 @@ export class ThisComputer {
       if (!connection) {
         throw new ThisComputerError("connect_failed", "Couldn't connect this computer. Try again.");
       }
+      this.enrolledAt.set(connection.agentId, Date.now());
+      this.removed.delete(connection.agentId);
       await this.deps.allowAgents(accountId, workspaceId, connection.agentId).catch((caught) => {
         throw serverFailure(caught, "Couldn't let agents use this computer");
       });
@@ -800,6 +888,11 @@ export class ThisComputer {
     );
   }
 
+  /** Connections whose enrollment the server still lists (as far as it's known). */
+  private live(connections: readonly AgentConnection[]): AgentConnection[] {
+    return connections.filter((connection) => !this.removed.has(connection.agentId));
+  }
+
   /** Every workspace that uses a connection, by server and workspace. */
   private workspacesUsing(connection: AgentConnection): string[] {
     const origin = useKey(connection.apiUrl, connection.workspaceId);
@@ -836,9 +929,13 @@ export class ThisComputer {
       ),
     ];
     for (const connection of candidates) {
+      // An enrollment the server no longer lists can't be reused: it was removed
+      // there, and connecting again enrolls this computer afresh below.
+      const reading = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);
+      if (this.removedOnServer(reading, connection)) continue;
       try {
         if (this.serviceBacked && options.screenControl) {
-          const machine = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);
+          const machine = reading?.kind === "listed" ? reading.machine : null;
           if (!machine?.screenControl) {
             if (!this.deps.enableScreenControl)
               throw new Error("Couldn't verify screen-control access for the existing agent.");
@@ -1506,9 +1603,61 @@ function serverFailure(caught: unknown, failure: string): ThisComputerError {
       cause: caught,
     });
   }
+  if (
+    typeof caught === "object" &&
+    caught !== null &&
+    (caught as { status?: unknown }).status === 401
+  ) {
+    return new ThisComputerError("signed_out", `${failure}: sign in again, then try again.`, {
+      cause: caught,
+    });
+  }
   return new ThisComputerError("connect_failed", `${failure}: ${errorText(caught)}`, {
     cause: caught,
   });
+}
+
+/** A network failure as fetch implementations report it, not a server's answer. */
+const NETWORK_FAILURE =
+  /fetch failed|failed to fetch|networkerror|net::err_|econnrefused|econnreset|enotfound|etimedout|eai_again/iu;
+
+/**
+ * Why the server's list of machines couldn't be read: no network, the
+ * account needs to sign in again, or the server answered with an error. A
+ * server that answered is never reported as unreachable.
+ */
+export function machineReadFailure(caught: unknown): ThisComputerError {
+  if (caught instanceof ThisComputerError) return caught;
+  const status =
+    typeof caught === "object" && caught !== null && "status" in caught
+      ? (caught as { status: unknown }).status
+      : undefined;
+  if (typeof status === "number") {
+    if (status === 401) {
+      return new ThisComputerError(
+        "signed_out",
+        "Sign in again to check this computer's connection.",
+        { cause: caught },
+      );
+    }
+    return new ThisComputerError(
+      "unknown",
+      `Couldn't check this computer's connection: ${errorText(caught)}`,
+      { cause: caught },
+    );
+  }
+  if (caught instanceof TypeError || NETWORK_FAILURE.test(errorText(caught))) {
+    return new ThisComputerError(
+      "offline",
+      "Couldn't reach the server to check this computer's connection. Check your connection and try again.",
+      { cause: caught },
+    );
+  }
+  return new ThisComputerError(
+    "unknown",
+    `Couldn't check this computer's connection: ${errorText(caught)}`,
+    { cause: caught },
+  );
 }
 
 function isSymlink(path: string): boolean {
@@ -1520,7 +1669,12 @@ function isSymlink(path: string): boolean {
 }
 
 function errorText(caught: unknown): string {
-  return caught instanceof Error ? caught.message : String(caught);
+  if (caught instanceof Error) return caught.message;
+  const message =
+    typeof caught === "object" && caught !== null
+      ? (caught as { message?: unknown }).message
+      : null;
+  return typeof message === "string" ? message : String(caught);
 }
 
 /** A plain sentence for a failed agent command: what failed, then why. */

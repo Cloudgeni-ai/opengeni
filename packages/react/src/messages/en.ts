@@ -3614,8 +3614,10 @@ export const englishMessages = {
   "thisComputer.ready": "Agents can use {machineName}",
   "thisComputer.reconnecting": "Connecting {machineName}…",
   "thisComputer.serviceConnecting":
-    "Waiting for the existing agent to report its connection and permissions.",
+    "Waiting for the Opengeni agent on this computer to come online.",
   "thisComputer.paused": "{machineName} is paused",
+  "thisComputer.removed": "{machineName} was removed from this workspace.",
+  "thisComputer.reconnect": "Reconnect",
   "thisComputer.resume": "Resume",
   "thisComputer.pause": "Pause",
   "thisComputer.turnOff": "Turn off",
@@ -3644,6 +3646,9 @@ export const englishMessages = {
     "Another helper is already running on this computer. Restart the computer and try again.",
   "thisComputer.error.busy": "Setup is already in progress.",
   "thisComputer.error.connectFailed": "Couldn't finish setting up this computer. Try again.",
+  "thisComputer.error.removed":
+    "This computer was removed from this workspace. Reconnect it to let agents use it again.",
+  "thisComputer.error.signedOut": "Sign in again, then try again.",
   "thisComputer.error.other": "Something went wrong. Try again.",
   "thisComputer.card.name": "Your computer",
   "thisComputer.card.subtitle": "Use your own computer in chats",

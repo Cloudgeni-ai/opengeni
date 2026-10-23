@@ -39,6 +39,7 @@ import {
   computerName,
   disallowAgentsOnComputer,
   ThisComputer,
+  ThisComputerError,
 } from "@opengeni/agent-host";
 import {
   defaultPermissionGuideLabels,
@@ -252,7 +253,8 @@ export class DesktopShell {
       logDir: app.getPath("logs"),
       mintEnrollToken: async (accountId, workspaceId, screenControl) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         const minted = await client.mintEnrollToken(workspaceId, {
           scope: "user",
           allowScreenControl: screenControl,
@@ -261,17 +263,29 @@ export class DesktopShell {
       },
       allowAgents: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         await allowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
       disallowAgents: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to turn this computer off here.");
+        if (!client)
+          throw new ThisComputerError(
+            "signed_out",
+            "Sign in again to turn this computer off here.",
+          );
         await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
+      // Null only when the server answered without this enrollment (removed
+      // there); a sign-in or network failure rejects instead.
       readMachine: async (accountId, _baseUrl, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) return null;
+        if (!client) {
+          throw new ThisComputerError(
+            "signed_out",
+            "Sign in again to check this computer's connection.",
+          );
+        }
         const machines = await client.listMachines(workspaceId);
         const machine = machines.machines.find((entry) => entry.enrollmentId === enrollmentId);
         return machine
@@ -284,7 +298,8 @@ export class DesktopShell {
       },
       enableScreenControl: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         await client.enableMachineScreenControl(workspaceId, enrollmentId);
       },
       openSystemSettings: (url) => void shell.openExternal(url),
