@@ -99,6 +99,7 @@ export function ChatView(props: ChatViewProps) {
           sessionId: agent.id,
           catalog,
           onComputerReady: () => void send("My computer is ready. Go ahead."),
+          onChromeReady: () => void send("My Chrome is connected. Go ahead."),
         }),
       // History streams in after mount; only a chat that never had a turn gets
       // the welcome, so an existing conversation never flashes it.

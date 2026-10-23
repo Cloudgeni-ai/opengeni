@@ -126,6 +126,14 @@ export interface ThisComputerDeps {
    */
   bundledAgent?: boolean;
   /**
+   * The oldest agent release this app works with (`1.2.3`). A downloaded agent
+   * older than it is replaced with exactly this release from the server it is
+   * connected to, and new downloads fetch this release rather than the server's
+   * stable one. The agent's own updates move it on from there. By default any
+   * working agent stays and downloads take the server's stable release.
+   */
+  minimumAgentVersion?: string;
+  /**
    * The agent's own config folder (its machine identity and connections).
    * By default the agent's usual one; an app with its own agent passes its own.
    */
@@ -1061,7 +1069,17 @@ export class ThisComputer {
       await this.requireService();
       return this.hostedPath;
     }
-    if (await this.versionOf(this.hostedPath)) return this.hostedPath;
+    const version = await this.versionOf(this.hostedPath);
+    if (version && !this.tooOld(version)) return this.hostedPath;
+    if (version) {
+      // An agent that works but is older than the app needs: replace it from
+      // the server it serves. Without one to reach, it keeps running as is.
+      if (this.deps.bundledAgent) return this.hostedPath;
+      const from = server ?? (await this.connections(true))[0]?.apiUrl ?? null;
+      if (!from) return this.hostedPath;
+      await this.download(from).catch(() => undefined);
+      return this.hostedPath;
+    }
     if (this.deps.bundledAgent) {
       throw new ThisComputerError(
         "unsupported",
@@ -1081,6 +1099,11 @@ export class ThisComputer {
     return this.hostedPath;
   }
 
+  private tooOld(version: string): boolean {
+    const minimum = this.deps.minimumAgentVersion;
+    return minimum !== undefined && compareVersions(version, minimum) < 0;
+  }
+
   private async versionOf(binary: string): Promise<string | null> {
     if (!existsSync(binary)) return null;
     const result = await this.run(binary, ["--version"], { timeoutMs: 15_000 });
@@ -1097,7 +1120,8 @@ export class ThisComputer {
     if (!asset) {
       throw new ThisComputerError("unsupported", "Agents can't use this kind of computer yet.");
     }
-    const url = new URL(`/agent/latest/${asset}`, server).toString();
+    const release = this.deps.minimumAgentVersion ? `v${this.deps.minimumAgentVersion}` : "latest";
+    const url = new URL(`/agent/${release}/${asset}`, server).toString();
     const [file, signature] = await Promise.all([
       this.deps.fetch(url),
       this.deps.fetch(`${url}.minisig`),
@@ -1486,4 +1510,15 @@ function failureMessage(failure: string, result: RunResult): string {
   if (result.timedOut) return `${failure}: it took too long. Check your connection and try again.`;
   const detail = lastErrorLine(result.output);
   return detail ? `${failure}: ${detail}` : `${failure}.`;
+}
+
+/** Orders two `major.minor.patch` versions: negative when `left` is older. */
+function compareVersions(left: string, right: string): number {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }

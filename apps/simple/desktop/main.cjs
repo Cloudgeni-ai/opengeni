@@ -382,7 +382,18 @@ function stopServer() {
 }
 
 function openExternalSafely(url) {
-  if (/^https?:/u.test(url)) void shell.openExternal(url);
+  if (!/^https?:/u.test(url)) return;
+  // The Chrome extension's store page belongs in Chrome, whatever the
+  // default browser is. Without Chrome it opens in the default one.
+  if (process.platform === "darwin" && /^https:\/\/chromewebstore\.google\.com\//u.test(url)) {
+    const child = spawn("/usr/bin/open", ["-a", "Google Chrome", url], { stdio: "ignore" });
+    child.once("error", () => void shell.openExternal(url));
+    child.once("exit", (code) => {
+      if (code !== 0) void shell.openExternal(url);
+    });
+    return;
+  }
+  void shell.openExternal(url);
 }
 
 function isBlank(url) {
@@ -636,6 +647,12 @@ if (!app.requestSingleInstanceLock()) {
     // computer while it is connected.
   });
   app.on("before-quit", (event) => {
+    if (!quitConfirmed && computer?.quitIsForPermission()) {
+      // macOS's "Quit & Reopen" after a permission: macOS opens the app again
+      // only when it quits right away, so quit now and open again ourselves.
+      quitConfirmed = true;
+      app.relaunch({ args: process.argv.slice(1).filter((arg) => arg !== "--hidden") });
+    }
     if (!quitConfirmed) {
       event.preventDefault();
       void confirmQuit();
