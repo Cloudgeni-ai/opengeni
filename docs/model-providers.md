@@ -2213,8 +2213,9 @@ model writes its reply as a `text` block; if it still writes none, nothing is
 recorded as the reply. A `text` block is always recorded verbatim. Replay sends
 each signed block back unchanged in its original position, so history bytes
 match what Claude returned; history stored while updates were briefly recorded
-as assistant messages replays the same signed block. Other APIs see the summary
-only as labelled historical reasoning. Other Claude models keep
+as assistant messages replays the same signed block. Other APIs see a newly
+stored summary only as labelled historical reasoning; summaries stored as
+assistant messages during that window are not rewritten. Other Claude models keep
 `display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
