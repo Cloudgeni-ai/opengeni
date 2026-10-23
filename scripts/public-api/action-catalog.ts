@@ -41,7 +41,8 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "a provider's browser redirect back to Opengeni",
   },
   {
-    pattern: /^\/v1\/webhooks\/|^\/v1\/integrations\/slack\/(commands|events|interactions)$/,
+    pattern:
+      /^\/v1\/webhooks\/|^\/v1\/integrations\/(slack\/(commands|events|interactions)|teams\/messages)$/,
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },

@@ -5501,13 +5501,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "POST /v1/integrations/teams/messages",
-    "method": "POST",
-    "path": "/v1/integrations/teams/messages",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",

@@ -144,6 +144,7 @@ describe("organization MCP action catalog", () => {
     ])
       expect(listed.has(key)).toBe(true);
     expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
+    expect(listed.has("POST /v1/integrations/teams/messages")).toBe(false);
   });
 
   test("marks exactly the actions no agent can do as the person", () => {
