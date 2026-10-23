@@ -257,12 +257,12 @@ export async function scheduledConnectionTools(
       ...settings.mcpServers.map(({ id }) => id),
       ...target.mcpServers.map(({ id }) => id),
     ],
-    defaultMcpServerIds: await workspaceSessionToolPolicyDefaultServerIds(
-      db,
-      workspaceId,
-      settings,
-      subjectId,
-    ),
+    // Explicit and inherited selections ignore workspace defaults. Their current
+    // registry is already supplied above; account authority is resolved by callers.
+    defaultMcpServerIds:
+      target.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(db, workspaceId, settings, subjectId)
+        : [],
   }).toolRefs;
 }
 
