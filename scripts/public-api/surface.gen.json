@@ -35512,7 +35512,8 @@
       "SessionAppSurfaces": "type",
       "SessionShellSlots": "type",
       "SessionUiFeatures": "type",
-      "SessionUiPreset": "type"
+      "SessionUiPreset": "type",
+      "SessionViewState": "type"
     },
     "@opengeni/react/session-attention-model": {
       "readAcknowledgementFrontier": "value",
