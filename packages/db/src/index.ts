@@ -3063,9 +3063,11 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
   if (!row) return null;
   // Bootstrap metadata is not RLS-protected. It does not by itself establish
   // that the complete workspace is readable in the caller's database scope.
-  const control = await findWorkspaceControlProjection(db, row.id);
-  if (!control) return null;
-  return mapWorkspace(row, control, await workspaceKindProjection(db, row));
+  return await withWorkspaceRls(db, row.id, async (scopedDb) => {
+    const control = await readWorkspaceControlProjection(scopedDb, row.id);
+    if (!control) return null;
+    return mapWorkspace(row, control, await readWorkspaceKindProjection(scopedDb, row));
+  });
 }
 
 /**
@@ -89491,50 +89493,62 @@ async function findWorkspaceControlProjection(
   db: Database,
   workspaceId: string,
 ): Promise<Workspace["inferenceControl"] | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [control] = await scopedDb
-      .select()
-      .from(schema.workspaceInferenceControls)
-      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
-      .limit(1);
-    if (!control) return null;
-    return {
-      timer: control.timerId
-        ? {
-            id: control.timerId,
-            action: control.timerAction as "pause" | "resume",
-            dueAt: control.timerDueAt!.toISOString(),
-            pauseForSeconds: control.timerPauseForSeconds,
-          }
-        : null,
-      serverTime: new Date().toISOString(),
-      state: control.workspaceState as "active" | "paused",
-      revision: Number(control.revision),
-      reason: control.reason,
-      changedBy: control.changedBy,
-      changedAt: control.changedAt?.toISOString() ?? null,
-    };
-  });
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readWorkspaceControlProjection(scopedDb, workspaceId),
+  );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceControlProjection(
+  db: Database,
+  workspaceId: string,
+): Promise<Workspace["inferenceControl"] | null> {
+  const [control] = await db
+    .select()
+    .from(schema.workspaceInferenceControls)
+    .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
+    .limit(1);
+  if (!control) return null;
+  return {
+    timer: control.timerId
+      ? {
+          id: control.timerId,
+          action: control.timerAction as "pause" | "resume",
+          dueAt: control.timerDueAt!.toISOString(),
+          pauseForSeconds: control.timerPauseForSeconds,
+        }
+      : null,
+    serverTime: new Date().toISOString(),
+    state: control.workspaceState as "active" | "paused",
+    revision: Number(control.revision),
+    reason: control.reason,
+    changedBy: control.changedBy,
+    changedAt: control.changedAt?.toISOString() ?? null,
+  };
 }
 
 async function workspaceKindProjection(
   db: Database,
   row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
 ): Promise<Workspace["kind"]> {
-  return await withRlsContext(
-    db,
-    { accountId: row.accountId, workspaceId: row.id },
-    async (scopedDb) => {
-      const [kind] = await rawRows<{ kind: string }>(
-        scopedDb,
-        sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
-      );
-      if (kind?.kind !== "personal" && kind?.kind !== "shared") {
-        throw new Error(`Workspace ${row.id} has no canonical kind`);
-      }
-      return kind.kind;
-    },
+  return await withRlsContext(db, { accountId: row.accountId, workspaceId: row.id }, (scopedDb) =>
+    readWorkspaceKindProjection(scopedDb, row),
   );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceKindProjection(
+  db: Database,
+  row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
+): Promise<Workspace["kind"]> {
+  const [kind] = await rawRows<{ kind: string }>(
+    db,
+    sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
+  );
+  if (kind?.kind !== "personal" && kind?.kind !== "shared") {
+    throw new Error(`Workspace ${row.id} has no canonical kind`);
+  }
+  return kind.kind;
 }
 
 function mapWorkspace(
