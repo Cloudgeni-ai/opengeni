@@ -1980,6 +1980,10 @@ export const InteractionSemanticSnapshot = /* @__PURE__ */ defineSchema(() =>
         })
         .strict()
         .optional(),
+      /** True when no elements are listed because the session reads them with
+       * the platform's native window-state tool: reading here as well would
+       * invalidate the element tokens that tool handed out. */
+      readByNativeTools: z.literal(true).optional(),
     })
     .strict(),
 );

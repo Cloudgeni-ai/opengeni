@@ -468,6 +468,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
             roots: observation.roots,
             nodeCount: observation.nodeCount,
             ...(observation.incomplete ? { incomplete: observation.incomplete } : {}),
+            ...(observation.readByNativeTools ? { readByNativeTools: true } : {}),
           }
         : null,
       screenshot: null,
