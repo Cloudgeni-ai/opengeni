@@ -48,6 +48,8 @@ let Dialog: ComponentType<{
   onOpenChange: (open: boolean) => void;
 }>;
 beforeAll(async () => {
+  // Message snippets resolve links through the page around the session UI.
+  const { browserPage } = await import("@opengeni/react/app/lib/navigation");
   mock.module("@opengeni/react/app/app-context", () => ({
     useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
   }));
@@ -55,6 +57,7 @@ beforeAll(async () => {
     useNavigate: () => (options: { search: Record<string, unknown> }) => {
       navigations.push(options);
     },
+    usePage: () => browserPage,
   }));
   Dialog = (await import("@opengeni/react/app/components/session/session-search-dialog")).default;
 });
