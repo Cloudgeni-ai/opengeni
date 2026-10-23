@@ -9,7 +9,7 @@ import { PauseIcon, PlayIcon, RotateCcwIcon, RotateCwIcon } from "lucide-react";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-import { formatClock } from "./meeting-model";
+import { formatClock } from "@opengeni/react/recordings";
 
 export type MeetingPlayerHandle = {
   /** Jump to a moment and play from there. */

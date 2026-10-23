@@ -13,7 +13,7 @@ import { Input } from "@opengeni/react/ui/input";
 import { Notice } from "@opengeni/react/ui/notice";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-import { formatClock } from "./meeting-model";
+import { formatClock } from "@opengeni/react/recordings";
 import type { MeetingRecorder } from "./recorder-context";
 
 type RecorderError = NonNullable<MeetingRecorder["error"]>;

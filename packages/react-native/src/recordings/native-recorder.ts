@@ -59,9 +59,18 @@ export interface NativeAudioCapture {
   level(): number;
   /** The recording being captured now, also across a JavaScript reload. */
   activeRecordingId(): string | null;
-  addListener(event: "onChunk", listener: (event: NativeAudioChunkEvent) => void): { remove(): void };
-  addListener(event: "onState", listener: (event: NativeAudioStateEvent) => void): { remove(): void };
-  addListener(event: "onError", listener: (event: NativeAudioErrorEvent) => void): { remove(): void };
+  addListener(
+    event: "onChunk",
+    listener: (event: NativeAudioChunkEvent) => void,
+  ): { remove(): void };
+  addListener(
+    event: "onState",
+    listener: (event: NativeAudioStateEvent) => void,
+  ): { remove(): void };
+  addListener(
+    event: "onError",
+    listener: (event: NativeAudioErrorEvent) => void,
+  ): { remove(): void };
 }
 
 export const NATIVE_RECORDING_MIME_TYPE = "audio/aac";
@@ -151,7 +160,11 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
     },
 
     async start() {
-      if (snapshot.state !== "idle" && snapshot.state !== "failed" && snapshot.state !== "stopped") {
+      if (
+        snapshot.state !== "idle" &&
+        snapshot.state !== "failed" &&
+        snapshot.state !== "stopped"
+      ) {
         return;
       }
       if (options.microphone === false) {
@@ -305,7 +318,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       });
     },
 
-    levels() {
+    levels(): Record<number, number> {
       if (snapshot.state !== "recording") return {};
       return { 0: native.level() };
     },

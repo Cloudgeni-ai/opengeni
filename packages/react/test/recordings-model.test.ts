@@ -18,7 +18,7 @@ import {
   speakerDisplayName,
   speakerIsNamed,
   transcriptErrorText,
-} from "./meeting-model";
+} from "../src/recordings-model";
 
 function segment(
   index: number,

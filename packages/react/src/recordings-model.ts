@@ -1,5 +1,5 @@
 /**
- * Plain helpers for the Meetings pages: words for a recording's state, clock
+ * Plain helpers for meeting UIs (web, phone, embedders): words for a recording's state, clock
  * times, speaker names and colors, and the transcript grouped into turns.
  * No React here, so each rule is tested on its own.
  */

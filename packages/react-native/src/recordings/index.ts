@@ -100,16 +100,30 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-let defaultStore: FileRecordingChunkStore | null = null;
+const stores = new Map<string, FileRecordingChunkStore>();
 
-/** The app's recording store: `opengeni-recordings` in its documents, kept until uploaded. */
-export function expoRecordingChunkStore(): FileRecordingChunkStore {
-  defaultStore ??= createFileRecordingChunkStore({
-    fs: expoRecordingFileSystem,
-    root: new Directory(Paths.document, "opengeni-recordings").uri.replace(/\/+$/u, ""),
-    sha256: sha256Hex,
-  });
-  return defaultStore;
+/**
+ * A recording store in the app's documents, kept until uploaded:
+ * `opengeni-recordings`, or `opengeni-recordings/<scope>` with a scope.
+ */
+export function expoRecordingChunkStore(scope?: string): FileRecordingChunkStore {
+  const key = scope ?? "";
+  let store = stores.get(key);
+  if (!store) {
+    const base = new Directory(Paths.document, "opengeni-recordings");
+    const directory = scope ? new Directory(base, safeScope(scope)) : base;
+    store = createFileRecordingChunkStore({
+      fs: expoRecordingFileSystem,
+      root: directory.uri.replace(/\/+$/u, ""),
+      sha256: sha256Hex,
+    });
+    stores.set(key, store);
+  }
+  return store;
+}
+
+function safeScope(scope: string): string {
+  return scope.replace(/[^A-Za-z0-9._-]/gu, "_");
 }
 
 export type NativeRecorderPlatformOptions = {
@@ -117,6 +131,12 @@ export type NativeRecorderPlatformOptions = {
   notification?: { title: string; text: string };
   /** AAC bit rate. Default 64 kbps, about 29 MB an hour. */
   bitRate?: number;
+  /**
+   * Keeps unsent audio apart per signed-in account, for apps with several:
+   * pass the account's id. Recordings are only ever uploaded with the client
+   * of the store they were saved in.
+   */
+  storeScope?: string;
 };
 
 /** The phone's capture for `useRecorder`, or an unsupported platform without the native module. */
@@ -124,7 +144,7 @@ export function nativeRecorderPlatform(
   options: NativeRecorderPlatformOptions & { notification: { title: string; text: string } },
 ): RecorderPlatform {
   const native = nativeAudioCapture();
-  const store = expoRecordingChunkStore();
+  const store = expoRecordingChunkStore(options.storeScope);
   const fetchImpl = expoFetch as unknown as typeof fetch;
   return {
     supported: native !== null,
@@ -161,9 +181,14 @@ export function useNativeRecorderPlatform(
   const title = options.notification?.title ?? t("native.recorder.notificationTitle");
   const text = options.notification?.text ?? t("native.recorder.notificationText");
   const bitRate = options.bitRate;
+  const storeScope = options.storeScope;
   return useMemo(
     () =>
-      nativeRecorderPlatform({ notification: { title, text }, ...(bitRate ? { bitRate } : {}) }),
-    [title, text, bitRate],
+      nativeRecorderPlatform({
+        notification: { title, text },
+        ...(bitRate ? { bitRate } : {}),
+        ...(storeScope ? { storeScope } : {}),
+      }),
+    [title, text, bitRate, storeScope],
   );
 }

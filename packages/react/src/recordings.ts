@@ -26,3 +26,20 @@ export type {
   UseTranscriptResult,
 } from "./hooks/use-recordings";
 export type { RecordingsClientLike, RecordingsClientOverride } from "./hooks/use-recordings";
+export {
+  activeSegmentIndex,
+  defaultMeetingTitle,
+  defaultSpeakerName,
+  formatClock,
+  formatDuration,
+  groupTranscriptTurns,
+  languageName,
+  meetingPhase,
+  meetingStatusLabel,
+  speakerColorSlots,
+  speakerDisplayName,
+  speakerIsNamed,
+  transcriptErrorText,
+  versionSummary,
+} from "./recordings-model";
+export type { MeetingPhase, TranscriptTurn } from "./recordings-model";

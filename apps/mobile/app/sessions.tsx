@@ -23,6 +23,7 @@ import { appSessionPath } from "@/app-links";
 import { rankChatSearch, workspacesToSearch } from "@/chat-search";
 import { useServerChatSearch } from "@/use-server-chat-search";
 import { cachedLists, rememberLists } from "@/session-list-cache";
+import { isCapturing, useMeetingRecorder } from "@/meetings";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
 import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
@@ -214,6 +215,7 @@ function Sessions() {
             style={{ ...fontStyle(theme), flex: 1, fontSize: 14, color: c.fg }}
           />
         </View>
+        {searching ? null : <MeetingsRow />}
         {searching ? (
           <>
             {results.workspaces.length > 0 ? (
@@ -357,6 +359,41 @@ function WorkspaceResultRow(props: {
         ) : null}
       </View>
       <Text style={{ ...fontStyle(theme), fontSize: 11, color: c["fg-subtle"] }}>Switch</Text>
+    </Pressable>
+  );
+}
+
+/* The rail's Meetings entry, saying so while a recording is running. */
+function MeetingsRow() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const recorder = useMeetingRecorder();
+  const live = isCapturing(recorder);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={live ? "Meetings, recording now" : "Meetings"}
+      onPress={() => router.push("/meetings")}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 10,
+        height: 40,
+        paddingHorizontal: 8,
+        marginBottom: 4,
+        borderRadius: theme.radius.md,
+        backgroundColor: pressed ? c.hover : "transparent",
+      })}
+    >
+      <Icon name="audio-lines" size={16} color={c["fg-muted"]} />
+      <Text style={{ ...fontStyle(theme, 500), flex: 1, fontSize: 15, color: c.fg }}>Meetings</Text>
+      {live ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: c.danger }} />
+          <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c.danger }}>Recording</Text>
+        </View>
+      ) : null}
+      <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
 }
