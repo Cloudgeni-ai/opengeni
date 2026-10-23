@@ -26,6 +26,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
 
 test("required aggregate covers docs and every selected job at exact head", () => {
   const { jobs } = workflow("pr-ci");
+  expect(jobs.contracts.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
   expect(jobs.ready.name).toBe("PR CI");
   expect(jobs.ready.needs).toEqual(["plan", "contracts", "units"]);
   expect(jobs.ready.if).toBe("${{ always() }}");

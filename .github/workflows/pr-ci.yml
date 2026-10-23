@@ -88,6 +88,8 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
+      - name: Fast lint gate
+        run: bun run lint
       - uses: actions/download-artifact@v4
         with:
           name: pr-impact-plan
