@@ -33339,16 +33339,21 @@ async function sessionListTotalsInScope(
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
       -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its own changes and this person opening
-      -- it. One extra row reports truncation.
+      -- latest of its conversations, its newest published version (creation
+      -- is version 1) and this person opening it. Archive, restore, rollback
+      -- and other updates to the Site's record are not activity, so they
+      -- never lift a Site for everyone. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
+        greatest(key.updated_at, site.published_at, opened.opened_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt"
       from site_keys key
       left join lateral (
-        select artifact.title, artifact.status, artifact.created_at, artifact.updated_at
+        select artifact.title, artifact.status, artifact.created_at,
+          (select version.created_at from ${schema.workspaceArtifactVersions} version
+            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'

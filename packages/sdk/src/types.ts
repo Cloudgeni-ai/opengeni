@@ -2058,7 +2058,7 @@ export type SiteConversationGroup = {
   title: string;
   /** Root conversations in the group; 0 for a Site with none yet. */
   conversations: number;
-  /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+  /** Latest activity: its conversations, its newest published version, or the viewer opening it. */
   updatedAt: string;
   /** Creation time of the group's newest conversation, else of the Site. */
   createdAt: string;
