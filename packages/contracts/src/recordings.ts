@@ -177,16 +177,25 @@ export const CreateRecordingUploadsRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type CreateRecordingUploadsRequest = z.infer<typeof CreateRecordingUploadsRequest>;
 
-export type RecordingChunkUpload = {
-  chunkNumber: number;
-  /** Already stored; skip the PUT. */
-  uploaded: boolean;
-  url: string | null;
-  method: "PUT";
-  headers: Record<string, string>;
-  expiresAt: string | null;
-};
-export type CreateRecordingUploadsResponse = { uploads: RecordingChunkUpload[] };
+export const RecordingChunkUpload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    chunkNumber: z.number().int(),
+    /** Already stored; skip the PUT. */
+    uploaded: z.boolean(),
+    /** Presigned URL to PUT the chunk's bytes to; null when already stored. */
+    url: z.string().nullable(),
+    method: z.literal("PUT"),
+    /** Headers the PUT must carry exactly. */
+    headers: z.record(z.string(), z.string()),
+    expiresAt: z.string().nullable(),
+  }),
+);
+export type RecordingChunkUpload = z.infer<typeof RecordingChunkUpload>;
+
+export const CreateRecordingUploadsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ uploads: z.array(RecordingChunkUpload) }),
+);
+export type CreateRecordingUploadsResponse = z.infer<typeof CreateRecordingUploadsResponse>;
 
 /** Confirm chunks whose bytes were PUT; the server checks each object first. */
 export const CompleteRecordingChunksRequest = /* @__PURE__ */ defineSchema(() =>
@@ -205,6 +214,16 @@ export const CompleteRecordingChunksRequest = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type CompleteRecordingChunksRequest = z.infer<typeof CompleteRecordingChunksRequest>;
+
+export const CompleteRecordingChunksResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Chunks now confirmed as stored. */
+    uploaded: z.array(z.number().int()),
+    /** Chunks whose bytes are not (fully) in storage yet; upload them again. */
+    missing: z.array(z.number().int()),
+  }),
+);
+export type CompleteRecordingChunksResponse = z.infer<typeof CompleteRecordingChunksResponse>;
 
 /** Capture is over: every listed chunk must be uploaded. Starts transcription. */
 export const FinalizeRecordingRequest = /* @__PURE__ */ defineSchema(() =>
@@ -315,6 +334,8 @@ export type UpdateRecordingSegmentsRequest = z.infer<typeof UpdateRecordingSegme
 export const CreateRecordingPersonRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      /** Client-generated id; creating the same id again returns the existing person. */
+      personId: z.string().uuid().optional(),
       displayName: z.string().trim().min(1).max(200),
       email: z.string().trim().email().max(320).optional(),
       memberSubjectId: z.string().min(1).max(1024).optional(),
@@ -324,128 +345,212 @@ export const CreateRecordingPersonRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type CreateRecordingPersonRequest = z.infer<typeof CreateRecordingPersonRequest>;
 
-export type RecordingTrack = {
-  trackNumber: number;
-  kind: "audio";
-  source: RecordingTrackSource;
-  mimeType: string;
-  chunkCount: number;
-  totalBytes: number;
-  durationMilliseconds: number;
-  /** The worker has prepared one seekable file for this track. */
-  playable: boolean;
-};
+export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    trackNumber: z.number().int(),
+    kind: z.literal("audio"),
+    source: RecordingTrackSource,
+    mimeType: z.string(),
+    chunkCount: z.number().int(),
+    totalBytes: z.number().int(),
+    durationMilliseconds: z.number().int(),
+    /** The worker has prepared one seekable file for this track. */
+    playable: z.boolean(),
+  }),
+);
+export type RecordingTrack = z.infer<typeof RecordingTrack>;
 
-export type RecordingTranscriptVersion = {
-  id: string;
-  recordingId: string;
-  versionNumber: number;
-  providerId: string;
-  model: string;
-  options: RecordingTranscriptionOptions;
-  state: RecordingTranscriptVersionState;
-  isCurrent: boolean;
-  languages: string[];
-  diarized: boolean;
-  diarization: RecordingDiarization | null;
-  audioMilliseconds: number;
-  segmentCount: number;
-  /** Estimated provider cost at list price, in US dollars. */
-  costUsd: number | null;
-  requestedBySubjectId: string;
-  errorCode: string | null;
-  createdAt: string;
-  completedAt: string | null;
-};
+export const RecordingTranscriptVersion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string(),
+    recordingId: z.string(),
+    versionNumber: z.number().int(),
+    providerId: z.string(),
+    model: z.string(),
+    options: RecordingTranscriptionOptions,
+    state: RecordingTranscriptVersionState,
+    isCurrent: z.boolean(),
+    languages: z.array(z.string()),
+    diarized: z.boolean(),
+    diarization: RecordingDiarization.nullable(),
+    audioMilliseconds: z.number().int(),
+    segmentCount: z.number().int(),
+    /** Estimated provider cost at list price, in US dollars. */
+    costUsd: z.number().nullable(),
+    requestedBySubjectId: z.string(),
+    errorCode: z.string().nullable(),
+    createdAt: z.string(),
+    completedAt: z.string().nullable(),
+  }),
+);
+export type RecordingTranscriptVersion = z.infer<typeof RecordingTranscriptVersion>;
 
-export type Recording = {
-  id: string;
-  workspaceId: string;
-  ownerSubjectId: string;
-  visibility: RecordingVisibility;
-  title: string;
-  state: RecordingState;
-  startedAt: string;
-  captureEndedAt: string | null;
-  durationMilliseconds: number;
-  externalRef: string | null;
-  metadata: Record<string, unknown>;
-  transcription: RecordingTranscriptionOptions;
-  tracks: RecordingTrack[];
-  /** The current transcript version, or the newest one while none is complete. */
-  transcript: RecordingTranscriptVersion | null;
-  createdAt: string;
-  updatedAt: string;
-};
+export const Recording = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string(),
+    workspaceId: z.string(),
+    ownerSubjectId: z.string(),
+    visibility: RecordingVisibility,
+    title: z.string(),
+    state: RecordingState,
+    startedAt: z.string(),
+    captureEndedAt: z.string().nullable(),
+    durationMilliseconds: z.number().int(),
+    externalRef: z.string().nullable(),
+    metadata: z.record(z.string(), z.unknown()),
+    transcription: RecordingTranscriptionOptions,
+    tracks: z.array(RecordingTrack),
+    /** The current transcript version, or the newest one while none is complete. */
+    transcript: RecordingTranscriptVersion.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
+export type Recording = z.infer<typeof Recording>;
 
-export type RecordingPerson = {
-  id: string;
-  displayName: string;
-  memberSubjectId: string | null;
-  email: string | null;
-  externalRef: string | null;
-  createdAt: string;
-};
+export const ListRecordingsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    recordings: z.array(Recording),
+    /** Pass as `beforeStartedAt` and `beforeId` for the next page; null at the end. */
+    nextBefore: z.object({ startedAt: z.string(), id: z.string() }).nullable(),
+  }),
+);
+export type ListRecordingsResponse = z.infer<typeof ListRecordingsResponse>;
 
-export type RecordingSpeaker = {
-  label: string;
-  /** Resolved display name: the person's name, the plain name, or the label. */
-  name: string;
-  personId: string | null;
-  source: RecordingSpeakerSource | null;
-  confidence: number | null;
-};
+export const FinalizeRecordingResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ recording: Recording, transcript: RecordingTranscriptVersion }),
+);
+export type FinalizeRecordingResponse = z.infer<typeof FinalizeRecordingResponse>;
 
-export type RecordingTranscriptSegment = {
-  index: number;
-  startMilliseconds: number;
-  endMilliseconds: number;
-  trackNumber: number | null;
-  /** Effective label after human edits; null when the model gave none. */
-  speakerLabel: string | null;
-  /** Effective text after human edits. */
-  text: string;
-  /** A person corrected this segment's text. */
-  edited: boolean;
-};
+export const ListRecordingTranscriptVersionsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ versions: z.array(RecordingTranscriptVersion) }),
+);
+export type ListRecordingTranscriptVersionsResponse = z.infer<
+  typeof ListRecordingTranscriptVersionsResponse
+>;
 
-export type RecordingTranscriptPage = {
-  version: RecordingTranscriptVersion;
-  speakers: RecordingSpeaker[];
-  segments: RecordingTranscriptSegment[];
-  /** Pass as `after` to read the next page; null at the end. */
-  nextAfter: number | null;
-};
+export const RecordingPerson = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string(),
+    displayName: z.string(),
+    memberSubjectId: z.string().nullable(),
+    email: z.string().nullable(),
+    externalRef: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
+export type RecordingPerson = z.infer<typeof RecordingPerson>;
 
-export type RecordingTranscriptionModel = {
-  providerId: string;
-  providerName: string;
-  model: string;
-  name: string;
-  available: boolean;
-  capabilities: RecordingTranscriptionCapabilities;
-  /** List price in USD per audio hour, when known. */
-  usdPerHour: number | null;
-};
+export const ListRecordingPeopleResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ people: z.array(RecordingPerson) }),
+);
+export type ListRecordingPeopleResponse = z.infer<typeof ListRecordingPeopleResponse>;
 
-export type RecordingTranscriptionCapabilities = {
-  batch: boolean;
-  live: boolean;
-  diarization: boolean;
-  liveDiarization: boolean;
-  /** Transcribes several tracks in one call and keeps them apart. */
-  multichannel: boolean;
-  maxSpeakers: number | null;
-  wordTimestamps: boolean;
-  /** ISO 639 codes the model supports; empty means it does not say. */
-  languages: string[];
-  languageDetection: boolean;
-  keyterms: boolean;
-  /** Provider-side matching against registered voices. */
-  speakerLibrary: boolean;
-  maxDurationSeconds: number | null;
-  maxFileBytes: number | null;
-};
+export const RecordingSpeaker = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    label: z.string(),
+    /** Resolved display name: the person's name, the plain name, or the label. */
+    name: z.string(),
+    personId: z.string().nullable(),
+    source: RecordingSpeakerSource.nullable(),
+    confidence: z.number().nullable(),
+  }),
+);
+export type RecordingSpeaker = z.infer<typeof RecordingSpeaker>;
+
+export const UpdateRecordingSpeakersResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ speakers: z.array(RecordingSpeaker) }),
+);
+export type UpdateRecordingSpeakersResponse = z.infer<typeof UpdateRecordingSpeakersResponse>;
+
+export const RecordingTranscriptSegment = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    index: z.number().int(),
+    startMilliseconds: z.number().int(),
+    endMilliseconds: z.number().int(),
+    trackNumber: z.number().int().nullable(),
+    /** Effective label after human edits; null when the model gave none. */
+    speakerLabel: z.string().nullable(),
+    /** Effective text after human edits. */
+    text: z.string(),
+    /** A person corrected this segment's text. */
+    edited: z.boolean(),
+  }),
+);
+export type RecordingTranscriptSegment = z.infer<typeof RecordingTranscriptSegment>;
+
+export const UpdateRecordingSegmentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ segments: z.array(RecordingTranscriptSegment) }),
+);
+export type UpdateRecordingSegmentsResponse = z.infer<typeof UpdateRecordingSegmentsResponse>;
+
+export const RecordingTranscriptPage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    version: RecordingTranscriptVersion,
+    speakers: z.array(RecordingSpeaker),
+    segments: z.array(RecordingTranscriptSegment),
+    /** Pass as `after` to read the next page; null at the end. */
+    nextAfter: z.number().int().nullable(),
+  }),
+);
+export type RecordingTranscriptPage = z.infer<typeof RecordingTranscriptPage>;
+
+/** A short-lived link to one track's prepared audio, for playback. */
+export const RecordingTrackAudio = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string(),
+    expiresAt: z.string(),
+    mimeType: z.string(),
+    bytes: z.number().int(),
+  }),
+);
+export type RecordingTrackAudio = z.infer<typeof RecordingTrackAudio>;
+
+export const RecordingTranscriptionCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    batch: z.boolean(),
+    live: z.boolean(),
+    diarization: z.boolean(),
+    liveDiarization: z.boolean(),
+    /** Transcribes several tracks in one call and keeps them apart. */
+    multichannel: z.boolean(),
+    maxSpeakers: z.number().int().nullable(),
+    wordTimestamps: z.boolean(),
+    /** ISO 639 codes the model supports; empty means it does not say. */
+    languages: z.array(z.string()),
+    languageDetection: z.boolean(),
+    keyterms: z.boolean(),
+    /** Provider-side matching against registered voices. */
+    speakerLibrary: z.boolean(),
+    maxDurationSeconds: z.number().nullable(),
+    maxFileBytes: z.number().nullable(),
+  }),
+);
+export type RecordingTranscriptionCapabilities = z.infer<typeof RecordingTranscriptionCapabilities>;
+
+export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    providerId: z.string(),
+    providerName: z.string(),
+    model: z.string(),
+    name: z.string(),
+    /** A credential for the provider is set up for this workspace. */
+    available: z.boolean(),
+    capabilities: RecordingTranscriptionCapabilities,
+    /** List price in USD per audio hour, when known. */
+    usdPerHour: z.number().nullable(),
+  }),
+);
+export type RecordingTranscriptionModel = z.infer<typeof RecordingTranscriptionModel>;
+
+export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(RecordingTranscriptionModel),
+    /** The model new transcripts use when a request names none. */
+    default: z.object({ providerId: z.string(), model: z.string() }),
+  }),
+);
+export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;
 
 export const RECORDING_EVENT_TYPES = [
   "recording.started",

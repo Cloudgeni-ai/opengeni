@@ -56,6 +56,7 @@ export default defineConfig({
     "src/session-attention-model.ts",
     "src/testing/session-scenarios.ts",
     "src/realtime.ts",
+    "src/recordings.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
     "src/artifacts-document.ts",

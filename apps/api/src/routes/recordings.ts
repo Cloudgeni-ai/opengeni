@@ -37,6 +37,7 @@ import {
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  recordAuditEvent,
   RecordingConflictError,
   RecordingForbiddenError,
   RecordingNotFoundError,
@@ -262,6 +263,24 @@ export function registerRecordingRoutes(
         };
       }),
     );
+    const issued = uploads.filter((upload) => upload.url !== null);
+    if (issued.length > 0) {
+      // Signed URLs are bearer capabilities: record the issuance (never the URL or key).
+      await recordAuditEvent(db, {
+        accountId: actor.accountId,
+        workspaceId: actor.workspaceId,
+        subjectId: actor.subjectId,
+        action: "recording.signed_upload.issued",
+        targetType: "recording",
+        targetId: recordingId,
+        metadata: {
+          recordingId,
+          trackNumber: body.trackNumber,
+          chunkNumbers: issued.map((upload) => upload.chunkNumber),
+          expiresAt: issued[0]!.expiresAt,
+        },
+      });
+    }
     return c.json({ uploads });
   });
 
@@ -451,6 +470,15 @@ export function registerRecordingRoutes(
       expiresInSeconds: PLAYBACK_URL_SECONDS,
       audience: "public",
     });
+    await recordAuditEvent(db, {
+      accountId: actor.accountId,
+      workspaceId: actor.workspaceId,
+      subjectId: actor.subjectId,
+      action: "recording.signed_audio.issued",
+      targetType: "recording",
+      targetId: recordingId,
+      metadata: { recordingId, trackNumber, expiresAt: link.expiresAt.toISOString() },
+    });
     return c.json({
       url: link.url,
       expiresAt: link.expiresAt.toISOString(),
@@ -471,10 +499,7 @@ export function registerRecordingRoutes(
 
   app.post("/v1/workspaces/:workspaceId/recording-people", async (c) => {
     const actor = await actorFor(c, "sessions:create");
-    const body = await parseRequestJson(
-      c,
-      CreateRecordingPersonRequest.extend({ personId: z.string().uuid().optional() }),
-    );
+    const body = await parseRequestJson(c, CreateRecordingPersonRequest);
     const { personId, ...person } = body;
     const result = await guard(() =>
       createRecordingPerson(db, { ...actor, personId: personId ?? crypto.randomUUID(), ...person }),
