@@ -11,6 +11,23 @@ export const RECORDING_MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 export const RECORDING_MAX_DURATION_MILLISECONDS = 10 * 60 * 60 * 1_000;
 export const RECORDING_UPLOAD_BATCH_MAX = 50;
 
+/**
+ * The audio containers a track can be captured in: WebM or Ogg Opus and MP4
+ * AAC from browsers, and an ADTS AAC stream from phones, whose frames
+ * concatenate across chunks the way WebM clusters do.
+ */
+export type RecordingAudioContainer = "webm" | "mp4" | "ogg" | "aac";
+
+/** The container a track's MIME type names, or null when recordings cannot use it. */
+export function recordingAudioContainer(mimeType: string): RecordingAudioContainer | null {
+  const base = mimeType.split(";")[0]!.trim().toLowerCase();
+  if (base === "audio/webm" || base === "video/webm") return "webm";
+  if (base === "audio/mp4" || base === "video/mp4" || base === "audio/x-m4a") return "mp4";
+  if (base === "audio/ogg" || base === "application/ogg") return "ogg";
+  if (base === "audio/aac" || base === "audio/aacp" || base === "audio/x-aac") return "aac";
+  return null;
+}
+
 export const RecordingVisibility = /* @__PURE__ */ defineSchema(() =>
   z.enum(["private", "workspace"]),
 );
@@ -133,7 +150,15 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
                 .min(0)
                 .max(RECORDING_MAX_TRACKS - 1),
               source: RecordingTrackSource,
-              mimeType: z.string().trim().min(1).max(128),
+              mimeType: z
+                .string()
+                .trim()
+                .min(1)
+                .max(128)
+                .refine(
+                  (mimeType) => recordingAudioContainer(mimeType) !== null,
+                  "mimeType must be audio/webm, audio/ogg, audio/mp4 or audio/aac",
+                ),
             })
             .strict(),
         )

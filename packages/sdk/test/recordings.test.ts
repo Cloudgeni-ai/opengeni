@@ -333,7 +333,9 @@ describe("RecordingUploader", () => {
       "0/1",
       "1/0",
     ]);
-    expect(new TextDecoder().decode(chunks[0]!.bytes)).toBe("m0");
+    expect(chunks[0]).not.toHaveProperty("bytes");
+    expect(chunks[0]!.byteLength).toBe(2);
+    expect(new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!)).toBe("m0");
     expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({ 0: 2, 1: 1 });
 
     const { uploader } = uploaderFor(server, reopened);
@@ -341,5 +343,53 @@ describe("RecordingUploader", () => {
     expect((await uploader.finish(RECORDING)).finalized).toBe(true);
     expect(await reopened.listRecordings()).toEqual([]);
     expect(await reopened.listChunks(RECORDING)).toEqual([]);
+    expect(await reopened.readChunk(RECORDING, 0, 0)).toBeNull();
+  });
+
+  test("an IndexedDB store from the first version keeps its chunks after the upgrade", async () => {
+    const factory = new IDBFactory();
+    // The first version's layout: chunk records carried their bytes.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("old", 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        db.createObjectStore("recordings", { keyPath: "recordingId" });
+        db.createObjectStore("chunks", {
+          keyPath: ["recordingId", "trackNumber", "chunkNumber"],
+        }).createIndex("recordingId", "recordingId");
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction(["chunks"], "readwrite");
+        tx.objectStore("chunks").put({
+          recordingId: RECORDING,
+          trackNumber: 0,
+          chunkNumber: 0,
+          bytes: new TextEncoder().encode("old"),
+          sha256: "x",
+          startMilliseconds: 0,
+          durationMilliseconds: 5_000,
+        });
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    const store = createIndexedDbRecordingChunkStore({ indexedDB: factory, databaseName: "old" });
+    expect(await store.listChunks(RECORDING)).toEqual([
+      {
+        recordingId: RECORDING,
+        trackNumber: 0,
+        chunkNumber: 0,
+        byteLength: 3,
+        sha256: "x",
+        startMilliseconds: 0,
+        durationMilliseconds: 5_000,
+      },
+    ]);
+    expect(new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!)).toBe("old");
   });
 });

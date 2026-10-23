@@ -2286,6 +2286,8 @@ export const englishMessages = {
   "native.ui.timeline.worker": "Worker",
   "native.ui.timeline.working": "Working",
   "native.ui.timeline.workingOnIt": "Working on it",
+  "native.recorder.notificationText": "Tap to return to the recording.",
+  "native.recorder.notificationTitle": "Recording audio",
   "native.voiceInput.allowMicrophoneAccessInSettings":
     "Allow microphone access in Settings to dictate.",
   "native.voiceInput.couldNotTranscribe":
