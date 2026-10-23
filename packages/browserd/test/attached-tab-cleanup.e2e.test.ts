@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import type { BrowserActionCommand } from "@opengeni/contracts";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 import type { AttachedBrowserBridgeConnector } from "../src/attached-cdp";
 import { readAttachedTabLedger, writeAttachedTabLedger } from "../src/attached-tab-ledger";
@@ -154,6 +156,123 @@ e2e(
   90_000,
 );
 
+e2e(
+  "a session waiting on a JavaScript dialog keeps Chrome; a tab blocked while released does not hold its return",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-attached-dialog-e2e-");
+    const root = join(directory, "state");
+    const chrome = Bun.spawn(
+      [
+        process.env.OPENGENI_BROWSER_EXECUTABLE ?? "chromium",
+        "--headless=new",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${join(directory, "profile")}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+      ],
+      { stdout: "ignore", stderr: "pipe" },
+    );
+    const browser = await CdpConnection.connect(await devtoolsEndpoint(chrome.stderr));
+    const bridge = new ChromeDebuggerBridge(browser);
+    const connect: AttachedBrowserBridgeConnector = async () => ({
+      request: async (payload) => await bridge.request(payload),
+      close: () => undefined,
+    });
+    const clock = { now: Date.now() };
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: root,
+      connectAttachedBridge: connect,
+      now: () => clock.now,
+    });
+    try {
+      const session = reference(11);
+      const work = (
+        await supervisor.createSession({
+          ...session,
+          headed: true,
+          transport: TRANSPORT,
+          initialUrl: PAGE,
+        })
+      ).observation.target.id;
+
+      // The agent's action opened a confirm; it asks the person and waits.
+      await bridge.request({
+        type: "debugger.command",
+        tabId: work,
+        method: "Runtime.evaluate",
+        params: { expression: "setTimeout(() => confirm('Are you sure?'), 0)" },
+      });
+      let observation = await supervisor.observe(session, work);
+      await waitFor(async () => {
+        observation = await supervisor.observe(session, work);
+        return observation.dialog !== null;
+      });
+      // Chrome offers the dialog only to the debugger attached when it opened:
+      // releasing now would leave nobody able to see or answer it.
+      clock.now += 11 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(bridge.attachedTabs()).toContain(work);
+      const answered = await supervisor.action({
+        protocolVersion: 1,
+        operationId: randomUUID(),
+        browserSessionId: session.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: work,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration,
+        expectedFrameId: observation.frameId!,
+        actor: { kind: "agent", subjectId: "attached-dialog-e2e" },
+        action: { type: "handle_dialog", response: "accept" },
+      } as BrowserActionCommand);
+      expect(answered.state).toBe("completed");
+      expect(answered.observation?.dialog ?? null).toBeNull();
+      clock.now += 11 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      expect(bridge.attachedTabs()).toEqual([]);
+
+      // While nobody holds the browser, the page opens an alert. No debugger
+      // attached later can see or answer it, and the page answers nothing
+      // until the person does. The session's return opens a new tab within a
+      // few seconds instead of waiting on it, and leaves the tab as it is.
+      const { sessionId } = await browser.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: bridge.targetOf(work),
+        flatten: true,
+      });
+      await browser.send("Page.enable", {}, { sessionId });
+      void browser
+        .send("Runtime.evaluate", { expression: "alert('Saved')" }, { sessionId })
+        .catch(() => undefined);
+      await Bun.sleep(300);
+      await browser.send("Target.detachFromTarget", { sessionId });
+      const started = Date.now();
+      const recovered = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(recovered.observation.target.id).not.toBe(work);
+      expect((await bridge.pages()).map((page) => page.id)).toContain(work);
+    } finally {
+      await supervisor.close().catch(() => undefined);
+      browser.close();
+      chrome.kill();
+      await chrome.exited;
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  150_000,
+);
+
+async function waitFor(condition: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await Bun.sleep(50);
+  }
+}
+
 /** The Opengeni Chrome extension's bridge, over a real Chromium: tabs are page
  * targets, chrome.debugger is one flattened CDP session per tab shared by
  * every caller, closing a tab ends its attachment, and debugger events reach
@@ -178,6 +297,10 @@ class ChromeDebuggerBridge {
         params: event.params,
       });
     });
+  }
+
+  targetOf(tabId: string): string {
+    return this.target(tabId);
   }
 
   attachedTabs(): string[] {

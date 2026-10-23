@@ -506,6 +506,9 @@ export type AgentBrowserDriverOptions = {
     /** A blank tab this session opened that another session is using now
      * stays open; whoever cleans up later closes it once it is free. */
     inUseElsewhere?: (targetId: string) => boolean;
+    /** How long a continuing runtime waits for the earlier tab to answer
+     * before it opens a new one instead. */
+    rebindTimeoutMs?: number;
   };
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
@@ -1106,36 +1109,51 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Continue in the tab an earlier runtime of this session was using when
-   * it is still open; null when a new tab is needed instead. */
+   * it is still open and answers promptly; null when a new tab is needed
+   * instead. A tab whose page does not answer (a dialog the page opened while
+   * no agent held the browser blocks it, and only the person can answer that
+   * one) is left as it is, rather than holding the session's return. */
   private async rebindPreviousTarget(
     connection: BrowserCdpConnection,
   ): Promise<BrowserObservationValue | null> {
     const targetId = this.rebindTargetId;
     this.rebindTargetId = null;
     if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
-    let info: TargetInfo | undefined;
-    try {
-      info = (await this.targetInfos(connection)).find(
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => {
+      deadline = setTimeout(
+        () => resolve(null),
+        this.ownedTabs?.rebindTimeoutMs ?? REBIND_TIMEOUT_MS,
+      );
+      deadline.unref?.();
+    });
+    let abandoned = false;
+    const rebind = (async () => {
+      const info = (await this.targetInfos(connection)).find(
         (candidate) => candidate.targetId === targetId,
       );
-    } catch {
-      return null;
-    }
-    if (!info || !isVisibleTarget(info)) return null;
-    this.selectedTargetId = targetId;
+      if (abandoned || !info || !isVisibleTarget(info)) return null;
+      this.selectedTargetId = targetId;
+      return await this.observe(targetId);
+    })().catch(() => null);
     try {
-      const observation = await this.observe(targetId);
-      this.windowParking?.arm();
-      this.ownedTabsChanged();
-      return observation;
-    } catch {
-      // A tab that cannot be read now (it closed meanwhile, or Chrome will
-      // no longer let the extension control it) is not worth failing the
-      // session for: open a new one, as a new session would.
-      this.removeState(targetId);
-      this.selectedTargetId = null;
-      return null;
+      const observation = await Promise.race([rebind, expired]);
+      if (observation) {
+        this.windowParking?.arm();
+        this.ownedTabsChanged();
+        return observation;
+      }
+    } finally {
+      clearTimeout(deadline);
     }
+    // A tab that cannot be read now (it closed meanwhile, Chrome will no
+    // longer let the extension control it, or its page is not answering) is
+    // not worth failing the session for: open a new one, as a new session
+    // would. A read still waiting on the tab ends by itself.
+    abandoned = true;
+    if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    if (!this.attaching.has(targetId)) this.removeState(targetId);
+    return null;
   }
 
   private recordCreatedTarget(targetId: string): void {
@@ -1310,6 +1328,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return this.preserveHeadlessSessionCookies;
   }
 
+  /** Whether a JavaScript dialog is waiting for an answer in any tab. Chrome
+   * offers a dialog only to the debugger that was attached when it opened:
+   * one attached later can neither see nor answer it, and the page stays
+   * blocked. Letting go of the browser now would strand it. */
+  hasOpenDialog(): boolean {
+    for (const state of this.states.values()) if (state.dialog) return true;
+    return false;
+  }
+
   async target(targetId: string): Promise<BrowserTargetValue | null> {
     const connection = await this.ensureConnection();
     const info = (await this.targetInfos(connection)).find(
@@ -1323,7 +1350,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // event-derived target/document/frame generations authoritative until the
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
-    if (!state.dialog) await this.refreshFrame(state);
+    // A dialog can open just before its event arrives (the person's own
+    // Chrome reports events by polling): a read that meets one reports it.
+    if (!state.dialog) {
+      try {
+        await this.untilDialog(state, async () => await this.refreshFrame(state));
+      } catch (error) {
+        if (!(error instanceof DialogBlockedError)) throw error;
+      }
+    }
     return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
@@ -7077,6 +7112,11 @@ function tabCrashedError(): InteractionDefiniteDriverError {
     false,
   );
 }
+
+/** How long a runtime continuing a session in the person's own browser waits
+ * for the tab the session was using before it opens a new one instead. A
+ * live page answers in well under a second. */
+const REBIND_TIMEOUT_MS = 5_000;
 
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";

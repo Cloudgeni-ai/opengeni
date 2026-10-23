@@ -341,6 +341,11 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
   isTerminal?(): boolean;
+  /** Whether a JavaScript dialog is waiting for an answer in one of its tabs.
+   * Releasing the browser then would lose it: a relaunched browser no longer
+   * has it, and in the person's own Chrome a debugger attached later can
+   * neither see nor answer it. */
+  hasOpenDialog?(): boolean;
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
@@ -538,7 +543,7 @@ export class BrowserSupervisor {
   private readonly now: () => number;
   private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
   /** Browsers an earlier controller handed off that this one is stopping. */
-  private readonly releasingDetached = new Map<string, Promise<void>>();
+  private readonly releasingDetached = new Map<string, Promise<unknown>>();
   /** Handed-off browsers the last sweep found still waiting for their idle
    * time; the controller is not empty while any remain. */
   private detachedWaiting = 0;
@@ -716,13 +721,16 @@ export class BrowserSupervisor {
 
   /** Settle one session's leftovers, claimed like a handed-off browser's
    * release so that its recovery or end waits instead of racing it. The
-   * check and claim happen without yielding. Returns whether it settled. */
+   * check and claim happen without yielding. Returns whether it settled; a
+   * session another live controller on this machine took over meanwhile is
+   * left to that controller. */
   private async settleAttachedLeftovers(browserSessionId: string): Promise<boolean> {
     if (this.attachedSessionBusy(browserSessionId)) return false;
     const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
-    const release = (async () => {
+    const release = (async (): Promise<boolean> => {
       const ledger = readAttachedTabLedger(sessionDirectory);
-      if (!ledger || ledger.settled) return;
+      if (!ledger || ledger.settled) return true;
+      if (ledger.ownerPid !== process.pid && processRunning(ledger.ownerPid)) return false;
       let next;
       try {
         next = await settleAttachedTabLedger(ledger, this.connectAttachedBridge, Date.now());
@@ -738,10 +746,11 @@ export class BrowserSupervisor {
       }
       writeAttachedTabLedger(sessionDirectory, next);
       if (!next.settled) throw new Error("some tabs could not be cleaned up yet");
+      return true;
     })();
     this.releasingDetached.set(browserSessionId, release);
     try {
-      await release;
+      if (!(await release)) return false;
       this.attachedLeftoverWarnings.delete(browserSessionId);
       return true;
     } catch (error) {
@@ -1352,8 +1361,9 @@ export class BrowserSupervisor {
    * graceful shutdown and reattached on its next causal request, and a session
    * whose driver already ended has nothing left to lose. A quiescent attached
    * Chrome session is likewise left intact in the user's browser. Any other
-   * session (external providers, launches without a durable working runtime)
-   * or any admitted command still blocks. */
+   * session (external providers, launches without a durable working runtime),
+   * a JavaScript dialog an agent has yet to answer, or any admitted command
+   * still blocks. */
   isIdle(): boolean {
     return this.updateBlockers().length === 0;
   }
@@ -3691,7 +3701,9 @@ function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
 }
 
 /** A browser nobody is using that its next request can bring back: no
- * request, live view, recording or recovery in progress. A managed browser
+ * request, live view, recording, recovery or unanswered JavaScript dialog in
+ * progress (an agent waiting on a dialog is still using the browser, and
+ * releasing it would lose the dialog). A managed browser
  * needs a stopped profile its next request can relaunch. A session in the
  * person's own Chrome needs nothing kept here: its tabs live on in Chrome, and
  * its next request continues in the tab it was using. */
@@ -3705,6 +3717,7 @@ function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
     runtime.recovery === null &&
     runtime.externalAuthTail === null &&
     runtime.controller.isIdle() &&
+    runtime.driver.hasOpenDialog?.() !== true &&
     (transport === "attached_chrome"
       ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
       : hasPreservableWorkingRuntime(runtime))
@@ -3729,6 +3742,8 @@ function restartPreservesRuntime(runtime: Runtime): boolean {
   if (!runtime.controller.isIdle()) return false;
   // A session whose driver already ended has no live state left to lose.
   if (runtime.driver.isTerminal?.()) return true;
+  // A restart would lose a dialog the agent has yet to answer.
+  if (runtime.driver.hasOpenDialog?.()) return false;
   // Attached Chrome lives outside this controller: its tabs and pages survive
   // our restart (only the empty tabs the session opened close, and Chrome's
   // debugger is released), and the session's next request continues in the

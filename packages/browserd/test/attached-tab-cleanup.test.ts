@@ -43,9 +43,28 @@ class FakeChromeProfile {
   readonly attached = new Set<string>();
   readonly requests: Array<Record<string, unknown>> = [];
   failListing = 0;
+  /** Runs as a controller connects to the profile. */
+  onConnect: (() => void) | null = null;
   private nextTab = 10;
+  private readonly events: Array<Record<string, unknown>> = [];
 
-  readonly connect: AttachedBrowserBridgeConnector = async (options) => this.bridge(options);
+  readonly connect: AttachedBrowserBridgeConnector = async (options) => {
+    this.onConnect?.();
+    return this.bridge(options);
+  };
+
+  /** The page in a tab opens (or a person answers) a JavaScript dialog. */
+  dialog(tabId: string, open: boolean): void {
+    this.events.push({
+      sequence: this.events.length + 1,
+      tabId,
+      sessionId: null,
+      method: open ? "Page.javascriptDialogOpening" : "Page.javascriptDialogClosed",
+      params: open
+        ? { url: this.tabs.get(tabId)?.url, message: "Are you sure?", type: "confirm" }
+        : { result: true, userInput: "" },
+    });
+  }
 
   bridge(
     options: Pick<AttachedBrowserBridgeOptions, "connectionGeneration">,
@@ -111,8 +130,12 @@ class FakeChromeProfile {
       case "debugger.detach":
         this.attached.delete(tabId);
         return { detached: true };
-      case "debugger.poll":
-        return { events: [], cursor: 0, truncated: false };
+      case "debugger.poll": {
+        const events = this.events.filter(
+          (event) => Number(event.sequence) > Number(payload.afterSequence ?? 0),
+        );
+        return { events, cursor: this.events.length, truncated: false };
+      }
       case "debugger.command":
         if (!this.attached.has(tabId))
           throw new AttachedBrowserBridgeError(
@@ -225,6 +248,14 @@ async function writeLeftovers(
   });
 }
 
+async function waitFor(condition: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await Bun.sleep(20);
+  }
+}
+
 /** The pid of a process that has exited: a crashed controller. */
 async function exitedPid(): Promise<number> {
   const child = Bun.spawn(["true"]);
@@ -307,6 +338,39 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       clock.now += 2 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
       expect(chrome.tabs.has(tab)).toBe(false);
+    });
+  });
+
+  test("a session waiting on a JavaScript dialog keeps Chrome until the dialog is answered", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(11);
+      const tab = (
+        await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
+      ).observation.target.id;
+      chrome.tabs.get(tab)!.url = "https://work.example.test/";
+      // The agent's click opened a confirm; it asks the person and waits.
+      chrome.dialog(tab, true);
+      await waitFor(async () => (await supervisor.observe(session, tab)).dialog !== null);
+      clock.now += 11 * MINUTE;
+      // Chrome offers a dialog only to the debugger attached when it opened,
+      // so letting go now would strand it; a restart would too.
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(chrome.attached.has(tab)).toBe(true);
+      expect(supervisor.updateBlockers()).toContainEqual({
+        kind: "browser_session",
+        resourceId: session.browserSessionId,
+        count: 1,
+      });
+
+      // Once it is answered, the idle session is released as any other.
+      chrome.dialog(tab, false);
+      await waitFor(async () => (await supervisor.observe(session, tab)).dialog === null);
+      clock.now += 11 * MINUTE;
+      expect(supervisor.updateBlockers()).toEqual([]);
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      expect(chrome.attached.size).toBe(0);
+      expect(chrome.tabs.has(tab)).toBe(true);
     });
   });
 
@@ -412,6 +476,56 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
       expect(await supervisor.releaseAttachedLeftovers()).toEqual([]);
       expect(chrome.tabs.has(blank)).toBe(true);
       expect(ledger(root, 7)?.settled).toBe(false);
+    });
+  });
+
+  test("a session a live controller takes over while the sweep runs is left to it", async () => {
+    await withChrome(async ({ chrome, root, open }) => {
+      const first = chrome.open(BLANK);
+      const second = chrome.open(BLANK);
+      await writeLeftovers(root, 12, { createdTabs: [first] });
+      await writeLeftovers(root, 13, { createdTabs: [second] });
+      // Both owners had exited when the sweep listed them. While it cleans
+      // up the first, another controller on this machine takes over both.
+      chrome.onConnect = () => {
+        chrome.onConnect = null;
+        for (const sequence of [12, 13]) {
+          const directory = join(root, "sessions", reference(sequence).browserSessionId);
+          writeAttachedTabLedger(directory, {
+            ...readAttachedTabLedger(directory)!,
+            ownerPid: process.ppid,
+          });
+        }
+      };
+      const supervisor = await open();
+      await supervisor.releaseAttachedLeftovers();
+      // The sweep had already started on one of them; the other is left to
+      // its new owner, untouched.
+      const settled = [12, 13].filter((sequence) => ledger(root, sequence)?.settled);
+      expect(settled).toHaveLength(1);
+      const kept = settled[0] === 12 ? 13 : 12;
+      expect(ledger(root, kept)).toMatchObject({ settled: false, ownerPid: process.ppid });
+      expect(chrome.tabs.has(kept === 12 ? first : second)).toBe(true);
+      expect(chrome.closed("tabs.close")).toEqual([kept === 12 ? second : first]);
+    });
+  });
+
+  test("ending a session another live controller holds leaves its tabs to that controller", async () => {
+    await withChrome(async ({ chrome, root, open }) => {
+      const blank = chrome.open(BLANK);
+      chrome.attached.add(blank);
+      await writeLeftovers(root, 14, {
+        createdTabs: [blank],
+        attachedTabs: [blank],
+        ownerPid: process.ppid,
+      });
+      const supervisor = await open();
+      await expect(supervisor.endSession(reference(14))).rejects.toMatchObject({
+        code: "resource_not_found",
+      });
+      expect(chrome.tabs.has(blank)).toBe(true);
+      expect(chrome.attached.has(blank)).toBe(true);
+      expect(ledger(root, 14)).toMatchObject({ settled: false, ownerPid: process.ppid });
     });
   });
 
