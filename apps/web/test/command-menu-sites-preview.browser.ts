@@ -101,7 +101,7 @@ try {
     // Chats still come first; Sites follow them even when a Site matches better.
     const labels = await menu(page)
       .getByRole("group")
-      .evaluateAll((groups) => groups.map((group) => group.getAttribute("aria-label")));
+      .evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label")));
     assert.deepEqual(labels.slice(0, 2), ["Chats", "Sites"]);
     await page.screenshot({ path: `${output}/mixed-query-${theme}.png` });
 
