@@ -562,6 +562,10 @@ export class GitHubReader {
           .filter((j) => j.conclusion !== "skipped")
           .every(
             (j) =>
+              j.runner_group_id === 0 &&
+              j.runner_group_name === "GitHub Actions" &&
+              Number.isSafeInteger(j.runner_id) &&
+              j.runner_id > 0 &&
               Array.isArray(j.labels) &&
               !j.labels.includes("self-hosted") &&
               j.labels.some((l: string) => /^(ubuntu|windows|macos)-/.test(l)),

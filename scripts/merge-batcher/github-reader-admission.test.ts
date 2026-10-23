@@ -15,6 +15,7 @@ async function fixture() {
   const state = {
     commentsRead: false,
     hosted: true,
+    hostedIdentity: true,
     currentAttempt: 1,
     jobCheckId: 100,
     reviewRequired: false,
@@ -135,6 +136,9 @@ async function fixture() {
               status: "completed",
               conclusion: "success",
               labels: state.hosted ? ["ubuntu-latest"] : ["self-hosted", "linux"],
+              runner_id: 1000123456,
+              runner_group_id: state.hostedIdentity ? 0 : 1,
+              runner_group_name: state.hostedIdentity ? "GitHub Actions" : "Default",
               check_run_url: `https://api.github.com/repos/Cloudgeni-ai/opengeni/check-runs/${state.jobCheckId}`,
             },
           ],
@@ -169,6 +173,11 @@ test("latest attempt must contain the required check, not an older successful jo
 test("self-hosted jobs are not hosted-CI evidence", async () => {
   const f = await fixture();
   f.state.hosted = false;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+});
+test("hosted-looking labels alone cannot prove a GitHub-hosted runner", async () => {
+  const f = await fixture();
+  f.state.hostedIdentity = false;
   expect((await f.reader.ready()).ready).toHaveLength(0);
 });
 test("native ruleset and classic review requirements both apply without added reviews", async () => {
