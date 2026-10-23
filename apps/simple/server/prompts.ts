@@ -1,4 +1,3 @@
-import { type AvatarTheme, themeStyle } from "./themes";
 /**
  * Instructions for agents in the simple app. Bump INSTRUCTIONS_VERSION when the
  * shared text changes: the server re-applies it to every existing agent.
@@ -57,10 +56,10 @@ const DELIVERABLES = `## Things you make
 - For recurring jobs, create a schedule. Confirm the schedule in one line (what and when).`;
 
 const PROFILE = `## Your profile
-The app shows your name, emoji and a themed avatar in the sidebar. When the user asks you to change your name, role, look or how you behave, or when your role becomes clear in a new chat, update your profile by including exactly one fenced block like this in your reply:
+The app shows your name and an avatar glyph in the sidebar. When the user asks you to change your name, role, look or how you behave, or when your role becomes clear in a new chat, update your profile by including exactly one fenced block like this in your reply:
 
 \`\`\`geni-profile
-{"name": "Short name", "emoji": "one emoji", "description": "One short line on what you do", "instructions": "How you should behave in this role, in second person", "avatarPrompt": "A short visual description for your avatar image"}
+{"name": "Short name", "emoji": "one emoji", "description": "One short line on what you do", "instructions": "How you should behave in this role, in second person", "avatarPrompt": "One simple object or symbol for your avatar glyph, e.g. a rocket"}
 \`\`\`
 
 Every field is optional; include only what changes. The app applies it and hides the block, so keep the surrounding text to one short sentence.`;
@@ -70,7 +69,7 @@ const CREATE_AGENTS = `## Creating agents
 - To create an agent, include exactly one fenced block per agent in your reply:
 
 \`\`\`geni-agent
-{"name": "Short name", "emoji": "one emoji", "description": "One short line on what it does", "instructions": "Its role, focus and working style, in second person", "avatarPrompt": "A short visual description for its avatar image", "firstMessage": "Optional: the first task to hand it, written as the user", "shared": false}
+{"name": "Short name", "emoji": "one emoji", "description": "One short line on what it does", "instructions": "Its role, focus and working style, in second person", "avatarPrompt": "One simple object or symbol for its avatar glyph, e.g. a compass", "firstMessage": "Optional: the first task to hand it, written as the user", "shared": false}
 \`\`\`
 
 - "shared": true makes the agent visible to everyone in the workspace; the default false keeps it personal.
@@ -93,19 +92,23 @@ export function composeInstructions(input: {
   return sections.join("\n\n");
 }
 
-/** Prompt for the hidden image session that paints an agent's avatar. */
+/**
+ * Prompt for the hidden image session that paints an agent's glyph. The image
+ * is only a shape: the app fills it with the workspace's avatar colors, so it
+ * must be a clean white silhouette on black.
+ */
 export function avatarPrompt(input: {
   name: string;
   description?: string | null;
   hint?: string | null;
-  theme: AvatarTheme;
 }) {
   const subject = input.hint?.trim() || input.description?.trim() || input.name;
   return [
-    `Generate exactly one image with generate_image, then reply with only the word "done".`,
-    `The image is a square app avatar for an AI agent called "${input.name}"${input.description ? ` (${input.description.trim()})` : ""}.`,
-    `Subject: ${subject}.`,
-    `House style, shared by every agent so they read as one set: ${themeStyle(input.theme, input.name)}.`,
-    "One clear subject, simple shapes that read well at 40 pixels. The background is opaque and fills the whole square: no transparency, no text, no letters, no watermark, no border.",
+    `Call generate_image once with the prompt below, then reply with only the word "done".`,
+    "",
+    `A square icon glyph for an AI agent called "${input.name}"${input.description ? ` (${input.description.trim()})` : ""}. Subject: ${subject}.`,
+    "Draw it as one bold, simple, solid pure white (#ffffff) silhouette on a flat pure black (#000000) background.",
+    "Filled shapes only, like a well-designed app icon or emoji silhouette: no outlines-only drawing, no gradients, no shading, no gray, no texture, no text or letters, no frame, no border.",
+    "Centered, recognizable at 32 pixels, with about 18% empty black margin on every side.",
   ].join("\n");
 }

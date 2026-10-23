@@ -9,6 +9,7 @@ import { Sparkles } from "lucide-react";
 import { lazy, Suspense, useMemo, type ReactNode } from "react";
 import { splitActionBlocks } from "../lib/blocks";
 import { client } from "../lib/app-api";
+import type { Agent } from "../lib/agents";
 import { ActionCard } from "./ActionCard";
 
 const ChatInteractiveBlock = lazy(() =>
@@ -22,6 +23,7 @@ export type MessageBodyContext = {
   sessionId: string;
   onOpenAgent: (sessionId: string) => void;
   onTellMore: (excerpt: string) => void;
+  findAgent: (sessionId: string) => Agent | undefined;
 };
 
 /** Agent replies with their action blocks swapped for cards, plus "Tell me more". */
@@ -92,6 +94,7 @@ function AgentMessage({
             sourceSessionId={context.sessionId}
             occurredAt={item.occurredAt}
             onOpenAgent={context.onOpenAgent}
+            findAgent={context.findAgent}
           />
         ),
       )}

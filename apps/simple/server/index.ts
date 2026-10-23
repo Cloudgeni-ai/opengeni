@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { repaintAvatars, resumeAvatarJobs, startAvatarJob } from "./avatars";
+import { resumeAvatarJobs, startAvatarJob } from "./avatars";
 import {
   dataDirectory,
   opengeniApiKey,
@@ -22,7 +22,7 @@ import {
   upsertProfile,
   usageSummary,
 } from "./db";
-import { AVATAR_THEMES, avatarTheme, DEFAULT_AVATAR_THEME } from "./themes";
+import { AVATAR_STYLES, DEFAULT_AVATAR_STYLE } from "../src/lib/avatar-styles";
 import {
   api,
   applyProfileUpdate,
@@ -68,6 +68,25 @@ async function body<T>(request: Request): Promise<T> {
   }
 }
 
+/**
+ * Where a provider sign-in lands. The Mac app opens sign-in in the person's
+ * browser (Google refuses embedded windows), so the browser tab ends here with
+ * a note to go back; the app itself sees the connection through polling.
+ */
+function connectedPage() {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connected</title><style>
+:root{color-scheme:light dark;--bg:#fafaf9;--fg:#1c1917;--muted:#78716c}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#fafaf9;--muted:#a8a29e}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;padding:16px}
+.check{width:56px;height:56px;border-radius:50%;background:#10b981;color:#fff;display:grid;place-items:center;font-size:28px;margin:0 auto 16px}
+h1{font-size:20px;margin:0 0 4px}p{margin:0;color:var(--muted)}</style></head>
+<body><main><div class="check">&#10003;</div><h1>You're connected</h1><p>You can close this tab and go back to Opengeni.</p></main>
+<script>setTimeout(function(){window.close()},1500)</script></body></html>`;
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new HttpError(400, `${name} is required`);
   return value.trim();
@@ -79,8 +98,8 @@ const config = () => ({
   fullAppUrl: opengeniWebUrl(),
   effortLevels: Object.keys(EFFORT_LEVELS),
   defaultEffort: DEFAULT_EFFORT,
-  avatarThemes: AVATAR_THEMES.map(({ id, name, blurb }) => ({ id, name, blurb })),
-  defaultAvatarTheme: DEFAULT_AVATAR_THEME,
+  avatarThemes: AVATAR_STYLES,
+  defaultAvatarTheme: DEFAULT_AVATAR_STYLE,
 });
 
 /** Opengeni refuses new chats until some model can run them. */
@@ -110,14 +129,6 @@ async function bootstrap(workspaceId: string) {
     void listAgentSessions(workspaceId)
       .then((sessions) => refreshAgentInstructions(workspaceId, sessions))
       .catch((error) => console.warn("Instruction refresh failed", error));
-    const profile = getProfile(main.id);
-    if (!profile?.avatarArtifactId && profile?.avatarStatus !== "pending") {
-      void startAvatarJob(
-        workspaceId,
-        main.id,
-        "a friendly glowing genie spark, warm violet and pink light, magical but minimal",
-      );
-    }
   }
   return {
     mainSessionId: main.id,
@@ -226,6 +237,7 @@ async function route(request: Request): Promise<Response> {
   const workspaceParam = url.searchParams.get("workspaceId");
 
   if (path === "/app/health") return json({ ok: true });
+  if (path === "/app/connected" && method === "GET") return connectedPage();
   if (path === "/app/bootstrap" && method === "GET") {
     return json(await bootstrap(requireString(workspaceParam, "workspaceId")));
   }
@@ -243,14 +255,11 @@ async function route(request: Request): Promise<Response> {
     const workspaceId = requireString(input.workspaceId, "workspaceId");
     const values = input.values ?? {};
     const theme = values.avatarTheme;
-    if (theme && !AVATAR_THEMES.some((entry) => entry.id === theme)) {
+    if (theme && !AVATAR_STYLES.some((entry) => entry.id === theme)) {
       throw new HttpError(400, "Unknown avatar style");
     }
-    const before = avatarTheme(getPrefs(workspaceId).avatarTheme).id;
-    const prefs = setPrefs(workspaceId, values);
-    // One house style for every agent: switching it repaints them all.
-    if (theme && theme !== before) repaintAvatars(workspaceId);
-    return json(prefs);
+    // Styles are colors the app fills in, so switching one repaints nothing.
+    return json(setPrefs(workspaceId, values));
   }
   if (path === "/app/agents" && method === "POST") {
     const input = await body<{

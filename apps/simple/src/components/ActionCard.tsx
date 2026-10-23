@@ -2,7 +2,9 @@ import { ArrowRight, Check, Loader2, RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { appApi, type AppliedBlock } from "../lib/app-api";
 import { blockKey, type ActionBlock } from "../lib/blocks";
+import type { Agent } from "../lib/agents";
 import { useAppEvents } from "../lib/app-events";
+import { AgentAvatar } from "./AgentAvatar";
 
 /** Blocks written in the last few minutes apply on their own; older ones wait for a click. */
 const AUTO_APPLY_WINDOW_MS = 10 * 60 * 1000;
@@ -20,12 +22,14 @@ export function ActionCard({
   sourceSessionId,
   occurredAt,
   onOpenAgent,
+  findAgent,
 }: {
   block: ActionBlock;
   workspaceId: string;
   sourceSessionId: string;
   occurredAt: string;
   onOpenAgent: (sessionId: string) => void;
+  findAgent: (sessionId: string) => Agent | undefined;
 }) {
   const [state, setState] = useState<State>({ phase: "checking" });
   const keyRef = useRef<string | null>(null);
@@ -74,8 +78,6 @@ export function ActionCard({
 
   const payload = block.payload ?? {};
   const name = typeof payload.name === "string" ? payload.name : null;
-  const emoji =
-    typeof payload.emoji === "string" ? payload.emoji : block.kind === "agent" ? "🤖" : "✨";
   const description = typeof payload.description === "string" ? payload.description : null;
 
   if (!block.complete) {
@@ -97,7 +99,7 @@ export function ActionCard({
           <Loader2 size={12} className="animate-spin" />
         )}
         {state.phase === "done"
-          ? `Profile updated${name ? `: ${emoji} ${name}` : ""}`
+          ? `Profile updated${name ? `: ${name}` : ""}`
           : state.phase === "error"
             ? "Couldn't update the profile"
             : "Updating profile…"}
@@ -112,9 +114,11 @@ export function ActionCard({
 
   return (
     <div className="card-in my-2 flex items-center gap-3 rounded-2xl border border-[var(--app-border)] bg-[var(--app-card)] p-3 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--app-accent-soft)] text-xl">
-        {emoji}
-      </div>
+      <CreatedAvatar
+        sessionId={state.phase === "done" ? (state.result.result?.sessionId ?? null) : null}
+        name={name ?? "New agent"}
+        findAgent={findAgent}
+      />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{name ?? "New agent"}</div>
         <div className="truncate text-xs text-[var(--app-muted)]">
@@ -149,5 +153,24 @@ export function ActionCard({
         <Loader2 size={16} className="shrink-0 animate-spin text-[var(--app-muted)]" />
       )}
     </div>
+  );
+}
+
+/** The new agent's real avatar once it exists, so the card matches the sidebar. */
+function CreatedAvatar({
+  sessionId,
+  name,
+  findAgent,
+}: {
+  sessionId: string | null;
+  name: string;
+  findAgent: (sessionId: string) => Agent | undefined;
+}) {
+  const agent = sessionId ? findAgent(sessionId) : undefined;
+  return (
+    <AgentAvatar
+      agent={agent ?? { id: sessionId ?? name, name, role: "agent", profile: null }}
+      size={40}
+    />
   );
 }

@@ -49,6 +49,7 @@ export type AgentProfile = {
   avatarArtifactId: string | null;
   avatarStatus: "none" | "pending" | "ready" | "failed";
   avatarPrompt: string | null;
+  avatarFormat: "mask" | "picture" | null;
   effort: EffortLevel | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -166,3 +167,8 @@ export const EFFORT_LABELS: Record<EffortLevel, { label: string; hint: string }>
   balanced: { label: "Balanced", hint: "Quick and smart" },
   thorough: { label: "Thorough", hint: "Thinks longer" },
 };
+
+/** Where provider sign-in returns: a small "you're connected" page on this app. */
+export function connectReturnUrl() {
+  return `${window.location.origin}/app/connected`;
+}

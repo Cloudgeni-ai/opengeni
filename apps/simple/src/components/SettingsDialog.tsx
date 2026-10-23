@@ -15,6 +15,7 @@ import { ArrowLeft, ExternalLink, Pause, Play, Trash2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { client, EFFORT_LABELS, type AvatarThemeOption, type EffortLevel } from "../lib/app-api";
 import type { ReplyLength } from "../lib/context";
+import { AgentAvatar, type AvatarSubject } from "./AgentAvatar";
 import { CodexConnect } from "./CodexConnect";
 
 export type SettingsTab =
@@ -49,6 +50,7 @@ export type SettingsDialogProps = {
   onDefaultEffort: (effort: EffortLevel) => void;
   avatarThemes: AvatarThemeOption[];
   avatarTheme: string;
+  avatarSamples: AvatarSubject[];
   onAvatarTheme: (theme: string) => void;
   replyLength: ReplyLength;
   onReplyLength: (length: ReplyLength) => void;
@@ -253,15 +255,20 @@ function General(props: SettingsDialogProps) {
   );
 }
 
-/** Sample agents painted in each style (`public/themes`), so the choice is visual. */
-const THEME_SAMPLES = ["geni", "coach", "finance", "meals"];
+/** Stand-ins when there are too few agents to show a style off. */
+const SAMPLE_NAMES = ["Coach", "Finance", "Meals"];
 
 function AvatarStyles(props: SettingsDialogProps) {
+  const samples = [...props.avatarSamples];
+  for (const name of SAMPLE_NAMES) {
+    if (samples.length >= 4) break;
+    samples.push({ id: `sample-${name}`, name, role: "agent", profile: null });
+  }
   return (
     <div className="py-3">
       <div className="text-sm font-medium">Avatar style</div>
       <div className="text-xs text-[var(--app-muted)]">
-        Every agent is painted in the same style. Changing it repaints them all.
+        The colors every agent wears. Switching is instant.
       </div>
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
         {props.avatarThemes.map((theme) => {
@@ -279,14 +286,8 @@ function AvatarStyles(props: SettingsDialogProps) {
               }`}
             >
               <div className="flex gap-1.5">
-                {THEME_SAMPLES.map((sample) => (
-                  <img
-                    key={sample}
-                    src={`/themes/${theme.id}-${sample}.webp`}
-                    alt=""
-                    loading="lazy"
-                    className="h-11 w-11 rounded-[14px] bg-[var(--app-hover)] object-cover"
-                  />
+                {samples.map((sample) => (
+                  <AgentAvatar key={sample.id} agent={sample} styleId={theme.id} size={40} />
                 ))}
               </div>
               <div className="mt-2 text-sm font-medium">{theme.name}</div>

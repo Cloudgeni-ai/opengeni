@@ -3,7 +3,7 @@ import { McpConnectionCard } from "@opengeni/react/connect";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import { GitBranch, Plug } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { client } from "../lib/app-api";
+import { client, connectReturnUrl } from "../lib/app-api";
 import { useAppEvents } from "../lib/app-events";
 
 /**
@@ -38,7 +38,7 @@ export function renderConnectionCard(
           capabilityId={capability.id}
           name={capability.name}
           rationale={capability.rationale}
-          returnUrl={window.location.href}
+          returnUrl={connectReturnUrl()}
         />
       </div>
     );

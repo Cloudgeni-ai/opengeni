@@ -74,7 +74,7 @@ export function DraftAgentView({
       </header>
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
         {busy ? (
-          <div className="mx-auto w-full max-w-3xl px-6 pt-8">
+          <div className="mx-auto w-full max-w-3xl px-4 pt-16 md:px-0">
             <div className="ml-auto w-fit max-w-[80%] rounded-3xl bg-[var(--app-hover)] px-4 py-2.5 text-[15px] whitespace-pre-wrap">
               {draft.sending}
             </div>
@@ -133,13 +133,13 @@ export function DraftAgentView({
           </div>
         )}
       </div>
-      <div className="mx-auto w-full max-w-3xl px-4 pb-4 md:px-6">
+      <div className="mx-auto w-full max-w-3xl px-3 pb-3 md:px-0">
         <form
           onSubmit={(event) => {
             event.preventDefault();
             submit(draft.text);
           }}
-          className="flex items-end gap-2 rounded-3xl border border-[var(--app-border)] bg-[var(--app-card)] p-2 pl-4 shadow-[0_1px_3px_rgba(0,0,0,0.05)] focus-within:border-[var(--app-accent)]"
+          className="rounded-2xl border border-[var(--app-border)] bg-[var(--app-card)] shadow-[0_1px_3px_rgba(0,0,0,0.05)] focus-within:border-[var(--app-accent)]"
         >
           <textarea
             ref={input}
@@ -154,16 +154,18 @@ export function DraftAgentView({
                 submit(draft.text);
               }
             }}
-            className="max-h-[200px] min-h-[36px] flex-1 resize-none bg-transparent py-1.5 text-[15px] outline-none placeholder:text-[var(--app-muted)] disabled:opacity-60"
+            className="block max-h-[200px] min-h-[44px] w-full resize-none bg-transparent px-4 pt-3 text-[15px] outline-none placeholder:text-[var(--app-muted)] disabled:opacity-60"
           />
-          <button
-            type="submit"
-            disabled={busy || !draft.text.trim()}
-            aria-label="Send"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--app-accent)] text-white transition-opacity disabled:opacity-30"
-          >
-            <ArrowUp size={18} />
-          </button>
+          <div className="flex justify-end px-2.5 pb-2.5">
+            <button
+              type="submit"
+              disabled={busy || !draft.text.trim()}
+              aria-label="Send"
+              className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--app-accent)] text-white transition-opacity disabled:opacity-30"
+            >
+              <ArrowUp size={17} />
+            </button>
+          </div>
         </form>
       </div>
     </div>

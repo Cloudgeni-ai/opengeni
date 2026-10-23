@@ -1,21 +1,21 @@
-import { getPrefs, getProfile, listProfiles, upsertProfile } from "./db";
+import { getProfile, listProfiles, upsertProfile } from "./db";
 import { api } from "./opengeni";
 import { avatarPrompt } from "./prompts";
 import { generatedImageIds } from "./receipts";
-import { avatarTheme } from "./themes";
 
-const POLL_MS = 4000;
+const POLL_MS = 2000;
 const TIMEOUT_MS = 6 * 60 * 1000;
 const running = new Set<string>();
 
 /**
- * Paints an agent's avatar in a hidden one-off session that may only generate
+ * Paints an agent's glyph in a hidden one-off session that may only generate
  * images, then remembers the retained artifact. The agent's own chat never
- * sees this work.
+ * sees this work. Geni wears the Opengeni mark and is never painted.
  */
 export async function startAvatarJob(workspaceId: string, sessionId: string, hint?: string | null) {
   if (running.has(sessionId)) return;
   const profile = getProfile(sessionId);
+  if (profile?.role === "main") return;
   const name = profile?.name ?? "Agent";
   running.add(sessionId);
   upsertProfile(workspaceId, sessionId, {
@@ -37,16 +37,17 @@ export async function startAvatarJob(workspaceId: string, sessionId: string, hin
         name,
         description: profile?.description ?? null,
         hint: hint ?? profile?.avatarPrompt ?? null,
-        theme: avatarTheme(getPrefs(workspaceId).avatarTheme),
       }),
     } as Parameters<typeof api.createSession>[1]);
     upsertProfile(workspaceId, sessionId, { avatarJobSessionId: studio.id });
     const artifactId = await waitForImage(workspaceId, studio.id);
-    upsertProfile(workspaceId, sessionId, {
-      avatarArtifactId: artifactId,
-      avatarStatus: artifactId ? "ready" : profile?.avatarArtifactId ? "ready" : "failed",
-      ...(artifactId ? {} : { avatarArtifactId: profile?.avatarArtifactId ?? null }),
-    });
+    upsertProfile(
+      workspaceId,
+      sessionId,
+      artifactId
+        ? { avatarArtifactId: artifactId, avatarFormat: "mask", avatarStatus: "ready" }
+        : { avatarStatus: profile?.avatarArtifactId ? "ready" : "failed" },
+    );
     await api.updateSessionArchive(workspaceId, studio.id, { archived: true }).catch(() => {});
   } catch (error) {
     console.warn(`Avatar job failed for ${sessionId}`, error);
@@ -78,20 +79,19 @@ async function waitForImage(workspaceId: string, studioSessionId: string): Promi
   return null;
 }
 
-/** After a restart, retry avatars that were mid-flight. */
+/**
+ * After a restart, retry avatars that were mid-flight, and repaint the older
+ * full-color pictures as glyphs (they keep showing until the glyph is ready).
+ */
 export function resumeAvatarJobs(workspaceId: string, { retryFailed = false } = {}) {
   for (const profile of listProfiles(workspaceId)) {
+    if (profile.role === "main") continue;
     const due =
-      profile.avatarStatus === "pending" || (retryFailed && profile.avatarStatus === "failed");
+      profile.avatarStatus === "pending" ||
+      profile.avatarFormat === "picture" ||
+      (retryFailed && profile.avatarStatus === "failed");
     if (due && !running.has(profile.sessionId)) {
       void startAvatarJob(workspaceId, profile.sessionId);
     }
-  }
-}
-
-/** Paints every agent again, after the workspace switched avatar style. */
-export function repaintAvatars(workspaceId: string) {
-  for (const profile of listProfiles(workspaceId)) {
-    if (!running.has(profile.sessionId)) void startAvatarJob(workspaceId, profile.sessionId);
   }
 }

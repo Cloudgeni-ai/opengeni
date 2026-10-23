@@ -144,7 +144,7 @@ function AgentRow({
       }`}
     >
       <div className="relative">
-        <AgentAvatar id={agent.id} emoji={agent.emoji} profile={agent.profile} size={34} />
+        <AgentAvatar agent={agent} size={34} />
         {agent.working ? (
           <span className="absolute -right-0.5 -bottom-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-[var(--app-sidebar)]">
             <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />

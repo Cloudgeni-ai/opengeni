@@ -82,6 +82,7 @@ export function ChatView(props: ChatViewProps) {
       sessionId: agent.id,
       onOpenAgent: props.onOpenAgent,
       onTellMore: (excerpt: string) => void send("Tell me more", excerpt),
+      findAgent: (id: string) => latest.current.agents.find((entry) => entry.id === id),
     }),
     [agent.id, props.onOpenAgent, send, workspaceId],
   );
@@ -173,7 +174,7 @@ function Header({
       >
         <Menu size={18} />
       </button>
-      <AgentAvatar id={agent.id} emoji={agent.emoji} profile={agent.profile} size={36} />
+      <AgentAvatar agent={agent} size={36} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <h1 className="truncate text-[15px] font-semibold">{agent.name}</h1>
@@ -323,7 +324,7 @@ function EmptyState({ agent, onPick }: { agent: Agent; onPick: (text: string) =>
   const suggestions = agent.role === "main" ? MAIN_SUGGESTIONS : blank ? BLANK_SUGGESTIONS : [];
   return (
     <div className="mx-auto flex max-w-xl flex-col items-center px-6 pt-[12vh] text-center">
-      <AgentAvatar id={agent.id} emoji={agent.emoji} profile={agent.profile} size={88} />
+      <AgentAvatar agent={agent} size={88} />
       <h2 className="mt-4 text-xl font-semibold tracking-tight">
         {agent.role === "main" ? "Hi, I'm Geni" : blank ? "What should this agent do?" : agent.name}
       </h2>

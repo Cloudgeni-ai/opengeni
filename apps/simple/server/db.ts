@@ -20,6 +20,8 @@ export type AgentProfile = {
   avatarStatus: "none" | "pending" | "ready" | "failed";
   avatarPrompt: string | null;
   avatarJobSessionId: string | null;
+  /** "mask": a silhouette the app colors in; "picture": an older full-color image. */
+  avatarFormat: "mask" | "picture" | null;
   effort: string | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -79,6 +81,17 @@ db.exec(`
     PRIMARY KEY (workspace_id, key)
   );
 `);
+const profileColumns = db
+  .query<{ name: string }, []>("SELECT name FROM pragma_table_info('agent_profiles')")
+  .all()
+  .map((column) => column.name);
+if (!profileColumns.includes("avatar_format")) {
+  // Avatars made before this column are full-color pictures.
+  db.exec("ALTER TABLE agent_profiles ADD COLUMN avatar_format TEXT");
+  db.exec(
+    "UPDATE agent_profiles SET avatar_format = 'picture' WHERE avatar_artifact_id IS NOT NULL",
+  );
+}
 
 type ProfileRow = {
   workspace_id: string;
@@ -90,6 +103,7 @@ type ProfileRow = {
   avatar_status: AgentProfile["avatarStatus"];
   avatar_prompt: string | null;
   avatar_job_session_id: string | null;
+  avatar_format: AgentProfile["avatarFormat"];
   effort: string | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -109,6 +123,7 @@ function toProfile(row: ProfileRow): AgentProfile {
     avatarStatus: row.avatar_status,
     avatarPrompt: row.avatar_prompt,
     avatarJobSessionId: row.avatar_job_session_id,
+    avatarFormat: row.avatar_format,
     effort: row.effort,
     name: row.name,
     role: row.role,
@@ -140,6 +155,7 @@ const PROFILE_FIELDS = {
   avatarStatus: "avatar_status",
   avatarPrompt: "avatar_prompt",
   avatarJobSessionId: "avatar_job_session_id",
+  avatarFormat: "avatar_format",
   effort: "effort",
   name: "name",
   role: "role",
