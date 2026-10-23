@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../../packages/react/src/lib/transient-retry";
 import { chromium, type Browser } from "playwright";
 import { freePort } from "@opengeni/testing/compose";
 import { startProcess, type StartedProcess } from "@opengeni/testing/process";
@@ -135,9 +136,25 @@ describe("native embedded error presentation", () => {
             });
           await drawer.getByRole("button", { name: "Close chats", exact: true }).click();
         }
+        // A send whose outcome is unknown after a dropped connection is held
+        // quietly for the update window and retried with the same key; only
+        // a failure that outlasts the window surfaces as an error. Run the
+        // page clock past that window so the held send reaches its error.
+        await page.clock.install();
         await page.goto(
           `${baseUrl}/error-branding-test.html?mode=unknown&custom&composer&theme=${theme}`,
         );
+        await page
+          .getByText(/is updating/u)
+          .first()
+          .waitFor();
+        expect(await page.locator("body").innerText()).not.toMatch(/opengeni/i);
+        if (evidenceDirectory)
+          await page.screenshot({
+            path: `${evidenceDirectory}/${width}-${theme}-custom-unknown-held.png`,
+            fullPage: true,
+          });
+        await page.clock.runFor(SERVICE_UPDATING_CALM_WINDOW_MS + 30_000);
         await page
           .getByText("ACME Assistant: The request could not be confirmed", { exact: false })
           .first()
