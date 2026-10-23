@@ -124,4 +124,15 @@ describe("repository discovery from a Mac's home folder", () => {
       ].sort(),
     );
   });
+
+  test("a fast discovery never loses its results to its watchdog", async () => {
+    // A watchdog stopped before it reset the traps it inherited once ran the
+    // script's cleanup and deleted the results: a complete, empty answer.
+    const root = tempDir("mac-home-fast-");
+    mkdirSync(join(root, "app", ".git"), { recursive: true });
+    const svc = new SandboxChannelAService({ session: hostShellSession(root, "Darwin", root) });
+    for (let run = 0; run < 60; run++) {
+      expect((await svc.detectReposDetailed()).repos).toEqual(["app"]);
+    }
+  }, 60_000);
 });

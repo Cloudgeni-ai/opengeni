@@ -3029,8 +3029,13 @@ export class SandboxChannelAService {
         'for mac_home_dir in ${mac_home_skip[@]+"${mac_home_skip[@]}"}; do mac_home_prune+=(-o -path "./$mac_home_dir" -prune); done',
         `${discovery} > "$results_file" &`,
         "discovery_pid=$!",
+        // The watchdog must not inherit this shell's traps: stopped before it
+        // resets them, it would run `cleanup` and delete the results.
+        "trap - EXIT HUP INT TERM",
         '(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep 15 & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM "$discovery_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &',
         "watchdog_pid=$!",
+        "trap cleanup EXIT",
+        "trap abort HUP INT TERM",
         'wait "$discovery_pid"',
         "status=$?",
         "discovery_pid=",
@@ -3161,8 +3166,13 @@ export class SandboxChannelAService {
       "set -m",
       `( trap '' TERM; ( trap - TERM; exec rg ${rgOptions} \${mac_home_excludes[@]+"\${mac_home_excludes[@]}"} ${rgPaths} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
       "search_pid=$!",
+      // The watchdog must not inherit this shell's traps: stopped before it
+      // resets them, it would run `cleanup` and delete the results.
+      "trap - EXIT HUP INT TERM",
       `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
       "watchdog_pid=$!",
+      "trap cleanup EXIT",
+      "trap abort HUP INT TERM",
       'wait "$search_pid" 2>/dev/null',
       "search_pid=",
       'kill "$watchdog_pid" 2>/dev/null || true',
