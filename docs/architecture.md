@@ -367,12 +367,7 @@ retries unacknowledged terminal records on reconnect and its existing heartbeat
 cadence over the bulk connection. Completion collectors use independent ingestion
 capacity and yield before their claim expires, preserving heartbeat/control liveness.
 An exact-operation delivery receipt stops notification retries after durable server
-ownership, or after an exact lookup finds no adopted command; it never grants output
-custody. Foreground/deleted operations need no background collection. An exit racing
-adoption is settled by the adopter's still-attached stream; if that path fails, the
-new row is due for ordinary reconciliation and runner inventory remains a fallback.
-That failure path uses the existing reconciliation cadence, not notification retries.
-A dedicated first-notification timestamp
+ownership; it never grants output custody. A dedicated first-notification timestamp
 bypasses polling backoff once, while failed collection keeps reconciliation backoff.
 Reaping remains the unavailable-runner fallback. The event alone does not grant output custody
 or acknowledge retained bytes. Unobserved nonterminal

@@ -1006,16 +1006,8 @@ Duplicate events cannot steal an active collector's claim. The runner republishe
 unacknowledged terminal records on connection establishment and at its existing
 heartbeat cadence over the independent bulk connection, healing a full send queue
 or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
-stops these notifications after the server durably owns reconciliation, or after an
-exact lookup finds no adopted command; it never releases retained output. Missing
-rows include foreground operations, deleted commands and exits racing adoption.
-The adopter keeps its output stream attached during its transaction and settles a
-racing exit. If the stream or that settlement fails, the newly adopted row is due
-for ordinary reconciliation; inventory also rediscovers retained output. This
-failure path can wait for the existing reconciliation pass (30 seconds by default),
-rather than the completion-notification heartbeat. No acknowledgement declares the
-command settled or changes retained-output custody. Only the first notification
-for an adopted command bypasses polling backoff.
+stops these notifications after the server durably owns reconciliation; it never
+releases retained output. Only the first notification bypasses polling backoff.
 Failed collections reuse reconciliation's exponential backoff, and pending
 duplicates coalesce per operation. Older agents and lost connections remain covered by
 reconciliation. Terminal publication

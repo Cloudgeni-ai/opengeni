@@ -224,6 +224,9 @@ export async function collectConnectedCommandCompletion(
     opId,
   };
   const command = await locateConnectedCommandCompletion(db, identity);
+  // Foreground operations and exits before adoption have no background row.
+  // Their attached consumer still owns terminal proof and the adoption race.
+  if (!command) return;
   const acknowledgeDelivery = async () => {
     if (!options.acknowledge || !bus?.getOpStreamConnection) return;
     const connection = await bus.getOpStreamConnection();
@@ -234,18 +237,6 @@ export async function collectConnectedCommandCompletion(
       }).finish(),
     );
   };
-  // Foreground operations, deleted commands and exits before adoption have no
-  // background row. Receipt acknowledges this notification only: it neither
-  // claims terminal proof nor releases output. The adopter handles an exit
-  // racing its transaction through its still-attached stream. If that path
-  // fails, the adopted row is due for ordinary reconciliation; runner inventory
-  // also discovers its retained exit (not an immediate-delivery guarantee).
-  // Leaving the receipt open otherwise repeats this lookup every heartbeat for
-  // every retained foreground result, although there is nothing to collect.
-  if (!command) {
-    await acknowledgeDelivery();
-    return;
-  }
   if (command.terminal) {
     await acknowledgeDelivery();
     return;
