@@ -176,6 +176,12 @@ export interface ThisComputerStatus {
    */
   setupPending?: boolean;
   /**
+   * Permissions the system has already been asked for on this computer, so
+   * screens don't ask again unprompted after the person declined. Absent
+   * from older apps.
+   */
+  requestedPermissions?: ThisComputerPermissionId[];
+  /**
    * Connected and not paused, but the app's agent isn't running right now and
    * is starting again, so agents can't use this computer until it is back.
    * Absent from older apps.

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
 import type { ThisComputerHost, ThisComputerStatus } from "@opengeni/sdk/this-computer";
 import { useThisComputer } from "../src/components/this-computer/use-this-computer";
 import { actRun, flush, registerDom, renderHook, renderComponent } from "./render-hook";
@@ -43,6 +43,8 @@ test("service permission setup never treats a reconnect's missing report as a gr
       actionError: null,
       canDisconnect: true,
       pending: null,
+      asking: null,
+      allowPermissions: () => undefined,
       refresh: () => undefined,
       connect: async () => status,
       turnOn: async () => status,
@@ -261,6 +263,8 @@ test("turning it on shows one state at a time and follows the computer back when
       actionError: null,
       canDisconnect: true,
       pending: null,
+      asking: null,
+      allowPermissions: () => undefined,
       refresh: () => undefined,
       connect: async () => waiting,
       turnOn: async () => waiting,
@@ -395,4 +399,77 @@ test("turning computer use off pauses it and shows off at once", async () => {
   });
   expect(hook.result.current.pending).toBeNull();
   await hook.unmount();
+});
+
+test("turning on asks for each missing permission in turn, and stops when the person declines", async () => {
+  const listeners = new Set<() => void>();
+  const asked: string[] = [];
+  let granted = { screenRecording: false, accessibility: false };
+  let state: ThisComputerStatus["state"] = "not_connected";
+  const read = (): ThisComputerStatus => ({
+    ...connected,
+    state,
+    permissions: [
+      { id: "screenRecording", granted: granted.screenRecording },
+      { id: "accessibility", granted: granted.accessibility },
+    ],
+  });
+  const host: ThisComputerHost = {
+    platform: "macos",
+    productName: "App",
+    status: async () => read(),
+    connect: async () => {
+      state = "connected";
+      return read();
+    },
+    pause: async () => undefined,
+    resume: async () => undefined,
+    requestPermission: async (id) => {
+      asked.push(id);
+    },
+    onChange: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  const changed = () => listeners.forEach((listener) => listener());
+  const hook = await renderHook(() => useThisComputer(host, "workspace"), undefined);
+  await flush();
+  try {
+    // One step: on, then straight to the first missing permission.
+    await actRun(async () => {
+      await hook.result.current.turnOn();
+    });
+    await flush();
+    expect(asked).toEqual(["screenRecording"]);
+    expect(hook.result.current.asking).toBe("screenRecording");
+
+    // Allowed: the next one is asked for without another click.
+    granted = { ...granted, screenRecording: true };
+    await actRun(changed);
+    await flush();
+    expect(asked).toEqual(["screenRecording", "accessibility"]);
+    expect(hook.result.current.asking).toBe("accessibility");
+
+    // Back in the app without allowing it: asking stops, with no new prompt.
+    setSystemTime(new Date(Date.now() + 5_000));
+    await actRun(() => void window.dispatchEvent(new Event("focus")));
+    await flush();
+    expect(hook.result.current.asking).toBeNull();
+    expect(asked).toHaveLength(2);
+
+    // "Open System Settings" asks for that one again, on request only.
+    await actRun(() => hook.result.current.allowPermissions());
+    await flush();
+    expect(asked).toEqual(["screenRecording", "accessibility", "accessibility"]);
+    // Allowed now: everything is in place and asking ends by itself.
+    granted = { ...granted, accessibility: true };
+    await actRun(changed);
+    await flush();
+    expect(hook.result.current.asking).toBeNull();
+    expect(asked).toHaveLength(3);
+  } finally {
+    setSystemTime();
+    await hook.unmount();
+  }
 });

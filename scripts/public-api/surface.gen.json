@@ -37544,6 +37544,7 @@
       "ComputerUseFix": "type",
       "ComputerUseHandlers": "type",
       "computerUseNoticeText": "value",
+      "computerUsePermissionText": "value",
       "ComputerUseProblem": "type",
       "computerUseProblemText": "value",
       "computerUseState": "value",

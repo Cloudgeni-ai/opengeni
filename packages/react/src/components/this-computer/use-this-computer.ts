@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type {
-  ThisComputerHost,
-  ThisComputerPermissionId,
-  ThisComputerStatus,
+import {
+  thisComputerPermissionSteps,
+  type ThisComputerHost,
+  type ThisComputerPermissionId,
+  type ThisComputerStatus,
 } from "@opengeni/sdk/this-computer";
 
 export interface UseThisComputerResult {
@@ -16,6 +17,13 @@ export interface UseThisComputerResult {
   canDisconnect: boolean;
   /** Computer use is being turned on ("on") or off ("off") from these screens. */
   pending: "on" | "off" | null;
+  /**
+   * While turning on: the permission the system is being asked for (its
+   * prompt, or its System Settings list with the app's guide). Null once it
+   * is granted with nothing else missing, or the person came back without
+   * allowing it.
+   */
+  asking: ThisComputerPermissionId | null;
   refresh(): void;
   connect(options: { screenControl: boolean }): Promise<ThisComputerStatus | null>;
   pause(): Promise<void>;
@@ -24,10 +32,16 @@ export interface UseThisComputerResult {
   /**
    * Turns computer use on, doing whatever it takes: resumes a paused agent,
    * registers this computer (again) when it never was or its registration is
-   * gone (e.g. removed from Machines), and starts the agent. Resolves with the
-   * new status; permissions still missing are the caller's next step.
+   * gone (e.g. removed from Machines), and starts the agent. Then it asks for
+   * each missing permission in turn (see `asking`), so turning on is one step.
+   * Resolves with the status before any permission is asked for.
    */
   turnOn(): Promise<ThisComputerStatus | null>;
+  /**
+   * Asks for the missing permissions, one after another as each is granted,
+   * until the person comes back without allowing one. Nothing when none is missing.
+   */
+  allowPermissions(): void;
   /** Turns computer use off: pauses the agent, keeping its registration so on is instant. */
   turnOff(): Promise<void>;
   requestPermission(id: ThisComputerPermissionId): Promise<void>;
@@ -53,7 +67,16 @@ export function useThisComputer(
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<"on" | "off" | null>(null);
+  const [asking, setAsking] = useState<ThisComputerPermissionId | null>(null);
+  /** What is being asked for and since when; whether the person came back since. */
+  const askingRef = useRef<{ id: ThisComputerPermissionId; at: number; returned: boolean } | null>(
+    null,
+  );
   const live = useRef(true);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  /** Set below: continues or ends the asking after each reading. */
+  const askNextRef = useRef<(next: ThisComputerStatus) => void>(() => undefined);
   const generation = useRef(0);
   const actionInFlight = useRef(false);
   /** The read in flight, and whether another was asked for meanwhile. */
@@ -75,8 +98,9 @@ export function useThisComputer(
     void host
       .status(workspaceId)
       .then((next) => {
-        if (live.current && mine.generation === generation.current)
-          setStatus((current) => sameStatus(current, next));
+        if (!live.current || mine.generation !== generation.current) return;
+        setStatus((current) => sameStatus(current, next));
+        askNextRef.current(next);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -94,10 +118,18 @@ export function useThisComputer(
     generation.current += 1;
     setStatus(null);
     setActionError(null);
+    askingRef.current = null;
+    setAsking(null);
     refresh();
     if (!host) return;
     const unsubscribe = host.onChange(refresh);
-    const onFocus = () => refresh();
+    const onFocus = () => {
+      // Back in the app while a permission is asked for: if the next reading
+      // still lacks it, the person didn't allow it, and asking stops there.
+      const current = askingRef.current;
+      if (current && Date.now() - current.at > RETURN_GRACE_MS) current.returned = true;
+      refresh();
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       live.current = false;
@@ -136,6 +168,43 @@ export function useThisComputer(
     }
   }, []);
 
+  const ask = useCallback(
+    (id: ThisComputerPermissionId) => {
+      if (!host?.requestPermission) return;
+      askingRef.current = { id, at: Date.now(), returned: false };
+      setAsking(id);
+      const mine = generation.current;
+      void host
+        .requestPermission(id)
+        .catch(() => undefined)
+        .finally(() => {
+          if (live.current && mine === generation.current) refreshRef.current();
+        });
+    },
+    [host],
+  );
+  /** After each reading while asking: ask for the next missing permission, or stop. */
+  const askNext = useCallback(
+    (next: ThisComputerStatus) => {
+      const current = askingRef.current;
+      if (!current) return;
+      const missing = missingStep(next);
+      // The one asked for was allowed and another is missing: ask for that one.
+      if (missing !== null && missing !== current.id) return ask(missing);
+      // All allowed, turned off meanwhile, or the person came back without allowing it.
+      if (missing === null || current.returned) {
+        askingRef.current = null;
+        setAsking(null);
+      }
+    },
+    [ask],
+  );
+  askNextRef.current = askNext;
+  const allowPermissions = useCallback(() => {
+    const missing = missingStep(statusRef.current);
+    if (missing !== null) ask(missing);
+  }, [ask]);
+
   const connect = useCallback(
     async (connectOptions: { screenControl: boolean }) => {
       if (!host) return null;
@@ -169,14 +238,21 @@ export function useThisComputer(
         // Never set up, or its registration is gone: register this computer afresh.
         return await host.connect(workspaceId, { screenControl: true });
       });
-      if (next && live.current) setStatus((current) => sameStatus(current, next));
+      if (next && live.current) {
+        setStatus((current) => sameStatus(current, next));
+        // One step: the missing permissions are asked for right away.
+        const missing = missingStep(next);
+        if (missing !== null) ask(missing);
+      }
       return next;
     } finally {
       if (live.current) setPending(null);
     }
-  }, [act, host, workspaceId]);
+  }, [act, ask, host, workspaceId]);
   const turnOff = useCallback(async () => {
     if (!host || actionInFlight.current) return;
+    askingRef.current = null;
+    setAsking(null);
     setPending("off");
     try {
       await act(() => host.pause());
@@ -203,6 +279,7 @@ export function useThisComputer(
       actionError,
       canDisconnect,
       pending,
+      asking,
       refresh,
       connect,
       pause,
@@ -210,6 +287,7 @@ export function useThisComputer(
       disconnect,
       turnOn,
       turnOff,
+      allowPermissions,
       requestPermission,
     }),
     [
@@ -218,6 +296,7 @@ export function useThisComputer(
       actionError,
       canDisconnect,
       pending,
+      asking,
       refresh,
       connect,
       pause,
@@ -225,9 +304,19 @@ export function useThisComputer(
       disconnect,
       turnOn,
       turnOff,
+      allowPermissions,
       requestPermission,
     ],
   );
+}
+
+/** A focus this soon after asking is the system's own prompt closing, not the person coming back. */
+const RETURN_GRACE_MS = 1_500;
+
+/** The first permission step still missing on a connected computer, or null. */
+function missingStep(status: ThisComputerStatus | null): ThisComputerPermissionId | null {
+  if (status?.state !== "connected") return null;
+  return thisComputerPermissionSteps(status).find((step) => !step.granted)?.id ?? null;
 }
 
 /** Keeps the current reading when a new one says the same thing. */

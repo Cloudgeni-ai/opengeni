@@ -1,10 +1,14 @@
 import type { MachineView } from "@opengeni/sdk";
-import { thisComputerNeedsPermissions } from "@opengeni/sdk/this-computer";
 import { ArrowUpRightIcon, CheckIcon, LaptopIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useOpenGeniText } from "../../messages/runtime";
 import { defaultThisComputerLabels, type ThisComputerLabels } from "./labels";
-import { computerUseFix, computerUseProblemText, computerUseState } from "./computer-use";
+import {
+  computerUseFix,
+  computerUsePermissionText,
+  computerUseProblemText,
+  computerUseState,
+} from "./computer-use";
 import type { UseThisComputerResult } from "./use-this-computer";
 
 /** A personal machine that can take work now. */
@@ -32,7 +36,11 @@ export interface ThisComputerCardProps {
   /** The app's name, e.g. for "Get … for desktop". */
   productName: string;
   labels?: ThisComputerLabels;
-  /** Opens `ThisComputerSetup` to finish required system permissions. */
+  /**
+   * "Open System Settings" for a missing permission, e.g. to open
+   * `ThisComputerSetup`. Without it, the card asks for the missing
+   * permissions itself (`computer.allowPermissions`).
+   */
   onSetup?(): void;
   /** Signs the person in again when computer use needs it; else that offers Try again. */
   onSignIn?: (() => void) | undefined;
@@ -104,14 +112,15 @@ export function ThisComputerCard({
   }, [readyName, onReady]);
   const setup = () => {
     started.current = true;
-    onSetup?.();
+    if (onSetup) onSetup();
+    else computer?.allowPermissions();
   };
+  // Turning on asks for any missing permission itself.
   const turnOn = () => {
     if (!computer || computer.acting) return;
     started.current = true;
     void computer.turnOn().then((next) => {
       if (!next) started.current = false;
-      if (thisComputerNeedsPermissions(next)) onSetup?.();
     });
   };
 
@@ -132,15 +141,19 @@ export function ThisComputerCard({
             : `${catalogText("thisComputer.computerUse.turningOn")} ${Math.round(use.progress * 100)}%`;
         action = <span className="og-tc-spinner" aria-hidden />;
         break;
+      case "needs_permission":
+        copy = computerUsePermissionText(use.appName ?? productName, catalogText);
+        action = (
+          <button type="button" onClick={setup}>
+            {catalogText("thisComputer.computerUse.openSettings")}
+          </button>
+        );
+        break;
       case "problem": {
         copy = computerUseProblemText(use, machineName, catalogText, labels);
         const fix = computerUseFix(use.problem);
         action =
-          fix === "allow" ? (
-            <button type="button" onClick={setup}>
-              {catalogText("thisComputer.computerUse.allow")}
-            </button>
-          ) : fix === "sign_in" && onSignIn ? (
+          fix === "sign_in" && onSignIn ? (
             <button type="button" onClick={onSignIn}>
               {catalogText("thisComputer.computerUse.signIn")}
             </button>

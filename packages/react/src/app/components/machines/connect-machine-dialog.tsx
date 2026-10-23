@@ -397,7 +397,7 @@ function ThisComputerChoice({
         desktop={desktop}
         onAllowPermissions={() => {
           onClose();
-          desktop.openSetup();
+          desktop.allowPermissions();
         }}
       />
     </div>

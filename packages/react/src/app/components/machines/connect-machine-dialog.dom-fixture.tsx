@@ -513,7 +513,7 @@ const { defaultThisComputerLabels } = await import("../../../this-computer");
 describe("Connect a machine inside the desktop app", () => {
   const labels = defaultThisComputerLabels();
   function inDesktop(status: Record<string, unknown> | null) {
-    const openSetup = mock(() => {});
+    const allowPermissions = mock(() => {});
     const turnOn = mock(async () => null);
     const turnOff = mock(async () => {});
     desktop = {
@@ -521,7 +521,7 @@ describe("Connect a machine inside the desktop app", () => {
       platform: "macos",
       productName: "Opengeni",
       labels,
-      openSetup,
+      allowPermissions,
       signIn: null,
       computer: {
         status: status && {
@@ -535,6 +535,8 @@ describe("Connect a machine inside the desktop app", () => {
         actionError: null,
         canDisconnect: true,
         pending: null,
+        asking: null,
+        allowPermissions,
         refresh: () => {},
         connect: async () => null,
         pause: async () => {},
@@ -545,13 +547,13 @@ describe("Connect a machine inside the desktop app", () => {
         requestPermission: async () => {},
       },
     };
-    return { openSetup, turnOn, turnOff };
+    return { allowPermissions, turnOn, turnOff };
   }
   const toggle = (h: Awaited<ReturnType<typeof render>>) =>
     h.dialog()!.querySelector<HTMLButtonElement>('[role="switch"]');
 
   test("never offers a download or the app hand-off for the computer it runs on", async () => {
-    const { turnOn, openSetup } = inDesktop({ state: "not_connected" });
+    const { turnOn, allowPermissions } = inDesktop({ state: "not_connected" });
     const h = await render({ advanced: false });
     try {
       expect(h.text()).toContain("Connect a machine");
@@ -566,7 +568,7 @@ describe("Connect a machine inside the desktop app", () => {
       expect(toggle(h)?.getAttribute("aria-checked")).toBe("false");
       await click(toggle(h));
       expect(turnOn).toHaveBeenCalledTimes(1);
-      expect(openSetup).not.toHaveBeenCalled();
+      expect(allowPermissions).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
@@ -612,7 +614,7 @@ describe("Connect a machine inside the desktop app", () => {
     }
   });
 
-  test("a problem shows with the switch on and exactly one fix", async () => {
+  test("a missing permission or a problem shows with the switch on and exactly one fix", async () => {
     const permissions = inDesktop({
       state: "connected",
       permissions: [{ id: "accessibility", granted: false }],
@@ -620,9 +622,9 @@ describe("Connect a machine inside the desktop app", () => {
     let h = await render({ advanced: false });
     try {
       expect(toggle(h)?.getAttribute("aria-checked")).toBe("true");
-      expect(h.text()).toContain("Agents need your permission");
-      await click(h.button("Allow in System Settings"));
-      expect(permissions.openSetup).toHaveBeenCalledTimes(1);
+      expect(h.text()).toContain("To let agents see and control the screen, allow Opengeni");
+      await click(h.button("Open System Settings"));
+      expect(permissions.allowPermissions).toHaveBeenCalledTimes(1);
       expect(h.onOpenChange).toHaveBeenCalledWith(false);
     } finally {
       await h.close();

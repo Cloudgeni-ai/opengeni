@@ -161,37 +161,60 @@ release is required for this presentation and desktop-host change.
 
 ## This computer
 
-Revised 2026-10-20. New installs remain app-hosted. A working standalone
-installation is service-backed instead: changing its responsible process would
-discard the usefulness of its existing macOS grants. Launch never changes it.
-A status read takes it over only when it is already registered to the open
+Revised 2026-10-23. New installs are app-hosted. A status read takes over a
+standalone installation only when it is already registered to the open
 workspace and the server lists that registration (for example, set up earlier
 from the web app's install command): the app records it as its own, asks the
 server to allow the person's agents if that is still missing, and shows
-computer use on. Its service, files and grants are not touched; the switch then
-pauses and resumes that same service.
+computer use on with nothing for the person to do.
+
+On macOS the app then moves that agent into the app (`hostServiceAgent`): one
+set of permissions, the app's, covers app-shots and computer use. In the
+background, once per launch and only while the service is on and running, it
+turns the service off (kept installed, also off at login) and starts the same
+binary as its own helper with the same config folder, so the connections and
+registration are unchanged: no new enrollment and no new machine. macOS then
+attributes screen and input use to Opengeni.app. If the helper doesn't stay up,
+the app stops it and turns the service back on, so the computer never has two
+agents or none. Hosting was chosen over keeping the service because the app
+can keep its helper running: it opens hidden at login while this computer is in
+use and keeps running in the menu bar with the window closed; only quitting it
+stops the agent, and quitting asks first. Grants the person gave
+"Opengeni Agent" don't carry over; the app asks for its own missing ones the
+same way as for a new install. An agent that stays a service (another
+platform, or the move failed) keeps working as before, and System Settings
+guidance names "Opengeni Agent".
 
 In the app this is **Computer use**: one switch (`ComputerUseRow` in
 `packages/react/src/app/components/desktop/computer-use.tsx`, state from
 `useComputerUse`/`computerUseState` in `@opengeni/react/this-computer`). The app
 never asks the person to connect, disconnect or reconnect the computer it runs
-on. The switch shows one of four states:
+on. The switch shows one state at a time:
 
 | State | Switch | What shows |
 | --- | --- | --- |
 | Off | off | "Let agents use {computer}." The same whether never set up, turned off, or removed on the server. |
-| Turning on | on | "Turning on…", no buttons. |
+| Turning on | on | "Turning on…", no buttons. Includes asking macOS for a missing permission. |
 | On | on | "Agents can use {computer}" with a green dot. |
-| Problem | on | The problem and exactly one fix: **Allow in System Settings** (permissions), **Sign in** (signed out), or **Try again** (server unreachable, or the server's or agent's own error). |
+| Needs permission | on | Calm, not an error: "To let agents see and control the screen, allow {app} in System Settings." and **Open System Settings**. Files and commands work meanwhile. |
+| Problem | on, red | The problem and exactly one fix: **Sign in** (signed out) or **Try again** (server unreachable, or the server's or agent's own error). |
 
 Off is pause: it persists across restarts and log-ins and keeps the
-installation and registration, so turning on is instant. Turning on does what
-is needed without asking: resumes a paused agent, registers this computer afresh
-when it never was or its registration is gone, starts the agent, and opens the
-permission steps only when something is still missing. Removing the computer
-from the workspace stays on its entry in the Machines list. The sidebar shows a
-small notice only while computer use turns on or has a problem, with the same
-one fix.
+installation and registration, so turning on is instant. Turning on is the
+whole step and does what is needed without asking: resumes a paused agent,
+registers this computer afresh when it never was or its registration is gone,
+starts the agent, then asks macOS for each missing permission in turn
+(`useThisComputer().asking`): the system prompt the first time, else the exact
+System Settings list with the app's floating guide. As each grant is detected
+the next missing one is asked for, and with none left it is on. When the person
+comes back to the app without allowing one, asking stops there and the switch
+shows **Needs permission**; nothing is asked again until they choose **Open
+System Settings** or turn the switch on again. If macOS quits and reopens the
+app to apply a grant, asking continues once for the next missing permission,
+unless that one was already asked for (`requestedPermissions`). Removing the
+computer from the workspace stays on its entry in the Machines list. The sidebar
+shows a small notice only while computer use turns on, needs a permission (same
+calm tone) or has a problem, with the same one fix.
 
 The server decides whether the local connection is still valid. Status reads
 the account's Machines view (`readMachine`): a machine the server no longer

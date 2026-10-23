@@ -39,6 +39,7 @@ export {
 export {
   computerUseFix,
   computerUseNoticeText,
+  computerUsePermissionText,
   computerUseProblemText,
   computerUseState,
   useComputerUse,

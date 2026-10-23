@@ -6,6 +6,7 @@ import {
   ThisComputerOffer,
   ThisComputerPanel,
   computerUseFix,
+  computerUsePermissionText,
   computerUseNoticeText,
   computerUseProblemText,
   computerUseState,
@@ -34,6 +35,8 @@ function computer(value: ThisComputerStatus | null): UseThisComputerResult {
     actionError: null,
     canDisconnect: true,
     pending: null,
+    asking: null,
+    allowPermissions: () => undefined,
     refresh: () => undefined,
     connect: async () => value,
     turnOn: async () => value,
@@ -262,22 +265,45 @@ test("computer use shows one state at a time", () => {
   ]) {
     expect(use(off)).toEqual({ kind: "off" });
   }
-  expect(use(status({}), { pending: "on" })).toEqual({ kind: "turning_on", progress: null });
+  expect(use(status({}), { pending: "on" })).toEqual({
+    kind: "turning_on",
+    progress: null,
+    asking: null,
+  });
   expect(use(status({ busy: true, setupProgress: 0.4 }))).toEqual({
     kind: "turning_on",
     progress: 0.4,
+    asking: null,
   });
   expect(use(status({ state: "connected", reconnecting: true }))).toEqual({
     kind: "turning_on",
     progress: null,
+    asking: null,
   });
   expect(use(status({ state: "connected" }))).toEqual({ kind: "on" });
   // Turning it off shows off at once; pausing elsewhere doesn't flash "turning on".
   expect(use(status({ state: "connected" }), { pending: "off" })).toEqual({ kind: "off" });
   expect(use(status({ state: "connected", busy: true }))).toEqual({ kind: "on" });
-  expect(use(status({ state: "connected", permissions: missing }))).toEqual(
-    problem("permissions", null, null),
-  );
+  // Asking the system for a permission is still turning on, one state.
+  expect(
+    use(status({ state: "connected", permissions: missing }), { asking: "accessibility" }),
+  ).toEqual({
+    kind: "turning_on",
+    progress: null,
+    asking: "accessibility",
+  });
+  // Not given (yet): calm, never a problem; it names the app the grant goes to.
+  expect(use(status({ state: "connected", permissions: missing }))).toEqual({
+    kind: "needs_permission",
+    appName: null,
+  });
+  expect(
+    use(status({ state: "connected", permissions: missing, permissionAppName: "Opengeni Agent" })),
+  ).toEqual({ kind: "needs_permission", appName: "Opengeni Agent" });
+  // A real failure still wins over a missing permission.
+  expect(
+    use(status({ state: "connected", permissions: missing, errorCode: "offline", error: "x" })),
+  ).toEqual(problem("offline", "offline", "x"));
 });
 
 test("each problem keeps its meaning, and only an unreachable server is offline", () => {
@@ -313,12 +339,18 @@ test("each problem keeps its meaning, and only an unreachable server is offline"
     "Sign in again to let agents use Kari's Mac.",
   );
   expect(text(problem("error", null, null) as never)).toBe("Computer use couldn't turn on.");
-  expect(computerUseNoticeText({ kind: "turning_on", progress: null }, t)).toBe(
+  expect(computerUseNoticeText({ kind: "turning_on", progress: null, asking: null }, t)).toBe(
     "Turning on computer use…",
+  );
+  expect(computerUseNoticeText({ kind: "needs_permission", appName: null }, t)).toBe(
+    "Allow screen access for computer use",
+  );
+  expect(computerUsePermissionText("Opengeni", t)).toBe(
+    "To let agents see and control the screen, allow Opengeni in System Settings.",
   );
   expect(computerUseNoticeText(server as never, t)).toBe("Computer use isn't working");
   // One fix each.
-  expect(computerUseFix("permissions")).toBe("allow");
+  expect(computerUseFix("permission")).toBe("open_settings");
   expect(computerUseFix("signed_out")).toBe("sign_in");
   expect(computerUseFix("offline")).toBe("try_again");
   expect(computerUseFix("error")).toBe("try_again");

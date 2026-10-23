@@ -1,11 +1,13 @@
 // "Computer use" inside the desktop app: one switch for whether agents can
 // use the computer the person is on, and a small notice for the sidebar while
-// it turns on or needs something. Each problem has exactly one fix.
-import { CircleAlertIcon, Loader2Icon } from "lucide-react";
+// it turns on or needs something. A missing permission or a problem has
+// exactly one fix; only real failures are shown as errors.
+import { CircleAlertIcon, InfoIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import {
   computerUseNoticeText,
+  computerUsePermissionText,
   computerUseProblemText,
   useComputerUse,
   type ComputerUseControl,
@@ -20,8 +22,9 @@ import type { DesktopThisComputer } from "./this-computer";
 
 export interface ComputerUseOptions {
   /**
-   * Where "Allow in System Settings" goes. The setup steps that walk through
-   * each permission by default; a permissions page can pass its own.
+   * What "Open System Settings" does for a missing permission. By default it
+   * asks for the next missing one: its System Settings list with the app's
+   * guide beside it. A permissions page can pass its own.
    */
   onAllowPermissions?: (() => void) | undefined;
 }
@@ -32,14 +35,14 @@ export function useDesktopComputerUseControl(
   options: ComputerUseOptions = {},
 ): ComputerUseControl {
   return useComputerUse(desktop.computer, {
-    onAllowPermissions: options.onAllowPermissions ?? desktop.openSetup,
+    onAllowPermissions: options.onAllowPermissions ?? desktop.allowPermissions,
     onSignIn: desktop.signIn ?? undefined,
   });
 }
 
 function fixLabel(fix: ComputerUseFix, t: OpenGeniText, tryAgain: string): string {
-  return fix === "allow"
-    ? t("thisComputer.computerUse.allow")
+  return fix === "open_settings"
+    ? t("thisComputer.computerUse.openSettings")
     : fix === "sign_in"
       ? t("thisComputer.computerUse.signIn")
       : tryAgain;
@@ -51,9 +54,11 @@ export interface ComputerUseRowProps extends ComputerUseOptions {
 }
 
 /**
- * The master switch for this computer, as a settings row: off, turning on,
- * on, or on with a problem and its one fix. Off pauses the agent and keeps
- * its registration, so turning it on again is instant.
+ * The master switch for this computer, as a settings row: off, turning on
+ * (including asking for missing permissions), on, on while a permission is
+ * still missing (calm, with "Open System Settings"), or on with a problem and
+ * its one fix. Off pauses the agent and keeps its registration, so turning
+ * it on again is instant.
  */
 export function ComputerUseRow({ desktop, onAllowPermissions, className }: ComputerUseRowProps) {
   const t = useOpenGeniText();
@@ -79,6 +84,9 @@ export function ComputerUseRow({ desktop, onAllowPermissions, className }: Compu
           {t("thisComputer.computerUse.on", { machineName })}
         </span>
       );
+      break;
+    case "needs_permission":
+      description = computerUsePermissionText(state.appName ?? desktop.productName, t);
       break;
     case "problem":
       description = (
@@ -117,8 +125,9 @@ export interface ComputerUseNoticeProps extends ComputerUseOptions {
 }
 
 /**
- * For the sidebar: only while computer use turns on or has a problem (with
- * the same one fix as the switch). Nothing when it's on or off.
+ * For the sidebar: only while computer use turns on, waits on a permission
+ * (calm, not an error) or has a problem (with the same one fix as the
+ * switch). Nothing when it's on or off.
  */
 export function ComputerUseNotice({
   desktop,
@@ -127,12 +136,15 @@ export function ComputerUseNotice({
 }: ComputerUseNoticeProps) {
   const t = useOpenGeniText();
   const { state, fix } = useDesktopComputerUseControl(desktop, { onAllowPermissions });
-  if (state.kind !== "turning_on" && state.kind !== "problem") return null;
+  if (state.kind !== "turning_on" && state.kind !== "problem" && state.kind !== "needs_permission")
+    return null;
   const machineName = desktop.computer.status?.machineName || "this computer";
   const detail =
     state.kind === "problem"
       ? computerUseProblemText(state, machineName, t, desktop.labels)
-      : undefined;
+      : state.kind === "needs_permission"
+        ? computerUsePermissionText(state.appName ?? desktop.productName, t)
+        : undefined;
   return (
     <div
       className={cn(
@@ -148,6 +160,8 @@ export function ComputerUseNotice({
             aria-hidden
             className="mt-0.5 size-3.5 shrink-0 animate-spin text-fg-muted"
           />
+        ) : state.kind === "needs_permission" ? (
+          <InfoIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-fg-muted" />
         ) : (
           <CircleAlertIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-danger" />
         )}

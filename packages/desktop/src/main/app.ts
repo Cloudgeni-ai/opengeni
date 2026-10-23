@@ -247,6 +247,10 @@ export class DesktopShell {
       ...(config.adoptStandaloneAgent !== undefined
         ? { adoptStandaloneAgent: config.adoptStandaloneAgent }
         : {}),
+      // The app opens at login and keeps running in the menu bar while this
+      // computer is in use, so an adopted service agent can run as its helper
+      // and share the app's permissions.
+      hostServiceAgent: process.platform === "darwin",
       fetch: (url) => net.fetch(url),
       dataDir: app.getPath("userData"),
       systemLanguages: () => app.getPreferredSystemLanguages(),

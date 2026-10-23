@@ -1,20 +1,20 @@
 // "Computer use" inside the Opengeni desktop app: the app runs the
 // connected-machine agent, and the web app shows one switch for it (see
-// `./computer-use`) plus the shared permission steps from
-// `@opengeni/react/this-computer`. Outside the desktop app (or where the
-// deployment doesn't offer connected machines) everything here renders nothing.
+// `./computer-use`). Turning it on asks macOS for any missing permission
+// itself, with the app's floating guide beside System Settings. Outside the
+// desktop app (or where the deployment doesn't offer connected machines)
+// everything here renders nothing.
 import {
-  ThisComputerSetup,
   defaultThisComputerLabels,
+  thisComputerPermissionSteps,
   useThisComputer,
-  useThisComputerSetupOpen,
   type ThisComputerHost,
   type ThisComputerLabels,
   type ThisComputerPlatform,
   type UseThisComputerResult,
 } from "../../../this-computer";
 import "../../../../styles/this-computer.css";
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { cn } from "../../../lib/cn";
 
 import { useAppContext } from "../../app-context";
@@ -31,8 +31,11 @@ export interface DesktopThisComputer {
   platform: ThisComputerPlatform;
   productName: string;
   labels: ThisComputerLabels;
-  /** Opens the setup steps: turning it on, or finishing the permissions. */
-  openSetup(): void;
+  /**
+   * Asks for the missing permissions, one after another (the system prompt
+   * the first time, else the System Settings list with the app's guide).
+   */
+  allowPermissions(): void;
   /** Signs this account in again, when the app has to; null where it can't. */
   signIn: (() => void) | null;
 }
@@ -85,7 +88,7 @@ export function DesktopThisComputerProvider({
   const { clientConfig } = useAppContext();
   const offered = clientConfig.connectedMachines !== false ? host : null;
   const computer = useThisComputer(offered, workspaceId);
-  const [open, setOpen] = useThisComputerSetupOpen(computer);
+  useContinueAskingAfterRelaunch(computer);
   const labels = useMemo(() => defaultThisComputerLabels(), []);
   const value = useMemo<DesktopThisComputer | null>(
     () =>
@@ -96,28 +99,36 @@ export function DesktopThisComputerProvider({
             platform: offered.platform,
             productName: offered.productName,
             labels,
-            openSetup: () => setOpen(true),
+            allowPermissions: computer.allowPermissions,
             signIn,
           }
         : null,
-    [computer, labels, offered, setOpen, workspaceId],
+    [computer, labels, offered, workspaceId],
   );
-  return (
-    <Context.Provider value={value}>
-      {children}
-      {offered ? (
-        <ThisComputerSetup
-          open={open}
-          onOpenChange={setOpen}
-          computer={computer}
-          platform={offered.platform}
-          productName={offered.productName}
-          appIcon="/icon-192.png"
-          labels={labels}
-        />
-      ) : null}
-    </Context.Provider>
-  );
+  return <Context.Provider value={value}>{children}</Context.Provider>;
+}
+
+/**
+ * macOS quits and reopens the app to apply some grants (Screen Recording).
+ * When the app comes back with turning on unfinished, it goes on asking, once,
+ * for the next missing permission, unless that one was already asked for:
+ * then the person declined it, and it waits for "Open System Settings".
+ */
+function useContinueAskingAfterRelaunch(computer: UseThisComputerResult): void {
+  const done = useRef(false);
+  const status = computer.status;
+  const allowPermissions = computer.allowPermissions;
+  useEffect(() => {
+    if (done.current || !status || status.state === "unavailable") return;
+    if (status.state !== "connected" || !status.setupPending) {
+      // Settled without unfinished setup: nothing to continue in this window.
+      if (!status.busy) done.current = true;
+      return;
+    }
+    done.current = true;
+    const next = thisComputerPermissionSteps(status).find((step) => !step.granted);
+    if (next && !status.requestedPermissions?.includes(next.id)) allowPermissions();
+  }, [allowPermissions, status]);
 }
 
 /**
@@ -130,14 +141,12 @@ export function useDesktopComputerUse(
 ): (ComputerUseControl & { machineName: string }) | null {
   const desktop = useDesktopThisComputer();
   const control = useComputerUse(desktop?.computer ?? null, {
-    onAllowPermissions: options.onAllowPermissions ?? desktop?.openSetup ?? noop,
+    onAllowPermissions: options.onAllowPermissions ?? desktop?.allowPermissions,
     onSignIn: desktop?.signIn ?? undefined,
   });
   if (!desktop || control.state.kind === "hidden") return null;
   return { ...control, machineName: desktop.computer.status?.machineName ?? "" };
 }
-
-function noop() {}
 
 /** Above the account row, only while computer use turns on or needs something. */
 export function DesktopThisComputerOffer({

@@ -21,7 +21,13 @@ afterEach(async () => {
 });
 
 function fixture(
-  options: { legacy?: boolean; signedOut?: boolean; inspectionFailure?: boolean } = {},
+  options: {
+    legacy?: boolean;
+    signedOut?: boolean;
+    inspectionFailure?: boolean;
+    /** How the agent behaves when the app runs it as its helper. */
+    hosted?: "runs" | "exits";
+  } = {},
 ) {
   const home = mkdtempSync(join(tmpdir(), "og-service-host-"));
   const bundle = join(home, "Applications", "OpenGeni Agent.app", "Contents", "MacOS");
@@ -42,6 +48,8 @@ function fixture(
       `  'service stop') touch "${paused}" ;;`,
       `  'service start') rm -f "${paused}" ;;`,
       `  --version) echo 'opengeni-agent 0.1.109' ;;`,
+      `  permissions) echo '{"required":true,"screenRecording":true,"accessibility":false,"inputMonitoring":false}' ;;`,
+      `  *' run') ${options.hosted === "exits" ? "exit 1" : `echo "$$" > "${home}/hosted.pid"; exec sleep 30`} ;;`,
       "  *) exit 99 ;;",
       "esac",
     ].join("\n"),
@@ -89,6 +97,7 @@ function fixture(
       throw new Error("must not reset permissions");
     },
     onChange: () => undefined,
+    ...(options.hosted ? { hostServiceAgent: true, hostedSettleMs: 400 } : {}),
   };
   const instances: ThisComputer[] = [];
   const create = () => {
@@ -243,6 +252,87 @@ describe.skipIf(process.platform === "win32")("service-backed desktop setup", ()
     ).toBe("app");
     await reopened.boot();
     expect(f.commands()).toEqual([]);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("a service agent moved into the app", () => {
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const state = (home: string) =>
+    JSON.parse(readFileSync(join(home, "this-computer.json"), "utf8")) as {
+      management: string;
+      hostedService: string | null;
+    };
+
+  test("runs as the app's helper with the same registration, and the service stays off", async () => {
+    const f = fixture({ hosted: "runs" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    // Adopted and running as a service: the next reading moves it into the app.
+    await app.status("https://server.example", "w1", "signed-in-account");
+    await until(
+      () => state(f.home).hostedService !== null && existsSync(join(f.home, "hosted.pid")),
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    expect(state(f.home)).toMatchObject({ management: "app", hostedService: expect.any(String) });
+    // The service was turned off (kept installed) before the helper started: one agent.
+    expect(existsSync(f.paused)).toBe(true);
+    expect(f.commands()).toContain("service stop");
+    expect(f.commands().some((command) => command.endsWith(" run"))).toBe(true);
+    // No new enrollment: minting would have thrown.
+    const status = await app.status("https://server.example", "w1", "signed-in-account");
+    expect(status.management).toBe("app");
+    expect(status.permissionAppName).toBeUndefined();
+    expect(status.state).toBe("connected");
+    // Its permissions now are the app's own, and opening at login keeps it available.
+    expect(status.permissions?.find((p) => p.id === "accessibility")?.granted).toBe(false);
+    expect(status.requestedPermissions).toEqual([]);
+    // Asked once: screens then know not to ask again unprompted.
+    await app.requestPermission("accessibility");
+    expect(
+      (await app.status("https://server.example", "w1", "signed-in-account")).requestedPermissions,
+    ).toEqual(["accessibility"]);
+    expect(app.openAtLoginChange(true)).toBe("open");
+    // Turning computer use off and on is the app's pause, not the service.
+    const serviceCommands = f.commands().filter((command) => command.startsWith("service "));
+    await app.pause();
+    expect((await app.status("https://server.example", "w1", "signed-in-account")).state).toBe(
+      "paused",
+    );
+    expect(existsSync(f.paused)).toBe(true);
+    expect(f.commands().filter((command) => /^service (start|stop)/.test(command))).toEqual(
+      serviceCommands.filter((command) => /^service (start|stop)/.test(command)),
+    );
+    f.preserved();
+  });
+
+  test("goes back to the service when the helper doesn't start", async () => {
+    const f = fixture({ hosted: "exits" });
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    await app.status("https://server.example", "w1", "signed-in-account");
+    // Connecting started the service once; going back starts it again.
+    await until(() => f.commands().filter((command) => command === "service start").length === 2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(state(f.home)).toMatchObject({ management: "service", hostedService: null });
+    // Back to exactly one agent: the service runs again.
+    expect(existsSync(f.paused)).toBe(false);
+    const status = await app.status("https://server.example", "w1", "signed-in-account");
+    expect(status.management).toBe("service");
+    expect(status.state).toBe("connected");
+    expect(status.error).toBeNull();
+    f.preserved();
+  });
+
+  test("an app that doesn't host service agents leaves the service alone", async () => {
+    const f = fixture();
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    await app.status("https://server.example", "w1", "signed-in-account");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(f.commands()).not.toContain("service stop");
+    expect(state(f.home).hostedService).toBeNull();
   });
 });
 

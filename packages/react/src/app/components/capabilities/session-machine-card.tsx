@@ -350,12 +350,11 @@ export function SessionMachineCapabilityCard({
           if (allowHere) return void use(allowHere);
           if (!offerThisComputer) return openSetup();
           if (desktop.computer.acting) return;
-          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
-          // Resumes, registers afresh or starts the agent, whichever it needs.
-          void desktop.computer.turnOn().then((next) => {
-            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
-            void fleet.refresh();
-          });
+          if (thisComputerNeedsPermissions(desktop.computer.status))
+            return desktop.allowPermissions();
+          // Resumes, registers afresh or starts the agent, whichever it needs,
+          // then asks for any missing permission itself.
+          void desktop.computer.turnOn().then(() => void fleet.refresh());
         }}
         onClose={closeSetup}
         opener={opener}

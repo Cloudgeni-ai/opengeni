@@ -12,13 +12,15 @@ const granted = [
   { id: "accessibility" as const, granted: true },
   { id: "inputMonitoring" as const, granted: true },
 ];
+// The app runs the agent as its own helper, so permissions are the app's.
 const base = {
   busy: false,
   error: null,
   machineName,
-  management: "service" as const,
-  permissionAppName: "Opengeni Agent",
+  management: "app" as const,
 };
+/** `?ask`: turning on finds Accessibility missing and asks macOS for it. */
+const asks = params.has("ask");
 const on: ThisComputerStatus = {
   ...base,
   state: "connected",
@@ -37,8 +39,16 @@ const SCENES: Record<string, ThisComputerStatus> = {
   },
   turning: { ...base, state: "connected", reconnecting: true, enrollmentId: "a2" },
   on,
-  // An agent set up earlier from the web app's install command, taken over as is.
+  // An agent set up earlier from the web app's install command, now run by the app.
   adopted: { ...on, enrollmentId: "web-installed" },
+  asking: {
+    ...on,
+    permissions: [
+      { id: "screenRecording", granted: true },
+      { id: "accessibility", granted: false },
+      { id: "inputMonitoring", granted: false },
+    ],
+  },
   permissions: {
     ...on,
     permissions: [
@@ -106,7 +116,8 @@ if (params.get("environment") !== "web") {
           setStatus({ ...base, state: "not_connected", busy: true });
           await wait(1_500);
           setStatus(SCENES.turning!);
-          setTimeout(() => setStatus(on), 1_500);
+          await wait(1_200);
+          setStatus(asks ? SCENES.asking! : on);
           return status;
         },
         pause: async () => setStatus(SCENES.paused!),
@@ -115,7 +126,10 @@ if (params.get("environment") !== "web") {
           setStatus(on);
         },
         disconnect: async () => setStatus(SCENES.off!),
-        requestPermission: async () => undefined,
+        // macOS shows its prompt; the person allows it a moment later.
+        requestPermission: async () => {
+          if (asks) setTimeout(() => setStatus(on), 2_500);
+        },
         onChange: (listener: () => void) => {
           listeners.add(listener);
           return () => listeners.delete(listener);

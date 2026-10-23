@@ -66,7 +66,7 @@ export const host: ThisComputerHost = {
 };
 export const DesktopContext = createContext<{
   computer: UseThisComputerResult;
-  openSetup(): void;
+  allowPermissions(): void;
 } | null>(null);
 export function useDesktopThisComputer() {
   const value = useContext(DesktopContext);

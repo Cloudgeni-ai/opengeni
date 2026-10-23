@@ -180,13 +180,14 @@ export function SessionChromeCapabilityCard({
           }
           if (!offerThisComputer) return setSetupOpen(true);
           if (desktop.computer.acting) return;
-          if (thisComputerNeedsPermissions(desktop.computer.status)) return desktop.openSetup();
+          if (thisComputerNeedsPermissions(desktop.computer.status))
+            return desktop.allowPermissions();
           void (
             desktop.computer.status?.state === "paused"
               ? desktop.computer.resume().then(() => desktop.computer.status)
               : desktop.computer.connect({ screenControl: false })
           ).then((next) => {
-            if (thisComputerNeedsPermissions(next)) desktop.openSetup();
+            if (thisComputerNeedsPermissions(next)) desktop.allowPermissions();
             void fleet.refresh();
           });
         }}

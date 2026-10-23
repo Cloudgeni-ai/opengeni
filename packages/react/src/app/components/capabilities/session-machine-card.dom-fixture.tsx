@@ -259,7 +259,7 @@ async function click(element: HTMLElement | null) {
 describe("Connected Machine conversation card", () => {
   test("desktop turns computer use on in one click and opens setup only for missing permissions", async () => {
     const { defaultThisComputerLabels } = await import("../../../this-computer");
-    const openSetup = mock(() => {});
+    const allowPermissions = mock(() => {});
     const turnOn = mock(async () => ({
       state: "connected" as const,
       busy: false,
@@ -271,7 +271,7 @@ describe("Connected Machine conversation card", () => {
       productName: "Opengeni",
       platform: "linux",
       labels: defaultThisComputerLabels(),
-      openSetup,
+      allowPermissions,
       signIn: null,
       computer: {
         status: { state: "not_installed", busy: false, error: null, machineName: "This laptop" },
@@ -279,6 +279,8 @@ describe("Connected Machine conversation card", () => {
         actionError: null,
         canDisconnect: true,
         pending: null,
+        asking: null,
+        allowPermissions,
         connect: async () => null,
         turnOn,
         turnOff: async () => {},
@@ -293,7 +295,7 @@ describe("Connected Machine conversation card", () => {
     try {
       await click(h.button("Use this computer"));
       expect(turnOn).toHaveBeenCalledTimes(1);
-      expect(openSetup).not.toHaveBeenCalled();
+      expect(allowPermissions).not.toHaveBeenCalled();
       expect(mintEnrollToken).not.toHaveBeenCalled();
       desktop!.computer.status = {
         state: "connected",
@@ -304,7 +306,7 @@ describe("Connected Machine conversation card", () => {
       };
       await h.rerender();
       await click(h.button("Use this computer"));
-      expect(openSetup).toHaveBeenCalledTimes(1);
+      expect(allowPermissions).toHaveBeenCalledTimes(1);
       expect(turnOn).toHaveBeenCalledTimes(1);
     } finally {
       await h.close();

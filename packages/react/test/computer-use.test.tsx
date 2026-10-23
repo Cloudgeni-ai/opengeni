@@ -23,7 +23,7 @@ function desktop(
     platform: "macos",
     productName: "Opengeni",
     labels: defaultThisComputerLabels(),
-    openSetup: () => undefined,
+    allowPermissions: () => undefined,
     signIn,
     computer: {
       status,
@@ -31,6 +31,8 @@ function desktop(
       actionError: null,
       canDisconnect: true,
       pending: null,
+      asking: null,
+      allowPermissions: () => undefined,
       refresh: () => undefined,
       connect: async () => status,
       turnOn: async () => status,
@@ -40,7 +42,7 @@ function desktop(
       disconnect: nothing,
       requestPermission: nothing,
       ...extra,
-    },
+    } as DesktopThisComputer["computer"],
   };
 }
 
@@ -78,12 +80,41 @@ test("turning on, on, and each problem with its one fix", () => {
   expect(checked(on)).toBe(true);
   expect(on.match(/<button/gu)).toHaveLength(1);
 
-  const fixes: [Partial<ThisComputerStatus>, string, string][] = [
-    [
+  // Asking macOS for a permission is part of turning on: no other state shows.
+  const asking = row(
+    desktop(
       { state: "connected", permissions: [{ id: "accessibility", granted: false }] },
-      "Agents need your permission",
-      "Allow in System Settings",
-    ],
+      { asking: "accessibility" },
+    ),
+  );
+  expect(asking).toContain("Turning on…");
+  expect(asking).not.toContain("System Settings");
+  expect(asking.match(/<button/gu)).toHaveLength(1);
+
+  // Came back without allowing it: calm, never red, one "Open System Settings".
+  const permission = row(
+    desktop({ state: "connected", permissions: [{ id: "accessibility", granted: false }] }),
+  );
+  expect(checked(permission)).toBe(true);
+  expect(permission).toContain(
+    "To let agents see and control the screen, allow Opengeni in System Settings.",
+  );
+  expect(permission).toContain("Open System Settings<svg");
+  expect(permission).not.toContain("text-danger");
+  expect(permission.match(/<button/gu)).toHaveLength(2);
+  // A browser-set-up agent that stays a service: the grant goes to it, by name.
+  expect(
+    row(
+      desktop({
+        state: "connected",
+        management: "service",
+        permissionAppName: "Opengeni Agent",
+        permissions: [{ id: "accessibility", granted: false }],
+      }),
+    ),
+  ).toContain("allow Opengeni Agent in System Settings");
+
+  const fixes: [Partial<ThisComputerStatus>, string, string][] = [
     [
       { state: "connected", reconnecting: true, errorCode: "offline", error: "fetch failed" },
       "Couldn't reach the server",
@@ -100,6 +131,7 @@ test("turning on, on, and each problem with its one fix", () => {
     expect(checked(html)).toBe(true);
     expect(html).toContain(line);
     expect(html).toContain(`${fix}<svg`);
+    expect(html).toContain("text-danger");
     // The switch and one fix: no other buttons.
     expect(html.match(/<button/gu)).toHaveLength(2);
   }
@@ -109,7 +141,7 @@ test("turning on, on, and each problem with its one fix", () => {
   expect(row(desktop(signedOut))).toContain("Try again<svg");
 });
 
-test("the sidebar shows only while turning on or with a problem, with the same fix", () => {
+test("the sidebar shows only while turning on, waiting on a permission or with a problem", () => {
   expect(notice(desktop({}))).toBe("");
   expect(notice(desktop({ state: "paused" }))).toBe("");
   expect(notice(desktop({ state: "connected" }))).toBe("");
@@ -123,6 +155,9 @@ test("the sidebar shows only while turning on or with a problem, with the same f
   const permissions = notice(
     desktop({ state: "connected", permissions: [{ id: "screenRecording", granted: false }] }),
   );
-  expect(permissions).toContain("Computer use needs permission");
-  expect(permissions).toContain("Allow in System Settings<svg");
+  expect(permissions).toContain("Allow screen access for computer use");
+  expect(permissions).toContain("Open System Settings<svg");
+  // The same calm tone as the switch: only real failures are red.
+  expect(permissions).not.toContain("text-danger");
+  expect(problem).toContain("text-danger");
 });
