@@ -50,6 +50,7 @@ export interface Manifest extends Omit<BatchSpec, "pulls"> {
 }
 export type Outcome = "success" | "code_failure" | "infrastructure" | "cancelled" | "unknown";
 export type InfrastructureRetryReason =
+  | "failed-batch"
   | "verified-infrastructure"
   | "provider-cancelled"
   | "no-job-logs";

@@ -710,7 +710,7 @@ export class GitHubReader {
         }>(key);
         if (
           cached &&
-          (cached.run.outcome === "success" || cached.retryPolicyVersion === 2) &&
+          (cached.run.outcome === "success" || cached.retryPolicyVersion === 3) &&
           (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
         ) {
           result.push(cached.run);
@@ -782,6 +782,20 @@ export class GitHubReader {
             }
           }
         }
+        // Provider-confirmed failed jobs may be retried once even without a
+        // trusted result artifact. This grants no landing or member-blame proof.
+        if (
+          status === "completed" &&
+          ["failure", "timed_out", "cancelled"].includes(details.conclusion)
+        ) {
+          const jobs = await this.pages(`actions/runs/${run.id}/attempts/${attempt}/jobs`, "jobs");
+          if (
+            jobs.length > 0 &&
+            jobs.every((j) => j.status === "completed") &&
+            jobs.some((j) => ["failure", "timed_out"].includes(j.conclusion))
+          )
+            infrastructureRetryReason = "failed-batch";
+        }
         const verifiedRun: Run = {
           id: Number(run.id),
           attempt,
@@ -801,7 +815,7 @@ export class GitHubReader {
           await this.cache.set(key, {
             run: verifiedRun,
             conclusion: details.conclusion,
-            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 2 }),
+            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 3 }),
           });
       }
     }
@@ -1155,6 +1169,9 @@ export class GitHubMutations {
       !Number.isSafeInteger(run.id) ||
       run.id < 1 ||
       !(
+        (run.trusted && run.outcome === "code_failure") ||
+        (run.infrastructureRetryReason === "failed-batch" &&
+          ["infrastructure", "cancelled"].includes(run.outcome)) ||
         (run.infrastructureRetryReason === "verified-infrastructure" &&
           run.trusted &&
           run.outcome === "infrastructure") ||
@@ -1162,9 +1179,7 @@ export class GitHubMutations {
         (run.infrastructureRetryReason === "no-job-logs" && run.outcome === "infrastructure")
       )
     )
-      throw new Error(
-        "Only a first-attempt terminal candidate infrastructure failure may be retried",
-      );
+      throw new Error("Only a first-attempt terminal candidate failure may be retried");
     await this.post(`actions/runs/${run.id}/rerun`, {});
   }
   async announce(number: number, body: string): Promise<void> {

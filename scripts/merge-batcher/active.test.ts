@@ -645,6 +645,25 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       );
     },
   );
+  test("code failure gets one fenced retry, then parks on the latest failed attempt", async () => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m, "code_failure");
+    f.advance(61);
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+    const second = f.api.workflowRuns.at(-1)!;
+    second.status = "completed";
+    second.outcome = "code_failure";
+    second.trusted = true;
+    second.completedAt = NOW;
+    expect(second.attempt).toBe(2);
+    expect((await f.controller().step()).action.kind).toBe("record");
+    expect((await f.state()).ledger.parked?.[0]?.attempt).toBe(2);
+    await f.executor().maintain();
+    expect(f.api.calls.filter((call) => call.endsWith("/rerun"))).toHaveLength(1);
+  });
   test("a stale code-failure retry intent cannot submit, even if a prior controller persisted it", async () => {
     const f = await fixture(),
       m = await f.publish();
@@ -860,7 +879,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     async (status) => {
       const f = await fixture();
       const m = await f.publish();
-      f.verdict(m, "code_failure");
+      f.verdict(m, "code_failure").attempt = 2;
       f.api.baseStatus = status;
       expect((await f.controller().step()).action.kind).toBe("record");
       const held = (await f.state()).ledger;
@@ -884,7 +903,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("green full-main CI is not comparable base-suite evidence for singleton ejection", async () => {
     const f = await fixture(),
       m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "code_failure").attempt = 2;
     expect((await f.controller().step()).action.kind).toBe("record");
     expect((await f.state()).ledger.ejected).toEqual([]);
     expect((await f.state()).ledger.parked?.[0]?.pull.headSha).toBe(f.head);
@@ -893,7 +912,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("parking comment lost response is reconciled after restart, never blindly replayed", async () => {
     const f = await fixture();
     const m = await f.publish();
-    f.verdict(m, "code_failure");
+    f.verdict(m, "code_failure").attempt = 2;
     await f.controller().step();
     expect((await f.controller().step()).action.kind).toBe("park");
     f.api.response = "lost";

@@ -39,6 +39,12 @@ test("required aggregate covers docs and every selected job at exact head", () =
   ])
     expect(aggregate).toContain(required);
   expect(jobs.contracts.if).toBeUndefined();
+  const commands = jobs.contracts.steps.map((s: any) => s.run ?? "").join("\n");
+  expect(commands).toContain("run-typecheck-plan.ts");
+  expect(commands).toContain("run-guards-plan.ts");
+  expect(commands).not.toContain("--exclude generated-fonts");
+  expect(commands).not.toContain("--exclude lint");
+  expect(readFileSync("scripts/ci/impact.ts", "utf8")).toContain('"generated-fonts"');
   for (const name of ["contracts", "units"]) {
     expect(jobs[name]["runs-on"]).toBe("ubuntu-latest");
     const checkout = jobs[name].steps.find((s: any) => s.uses?.startsWith("actions/checkout@"));
