@@ -17306,17 +17306,20 @@ type InboxAccessContextShape = {
 };
 
 /**
- * Who has an inbox: a signed-in person (`user:`), or the one human of a local
- * install. API keys, services, configured or development subjects and agents
- * act through sessions and have none. This is the shape the web uses to show
- * the Inbox; the API also checks verified managed-human or local-bootstrap
- * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
+ * Who has an inbox: a signed-in person (`user:`), a product's external user
+ * (`external_user:`, signed in to the product, which relays as them), or the
+ * one human of a local install. API keys, services, configured or development
+ * subjects and agents act through sessions and have none. This is the shape
+ * the web uses to show the Inbox; the API also checks verified managed-human,
+ * external-actor or local-bootstrap provenance (see `inboxSubjectForContext`
+ * in `@opengeni/core`).
  */
 export function accessContextHasInbox(
   context: InboxAccessContextShape | null | undefined,
 ): boolean {
   if (!context || context.credential) return false;
-  if (context.subjectId.startsWith("user:")) return true;
+  if (context.subjectId.startsWith("user:") || context.subjectId.startsWith("external_user:"))
+    return true;
   const grants = context.workspaceGrants ?? [];
   return (
     context.mode === "local" &&

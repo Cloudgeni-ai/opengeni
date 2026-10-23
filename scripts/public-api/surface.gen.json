@@ -1778,6 +1778,7 @@
       "path": "/v1/workspaces/:workspaceId",
       "sdk": [
         "OpenGeniClient.updateWorkspace",
+        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [
@@ -9468,6 +9469,7 @@
       "path": "/v1/workspaces/external",
       "sdk": [
         "OpenGeniClient.ensureWorkspace",
+        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [

@@ -545,6 +545,30 @@ export function createSessionProxyHandler(
       const uploadsEnabled = resolved.visitor !== true || options.visitorUploads === true;
 
       const [root, ...rest] = segments;
+      if (root === "inbox") {
+        // The user's own inbox, as the user: its items in this workspace only,
+        // and their inbox settings (`authorizeMutation` can keep those read-only).
+        const listing = rest.length === 0 && reading;
+        const item =
+          rest.length === 2 && rest[0] === "items" && SEGMENT.test(rest[1]!) && method === "PATCH";
+        const settings =
+          rest.length === 1 && rest[0] === "settings" && (reading || method === "PUT");
+        if (!listing && !item && !settings) return notAllowed();
+        const inboxUrl = new URL(
+          client.apiUrl(`/v1/${segments.map(encodeURIComponent).join("/")}`),
+        );
+        if (listing || item) inboxUrl.searchParams.set("workspaceId", workspaceId);
+        return relayResponse(
+          await client.fetchApi(inboxUrl.toString(), {
+            method,
+            headers: forwardedHeaders(request, false),
+            ...(reading || request.body === null ? {} : { body: request.body, duplex: "half" }),
+            signal: request.signal,
+          } as RequestInit),
+          heartbeatMs,
+          rejectedKeyNotice,
+        );
+      }
       if (root !== "workspaces" || rest.length === 0) {
         // Outside the workspace, only the app's bootstrap reads, answered for
         // the resolved workspace alone, never the user's other workspaces or

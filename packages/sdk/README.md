@@ -258,7 +258,12 @@ workspace:
 - **Outside it**, only the bootstrap reads answer, for this workspace alone:
   `GET /v1/workspaces` (just the resolved workspace), `GET /v1/access/me` (the
   user's effective grant here, never their other workspaces or the key's
-  authority), and `GET /v1/config/client`. Everything else is a 404.
+  authority), and `GET /v1/config/client`, plus the user's own inbox:
+  `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to this workspace's
+  items, and `GET`/`PUT /v1/inbox/settings`. Everything else is a 404. Your
+  users' questions, approvals, paused goals and agent notifications reach that
+  inbox like an Opengeni member's (the stock app shows it), so you do not need
+  to build notifications from session events.
 - **What narrows it:** an `asUser` request holds only the permissions both the
   organization key and the user's membership hold, so a key or member role
   without `files:write`, `schedules:*` or `sessions:control` cannot upload,

@@ -99,7 +99,7 @@ console.log(members.length); // WorkspaceMember[]
 
 ## createSessionProxyHandler
 
-`createSessionProxyHandler(client, options)` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and render `<OpenGeniChat baseUrl="/api/opengeni" />` or `SessionApp`. Each request calls `resolve`, runs as the resolved user, and stays in the resolved workspace: every Opengeni route in that workspace is forwarded, and Opengeni's permissions decide what it may do. Outside the workspace only the bootstrap reads (`workspaces`, `access/me`, `config/client`) answer.
+`createSessionProxyHandler(client, options)` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and render `<OpenGeniChat baseUrl="/api/opengeni" />` or `SessionApp`. Each request calls `resolve`, runs as the resolved user, and stays in the resolved workspace: every Opengeni route in that workspace is forwarded, and Opengeni's permissions decide what it may do. Outside the workspace only the bootstrap reads (`workspaces`, `access/me`, `config/client`) and the user's own inbox (`inbox` and `inbox/items/{id}` limited to the workspace, `inbox/settings`) answer.
 
 | Option                 | Purpose                                                                                                                                      |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |

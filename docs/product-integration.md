@@ -132,7 +132,15 @@ there with the same requests the Opengeni web app makes, and Opengeni's
 permission checks decide each one. A path naming another workspace is a 403.
 Outside the workspace only the bootstrap reads answer, scoped to the resolved
 workspace: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective
-grant there) and `GET /v1/config/client`; everything else is a 404.
+grant there) and `GET /v1/config/client`. The user's own inbox also passes:
+`GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved
+workspace's items, and `GET`/`PUT /v1/inbox/settings` (keep settings
+read-only with `authorizeMutation` if your product owns them). Everything
+else is a 404. An external user has an inbox like an Opengeni member: their
+sessions' questions, approvals, paused goals and agent notifications land
+there, and the stock app shows it, so a product needs no notification
+pipeline of its own. Phone pushes need the Opengeni native app and do not
+reach external users.
 
 The product narrows that surface in three places, from coarse to fine:
 
