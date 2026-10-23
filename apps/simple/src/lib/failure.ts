@@ -94,14 +94,15 @@ export function failureView(payload: unknown): FailureView {
     (aboutChatGpt && /usage limit/.test(text))
   ) {
     // The worker names the reset window ("resets in about 2h 5m", "in 2.5 hours").
-    const reset = /(?:resets|returns) (in (?:about |under )?(?:\d+(?:\.\d+)?\s*[a-z]+\s*)+)/i.exec(
-      typeof record.error === "string" ? record.error : "",
-    )?.[1];
+    // An API-key quota (quotaScope alone) is the model's, not ChatGPT's.
+    const who = LIMIT_CODES.has(code) || aboutChatGpt ? "ChatGPT's" : "The model's";
+    const reset =
+      /(?:resets|returns) (in (?:about |under )?\d+(?:\.\d+)?\s*[a-z]+(?:,?\s*(?:and\s+)?\d+(?:\.\d+)?\s*[a-z]+)*)/i.exec(
+        typeof record.error === "string" ? record.error : "",
+      )?.[1];
     return {
       kind: "limit",
-      message: reset
-        ? `ChatGPT's usage limit is reached. It resets ${reset.trim()}.`
-        : "ChatGPT's usage limit is reached. Try again later.",
+      message: `${who} usage limit is reached. ${reset ? `It resets ${reset.trim()}.` : "Try again later."}`,
       retry: false,
     };
   }
@@ -145,11 +146,12 @@ export function failureView(payload: unknown): FailureView {
   ) {
     return { kind: "temporary", message: "ChatGPT didn't respond in time.", retry: true };
   }
-  // Anything else may well fail the same way, so no Retry button: a new
-  // message (maybe worded differently) is the honest next step.
+  // Anything else may well fail the same way, so Retry only when the worker
+  // says so; otherwise a new message (maybe worded differently) is the next step.
+  const retry = record.retryable === true;
   return {
     kind: "unknown",
-    message: "Something went wrong. Send a message to carry on.",
-    retry: false,
+    message: retry ? "Something went wrong." : "Something went wrong. Send a message to carry on.",
+    retry,
   };
 }

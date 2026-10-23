@@ -289,7 +289,7 @@ export async function refreshAgentInstructions(workspaceId: string, sessions: Se
         blank: Boolean(metadata?.blank) && !customInstructions,
         // Without a profile here the name and description aren't known, so the
         // agent keeps the identity it has.
-        keepIdentity: !profile,
+        keepIdentity: !profile || (profile.name == null && profile.description == null),
       });
       upsertProfile(workspaceId, session.id, {
         instructionsVersion: INSTRUCTIONS_VERSION,

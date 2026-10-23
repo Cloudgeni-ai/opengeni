@@ -304,7 +304,10 @@ function foreign(request: Request) {
   const origin = request.headers.get("origin");
   if (!origin || request.method === "GET" || request.method === "HEAD") return false;
   try {
-    return new URL(origin).host !== host;
+    const from = new URL(origin);
+    // In development the page comes from Vite, which forwards writes here.
+    if (!serveDist && from.port === String(SIMPLE_WEB_PORT)) return false;
+    return from.host !== host;
   } catch {
     return true;
   }

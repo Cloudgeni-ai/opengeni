@@ -368,6 +368,8 @@ function resource(...parts) {
 async function startServer(token) {
   const dataDir = join(userData, "data", new URL(serverUrl).host);
   mkdirSync(dataDir, { recursive: true });
+  // A server stopped just before (sign out, then in again) must free the saved port.
+  await stopping;
   const port = await stablePort(dataDir);
   const child = spawn(resource("simple-server"), ["--serve-dist"], {
     env: {
@@ -412,12 +414,15 @@ async function startServer(token) {
   return origin;
 }
 
+/** The last stop still under way; the next start waits for it to free the port. */
+let stopping = Promise.resolve();
+
 /** Stops the local server; resolves once it has let go of its port. */
 function stopServer() {
   const child = server?.child;
   server = null;
-  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return stopping;
+  stopping = new Promise((resolve) => {
     const timer = setTimeout(resolve, 3_000);
     child.once("exit", () => {
       clearTimeout(timer);
@@ -425,6 +430,7 @@ function stopServer() {
     });
     child.kill();
   });
+  return stopping;
 }
 
 function openExternalSafely(url) {
@@ -587,12 +593,10 @@ async function openWorkspace(url, token, { hidden = false } = {}) {
   activeToken = token;
   saveServerUrl(url);
   buildMenu();
-  const stopped = stopServer();
+  stopServer();
   mainWindow?.destroy();
   mainWindow = null;
   app.dock?.setBadge("");
-  // The old server must free the saved port, or the page gets a new origin.
-  await stopped;
   showApp(await startServer(token), { hidden });
   closeWelcome();
   computer?.reset();
