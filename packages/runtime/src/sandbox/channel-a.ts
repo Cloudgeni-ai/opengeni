@@ -458,6 +458,53 @@ const CODE_SEARCH_CREDENTIAL_EXCLUDES = CODE_SEARCH_CREDENTIAL_DIRS.flatMap((dir
   `!**/${dir.join("/")}/**`,
 ]);
 
+/**
+ * Folders of a macOS home folder that macOS guards with a privacy prompt:
+ * Desktop, Documents and Downloads (Files and Folders), Pictures (Photos),
+ * Music and Movies (Apple Music and the media library), Library (Contacts,
+ * Calendars, Reminders, Mail, Messages, iCloud Drive and other apps' data)
+ * and the Trash. A Connected Mac's agent works from the owner's home folder
+ * and runs as the Opengeni app, so the first read of each one shows the owner
+ * a prompt in the app's name. Automatic whole-workspace walks therefore skip
+ * them there; a path the agent names explicitly is still read.
+ */
+export const MAC_HOME_PRIVACY_GUARDED_DIRS: readonly string[] = [
+  "Desktop",
+  "Documents",
+  "Downloads",
+  "Library",
+  "Movies",
+  "Music",
+  "Pictures",
+  ".Trash",
+];
+
+/**
+ * Bash that sets `mac_home_guarded=1` when the command runs from a macOS home
+ * folder: the user's `$HOME`, or a direct child of `/Users`. It reads only
+ * `uname` and the working directory's own path, so it never touches a guarded
+ * folder itself, and is `0` on every other box.
+ */
+const MAC_HOME_GUARD_DETECT = [
+  "mac_home_guarded=0",
+  'if [ "$(uname -s 2>/dev/null)" = Darwin ]; then',
+  "mac_home_here=$(pwd -P 2>/dev/null)",
+  'mac_home_user=$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)',
+  'if [ -n "$mac_home_here" ] && [ "$mac_home_here" = "$mac_home_user" ]; then mac_home_guarded=1; fi',
+  'case "$mac_home_here" in /Users/*/*) ;; /Users/?*) mac_home_guarded=1 ;; esac',
+  "fi",
+].join("\n");
+
+/** ripgrep globs, anchored at the search's working directory, for the guarded folders. */
+const CODE_SEARCH_MAC_HOME_EXCLUDES: readonly string[] = MAC_HOME_PRIVACY_GUARDED_DIRS.flatMap(
+  (dir) => ["-g", `!/${dir}`],
+);
+
+/** `find` primaries (from `.`) that prune the guarded folders. */
+const REPOSITORY_DISCOVERY_MAC_HOME_PRUNE = `\\( ${MAC_HOME_PRIVACY_GUARDED_DIRS.map(
+  (dir) => `-path ${shellQuote(`./${dir}`)}`,
+).join(" -o ")} \\) -prune`;
+
 /** Whether a relative path names a credential directory (or something inside one), in any case. */
 function isCodeSearchCredentialPath(path: string): boolean {
   // `a/./b` and `a//b` name `a/b`
@@ -2936,6 +2983,9 @@ export class SandboxChannelAService {
         "-o \\( -type d \\( -name node_modules -o -name .cache -o -name .local",
         "-o -name dist -o -name build -o -name target -o -name .venv",
         "-o -name __pycache__ -o -name .next \\) -prune \\)",
+        // From a Mac's home folder, never enter the privacy-guarded folders
+        // (see MAC_HOME_PRIVACY_GUARDED_DIRS).
+        '${mac_home_prune[@]+"${mac_home_prune[@]}"}',
         "2>/dev/null",
       ].join(" ");
       // The status trailer is necessary for providers whose only structural
@@ -2957,6 +3007,9 @@ export class SandboxChannelAService {
         "abort() { trap - EXIT; cleanup; exit 143; }",
         "trap cleanup EXIT",
         "trap abort HUP INT TERM",
+        MAC_HOME_GUARD_DETECT,
+        "mac_home_prune=()",
+        `if [ "$mac_home_guarded" = 1 ]; then mac_home_prune=(-o ${REPOSITORY_DISCOVERY_MAC_HOME_PRUNE}); fi`,
         `${discovery} > "$results_file" &`,
         "discovery_pid=$!",
         '(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep 15 & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM "$discovery_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &',
@@ -3045,6 +3098,10 @@ export class SandboxChannelAService {
     options: { timeoutMs: number; maxBytes: number; maxTransferBytes?: number },
   ): Promise<CodeSearchRipgrepOutcome> {
     const argv = validateCodeSearchRipgrepArgs(args, this.workspaceRoot);
+    // Paths cannot start with "-", so the last "--" separates options from paths.
+    const separator = argv.lastIndexOf("--");
+    const rgOptions = argv.slice(0, separator).map(shellQuote).join(" ");
+    const rgPaths = argv.slice(separator).map(shellQuote).join(" ");
     const maxBytes = Math.max(1, Math.min(CODE_SEARCH_RG_MAX_BYTES, Math.floor(options.maxBytes)));
     const maxTransferBytes = Math.max(
       CODE_SEARCH_RG_CHUNK_BYTES,
@@ -3069,6 +3126,11 @@ export class SandboxChannelAService {
       "trap cleanup EXIT",
       "trap abort HUP INT TERM",
       `if ! command -v rg >/dev/null 2>&1; then printf '${CODE_SEARCH_RG_END}127:0__'; exit 0; fi`,
+      // From a Mac's home folder, skip the privacy-guarded folders unless the
+      // engine names them (see MAC_HOME_PRIVACY_GUARDED_DIRS).
+      MAC_HOME_GUARD_DETECT,
+      "mac_home_excludes=()",
+      `if [ "$mac_home_guarded" = 1 ]; then mac_home_excludes=(${CODE_SEARCH_MAC_HOME_EXCLUDES.map(shellQuote).join(" ")}); fi`,
       // Job control gives the pipeline its own process group, so the watchdog
       // and cleanup stop ripgrep itself rather than only the subshell. Output is
       // compressed once, straight into the kept file: providers retain only
@@ -3077,7 +3139,7 @@ export class SandboxChannelAService {
       // (bash 3.2 runs a trap before the pipeline ends), so a stopped search
       // still stores a whole member and records every stage's status.
       "set -m",
-      `( trap '' TERM; ( trap - TERM; exec rg ${argv.map(shellQuote).join(" ")} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
+      `( trap '' TERM; ( trap - TERM; exec rg ${rgOptions} \${mac_home_excludes[@]+"\${mac_home_excludes[@]}"} ${rgPaths} ) 2>/dev/null | ( trap - TERM; exec head -c ${maxBytes + 1} ) | gzip -c > "$gz_file"; printf '%s %s %s' "\${PIPESTATUS[0]}" "\${PIPESTATUS[1]}" "\${PIPESTATUS[2]}" > "$status_file" ) </dev/null >/dev/null 2>&1 &`,
       "search_pid=$!",
       `(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep ${seconds} & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM -- "-$search_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &`,
       "watchdog_pid=$!",

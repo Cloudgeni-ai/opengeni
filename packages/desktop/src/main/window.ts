@@ -21,6 +21,7 @@ import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
 import { routeNewWindow, routePopupNavigation } from "./popup-routing";
 import { MainFrameLoad } from "./reachability";
 import { systemAudioUsable } from "./system-audio";
+import { grantsPermissionCheck, grantsPermissionRequest } from "./web-permissions";
 import { MIN_SIZE, placeWindow, type Placement, type SavedWindow } from "./window-placement";
 
 export interface AccountTarget {
@@ -364,22 +365,21 @@ export class MainWindow {
     contents.on("context-menu", (_event, params) => this.contextMenu(contents, params));
     contents.session.setPermissionRequestHandler((requester, permission, callback, details) => {
       const trusted = sameOrigin(details.requestingUrl, target.baseUrl) && requester === contents;
-      callback(
-        trusted &&
-          [
-            "media",
-            "clipboard-sanitized-write",
-            "clipboard-read",
-            "fullscreen",
-            "pointerLock",
-          ].includes(permission),
-      );
+      const mediaTypes = "mediaTypes" in details ? details.mediaTypes : undefined;
+      callback(grantsPermissionRequest(trusted, permission, { mediaTypes }));
     });
-    contents.session.setPermissionCheckHandler(
-      (_requester, permission, origin) =>
-        sameOrigin(origin, target.baseUrl) &&
-        ["media", "clipboard-sanitized-write", "clipboard-read", "fullscreen"].includes(permission),
+    contents.session.setPermissionCheckHandler((_requester, permission, origin, details) =>
+      grantsPermissionCheck(sameOrigin(origin, target.baseUrl), permission, {
+        mediaType: details.mediaType,
+      }),
     );
+    // USB, serial and HID devices are never offered, and a Web Bluetooth
+    // chooser is cancelled, so no page reaches those devices (see web-permissions.ts).
+    contents.session.setDevicePermissionHandler(() => false);
+    contents.on("select-bluetooth-device", (event, _devices, callback) => {
+      event.preventDefault();
+      callback("");
+    });
     return view;
   }
 

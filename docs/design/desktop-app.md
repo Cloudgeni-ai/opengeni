@@ -176,6 +176,17 @@ are non-mutating; only explicit signed-in setup enables desktop management.
   *responsible* process: the app that started the process tree. A launchd job
   is its own responsible process, so a separate agent service is always asked
   about under its own name.
+- Nothing else from macOS's privacy list. Because the hosted agent and every
+  shell it starts run as the app, any read of a guarded folder in the home
+  folder (Desktop, Documents, Downloads, Library, Music, Pictures, Movies, the
+  Trash) asks the person in the app's name. Automatic walks from a Mac's home
+  folder (code search, repository discovery) skip those folders unless a path
+  names them, and the agent instructions say not to scan them unasked. The
+  app declares only the microphone usage description and the `audio-input`
+  entitlement (dictation and voice chats); the window refuses the camera,
+  screen sharing, Bluetooth, USB, serial and HID devices and location
+  (`packages/desktop/src/main/web-permissions.ts`,
+  `apps/desktop/test/mac-privacy.test.ts`).
 - On Windows, the person's interactive desktop session, where CUA sees and
   drives their windows.
 - To stay compatible with every server it serves, which may run different

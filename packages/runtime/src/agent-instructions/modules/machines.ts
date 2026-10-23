@@ -8,6 +8,7 @@ export const connectedMachineModule: AgentPromptModule = {
     blocks(
       "# Connected Machine",
       "This session runs on a Connected Machine, a computer its owner connected to this workspace. You work directly on its real filesystem, so treat existing files and processes as the owner's.",
+      "On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt. Open them only when the task needs them, and never scan the whole home folder recursively.",
       context.renderer === "opengeni" &&
         bullets(
           "Connected Machine examples are [app.py](sandbox:/home/u/proj/app.py:12) on POSIX and [app.ts](<sandbox:C:/repo/app.ts:12>) on Windows.",

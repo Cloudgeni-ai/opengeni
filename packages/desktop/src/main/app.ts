@@ -361,6 +361,10 @@ export class DesktopShell {
     if (process.platform === "linux") {
       app.commandLine.appendSwitch("enable-features", "OverlayScrollbar");
     }
+    // No feature uses Web Bluetooth. Without it no page can start Bluetooth,
+    // which macOS would ask the person about (the app ships no Bluetooth
+    // usage description; see web-permissions.ts).
+    app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
     // Without it Windows shows no notifications for the installed app.
     if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {

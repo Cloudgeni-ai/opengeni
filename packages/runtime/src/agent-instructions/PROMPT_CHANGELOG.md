@@ -295,6 +295,22 @@ text named it only inside link examples).
 + You work directly on its real filesystem, so treat existing files and processes as the owner's.
 ```
 
+macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
+the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
+Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
+asks the owner about each one (Files and Folders, Photos, Apple Music and the
+media library, Contacts, Calendars and other apps' data) in the app's name.
+People saw that cascade and took the app for asking far more than it needs.
+The module now says to open those folders only when the task needs them. Code
+search and repository discovery skip them on their own (see
+`MAC_HOME_PRIVACY_GUARDED_DIRS` in `sandbox/channel-a.ts`). Only the modular
+composition has a Connected Machine module; legacy bytes are unchanged.
+
+```diff
++ On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
++ Open them only when the task needs them, and never scan the whole home folder recursively.
+```
+
 Goal completion. In the first modular-none eval runs, two of nine goal runs
 verified the work, said the goal was complete, and ended without calling the
 (deferred) goal tool. The goal module now says so explicitly. Its discovery
