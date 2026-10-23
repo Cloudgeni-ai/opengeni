@@ -977,7 +977,23 @@ test("a Site a chat made sits in that chat's project, and opening a Site keeps i
     (id) => window.sessionSidebarQa.siteOpens.includes(id),
     checklistSiteId,
   );
-  // Opening it is not activity, as opening a chat is not: it keeps its place.
+  // Opening it is not activity, as opening a chat is not: it keeps its place
+  // once the sidebar has read the list again after the open.
+  const listsAtOpen = await page.evaluate(() => window.sessionSidebarQa.listCalls.length);
+  await page.evaluate(
+    ([workspace, site]) =>
+      window.dispatchEvent(
+        new CustomEvent("opengeni:site-opened", {
+          detail: { workspaceId: workspace, siteId: site },
+        }),
+      ),
+    [workspaceId, checklistSiteId] as const,
+  );
+  await page.waitForFunction(
+    (count) => window.sessionSidebarQa.listCalls.length > count,
+    listsAtOpen,
+  );
+  await page.waitForTimeout(300);
   expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
   expect(
     await page.evaluate(() => {

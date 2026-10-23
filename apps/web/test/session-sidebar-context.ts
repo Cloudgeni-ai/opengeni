@@ -194,7 +194,6 @@ const createdSites: Array<{
   channelId: string | null;
   updatedAt: string;
 }> = [];
-/** This person's latest open of each Site, which counts as its activity. */
 if (previewParameters.get("scenario") === "sites") {
   const siteConversation = (
     number: number,
