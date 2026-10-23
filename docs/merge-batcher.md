@@ -1,5 +1,16 @@
 # Portable merge batcher
 
+## Active child diagnostics
+
+The active CLI emits `batcher-child-failure/v1` on stderr, retaining bounded,
+credential-redacted error name, message, stack, phase, operation and HTTP status.
+The complete JSON record fits within 6144 bytes; truncation is explicit. Atomic
+push errors retain their unsafe phase through outer controller handling. This is
+diagnostic evidence, never permission to replay a transaction: existing CAS,
+unknown-effect reconciliation, admission and candidate-CI retry rules remain
+authoritative. Supervisors must preserve unsafe holds rather than interpreting
+every nonzero child exit as an ordinary retry.
+
 ## Explicit first activation initialization
 
 Active mode requires a present, operator-initialized `refs/heads/batcher-state`.

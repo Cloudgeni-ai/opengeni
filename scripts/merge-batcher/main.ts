@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { errorDiagnostic, markFailurePhase } from "./diagnostics";
 import { parseArgs } from "node:util";
 import { Controller, LiveReader, type StepResult } from "./controller";
 import { AtomicGitWriter, GitStore } from "./git";
@@ -207,7 +208,7 @@ export async function runService(
           error instanceof ProviderError ? error.retryAfterSeconds : 0,
         );
         // Provider bodies, URLs and arbitrary Git stderr are deliberately absent.
-        if (once) throw error;
+        if (once) throw markFailurePhase(error, "controller-step");
         console.error(
           JSON.stringify({
             status: "observation_failed",
@@ -238,7 +239,7 @@ export async function runService(
 }
 if (import.meta.main)
   main(process.argv.slice(2)).catch((error) => {
-    // Errors originating in adapters have sanitized messages. Avoid dumping stacks/env.
-    console.error(error instanceof Error ? error.message : "Batcher failed");
+    // Retain bounded diagnostic text only after credential redaction.
+    console.error(JSON.stringify(errorDiagnostic(error)));
     process.exitCode = 1;
   });
