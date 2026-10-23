@@ -156,9 +156,9 @@ describe("the watchdog in a discovery or search script", () => {
       const before = script.slice(0, watchdog);
       const after = script.slice(watchdog);
       // Cleared right before the fork, and armed again right after it.
-      expect(before.lastIndexOf("trap - EXIT HUP INT TERM")).toBeGreaterThan(
-        before.lastIndexOf("trap cleanup EXIT"),
-      );
+      const cleared = before.lastIndexOf("trap - EXIT HUP INT TERM");
+      expect(cleared).toBeGreaterThan(before.lastIndexOf("trap cleanup EXIT"));
+      expect(cleared).toBeGreaterThan(before.lastIndexOf("trap abort HUP INT TERM"));
       const forked = after.indexOf("watchdog_pid=$!");
       expect(forked).toBeGreaterThan(0);
       expect(after.indexOf("trap cleanup EXIT")).toBeGreaterThan(forked);
