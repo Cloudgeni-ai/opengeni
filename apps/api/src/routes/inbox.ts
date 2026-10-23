@@ -210,9 +210,11 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const itemId = c.req.param("itemId");
+    // A relay pinned to one workspace passes it, so an item elsewhere is absent.
+    const workspaceFilter = c.req.query("workspaceId") ?? null;
     for (const accountId of await personAccounts(deps, context)) {
       const item = await getInboxItem(deps.db, { itemId, accountId, subjectId });
-      if (!item) continue;
+      if (!item || (workspaceFilter !== null && item.workspaceId !== workspaceFilter)) continue;
       await requireAccessGrant(c, deps, item.workspaceId, "sessions:read");
       await updateInboxItemAttention(deps.db, {
         itemId,

@@ -1318,11 +1318,21 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
  * {@link accessContextHasInbox}. An agent acting as a person (verified
  * in-process dispatch) reads that person's inbox within its organization and
  * workspaces: the inbox routes check each item's workspace on this context.
+ * An external user (`external_user:`) reads their own inbox only through the
+ * organization key that resolved them as an external actor, within that
+ * organization; a linked native identity acts as its `user:` person, whose
+ * inbox is read by signing in to Opengeni, not through a product's key.
  */
 export function inboxSubjectForContext(context: AccessContext): string | null {
   if (!accessContextHasInbox(context)) return null;
   if (context.subjectId.startsWith("user:")) {
     return canonicalManagedCookieContexts.has(context) || delegatedHumanContexts.has(context)
+      ? context.subjectId
+      : null;
+  }
+  if (context.subjectId.startsWith("external_user:")) {
+    const external = externalActorContexts.get(context);
+    return external && !external.linked && external.identity.subjectId === context.subjectId
       ? context.subjectId
       : null;
   }

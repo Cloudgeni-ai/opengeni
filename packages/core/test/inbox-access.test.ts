@@ -44,4 +44,12 @@ describe("inboxSubjectForContext", () => {
     expect(inboxSubjectForContext(context({}))).toBeNull();
     expect(inboxSubjectForContext(context({ mode: "configured" }))).toBeNull();
   });
+
+  test("an external-user-shaped context the external actor resolver did not produce has no inbox", () => {
+    // Same shape as a product's external user, but not resolved from an
+    // organization key's external actor selection (for example a bearer or
+    // Site viewer naming the subject).
+    const subjectId = `external_user:${crypto.randomUUID()}`;
+    expect(inboxSubjectForContext(context({ mode: "managed", subjectId }))).toBeNull();
+  });
 });

@@ -311,6 +311,9 @@ export async function setInboxSettings(
 /**
  * A turn works for its initiating human, including an explicitly absent human.
  * Legacy non-turn inbox operations retain the session recipient convention.
+ * A person is a `user:` subject or an external user (`external_user:`, a
+ * product's own user acting through its organization key), as in the inbox
+ * projection's person rule; the local install's `dev` only in that install.
  */
 export async function getSessionInboxRecipient(
   db: Database,
@@ -336,7 +339,8 @@ export async function getSessionInboxRecipient(
       )
       SELECT coalesce(
         (SELECT subject FROM unnest(subjects) WITH ORDINALITY AS candidates(subject, position)
-          WHERE subject LIKE 'user:%' ORDER BY position LIMIT 1),
+          WHERE starts_with(subject, 'user:') OR starts_with(subject, 'external_user:')
+          ORDER BY position LIMIT 1),
         CASE WHEN 'dev' = ANY(subjects) AND EXISTS (
           SELECT 1 FROM managed_accounts a WHERE a.id = recipient.account_id
             AND a.external_source = 'opengeni:local' AND a.external_id = 'default'

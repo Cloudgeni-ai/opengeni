@@ -31,7 +31,7 @@ UI's decision.
 | Layer | Owner | Mechanism |
 | --- | --- | --- |
 | Identity | Product | `resolve(request)` returns the user (and tenant or workspace); every call runs through `asUser(user, { source })`, never the key's own authority. |
-| Scope | Relay | One workspace per request. Inside `/v1/workspaces/{ws}` every route and method is forwarded; a path naming another workspace is a 403. Outside it only the bootstrap reads answer, scoped to `{ws}`: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective grant there), `GET /v1/config/client`. |
+| Scope | Relay | One workspace per request. Inside `/v1/workspaces/{ws}` every route and method is forwarded; a path naming another workspace is a 403. Outside it only the bootstrap reads answer, scoped to `{ws}`: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective grant there), `GET /v1/config/client`; and the user's own inbox: `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` with `workspaceId={ws}`, `GET`/`PUT /v1/inbox/settings`. |
 | Authority | Opengeni | An `asUser` request holds only the permissions both the organization key and the user's membership hold. Products narrow it with the key's permissions and workspace scope, and per member with `addExternalWorkspaceMember` / `updateExternalWorkspaceMember`. |
 | Server-owned choices | Product | `createSession` (the chat's agent, tools, MCP servers, Skills, instructions and model policy; the relay then refuses the routes that would change them later), `beforeForwardMessage` (model context and MCP credentials per message), `toolServer`, `modelSelection`, `visitorUploads`, `chats` defaults. |
 | Explicit closures | Product | `refuse(route, context)` keeps routes closed that Opengeni would allow; `authorizeSession` adds a product check for every chat a request names, by path or `x-opengeni-session-id`. |
@@ -118,10 +118,18 @@ The permission set automatic membership grants (workspace read, session
 create, read and control, file upload and read, MCP attachment) therefore
 becomes the default product surface, and its review matters more than before.
 
+External users have an inbox. Opengeni's person rule (owner, else who started
+the session, else the schedule's owner) counts an `external_user:` subject as a
+person, so their questions, approvals, paused goals and agent notifications
+reach their inbox, and `notify_user` delivers to them instead of recording
+`undeliveredReason: "no_human_recipient"`. The API serves that inbox only to
+the external actor the organization key resolved (not to a linked native
+identity, whose person reads it by signing in to Opengeni), and the relay
+limits list and item updates to `{ws}`. Phone pushes need a native-app
+sign-in, so they do not reach external users.
+
 ## Follow-ups
 
-- Inbox and notifications for external users: the inbox routes have no
-  subject for an external actor today, so products build their own.
 - Agent setup stored as Opengeni data (workspace agent profiles) instead of
   recomputed by `createSession` on every create.
 - Role presets for product members, so a product picks a role instead of

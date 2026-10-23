@@ -1865,6 +1865,53 @@ describe("createSessionProxyHandler pass-through", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
+  test("the user's own inbox passes through as the user, pinned to the workspace", async () => {
+    const { handler, upstream } = setup();
+    const item = "33333333-3333-4333-8333-333333333333";
+    const json = { headers: { "Content-Type": "application/json" }, body: "{}" };
+    for (const [path, method] of [
+      [`/inbox?workspaceId=${OTHER_WORKSPACE_ID}&extra=1`, "GET"],
+      [`/inbox/items/${item}`, "PATCH"],
+      ["/inbox/settings", "GET"],
+      ["/inbox/settings", "PUT"],
+    ] as const) {
+      const response = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "GET" ? {} : json),
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(
+      upstream.requests.map(
+        (request) => `${request.method} ${request.url.pathname}${request.url.search}`,
+      ),
+    ).toEqual([
+      `GET /v1/inbox?workspaceId=${WORKSPACE_ID}`,
+      `PATCH /v1/inbox/items/${item}?workspaceId=${WORKSPACE_ID}`,
+      "GET /v1/inbox/settings",
+      "PUT /v1/inbox/settings",
+    ]);
+    for (const request of upstream.requests) {
+      expect(request.headers.get("x-opengeni-external-actor")).not.toBeNull();
+    }
+    for (const [path, method] of [
+      ["/inbox", "POST"],
+      ["/inbox/items", "GET"],
+      [`/inbox/items/${item}`, "GET"],
+      [`/inbox/items/${item}`, "DELETE"],
+      [`/inbox/items/${encodeURIComponent("not:an-id")}`, "PATCH"],
+      ["/inbox/settings", "PATCH"],
+      ["/inbox/other", "GET"],
+    ] as const) {
+      const response = await send(handler, `${mount}${path}`, {
+        method,
+        ...(method === "GET" || method === "DELETE" ? {} : json),
+      });
+      expect(response.status).toBe(404);
+    }
+    expect(upstream.requests).toHaveLength(4);
+  });
+
   test("relays keys and subject ids in paths re-encoded, and refuses unsafe segments", async () => {
     const { handler, upstream } = setup();
     const relayed = await send(
