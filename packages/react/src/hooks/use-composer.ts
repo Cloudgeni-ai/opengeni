@@ -28,8 +28,10 @@ import {
 import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
 import {
+  isActionFailure,
   isCalmServiceFailure,
   isTransientServiceFailure,
+  markActionFailure,
   TRANSIENT_RECONNECT_INTERVAL_MS,
 } from "../lib/transient-retry";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
@@ -853,8 +855,6 @@ export function useComposer(
   const serviceRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const processOptimisticSendsRef = useRef<() => void>(() => undefined);
   const [serviceWaiting, setServiceWaiting] = useState(false);
-  // The last draft save failure, so a send blocked by it keeps its real cause.
-  const persistFailureRef = useRef<Error | null>(null);
   // Bumped to re-run autosave once Opengeni answers again after an update.
   const [autosaveRetry, setAutosaveRetry] = useState(0);
   const optimisticCallbackIdsRef = useRef(new Set<string>());
@@ -940,7 +940,6 @@ export function useComposer(
     if (serviceRetryTimerRef.current !== null) clearTimeout(serviceRetryTimerRef.current);
     serviceRetryTimerRef.current = null;
     setServiceWaiting(false);
-    persistFailureRef.current = null;
     optimisticCallbackIdsRef.current = new Set();
     steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
@@ -1425,13 +1424,19 @@ export function useComposer(
   );
 
   const persistPayload = useCallback(
-    async (payload: SaveComposerDraftRequest): Promise<boolean> => {
+    async (
+      payload: SaveComposerDraftRequest,
+      // Receives this call's own failure (never a later autosave's), so a send
+      // blocked by it keeps its real cause.
+      onFailure?: (problem: Error) => void,
+    ): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
       if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) {
         return false;
       }
       let success = false;
+      let failure: Error | null = null;
       const run = async () => {
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -1448,7 +1453,6 @@ export function useComposer(
           return;
         }
         setDraftSaving(true);
-        persistFailureRef.current = null;
         try {
           const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
           if (
@@ -1465,7 +1469,7 @@ export function useComposer(
             targetGeneration.current === ownedGeneration
           ) {
             const problem = asError(cause);
-            persistFailureRef.current = problem;
+            failure = problem;
             if (isDraftConflictError(problem)) setDraftConflict(problem);
             setError(problem);
           }
@@ -1480,6 +1484,7 @@ export function useComposer(
       };
       saveChain.current = saveChain.current.then(run, run);
       await saveChain.current;
+      if (!success && failure) onFailure?.(failure);
       return success;
     },
     [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
@@ -1581,6 +1586,8 @@ export function useComposer(
     optimisticProcessorBusyRef.current = true;
     void (async () => {
       let mutationFailureObserved = false;
+      // The draft save failed before anything was submitted.
+      let notSubmitted = false;
       let holding = false;
       /**
        * Keep a send that failed only because Opengeni is updating: it stays
@@ -1676,7 +1683,17 @@ export function useComposer(
             // This read cannot settle the prior mutation in either direction.
             // Preserve its exact key and uncertain status until reconciliation
             // succeeds or that same mutation is actually replayed.
-            markFailed(cause, true);
+            const wasHeld = serviceWaitRef.current.has(operation.clientEventId);
+            if (!markFailed(cause, true) && wasHeld) {
+              // A send held for an update that can no longer wait is now a
+              // delivery failure; its first failure was never reported.
+              notifyComposerObserver(
+                onDeliveryErrorRef.current,
+                asError(cause),
+                operation.input,
+                "send",
+              );
+            }
             return;
           }
           const reconciled = reconcileOptimisticSendFromEvents(operation, events);
@@ -1705,11 +1722,18 @@ export function useComposer(
         }
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
-          if (!(await persistPayload(operation.draftPayload))) {
+          let persistFailure = null as Error | null;
+          if (
+            !(await persistPayload(operation.draftPayload, (problem) => {
+              persistFailure = problem;
+            }))
+          ) {
             // An update that blocks the draft save holds the send like any
             // other transient failure; nothing was submitted yet.
-            const persistFailure = persistFailureRef.current;
-            if (persistFailure && isTransientServiceFailure(persistFailure)) throw persistFailure;
+            if (persistFailure && isTransientServiceFailure(persistFailure)) {
+              notSubmitted = true;
+              throw persistFailure;
+            }
             throw new ComposerStateError(t("hooks.useComposer.theMessageDraftCouldNot"));
           }
           expectedDraftRevision = draftRef.current?.revision;
@@ -1824,7 +1848,7 @@ export function useComposer(
         const outcomeUnknown =
           operation.outcomeUnknown && !mutationFailureObserved
             ? true
-            : isOutcomeUnknownError(cause);
+            : !notSubmitted && isOutcomeUnknownError(cause);
         // A send held for an update is not a delivery failure (yet).
         if (!markFailed(cause, outcomeUnknown)) {
           notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
@@ -1873,6 +1897,21 @@ export function useComposer(
   useEffect(() => {
     processOptimisticSends();
   }, [optimisticSends, processOptimisticSends]);
+  // A held send can also leave "sending" without its retry (the event stream
+  // confirms it, or the person removes it): drop the hold so the updating
+  // line clears with it.
+  useEffect(() => {
+    for (const id of serviceWaitRef.current.keys()) {
+      if (
+        !optimisticSends.some(
+          (candidate) => candidate.clientEventId === id && candidate.state === "sending",
+        )
+      ) {
+        serviceWaitRef.current.delete(id);
+      }
+    }
+    setServiceWaiting(serviceWaitRef.current.size > 0);
+  }, [optimisticSends]);
 
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
@@ -1952,11 +1991,14 @@ export function useComposer(
     sessionId,
   ]);
 
-  // An update or brief outage left an error on the composer (a draft save,
-  // Steer or control call). Check quietly until Opengeni answers again, then
-  // clear that error and let autosave catch up; nobody has to click anything.
+  // An update or brief outage left a draft save error on the composer. Check
+  // quietly until Opengeni answers again, then clear it and let autosave catch
+  // up; nobody has to click anything. An explicit action's failure (Stop,
+  // Resume, Steer) stays until the person acts, so it is never lost.
   useEffect(() => {
-    if (!error || !sessionId || !isTransientServiceFailure(error)) return;
+    if (!error || !sessionId || !isTransientServiceFailure(error) || isActionFailure(error)) {
+      return;
+    }
     const ownedTargetKey = targetKey;
     const ownedError = error;
     let cancelled = false;
@@ -2127,7 +2169,7 @@ export function useComposer(
               targetKeyRef.current === ownedTargetKey &&
               targetGeneration.current === ownedGeneration
             ) {
-              const problem = asError(cause);
+              const problem = markActionFailure(asError(cause));
               setError(problem);
               if (pending.delivery === "steer") {
                 keepSteering = true;
@@ -2211,7 +2253,7 @@ export function useComposer(
               targetKeyRef.current === ownedTargetKey &&
               targetGeneration.current === ownedGeneration
             ) {
-              setError(problem);
+              setError(markActionFailure(problem));
             }
             return false;
           }
@@ -2318,7 +2360,7 @@ export function useComposer(
             targetKeyRef.current === ownedTargetKey &&
             targetGeneration.current === ownedGeneration
           ) {
-            setError(asError(cause));
+            setError(markActionFailure(asError(cause)));
           }
           return false;
         }
@@ -2603,7 +2645,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(normalizeError(cause));
+          setError(markActionFailure(normalizeError(cause)));
         }
       } finally {
         if (
@@ -2647,7 +2689,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(normalizeError(cause));
+          setError(markActionFailure(normalizeError(cause)));
         }
       } finally {
         if (
@@ -2722,7 +2764,7 @@ export function useComposer(
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setError(asError(cause));
+          setError(markActionFailure(asError(cause)));
         }
       } finally {
         if (

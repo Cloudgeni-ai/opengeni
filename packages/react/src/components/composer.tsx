@@ -58,7 +58,11 @@ import {
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage } from "../lib/format";
-import { OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
+import {
+  isActionFailure,
+  OPENGENI_UPDATING_ACTION_NOTICE,
+  OPENGENI_UPDATING_NOTICE,
+} from "../lib/transient-retry";
 import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
 import { singleSendText } from "../messages/single-send";
@@ -596,22 +600,27 @@ export function useChatComposerController({
   );
   // While Opengeni is updating (or briefly unreachable) the composer shows
   // one calm line and keeps retrying; the error itself only surfaces if it
-  // outlasts a normal update.
+  // outlasts a normal update. An explicit action (Stop, Resume, Steer) is not
+  // retried for the person, so it says calmly that it did not go through.
   const calmServiceFailure = useCalmServiceFailure(delivery.error);
-  const serviceUpdating = calmServiceFailure || delivery.reconnecting === true;
+  const calmActionFailure = calmServiceFailure && isActionFailure(delivery.error);
+  const serviceUpdating =
+    (calmServiceFailure && !calmActionFailure) || delivery.reconnecting === true;
   const activeNotice =
     notice ??
-    (delivery.error && !calmServiceFailure
-      ? {
-          tone: "error" as const,
-          message: /control changed|paused while/i.test(delivery.error.message)
-            ? messages.controlChangedError
-            : formatError(
-                delivery.error,
-                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
-              ),
-        }
-      : null);
+    (calmActionFailure
+      ? { tone: "ok" as const, message: OPENGENI_UPDATING_ACTION_NOTICE(t) }
+      : delivery.error && !calmServiceFailure
+        ? {
+            tone: "error" as const,
+            message: /control changed|paused while/i.test(delivery.error.message)
+              ? messages.controlChangedError
+              : formatError(
+                  delivery.error,
+                  composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
+                ),
+          }
+        : null);
   useEffect(() => {
     if (notice?.tone !== "ok") return;
     const timer = window.setTimeout(

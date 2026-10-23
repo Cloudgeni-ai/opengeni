@@ -114,6 +114,8 @@ export function useTurnQueue(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
   const pageLive = usePageLiveActivity();
+  const pageLiveRef = useRef(pageLive);
+  pageLiveRef.current = pageLive;
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
@@ -245,8 +247,9 @@ export function useTurnQueue(
               streak.surfaced = true;
               if (ticket === readGeneration.current) setLoading(false);
             }
-            // A reconciliation read is retried by its caller.
-            if (!rejectOnFailure) {
+            // A reconciliation read is retried by its caller; a hidden page
+            // reads again when it is shown.
+            if (!rejectOnFailure && pageLiveRef.current) {
               cancelTransientRetry();
               transientRetryTimerRef.current = setTimeout(() => {
                 transientRetryTimerRef.current = null;
@@ -270,6 +273,8 @@ export function useTurnQueue(
 
   useEffect(() => {
     if (!enabled || !pageLive) {
+      // A hidden page does not keep retrying; it reads again when shown.
+      cancelTransientRetry();
       setLoading(false);
       return;
     }
@@ -296,7 +301,7 @@ export function useTurnQueue(
       if (timer !== null) clearTimeout(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, pageLive, options.pollIntervalMs]);
+  }, [cancelTransientRetry, load, enabled, pageLive, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();

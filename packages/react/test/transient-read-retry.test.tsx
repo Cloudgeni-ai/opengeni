@@ -571,6 +571,56 @@ describe("useTurnQueue transient retry", () => {
     await hook.unmount();
   });
 
+  test("a hidden page stops retrying the queue and reads again when shown", async () => {
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const setVisibility = async (next: DocumentVisibilityState) => {
+      visibility = next;
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+    };
+    let failing = true;
+    let reads = 0;
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (failing) throw parked();
+        return queueSnapshot([queued]);
+      },
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    try {
+      await flush(30_000);
+      expect(reads).toBeGreaterThan(3);
+      await setVisibility("hidden");
+      // Past the hidden-tab grace, then no read for ten minutes.
+      await flush(10_000);
+      const readsWhileHidden = reads;
+      await flush(10 * 60_000);
+      expect(reads).toBe(readsWhileHidden);
+
+      failing = false;
+      await setVisibility("visible");
+      await flush(10);
+      expect(reads).toBe(readsWhileHidden + 1);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["queued-turn"]);
+    } finally {
+      await hook.unmount();
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      } else {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+    }
+  });
+
   test("a definitive queue failure surfaces at once and is not retried", async () => {
     let reads = 0;
     const client = fakeClient({

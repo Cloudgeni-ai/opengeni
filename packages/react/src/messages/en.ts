@@ -1382,6 +1382,8 @@ export const englishMessages = {
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
   "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
+  "lib.transientRetry.actionMayNotHaveGoneThrough":
+    "{product} is updating, so that may not have gone through. Try again in a moment.",
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "machineCard.active": "Active",

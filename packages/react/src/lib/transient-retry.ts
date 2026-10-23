@@ -18,6 +18,27 @@ export const TRANSIENT_RECONNECT_INTERVAL_MS = 3_000;
 export const OPENGENI_UPDATING_NOTICE = (t: OpenGeniText) =>
   t("lib.transientRetry.opengeniIsUpdatingWeLl");
 
+/**
+ * An explicit action (Stop, Resume, Steer, a direct send) that failed only
+ * because Opengeni is updating. It is not retried automatically, so it never
+ * reads as "we'll reconnect": the person is told calmly to try again.
+ */
+export const OPENGENI_UPDATING_ACTION_NOTICE = (t: OpenGeniText) =>
+  t("lib.transientRetry.actionMayNotHaveGoneThrough");
+
+const actionFailures = new WeakSet<object>();
+
+/** Record that `error` is the failure of an explicit action, not a background read or save. */
+export function markActionFailure<T>(error: T): T {
+  if (typeof error === "object" && error !== null) actionFailures.add(error);
+  return error;
+}
+
+/** True for a failure recorded with {@link markActionFailure}. */
+export function isActionFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && actionFailures.has(error);
+}
+
 const NETWORK_FAILURE =
   /failed to fetch|fetch failed|networkerror|load failed|network request failed/iu;
 
@@ -30,6 +51,8 @@ export function isTransientServiceFailure(error: unknown): boolean {
   if (isAbort(error)) return false;
   if (isMaintenanceError(error)) return true;
   if (error instanceof OpenGeniApiError) {
+    // The API said this exact failure is not worth retrying.
+    if (error.retryable === false) return false;
     if (error.status === 502 || error.status === 503 || error.status === 504) return true;
     if (error.status === 500) return error.retryable;
     // The SDK reports a mutation whose response never arrived as status 0.

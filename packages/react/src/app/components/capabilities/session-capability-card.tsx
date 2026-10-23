@@ -33,10 +33,10 @@ import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./sess
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
 import { usePage } from "../../lib/navigation";
 import {
-  isTransientServiceFailure,
   OPENGENI_UPDATING_NOTICE,
   TRANSIENT_RECONNECT_INTERVAL_MS,
 } from "../../../lib/transient-retry";
+import { useCalmServiceFailure } from "../../../lib/use-calm-service-failure";
 
 /** The built-in card for connecting a person's own computer to this chat. */
 export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
@@ -356,9 +356,9 @@ function SessionCapabilitySetup({
     catalog.authorityKey,
     setBusy,
   ]);
-  // While Opengeni is updating, keep reloading the catalog until it answers.
-  const catalogUpdating =
-    catalog.loadError !== null && isTransientServiceFailure(catalog.loadError);
+  // While Opengeni is updating, keep reloading the catalog until it answers;
+  // a failure that outlasts a normal update shows as the problem it is.
+  const catalogUpdating = useCalmServiceFailure(catalog.loadError);
   const refreshCatalogRef = useRef(catalog.refresh);
   refreshCatalogRef.current = catalog.refresh;
   useEffect(() => {

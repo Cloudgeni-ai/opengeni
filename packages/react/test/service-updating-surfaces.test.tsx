@@ -11,7 +11,7 @@ import { ChatComposer } from "../src/components/chat-composer";
 import { SessionChrome } from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
-import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
+import { markActionFailure, SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
 import { fakeTurn } from "./fake-client";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -144,6 +144,24 @@ describe("composer while Opengeni is updating", () => {
     const [line] = failedLines(mounted.container);
     expect(line).toContain("temporarily unavailable");
     expect(line).toContain("Reference: edge-1");
+  });
+
+  test("a Stop or Steer that failed during an update says so calmly, not that it will reconnect", async () => {
+    const action =
+      "Opengeni is updating, so that may not have gone through. Try again in a moment.";
+    mounted = await renderComponent(
+      <ChatComposer composer={composer({ error: markActionFailure(parked()) })} />,
+    );
+    await flush(10);
+    const root = mounted.container;
+    expect(updatingLine(root)).toBeNull();
+    expect(failedLines(root)).toEqual([]);
+    expect(root.textContent).not.toContain("Reference");
+    expect(root.querySelector('[role="alert"]')).toBeNull();
+    expect(announced(root)).toEqual([action]);
+    // It stays until the person acts, however long the update lasts.
+    await flush(30 * 60_000);
+    expect(announced(root)).toEqual([action]);
   });
 
   test("a definitive error stays red at once", async () => {

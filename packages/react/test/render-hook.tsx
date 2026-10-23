@@ -45,6 +45,24 @@ export function registerDom(options: { clock?: "real" | "virtual" } = {}): void 
   });
 }
 
+/**
+ * Run one test body on the virtual clock in a file that otherwise uses real
+ * time, for example to let a failure outlast a two-minute window. Pending
+ * timers are settled before the real clock comes back.
+ */
+export async function withVirtualClock<T>(run: () => Promise<T>): Promise<T> {
+  jest.useFakeTimers();
+  try {
+    return await run();
+  } finally {
+    try {
+      if (jest.isFakeTimers()) await act(async () => jest.runOnlyPendingTimers());
+    } finally {
+      jest.useRealTimers();
+    }
+  }
+}
+
 export type RenderedHook<T, P> = {
   /** Latest hook return value. */
   result: { current: T };
