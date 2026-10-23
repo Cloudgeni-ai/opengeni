@@ -41,7 +41,7 @@ import {
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
-import { summarizeToolGatewayInputErrors } from "./input-issues";
+import { summarizeToolGatewayInputErrors, type ToolGatewayInputIssueSummary } from "./input-issues";
 
 export type ToolGatewayExecutionContext = {
   operationId: string;
@@ -743,6 +743,47 @@ function compileCatalogSchema(
   }
   compiledCatalogSchemaCache.set(cacheKey, compiled);
   return compiled;
+}
+
+let argumentValidators: SchemaValidators | undefined;
+let argumentDiagnosticValidators: SchemaValidators | undefined;
+
+/**
+ * Check arguments against a remote server's input schema (for example an MCP
+ * event type's `inputSchema`) with the validators tool calls use. Returns the
+ * problems as value-free sentences, or none when the arguments fit. A schema
+ * that cannot be compiled is not enforced here: the server still validates
+ * its own input.
+ */
+export function inputSchemaArgumentIssues(
+  schema: Record<string, unknown>,
+  args: Record<string, unknown>,
+): ToolGatewayInputIssueSummary {
+  const fits = { issues: [], omittedIssueCount: 0 };
+  let validate: ValidateFunction<unknown>;
+  try {
+    validate = compileCatalogSchema(
+      (argumentValidators ??= createSchemaValidators("first_error")),
+      schema as ToolGatewayCatalogEntryValue["inputSchema"],
+    );
+  } catch {
+    return fits;
+  }
+  if (validate(args)) return fits;
+  let errors = validate.errors;
+  if (repairableInputSize(args)) {
+    try {
+      const diagnose = compileCatalogSchema(
+        (argumentDiagnosticValidators ??= createSchemaValidators("all_errors")),
+        schema as ToolGatewayCatalogEntryValue["inputSchema"],
+      );
+      diagnose(args);
+      errors = diagnose.errors ?? errors;
+    } catch {
+      // The first-error result already decided the rejection.
+    }
+  }
+  return summarizeToolGatewayInputErrors(errors, { schema, arguments: args });
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {

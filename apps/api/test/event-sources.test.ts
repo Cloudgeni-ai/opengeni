@@ -11,9 +11,15 @@ import {
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
+import {
+  type FakeMcpEventsServer,
+  type FakeMcpEventType,
+  startFakeMcpEventsServer,
+} from "@opengeni/testing/mcp-events-server";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
+import { pumpDueMcpEventSubscriptions } from "@opengeni/core";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -38,7 +44,10 @@ const memberPermissions = [
   "scheduled_tasks:manage",
 ];
 
-async function fixture(options: { enabled: boolean }) {
+async function fixture(options: {
+  enabled: boolean;
+  mcpServers?: Array<{ id: string; name: string; url: string }>;
+}) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Event source fixture') returning id`;
   const accountId = String(account!.id);
@@ -67,6 +76,7 @@ async function fixture(options: { enabled: boolean }) {
     publicBaseUrl: "https://opengeni.example",
     environmentsEncryptionKey: randomBytes(32).toString("base64"),
     eventTriggersEnabled: options.enabled,
+    mcpServers: options.mcpServers ?? [],
   });
   const bus = new MemoryEventBus();
   const app = createApp({
@@ -157,6 +167,7 @@ async function fixture(options: { enabled: boolean }) {
     bus,
     settings,
     workspace,
+    service,
     owner,
     other,
     sources,
@@ -484,5 +495,395 @@ describe("event sources", () => {
       summary: "Issue created: ENG-42 Checkout is slow",
       actor: { kind: "person", name: "Ada" },
     });
+  });
+});
+
+const TICKET_CREATED: FakeMcpEventType = {
+  name: "ticket.created",
+  description: "A ticket was created in a queue.",
+  delivery: ["poll"],
+  inputSchema: {
+    type: "object",
+    properties: { queue: { type: "string" } },
+    required: ["queue"],
+    additionalProperties: false,
+  },
+  payloadSchema: {
+    type: "object",
+    properties: { queue: { type: "string" }, title: { type: "string" } },
+  },
+};
+const TICKET_CLOSED: FakeMcpEventType = {
+  name: "ticket.closed",
+  description: "A ticket was closed.",
+  delivery: ["poll", "webhook"],
+  inputSchema: { type: "object", properties: { queue: { type: "string" } } },
+  payloadSchema: { type: "object", properties: { title: { type: "string" } } },
+};
+
+describe("MCP event sources", () => {
+  const fakes: FakeMcpEventsServer[] = [];
+  afterAll(async () => {
+    for (const fake of fakes) await fake.stop();
+  });
+
+  async function mcpFixture() {
+    let app: { request: (path: string, init: RequestInit) => Promise<Response> } | null = null;
+    const fake = startFakeMcpEventsServer({
+      eventTypes: [TICKET_CREATED, TICKET_CLOSED],
+      nextPollMs: 20_000,
+      maxTtlMs: 3_600_000,
+      webhookFetch: async (url, init) => await app!.request(new URL(url).pathname, init),
+    });
+    const plain = startFakeMcpEventsServer({ eventTypes: [], advertiseEvents: false });
+    fakes.push(fake, plain);
+    const f = await fixture({
+      enabled: true,
+      mcpServers: [
+        { id: "events-fixture", name: "Events Fixture", url: fake.url },
+        { id: "plain-fixture", name: "Plain Fixture", url: plain.url },
+      ],
+    });
+    app = f.app;
+    const started: EventOccurrenceToStart[] = [];
+    const pump = async () => {
+      await shared.admin`update mcp_event_subscriptions
+        set next_action_at = now() - interval '1 second', lease_until = null
+        where workspace_id = ${f.workspace.id}`;
+      await pumpDueMcpEventSubscriptions({ db: db.db, settings: f.settings, bus: f.bus });
+    };
+    const dispatch = async () => {
+      await makeDue(f.workspace.id);
+      await dispatchDueEventTriggers({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        startRun: async (occurrence) => {
+          if (occurrence.workspaceId === f.workspace.id) started.push(occurrence);
+        },
+      });
+    };
+    const subscriptions = async () =>
+      await shared.admin`select mode, cursor, gap_pending, server_subscription_id, failures
+        from mcp_event_subscriptions where workspace_id = ${f.workspace.id}`;
+    const createSource = async () => {
+      const created = await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "mcp", serverId: "events-fixture" }),
+      });
+      expect(created.status).toBe(201);
+      return (await f.json(created)).source as Record<string, any>;
+    };
+    const automation = async (sourceId: string, eventType: string, args: unknown) => {
+      const response = await f.createAutomation(f.owner.headers, {
+        triggers: [{ sourceId, eventTypes: [eventType], arguments: args }],
+      });
+      expect(response.status).toBe(201);
+      return await f.json(response);
+    };
+    const task = async (id: string) =>
+      await f.json(await f.app.request(`${f.tasks}/${id}`, { headers: f.owner.headers }));
+    const events = async (sourceId: string) =>
+      (
+        await f.json(
+          await f.app.request(`${f.sources}/${sourceId}/events`, { headers: f.owner.headers }),
+        )
+      ).events as Array<Record<string, any>>;
+    const deliveries = async (sourceId: string) =>
+      (
+        await f.json(
+          await f.app.request(`${f.sources}/${sourceId}/deliveries`, {
+            headers: f.owner.headers,
+          }),
+        )
+      ).deliveries as Array<Record<string, any>>;
+    return {
+      ...f,
+      fake,
+      started,
+      pump,
+      dispatch,
+      subscriptions,
+      createSource,
+      automation,
+      task,
+      events,
+      deliveries,
+    };
+  }
+
+  test("a source is one person's connection to a server that offers events", async () => {
+    const f = await mcpFixture();
+    const asService = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.service,
+      body: JSON.stringify({ kind: "mcp", serverId: "events-fixture" }),
+    });
+    expect(asService.status).toBe(422);
+    const plain = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "mcp", serverId: "plain-fixture" }),
+    });
+    expect(plain.status).toBe(422);
+    const unknown = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "mcp", serverId: "not-added" }),
+    });
+    expect(unknown.status).toBe(422);
+
+    const source = await f.createSource();
+    expect(source).toMatchObject({
+      kind: "mcp",
+      name: "Events Fixture",
+      visibility: "private",
+      webhookUrl: null,
+      mcp: { serverId: "events-fixture" },
+    });
+    const madeShared = await f.app.request(`${f.sources}/${source.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ visibility: "workspace" }),
+    });
+    expect(madeShared.status).toBe(422);
+
+    const { eventTypes } = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(eventTypes.map((entry: any) => entry.type)).toEqual(["ticket.created", "ticket.closed"]);
+    expect(eventTypes[0]).toMatchObject({
+      description: "A ticket was created in a queue.",
+      argumentsSchema: TICKET_CREATED.inputSchema,
+    });
+
+    const invalid = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: source.id, eventTypes: ["ticket.created"], arguments: { queue: 5 } }],
+    });
+    expect(invalid.status).toBe(422);
+    const missingType = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: source.id, eventTypes: ["ticket.deleted"], arguments: {} }],
+    });
+    expect(missingType.status).toBe(422);
+    const twoTypes = await f.createAutomation(f.owner.headers, {
+      triggers: [
+        { sourceId: source.id, eventTypes: ["ticket.created", "ticket.closed"], arguments: {} },
+      ],
+    });
+    expect(twoTypes.status).toBe(422);
+  });
+
+  test("a polled stream delivers new events once, in order, and wakes the automation", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    expect(automation.events.triggers[0]).toMatchObject({
+      eventTypes: ["ticket.created"],
+      arguments: { queue: "billing" },
+      status: "active",
+    });
+
+    // The first step only learns where "now" is; earlier events are not replayed.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Before" });
+    await f.pump();
+    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", cursor: "c1" }]);
+    expect(f.fake.requestsFor("events/poll")[0]?.params).toMatchObject({
+      name: "ticket.created",
+      arguments: { queue: "billing" },
+      cursor: null,
+    });
+    expect(f.fake.requestsFor("events/poll")[0]?.mcpName).toBe("ticket.created");
+
+    await f.fake.emit("ticket.created", { queue: "billing", title: "First" }, { eventId: "t-1" });
+    await f.fake.emit("ticket.created", { queue: "support", title: "Other queue" });
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Second" }, { eventId: "t-2" });
+    // The server sends the same event again; it is stored once.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "First" }, { eventId: "t-1" });
+    await f.pump();
+    const stored = await f.events(source.id);
+    expect(stored.map((event) => event.data.title)).toEqual(["Second", "First"]);
+    expect(stored.every((event) => event.type === "ticket.created")).toBe(true);
+    expect(await f.subscriptions()).toMatchObject([{ cursor: "c5", gap_pending: false }]);
+
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toContain(automation.id);
+
+    // Polling again without news stores nothing and fires nothing.
+    const runs = f.started.length;
+    await f.pump();
+    expect(await f.events(source.id)).toHaveLength(2);
+    await f.dispatch();
+    expect(f.started).toHaveLength(runs);
+
+    // History that expired before the next poll is reported as a gap.
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Lost" });
+    f.fake.expireHistory();
+    await f.fake.emit("ticket.created", { queue: "billing", title: "After the gap" });
+    await f.pump();
+    const [latest] = await f.events(source.id);
+    expect(latest).toMatchObject({ data: { title: "After the gap" }, gapBefore: true });
+
+    // A replayed poll page fires its events again.
+    const [page] = await f.deliveries(source.id);
+    const replay = await f.app.request(`${f.sources}/${source.id}/deliveries/${page!.id}/replay`, {
+      method: "POST",
+      headers: f.owner.headers,
+    });
+    expect(replay.status).toBe(201);
+    expect((await f.json(replay)).delivery.eventIds).toHaveLength(1);
+    const tested = await f.app.request(`${f.sources}/${source.id}/test`, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ type: "ticket.created", data: { queue: "billing", title: "Test" } }),
+    });
+    expect(tested.status).toBe(201);
+    expect((await f.json(tested)).matchedAutomationIds).toEqual([automation.id]);
+  });
+
+  test("a refusal blocks the triggers until it clears, and pausing ends the subscription", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    await f.pump();
+
+    f.fake.failNext("events/poll", { code: -32_024, message: "Queue is private", data: {} });
+    await f.pump();
+    const blocked = await f.task(automation.id);
+    expect(blocked.events.triggers[0]).toMatchObject({ status: "blocked" });
+    expect(blocked.events.triggers[0].statusReason).toContain("Queue is private");
+
+    await f.pump();
+    expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
+      status: "active",
+      statusReason: null,
+    });
+
+    const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ status: "paused" }),
+    });
+    expect(paused.status).toBe(200);
+    await f.pump();
+    expect(await f.subscriptions()).toHaveLength(0);
+
+    const resumed = await f.app.request(`${f.tasks}/${automation.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ status: "active" }),
+    });
+    expect(resumed.status).toBe(200);
+    await f.pump();
+    expect(await f.subscriptions()).toMatchObject([{ mode: "poll" }]);
+  });
+
+  test("identical triggers share one subscription; different arguments never cross-fire", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const billing = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    const billingToo = await f.automation(source.id, "ticket.created", { queue: "billing" });
+    const support = await f.automation(source.id, "ticket.created", { queue: "support" });
+    await f.pump();
+    expect(await f.subscriptions()).toHaveLength(2);
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(2);
+
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Invoice wrong" });
+    await f.pump();
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId).sort()).toEqual([billing.id, billingToo.id].sort());
+    expect(f.started.map((run) => run.taskId)).not.toContain(support.id);
+  });
+
+  test("a webhook stream verifies, delivers, dedupes, reports gaps and resubscribes", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.closed", { queue: "billing" });
+
+    await f.pump();
+    const [subscription] = await f.subscriptions();
+    expect(subscription).toMatchObject({ mode: "webhook", failures: 0 });
+    const serverId = String(subscription!.server_subscription_id);
+    expect(serverId).toStartWith("sub_");
+    expect(f.fake.posts.map((post) => [JSON.parse(post.body).type, post.status])).toEqual([
+      ["verification", 200],
+    ]);
+    const url = f.fake.subscriptions.get(serverId)!.url;
+    expect(url).toStartWith("https://opengeni.example/v1/webhooks/events/");
+
+    await f.fake.emit("ticket.closed", { queue: "billing", title: "Refund sent" });
+    await f.fake.emit("ticket.closed", { queue: "support", title: "Not ours" });
+    const delivered = f.fake.posts.at(-1)!;
+    expect(delivered.status).toBe(200);
+    expect(f.fake.posts).toHaveLength(2);
+    // A retried POST keeps its webhook-id and is recorded once.
+    expect((await f.fake.redeliver(delivered)).status).toBe(200);
+    expect(await f.events(source.id)).toHaveLength(1);
+    expect((await f.deliveries(source.id))[0]).toMatchObject({
+      status: "accepted",
+      duplicateCount: 1,
+    });
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
+
+    expect((await f.fake.sendGap(serverId)).status).toBe(200);
+    await f.fake.emit("ticket.closed", { queue: "billing", title: "After a gap" });
+    expect((await f.events(source.id))[0]).toMatchObject({
+      data: { title: "After a gap" },
+      gapBefore: true,
+    });
+
+    // Refreshing keeps the same server subscription and does not verify again.
+    await f.pump();
+    expect(f.fake.subscriptions.get(serverId)?.refreshes).toBe(1);
+
+    // The server ends the subscription; the next step subscribes again.
+    const terminated = await f.fake.terminate(serverId, {
+      code: -32_603,
+      message: "Server restarted",
+    });
+    expect(terminated.status).toBe(200);
+    expect(f.fake.subscriptions.size).toBe(0);
+    await f.pump();
+    expect([...f.fake.subscriptions.keys()]).toEqual([serverId]);
+
+    // A delivery for a subscription Opengeni no longer has is answered 410 Gone.
+    const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ status: "paused" }),
+    });
+    expect(paused.status).toBe(200);
+    await f.pump();
+    expect(f.fake.subscriptions.size).toBe(0);
+    expect(await f.subscriptions()).toHaveLength(0);
+    const late = await f.app.request(new URL(url).pathname, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mcp-subscription-id": serverId },
+      body: delivered.body,
+    });
+    expect(late.status).toBe(410);
+  });
+
+  test("a webhook the server can't reach falls back to polling", async () => {
+    const f = await mcpFixture();
+    const source = await f.createSource();
+    const automation = await f.automation(source.id, "ticket.closed", {});
+    f.fake.failNext("events/subscribe", {
+      code: -32_027,
+      message: "Callback endpoint error",
+      data: { reason: "dns" },
+    });
+    await f.pump();
+    expect(await f.subscriptions()).toMatchObject([{ mode: "poll", failures: 0 }]);
+    await f.fake.emit("ticket.closed", { title: "Polled instead" });
+    await f.pump();
+    // Polling sticks: the webhook is not tried again.
+    expect(f.fake.requestsFor("events/subscribe")).toHaveLength(1);
+    expect(f.fake.requestsFor("events/poll")).toHaveLength(2);
+    expect((await f.events(source.id)).map((event) => event.data.title)).toEqual([
+      "Polled instead",
+    ]);
+    expect((await f.task(automation.id)).events.triggers[0].status).toBe("active");
   });
 });

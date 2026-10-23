@@ -185,7 +185,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/event-sources/:sourceId/event-types", async (c) => {
     const { viewer, workspaceId } = await viewerFor(c, "scheduled_tasks:run");
     const source = await requireEventSource(db, viewer, workspaceId, sourceIdParam(c), "use");
-    const eventTypes = await listEventSourceTypes({ db, source });
+    const eventTypes = await listEventSourceTypes({ db, settings: deps.settings, source });
     return c.json(ListEventTypesResponse.parse({ sourceId: source.id, eventTypes }));
   });
 
@@ -211,6 +211,11 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
     switch (result.outcome) {
       case "not_found":
         return c.json({ error: "not found" }, 404);
+      case "gone":
+        // An MCP subscription that ended: the server must stop retrying.
+        return c.json({ error: "subscription ended" }, 410);
+      case "challenge":
+        return c.json({ challenge: result.challenge }, 200);
       case "rejected":
         return c.json({ error: result.reason }, 401);
       case "stored":

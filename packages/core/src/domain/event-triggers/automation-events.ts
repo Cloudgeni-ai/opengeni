@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   ScheduledTaskEventsInput,
+  type ParsedEventTriggerInput,
   type ParsedScheduledTaskEventsInput,
   type ScheduledTask,
   type ScheduledTaskAction,
@@ -17,24 +18,43 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { eventTriggersEnabled } from "./sources";
+import { mcpServerDisplayName, withMcpEventSourceClient } from "./mcp-event-source-client";
+import {
+  mcpEventArgumentsProblem,
+  mcpEventStreamKey,
+  mcpEventTypeUnavailableReason,
+  mcpSourceEventTypes,
+  mcpWebhookBaseUrl,
+} from "./mcp-event-types";
+import type { McpEventType } from "./mcp-events-protocol";
+import { eventTriggersEnabled, mcpSourceHttpError, type McpEventSourceNetwork } from "./sources";
 
 /**
  * Event triggers on an automation (a scheduled task). They are validated
  * with the rest of a create or update and written in the same transaction.
  */
 
+/** A trigger ready to write; an MCP trigger carries the stream (type and arguments) it listens on. */
+export type ValidatedEventTrigger = ParsedEventTriggerInput & { streamKey?: string };
+export type ValidatedScheduledTaskEvents = Omit<ParsedScheduledTaskEventsInput, "triggers"> & {
+  triggers: ValidatedEventTrigger[];
+};
+
 /** Validate the requested triggers against the automation they will belong to. */
-export async function validateScheduledTaskEvents(input: {
-  settings: Pick<Settings, "eventTriggersEnabled">;
-  db: Database;
-  workspaceId: string;
-  /** The automation's owner; a private source fires only that person's automations. */
-  ownerSubjectId: string | null;
-  schedule: ScheduledTaskScheduleSpec;
-  action: ScheduledTaskAction;
-  events: ParsedScheduledTaskEventsInput;
-}): Promise<ParsedScheduledTaskEventsInput> {
+export async function validateScheduledTaskEvents(
+  input: {
+    settings: Settings;
+    db: Database;
+    workspaceId: string;
+    /** The automation's owner; a private source fires only that person's automations. */
+    ownerSubjectId: string | null;
+    /** The automation being edited: its unchanged MCP triggers stay valid if the server is unreachable. */
+    taskId?: string;
+    schedule: ScheduledTaskScheduleSpec;
+    action: ScheduledTaskAction;
+    events: ParsedScheduledTaskEventsInput;
+  } & McpEventSourceNetwork,
+): Promise<ValidatedScheduledTaskEvents> {
   const events = ScheduledTaskEventsInput.parse(input.events);
   if (events.triggers.length === 0) return { triggers: [] };
   if (!eventTriggersEnabled(input.settings)) {
@@ -50,6 +70,9 @@ export async function validateScheduledTaskEvents(input: {
     });
   }
   const sources = new Map<string, Awaited<ReturnType<typeof getEventSource>>>();
+  const mcpTypes = new Map<string, Promise<McpEventType[]>>();
+  let existingStreams: Set<string> | undefined;
+  const triggers: ValidatedEventTrigger[] = [];
   for (const [index, trigger] of events.triggers.entries()) {
     if (!sources.has(trigger.sourceId)) {
       sources.set(
@@ -70,13 +93,76 @@ export async function validateScheduledTaskEvents(input: {
           message: `Trigger ${index + 1}: an MCP trigger subscribes to exactly one event type`,
         });
       }
-    } else if (trigger.arguments !== undefined) {
+      const args = trigger.arguments ?? {};
+      const streamKey = mcpEventStreamKey(type, args);
+      let types = mcpTypes.get(source.id);
+      if (!types) {
+        types = withMcpEventSourceClient(
+          {
+            db: input.db,
+            settings: input.settings,
+            ...(input.fetch ? { fetch: input.fetch } : {}),
+          },
+          source,
+          (client, { server }) => mcpSourceEventTypes(client, source, mcpServerDisplayName(server)),
+        );
+        // Settled below; a rejection here must not go unhandled meanwhile.
+        types.catch(() => undefined);
+        mcpTypes.set(source.id, types);
+      }
+      let offered: McpEventType[] | null = null;
+      try {
+        offered = await types;
+      } catch (error) {
+        existingStreams ??= await existingMcpStreams(input.db, input.workspaceId, input.taskId);
+        // An unchanged trigger stays as it was; its subscription reports problems itself.
+        if (!existingStreams.has(`${source.id}:${streamKey}`)) {
+          const problem = mcpSourceHttpError(error, source.name);
+          throw new HTTPException(problem.status, {
+            message: `Trigger ${index + 1}: ${problem.message}`,
+          });
+        }
+      }
+      if (offered) {
+        const found = offered.find((candidate) => candidate.name === type);
+        const problem = !found
+          ? `${source.name} doesn't offer "${type}" events`
+          : (mcpEventTypeUnavailableReason(found, mcpWebhookBaseUrl(input.settings) !== null) ??
+            mcpEventArgumentsProblem(found, args));
+        if (problem) {
+          throw new HTTPException(422, { message: `Trigger ${index + 1}: ${problem}` });
+        }
+      }
+      triggers.push({ ...trigger, arguments: args, streamKey });
+      continue;
+    }
+    if (trigger.arguments !== undefined) {
       throw new HTTPException(422, {
         message: `Trigger ${index + 1}: subscription arguments are only for MCP event sources`,
       });
     }
+    triggers.push(trigger);
   }
-  return events;
+  return { ...events, triggers };
+}
+
+/** The MCP streams an automation already listens on, as `sourceId:streamKey`. */
+async function existingMcpStreams(
+  db: Database,
+  workspaceId: string,
+  taskId: string | undefined,
+): Promise<Set<string>> {
+  if (!taskId) return new Set();
+  const events = (await getScheduledTaskEvents(db, workspaceId, [taskId])).get(taskId);
+  return new Set(
+    (events?.triggers ?? []).flatMap((trigger) =>
+      trigger.sourceKind === "mcp" && trigger.eventTypes[0]
+        ? [
+            `${trigger.sourceId}:${mcpEventStreamKey(trigger.eventTypes[0], trigger.arguments ?? {})}`,
+          ]
+        : [],
+    ),
+  );
 }
 
 /**
@@ -104,7 +190,7 @@ export async function validateScheduleForExistingEvents(input: {
 export async function writeScheduledTaskEvents(
   tx: Database,
   task: Pick<ScheduledTask, "accountId" | "workspaceId" | "id">,
-  events: ParsedScheduledTaskEventsInput,
+  events: ValidatedScheduledTaskEvents,
 ): Promise<void> {
   await setScheduledTaskEvents(tx, {
     accountId: task.accountId,
