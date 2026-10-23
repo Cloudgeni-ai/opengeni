@@ -87,15 +87,18 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - run: bun install --frozen-lockfile
+      - name: Install contract dependencies
+        run: bun install --frozen-lockfile
       - name: Fast lint gate
         run: bun run lint
       - uses: actions/download-artifact@v4
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan
-      - run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
-      - run: bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --exclude publish-closure --exclude sdk-compat --exclude example-builds
+      - name: Check affected types
+        run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
+      - name: Check affected source guards
+        run: bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --exclude publish-closure --exclude sdk-compat --exclude example-builds
 
   units:
     needs: plan
@@ -115,7 +118,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - run: bun install --frozen-lockfile
+      - name: Install unit dependencies
+        run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: pr-impact-plan
