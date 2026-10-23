@@ -28,7 +28,7 @@ const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
   loading: t("sessionList.loadingChats"),
   loadMore: t("sessionList.showMore"),
   rename: t("sessionList.rename"),
-  archive: "Hide for me",
+  archive: t("sessionList.archive"),
   save: t("sessionList.save"),
   cancel: t("sessionList.cancel"),
 });
