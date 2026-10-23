@@ -330,8 +330,12 @@ class ChromeDebuggerBridge {
         return {} as T;
       case "tabs.close": {
         const tabId = String(payload.tabId);
+        const targetId = this.target(tabId);
         await this.detach(tabId);
-        await this.browser.send("Target.closeTarget", { targetId: this.target(tabId) });
+        await this.browser.send("Target.closeTarget", { targetId });
+        // chrome.tabs.remove resolves once the tab is gone; Target.closeTarget
+        // returns while Chromium may still list the closing target.
+        await waitFor(async () => !(await this.targetListed(targetId)));
         return { tabs: await this.tabs() } as T;
       }
       case "debugger.attach": {
@@ -392,6 +396,13 @@ class ChromeDebuggerBridge {
 
   private target(tabId: unknown): string {
     return this.tabIds.get(String(tabId))!;
+  }
+
+  private async targetListed(targetId: string): Promise<boolean> {
+    const { targetInfos } = await this.browser.send<{
+      targetInfos: Array<{ targetId: string }>;
+    }>("Target.getTargets");
+    return targetInfos.some((target) => target.targetId === targetId);
   }
 
   private async tabs() {
