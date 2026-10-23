@@ -1,10 +1,12 @@
-import { ChevronDown, Plus, Settings, X } from "lucide-react";
+import { ChevronDown, Plus, RotateCcw, Settings, X } from "lucide-react";
 import { useState } from "react";
 import { organizeSidebar, type Agent } from "../lib/agents";
 import { AgentAvatar } from "./AgentAvatar";
 
 export function Sidebar({
   agents,
+  archived,
+  onRestore,
   selectedId,
   workspaceName,
   drafting,
@@ -14,6 +16,8 @@ export function Sidebar({
   onClose,
 }: {
   agents: Agent[];
+  archived: Agent[];
+  onRestore: (id: string) => Promise<void>;
   selectedId: string | null;
   workspaceName: string | null;
   drafting: boolean;
@@ -24,6 +28,8 @@ export function Sidebar({
 }) {
   const sections = organizeSidebar(agents);
   const [quietOpen, setQuietOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
   return (
     <nav className="flex h-full w-full flex-col bg-[var(--app-sidebar)]" aria-label="Agents">
       <div className="flex items-center gap-2 px-3 pt-3 pb-2">
@@ -100,6 +106,44 @@ export function Sidebar({
             </div>
           );
         })}
+        {archived.length ? (
+          <div className="mb-2">
+            <button
+              type="button"
+              onClick={() => setArchivedOpen((open) => !open)}
+              className="flex w-full items-center gap-1 px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-[var(--app-muted)] uppercase"
+            >
+              Archived
+              <span className="font-normal normal-case">({archived.length})</span>
+              <ChevronDown
+                size={12}
+                className={`transition-transform ${archivedOpen ? "" : "-rotate-90"}`}
+              />
+            </button>
+            {archivedOpen
+              ? archived.map((agent) => (
+                  <div
+                    key={agent.id}
+                    className="flex items-center gap-2.5 rounded-xl px-2 py-1.5 opacity-70"
+                  >
+                    <AgentAvatar agent={agent} size={28} />
+                    <span className="min-w-0 flex-1 truncate text-sm">{agent.name}</span>
+                    <button
+                      type="button"
+                      disabled={restoring !== null}
+                      onClick={() => {
+                        setRestoring(agent.id);
+                        void onRestore(agent.id).finally(() => setRestoring(null));
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--app-border)] px-2 py-0.5 text-xs hover:bg-[var(--app-hover)] disabled:opacity-60"
+                    >
+                      <RotateCcw size={11} /> {restoring === agent.id ? "Restoring…" : "Restore"}
+                    </button>
+                  </div>
+                ))
+              : null}
+          </div>
+        ) : null}
       </div>
       <div className="border-t border-[var(--app-border)] p-2">
         <button
@@ -131,7 +175,11 @@ function AgentRow({
     ? "Needs you"
     : agent.working
       ? "Working…"
-      : (agent.description ?? (agent.role === "main" ? "Your main agent" : null));
+      : agent.waiting
+        ? "Waiting for ChatGPT"
+        : agent.failed
+          ? "Stopped"
+          : (agent.description ?? (agent.role === "main" ? "Your main agent" : null));
   // The open chat is being read, whatever the server's unread mark says.
   const unread = agent.unread && !selected;
   return (
@@ -151,6 +199,10 @@ function AgentRow({
           <span className="absolute -right-0.5 -bottom-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-[var(--app-sidebar)]">
             <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
           </span>
+        ) : agent.waiting ? (
+          <span className="absolute -right-0.5 -bottom-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-[var(--app-sidebar)]">
+            <span className="h-2 w-2 rounded-full bg-sky-400" />
+          </span>
         ) : null}
       </div>
       <div className="min-w-0 flex-1">
@@ -161,7 +213,7 @@ function AgentRow({
         </div>
         {subtitle ? (
           <div
-            className={`truncate text-xs ${agent.needsYou ? "text-amber-600 dark:text-amber-400" : "text-[var(--app-muted)]"}`}
+            className={`truncate text-xs ${agent.needsYou ? "text-amber-600 dark:text-amber-400" : agent.failed && !agent.working ? "text-rose-600 dark:text-rose-400" : "text-[var(--app-muted)]"}`}
           >
             {subtitle}
           </div>

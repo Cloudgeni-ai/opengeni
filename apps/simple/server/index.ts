@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   opengeniApiKey,
   opengeniApiUrl,
@@ -299,6 +300,10 @@ Bun.serve({
       return json({ error: "Not found" }, 404);
     } catch (error) {
       if (error instanceof HttpError) return json({ error: error.message }, error.status);
+      // A sign-in Opengeni no longer accepts reaches the page as itself.
+      if (error instanceof OpenGeniApiError && (error.status === 401 || error.status === 403)) {
+        return json({ error: error.message }, error.status);
+      }
       console.error(error);
       return json({ error: error instanceof Error ? error.message : "Internal error" }, 500);
     }

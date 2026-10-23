@@ -62,12 +62,9 @@ export function ActionCard({
       } else if (result?.state === "applying") {
         // The server (or another window) is applying it; look again shortly.
         applyLater();
-      } else setState({ phase: "error", message: "That didn't work." });
-    } catch (error) {
-      setState({
-        phase: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      } else setState({ phase: "error", message: failedMessage(block.kind) });
+    } catch {
+      setState({ phase: "error", message: failedMessage(block.kind) });
     }
   };
 
@@ -116,7 +113,17 @@ export function ActionCard({
       </div>
     );
   }
-  if (!block.payload) return null;
+  // The agent wrote something unreadable: say so instead of showing nothing.
+  if (!block.payload) {
+    return (
+      <div className="card-in my-2 rounded-2xl border border-[var(--app-border)] bg-[var(--app-card)] px-3 py-2.5 text-sm text-[var(--app-muted)]">
+        {block.kind === "agent"
+          ? "Couldn't set up this agent. Ask again to retry."
+          : "Couldn't update the profile. Ask again to retry."}
+      </div>
+    );
+  }
+  const shared = payload.shared === true;
 
   if (block.kind === "profile") {
     // An old profile change that never applied is history, not a to-do.
@@ -150,7 +157,12 @@ export function ActionCard({
         findAgent={findAgent}
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold">{name ?? "New agent"}</div>
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-semibold">{name ?? "New agent"}</span>
+          <span className="shrink-0 rounded-full bg-[var(--app-hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--app-muted)]">
+            {shared ? "Workspace" : "Personal"}
+          </span>
+        </div>
         <div className="truncate text-xs text-[var(--app-muted)]">
           {state.phase === "error" ? state.message : (description ?? "A new agent")}
         </div>
@@ -184,6 +196,10 @@ export function ActionCard({
       )}
     </div>
   );
+}
+
+function failedMessage(kind: ActionBlock["kind"]) {
+  return kind === "agent" ? "Couldn't create the agent." : "Couldn't update the profile.";
 }
 
 /** The new agent's real avatar once it exists, so the card matches the sidebar. */

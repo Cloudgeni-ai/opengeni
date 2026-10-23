@@ -13,6 +13,10 @@ export type Agent = {
   lastUsedAt: string | null;
   lastActivityAt: string;
   working: boolean;
+  /** Waiting for ChatGPT capacity; it continues by itself. */
+  waiting: boolean;
+  /** Its last turn stopped with an error. */
+  failed: boolean;
   needsYou: boolean;
   unread: boolean;
 };
@@ -29,7 +33,8 @@ export function simpleMetadata(session: Session): SimpleMetadata | null {
   return value && typeof value === "object" ? (value as SimpleMetadata) : null;
 }
 
-const WORKING = new Set(["running", "queued", "recovering", "waiting_capacity", "starting"]);
+const WORKING = new Set(["running", "queued", "recovering", "starting"]);
+const BUSY = new Set([...WORKING, "waiting_capacity"]);
 const ABANDONED_AFTER_MS = 2 * 60 * 1000;
 
 /**
@@ -47,8 +52,19 @@ function isAbandonedBlank(
     // Only creation bookkeeping, never a single turn.
     session.lastSequence < 10 &&
     session.activeTurnId == null &&
-    !WORKING.has(String(session.status)) &&
+    !BUSY.has(String(session.status)) &&
     Date.now() - Date.parse(session.createdAt) > ABANDONED_AFTER_MS
+  );
+}
+
+/** Archived agents, for the sidebar's Archived list where they can come back. */
+export function archivedAgents(sessions: Session[], profiles: AgentProfile[]): Agent[] {
+  return toAgents(
+    sessions
+      .filter((session) => session.archived && simpleMetadata(session)?.kind === "agent")
+      .map((session) => ({ ...session, archived: false })),
+    profiles,
+    [],
   );
 }
 
@@ -81,7 +97,11 @@ export function toAgents(
         score: usageById.get(session.id)?.score ?? 0,
         lastUsedAt: usageById.get(session.id)?.lastUsedAt ?? null,
         lastActivityAt: session.updatedAt,
-        working: session.activelyWorking === true || WORKING.has(status),
+        working:
+          status !== "waiting_capacity" &&
+          (session.activelyWorking === true || WORKING.has(status)),
+        waiting: status === "waiting_capacity",
+        failed: status === "failed",
         needsYou: status === "requires_action",
         unread: session.unread === true,
       } satisfies Agent;
@@ -114,10 +134,10 @@ export function organizeSidebar(agents: Agent[]): SidebarSection[] {
     agent.score +
     (agent.needsYou ? 100 : 0) +
     (agent.unread ? 20 : 0) +
-    (agent.working ? 5 : 0) +
+    (agent.working || agent.waiting ? 5 : 0) +
     recency(agent.lastActivityAt, now);
   const isQuiet = (agent: Agent) => {
-    if (agent.needsYou || agent.unread || agent.working) return false;
+    if (agent.needsYou || agent.unread || agent.working || agent.waiting) return false;
     const touched = Math.max(
       agent.lastUsedAt ? Date.parse(agent.lastUsedAt) : 0,
       Date.parse(agent.lastActivityAt),

@@ -143,7 +143,7 @@ function ComputerTab() {
   return (
     <Section
       title="Your computer"
-      hint="Let agents use this Mac when a task needs it: open pages in your Chrome and, if you allow it, see and control the screen. They ask in the chat first."
+      hint="Let agents use this Mac when a task needs it: open pages in your Chrome and, if you allow it, see and control the screen. The first time, an agent asks you in the chat."
     >
       {app ? (
         <div className="simple-connections">

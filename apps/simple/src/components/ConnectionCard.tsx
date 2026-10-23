@@ -12,7 +12,8 @@ import { useAppComputer } from "../lib/this-computer";
 /**
  * Inline connection setup when an agent asks for a tool. OAuth services get
  * the native connect card right in the chat; GitHub opens its App install;
- * anything else points at Settings.
+ * anything else points at Settings. Whatever the person connects from a card,
+ * the agent hears about it and carries on.
  */
 export function renderConnectionCard(
   item: AuthNeededItem,
@@ -20,10 +21,10 @@ export function renderConnectionCard(
     workspaceId: string;
     sessionId: string;
     catalog: CapabilityCatalogItem[];
-    /** The person turned their computer on from the card. */
-    onComputerReady?: () => void;
-    /** The person linked their Chrome from the card. */
-    onChromeReady?: () => void;
+    /** Where connections this app can't make are set up, when there is one. */
+    fullAppUrl: string | null;
+    /** The person finished what the card asked; `text` tells the agent to go on. */
+    onReady: (text: string) => void;
   },
 ): ReactNode | undefined {
   const capability = item.capability;
@@ -39,14 +40,25 @@ export function renderConnectionCard(
         <ChromeCard
           workspaceId={context.workspaceId}
           rationale={capability.rationale}
-          onReady={context.onChromeReady}
+          onReady={() => context.onReady("My Chrome is connected. Go ahead.")}
         />
       );
     }
-    return <ComputerCard rationale={capability.rationale} onReady={context.onComputerReady} />;
+    return (
+      <ComputerCard
+        rationale={capability.rationale}
+        onReady={() => context.onReady("My computer is ready. Go ahead.")}
+      />
+    );
   }
   if (capability.id === "api:github-app") {
-    return <GitHubCard workspaceId={context.workspaceId} rationale={capability.rationale} />;
+    return (
+      <GitHubCard
+        workspaceId={context.workspaceId}
+        rationale={capability.rationale}
+        onReady={() => context.onReady("GitHub is connected. Go ahead.")}
+      />
+    );
   }
   const entry = context.catalog.find((candidate) => candidate.id === capability.id);
   if (entry?.kind === "mcp" && entry.authKind === "oauth2") {
@@ -60,11 +72,36 @@ export function renderConnectionCard(
           name={capability.name}
           rationale={capability.rationale}
           returnUrl={connectReturnUrl()}
+          onConfigured={() => context.onReady(`${capability.name} is connected. Go ahead.`)}
         />
       </div>
     );
   }
-  return <SettingsFallback title={`Connect ${capability.name}`} rationale={capability.rationale} />;
+  // Settings connects only sign-in services; anything else is set up in the
+  // full app, and saying so beats a button that leads nowhere.
+  return (
+    <Shell
+      icon={<Plug size={18} />}
+      title={`Connect ${capability.name}`}
+      rationale={
+        context.fullAppUrl
+          ? `${capability.name} is set up in the full Opengeni app. Tell the agent once it's done.`
+          : `${capability.name} can't be connected from this app yet.`
+      }
+      action={
+        context.fullAppUrl ? (
+          <a
+            href={context.fullAppUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1.5 text-xs font-medium text-white"
+          >
+            Open
+          </a>
+        ) : null
+      }
+    />
+  );
 }
 
 /**
@@ -270,50 +307,103 @@ function SettingsFallback({ title, rationale }: { title: string; rationale: stri
   );
 }
 
-function GitHubCard({ workspaceId, rationale }: { workspaceId: string; rationale: string }) {
-  const [state, setState] = useState<"idle" | "busy" | "connected" | "error">("idle");
+/** How often to look for the finished GitHub install, and for how long. */
+const GITHUB_POLL_MS = 3_000;
+const GITHUB_WATCH_MS = 10 * 60_000;
+
+/**
+ * GitHub connects through its App install in the browser. The card watches for
+ * the install to finish and then tells the agent to go on.
+ */
+function GitHubCard({
+  workspaceId,
+  rationale,
+  onReady,
+}: {
+  workspaceId: string;
+  rationale: string;
+  onReady: () => void;
+}) {
+  const [state, setState] = useState<
+    "idle" | "busy" | "waiting" | "connected" | "error" | "unavailable"
+  >("idle");
   const [message, setMessage] = useState<string | null>(null);
+  const told = useRef(false);
+  const connected = () => {
+    setState("connected");
+    if (told.current) return;
+    told.current = true;
+    onReady();
+  };
+  useEffect(() => {
+    if (state !== "waiting") return;
+    const since = Date.now();
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      if (Date.now() - since > GITHUB_WATCH_MS) {
+        setState("idle");
+        return;
+      }
+      if (document.visibilityState === "hidden") return;
+      void client.getGitHubApp(workspaceId).then(
+        (info) => {
+          if (!stopped && info.status === "bound") connected();
+        },
+        () => undefined,
+      );
+    }, GITHUB_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one watch per click
+  }, [state, workspaceId]);
   const start = async () => {
     setState("busy");
+    setMessage(null);
     try {
       const info = await client.getGitHubApp(workspaceId, {
         returnPath: window.location.pathname,
       });
       if (info.status === "bound") {
-        setState("connected");
+        connected();
         return;
       }
       const url = info.installUrl ?? info.linkUrl;
       if (!url) {
-        setState("error");
-        setMessage(
-          info.configured
-            ? "GitHub can't be connected from here."
-            : "GitHub isn't set up on this Opengeni yet.",
-        );
+        // Nothing the person can do here; no button to press again.
+        setState("unavailable");
+        setMessage("GitHub can't be connected from this app yet.");
         return;
       }
       window.open(url, "_blank", "noopener");
-      setState("idle");
-    } catch (error) {
+      setState("waiting");
+    } catch {
       setState("error");
-      setMessage(error instanceof Error ? error.message : String(error));
+      setMessage("Couldn't reach GitHub. Try again in a moment.");
     }
   };
   return (
     <Shell
       icon={<GitBranch size={18} />}
       title={state === "connected" ? "GitHub is connected" : "Connect GitHub"}
-      rationale={message ?? rationale}
+      rationale={
+        message ??
+        (state === "waiting"
+          ? "Finish in your browser. This card updates once it's done."
+          : rationale)
+      }
       action={
-        state === "connected" ? null : (
+        state === "connected" ? (
+          <Check size={16} className="shrink-0 text-[var(--app-accent)]" />
+        ) : state === "unavailable" ? null : (
           <button
             type="button"
             disabled={state === "busy"}
             onClick={() => void start()}
             className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60"
           >
-            Connect
+            {state === "waiting" ? "Open again" : "Connect"}
           </button>
         )
       }

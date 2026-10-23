@@ -219,22 +219,25 @@
         <h1 id="title">Sign in to Opengeni</h1>
         <p class="lead">Your browser opens to finish signing in.</p>
         <form id="form" novalidate>
-          <div class="servers" role="group" aria-label="Server">
-            <button type="button" data-server="https://staging.app.opengeni.ai">Staging</button>
-            <button type="button" data-server="https://app.opengeni.ai">Production</button>
-            <button type="button" data-server="">Other</button>
+          <div id="advanced" class="stack" hidden>
+            <div class="servers" role="group" aria-label="Server">
+              <button type="button" data-server="https://app.opengeni.ai">Opengeni</button>
+              <button type="button" data-server="https://staging.app.opengeni.ai">Staging</button>
+              <button type="button" data-server="">Other</button>
+            </div>
+            <input
+              id="other"
+              type="text"
+              inputmode="url"
+              placeholder="opengeni.example.com"
+              autocapitalize="off"
+              spellcheck="false"
+              hidden
+            />
+            <p id="host" class="host"></p>
           </div>
-          <input
-            id="other"
-            type="text"
-            inputmode="url"
-            placeholder="opengeni.example.com"
-            autocapitalize="off"
-            spellcheck="false"
-            hidden
-          />
-          <p id="host" class="host"></p>
           <button type="submit" class="primary">Continue in browser</button>
+          <button id="advancedToggle" type="button" class="link">Use another server</button>
         </form>
       </section>
       <section id="waiting" hidden>
@@ -265,6 +268,11 @@
       let applied;
 
       const host = (url) => url.replace(/^https?:\/\//u, "");
+      const DEFAULT_SERVER = "https://app.opengeni.ai";
+      function showAdvanced() {
+        byId("advanced").hidden = false;
+        byId("advancedToggle").hidden = true;
+      }
       function select(url, custom) {
         selected = url;
         for (const button of document.querySelectorAll(".servers button")) {
@@ -286,6 +294,7 @@
         byId("pending").textContent = host(state.server || "");
         byId("ready").textContent = host(state.server || "");
         byId("title").textContent = state.canGoBack ? "Change server" : "Sign in to Opengeni";
+        if (state.canGoBack) showAdvanced();
         byId("back").hidden = !state.canGoBack || state.view === "starting";
         byId("error").hidden = !state.error;
         byId("error").textContent = state.error || "";
@@ -296,9 +305,11 @@
           );
           if (!preset && state.server) other.value = host(state.server);
           select(
-            preset || !state.server ? state.server || "https://staging.app.opengeni.ai" : "",
+            preset || !state.server ? state.server || DEFAULT_SERVER : "",
             !preset && Boolean(state.server),
           );
+          // A server other than the usual one stays in view, so it's never a surprise.
+          if (state.server && state.server !== DEFAULT_SERVER) showAdvanced();
         }
       };
 
@@ -311,10 +322,11 @@
         event.preventDefault();
         send("continue", other.hidden ? selected : other.value.trim());
       });
+      byId("advancedToggle").addEventListener("click", showAdvanced);
       byId("again").addEventListener("click", () => send("again"));
       byId("restart").addEventListener("click", () => send("restart"));
       byId("back").addEventListener("click", () => send("back"));
-      window.render({ view: "start", server: "https://staging.app.opengeni.ai" });
+      window.render({ view: "start", server: DEFAULT_SERVER });
     </script>
   </body>
 </html>

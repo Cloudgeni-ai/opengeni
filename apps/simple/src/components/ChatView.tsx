@@ -6,6 +6,7 @@ import type { Agent } from "../lib/agents";
 import { appApi, client, EFFORT_LABELS, type EffortLevel } from "../lib/app-api";
 import { useAppEvents } from "../lib/app-events";
 import { buildModelContext, type ReplyLength } from "../lib/context";
+import { failureView, type FailureView } from "../lib/failure";
 import { AgentAvatar } from "./AgentAvatar";
 import { IconPicker } from "./IconPicker";
 import { renderConnectionCard } from "./ConnectionCard";
@@ -22,6 +23,9 @@ export type ChatViewProps = {
   catalog: CapabilityCatalogItem[];
   onOpenAgent: (sessionId: string) => void;
   onOpenSidebar: () => void;
+  fullAppUrl: string | null;
+  /** Opens where ChatGPT is connected. */
+  onReconnectModel: () => void;
 };
 
 export function ChatView(props: ChatViewProps) {
@@ -90,6 +94,18 @@ export function ChatView(props: ChatViewProps) {
 
   const catalog = props.catalog;
   const fresh = neverTalked(agent);
+  const statusRow = agent.working ? (
+    <WorkingRow key={agent.id} />
+  ) : agent.waiting ? (
+    <WaitingRow />
+  ) : agent.failed ? (
+    <FailureRow
+      key={`${agent.id}:${agent.session.lastSequence}`}
+      workspaceId={workspaceId}
+      sessionId={agent.id}
+      onReconnect={props.onReconnectModel}
+    />
+  ) : null;
   const timelineProps = useMemo(
     () => ({
       turnSummary: { rolling: true },
@@ -98,17 +114,41 @@ export function ChatView(props: ChatViewProps) {
           workspaceId,
           sessionId: agent.id,
           catalog,
-          onComputerReady: () => void send("My computer is ready. Go ahead."),
-          onChromeReady: () => void send("My Chrome is connected. Go ahead."),
+          fullAppUrl: props.fullAppUrl,
+          onReady: (text) => void send(text),
         }),
       // History streams in after mount; only a chat that never had a turn gets
       // the welcome, so an existing conversation never flashes it.
       emptyState: fresh ? <EmptyState agent={agent} onPick={(text) => void send(text)} /> : <div />,
       shouldRenderItem: chatOnly,
-      trailingState: agent.working ? <WorkingRow key={agent.id} /> : null,
+      trailingState: (
+        <>
+          <HelperStrip
+            key={agent.id}
+            workspaceId={workspaceId}
+            sessionId={agent.id}
+            busy={agent.working || agent.waiting}
+            onOpen={onOpenSession}
+          />
+          {statusRow}
+        </>
+      ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the empty state only needs identity
-    [agent.id, agent.name, agent.profile?.icon, agent.working, fresh, catalog, send, workspaceId],
+    [
+      agent.id,
+      agent.name,
+      agent.profile?.icon,
+      agent.working,
+      agent.waiting,
+      agent.failed,
+      agent.session.lastSequence,
+      fresh,
+      onOpenSession,
+      catalog,
+      send,
+      workspaceId,
+    ],
   );
 
   return (
@@ -168,7 +208,11 @@ function Header({
   const run = (action: () => Promise<unknown>) => {
     setMenuOpen(false);
     void action().then(onChanged, (error) =>
-      window.alert(error instanceof Error ? error.message : String(error)),
+      window.alert(
+        error instanceof Error && error.message.length < 120
+          ? error.message
+          : "That didn't work. Try again in a moment.",
+      ),
     );
   };
   return (
@@ -189,6 +233,10 @@ function Header({
             <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> Working
             </span>
+          ) : agent.waiting ? (
+            <span className="inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-current" /> Waiting
+            </span>
           ) : null}
         </div>
         <p className="truncate text-xs text-[var(--app-muted)]">
@@ -197,7 +245,9 @@ function Header({
               ? "Your main agent. Ask for anything."
               : agent.shared
                 ? "Workspace agent"
-                : "Personal agent")}
+                : agent.session.tenancy?.visibility === "workspace"
+                  ? "Personal agent, visible in this workspace"
+                  : "Personal agent")}
         </p>
       </div>
       <div className="relative">
@@ -287,7 +337,7 @@ function Header({
                     onClick={() => {
                       if (
                         !window.confirm(
-                          `Archive ${agent.name}? Its chat is kept but it leaves the sidebar.`,
+                          `Archive ${agent.name}? Its chat is kept under Archived, where you can restore it.`,
                         )
                       )
                         return;
@@ -451,6 +501,202 @@ function WorkingRow() {
         <span />
       </span>
       {long ? <span className="card-in">Working on it</span> : null}
+    </div>
+  );
+}
+
+const HELPER_STATES = {
+  running: "working",
+  queued: "working",
+  recovering: "working",
+  starting: "working",
+  waiting_capacity: "waiting",
+  requires_action: "needs you",
+} as const;
+
+/**
+ * The helpers this agent started that are still busy or need the person: one
+ * small chip each, opening the helper. Finished helpers drop off; their result
+ * reaches the chat through the agent.
+ */
+function HelperStrip({
+  workspaceId,
+  sessionId,
+  busy,
+  onOpen,
+}: {
+  workspaceId: string;
+  sessionId: string;
+  busy: boolean;
+  onOpen: (sessionId: string) => void;
+}) {
+  const [helpers, setHelpers] = useState<
+    { id: string; title: string; state: (typeof HELPER_STATES)[keyof typeof HELPER_STATES] }[]
+  >([]);
+  useEffect(() => {
+    let stopped = false;
+    const read = () => {
+      if (document.visibilityState === "hidden") return;
+      void client.listSessions(workspaceId, { parentSessionId: sessionId, limit: 50 }).then(
+        (children) => {
+          if (stopped) return;
+          setHelpers(
+            children.flatMap((child) => {
+              const state = HELPER_STATES[String(child.status) as keyof typeof HELPER_STATES];
+              return state && !child.archived
+                ? [{ id: child.id, title: child.title?.trim() || "Helper", state }]
+                : [];
+            }),
+          );
+        },
+        () => undefined,
+      );
+    };
+    read();
+    // Helpers mostly run while their agent does; look less often otherwise.
+    const timer = window.setInterval(read, busy ? 5_000 : 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [workspaceId, sessionId, busy]);
+  if (!helpers.length) return null;
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-1.5 px-6 pt-2 text-xs">
+      <span className="text-[var(--app-muted)]">Helpers</span>
+      {helpers.map((helper) => (
+        <button
+          key={helper.id}
+          type="button"
+          onClick={() => onOpen(helper.id)}
+          className="inline-flex max-w-[16rem] items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-card)] px-2.5 py-1 hover:border-[var(--app-accent)]"
+        >
+          <span
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+              helper.state === "needs you"
+                ? "bg-amber-500"
+                : helper.state === "waiting"
+                  ? "bg-sky-400"
+                  : "animate-pulse bg-emerald-500"
+            }`}
+          />
+          <span className="truncate">{helper.title}</span>
+          <span className="shrink-0 text-[var(--app-muted)]">{helper.state}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** ChatGPT is busy or out of capacity; the agent picks up again by itself. */
+function WaitingRow() {
+  return (
+    <div className="mx-auto flex w-full max-w-3xl items-center gap-2.5 px-6 pt-2 pb-6 text-sm text-[var(--app-muted)]">
+      <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400" />
+      Waiting for ChatGPT. This continues by itself.
+    </div>
+  );
+}
+
+/** The last failure retried by hand in each chat, so the same one doesn't offer Retry again. */
+const retriedFailures = new Map<
+  string,
+  { eventId: string; kind: FailureView["kind"]; at: number }
+>();
+const RETRY_MEMORY_MS = 15 * 60_000;
+
+/**
+ * Why the agent stopped, in one sentence. Retry only shows when trying the same
+ * thing again can work, and only once: a second identical failure suggests
+ * something else instead of another pointless retry.
+ */
+function FailureRow({
+  workspaceId,
+  sessionId,
+  onReconnect,
+}: {
+  workspaceId: string;
+  sessionId: string;
+  onReconnect: () => void;
+}) {
+  const [failure, setFailure] = useState<{
+    eventId: string;
+    retainedTurn: boolean;
+    view: FailureView;
+  } | null>(null);
+  const [retryState, setRetryState] = useState<"idle" | "sending" | "error">("idle");
+  useEffect(() => {
+    let stopped = false;
+    void client.getSession(workspaceId, sessionId).then(
+      (session) => {
+        if (stopped) return;
+        const diagnostics = session.failureDiagnostics;
+        setFailure({
+          eventId: diagnostics?.eventId ?? "",
+          retainedTurn: Boolean(diagnostics?.turnId),
+          view: failureView(diagnostics?.payload),
+        });
+      },
+      () => {
+        if (!stopped)
+          setFailure({ eventId: "", retainedTurn: false, view: failureView(undefined) });
+      },
+    );
+    return () => {
+      stopped = true;
+    };
+  }, [workspaceId, sessionId]);
+  if (!failure) return null;
+  const { view } = failure;
+  const previous = retriedFailures.get(sessionId);
+  const retriedThis = previous?.eventId === failure.eventId;
+  const failedAgain =
+    !retriedThis && previous?.kind === view.kind && Date.now() - previous.at < RETRY_MEMORY_MS;
+  const canRetry = view.retry && Boolean(failure.eventId) && failure.retainedTurn && !failedAgain;
+  const message =
+    retryState === "error"
+      ? "Couldn't try again right now. Send a message instead."
+      : view.retry && failedAgain
+        ? "It stopped again. Try again later, or ask in a different way."
+        : view.retry && !canRetry
+          ? `${view.message} Send a message to try again.`
+          : view.message;
+  const retry = () => {
+    setRetryState("sending");
+    retriedFailures.set(sessionId, { eventId: failure.eventId, kind: view.kind, at: Date.now() });
+    void client
+      .retrySession(workspaceId, sessionId, {
+        clientEventId: crypto.randomUUID(),
+        failureEventId: failure.eventId,
+      })
+      .then(
+        () => undefined,
+        () => setRetryState("error"),
+      );
+  };
+  return (
+    <div className="card-in mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-6 pt-2 pb-6 text-sm">
+      <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500" />
+      <span className="min-w-0 flex-1 text-[var(--app-fg)]">{message}</span>
+      {canRetry && retryState !== "error" ? (
+        <button
+          type="button"
+          onClick={retry}
+          disabled={retryState === "sending" || retriedThis}
+          className="shrink-0 rounded-full border border-[var(--app-border)] bg-[var(--app-card)] px-3 py-1 text-xs font-medium hover:border-[var(--app-accent)] disabled:opacity-60"
+        >
+          {retryState === "sending" || retriedThis ? "Trying again…" : "Try again"}
+        </button>
+      ) : null}
+      {view.reconnect ? (
+        <button
+          type="button"
+          onClick={onReconnect}
+          className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1 text-xs font-medium text-white"
+        >
+          Reconnect ChatGPT
+        </button>
+      ) : null}
     </div>
   );
 }

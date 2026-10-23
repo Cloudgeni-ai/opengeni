@@ -10,6 +10,7 @@ import {
   SIMPLE_IPC,
   SIMPLE_ORIGIN_ARGUMENT,
   type OpengeniSimpleBridge,
+  type SimpleAppHost,
 } from "./ipc";
 
 function argument(name: string): string | null {
@@ -45,6 +46,20 @@ if (origin && window.location.origin === origin) {
       };
     },
   };
-  const bridge: OpengeniSimpleBridge = { productName, thisComputer };
+  const appHost: SimpleAppHost = {
+    setAttention: (count) => void ipcRenderer.invoke(SIMPLE_IPC.attention, count),
+    notify: (notification) => void ipcRenderer.invoke(SIMPLE_IPC.notify, notification),
+    signInAgain: () => void ipcRenderer.invoke(SIMPLE_IPC.signInAgain),
+    onOpenAgent: (listener) => {
+      const handler = (_event: unknown, agentId: unknown) => {
+        if (typeof agentId === "string") listener(agentId);
+      };
+      ipcRenderer.on(SIMPLE_IPC.openAgent, handler);
+      return () => {
+        ipcRenderer.removeListener(SIMPLE_IPC.openAgent, handler);
+      };
+    },
+  };
+  const bridge: OpengeniSimpleBridge = { productName, thisComputer, app: appHost };
   contextBridge.exposeInMainWorld(SIMPLE_BRIDGE_GLOBAL, bridge);
 }

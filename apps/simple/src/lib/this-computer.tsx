@@ -94,7 +94,7 @@ function simpleLabels(labels: ThisComputerLabels): ThisComputerLabels {
     ...labels,
     safety: () => "Only you can ask for this, in your own chats. Pause it any time in Settings.",
     done: (machineName) => `Agents can now use ${machineName}. Pause any time in Settings.`,
-    pauseHint: () => "Agents ask in the chat before they use it.",
+    pauseHint: () => "While it's on, agents can use it in any of your chats.",
     resumeHint: () => "Agents can't use this computer while it's paused.",
     trayName: () => "Settings",
   };

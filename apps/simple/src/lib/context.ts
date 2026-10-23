@@ -28,7 +28,7 @@ export function buildModelContext(input: {
     for (const agent of others.slice(0, 30)) {
       const state = agent.needsYou
         ? "waiting for the user"
-        : agent.working
+        : agent.working || agent.waiting
           ? "working now"
           : `last active ${relativeTime(agent.lastActivityAt)}`;
       const description = agent.description ? ` - ${agent.description}` : "";

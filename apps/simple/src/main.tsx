@@ -3,7 +3,9 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { Splash } from "./components/Splash";
+import { StartProblem } from "./components/StartProblem";
 import { client } from "./lib/app-api";
+import { NoWorkspaceError } from "./lib/start-error";
 import "./styles.css";
 
 const WORKSPACE_KEY = "simple:workspace";
@@ -18,7 +20,7 @@ function readStored(key: string) {
 
 function Root() {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -28,33 +30,19 @@ function Root() {
         if (cancelled) return;
         const stored = readStored(WORKSPACE_KEY);
         const chosen = workspaces.find((workspace) => workspace.id === stored) ?? workspaces[0];
-        if (!chosen) setError("No workspace is available for this account.");
+        if (!chosen) setError(new NoWorkspaceError());
         else setWorkspaceId(chosen.id);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        if (!cancelled) setError(cause ?? new Error("Unknown"));
       });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  if (error) {
-    return (
-      <div className="flex h-full items-center justify-center p-6 text-center text-[var(--app-muted)]">
-        <div>
-          <p className="text-lg font-medium text-[var(--app-fg)]">Opengeni is not reachable</p>
-          <p className="mt-1 text-sm">{error}</p>
-          <button
-            type="button"
-            className="mt-4 rounded-full bg-[var(--app-accent)] px-4 py-2 text-sm font-medium text-white"
-            onClick={() => window.location.reload()}
-          >
-            Try again
-          </button>
-        </div>
-      </div>
-    );
+  if (error !== undefined) {
+    return <StartProblem error={error} onRetry={() => window.location.reload()} />;
   }
   if (!workspaceId) return <Splash />;
   return (

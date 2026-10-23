@@ -93,7 +93,11 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   });
   const text = await response.text();
   const value = text ? JSON.parse(text) : null;
-  if (!response.ok) throw new Error(value?.error ?? `Request failed (${response.status})`);
+  if (!response.ok) {
+    throw Object.assign(new Error(value?.error ?? `Request failed (${response.status})`), {
+      status: response.status,
+    });
+  }
   return value as T;
 }
 

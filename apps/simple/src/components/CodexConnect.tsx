@@ -48,9 +48,9 @@ export function CodexConnect({
           return;
         }
       }
-    } catch (cause) {
+    } catch {
       setPhase("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError("Couldn't reach ChatGPT. Try again in a moment.");
     }
   };
 
@@ -89,6 +89,9 @@ export function CodexConnect({
       </p>
       {phase === "waiting" && flow ? (
         <div className="mt-3 space-y-3">
+          <p className="text-xs text-[var(--app-fg)]">
+            Open the ChatGPT page, sign in, and enter this code:
+          </p>
           <div className="flex items-center gap-2">
             <code className="rounded-xl bg-[var(--app-hover)] px-3 py-2 font-mono text-lg tracking-widest">
               {flow.userCode}
@@ -113,7 +116,7 @@ export function CodexConnect({
             Open ChatGPT sign-in <ExternalLink size={14} />
           </a>
           <div className="flex items-center gap-2 text-xs text-[var(--app-muted)]">
-            <Loader2 size={13} className="animate-spin" /> Waiting for you to approve the code…
+            <Loader2 size={13} className="animate-spin" /> This updates by itself once you're done.
           </div>
         </div>
       ) : (

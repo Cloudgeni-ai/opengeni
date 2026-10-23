@@ -16,6 +16,7 @@ import {
   ipcMain,
   nativeTheme,
   net,
+  Notification,
   screen,
   shell,
   type IpcMainInvokeEvent,
@@ -39,7 +40,7 @@ import {
 } from "@opengeni/agent-host/permission-guide";
 import { macLoginAgentName } from "@opengeni/desktop/mac-login-agent";
 
-import { SIMPLE_IPC } from "./ipc";
+import { SIMPLE_IPC, type SimpleNotification } from "./ipc";
 
 /** The server the app is signed in to, with the person's token for it. */
 export interface SimpleAccount {
@@ -56,6 +57,8 @@ export interface SimpleComputerOptions {
   appWindow(): { contents: WebContents; origin: string } | null;
   /** Bring the app window forward, e.g. after the last permission is allowed. */
   reveal(): void;
+  /** The page found its sign-in no longer works: back to signing in. */
+  signInAgain(): void;
   log(line: string): void;
 }
 
@@ -286,6 +289,32 @@ export function createSimpleComputer(options: SimpleComputerOptions): SimpleComp
   handle(SIMPLE_IPC.computerDisconnect, (account, workspaceId) =>
     computer.disconnect(account.serverUrl, account.serverUrl, workspace(workspaceId)),
   );
+  handle(SIMPLE_IPC.signInAgain, () => options.signInAgain());
+  // The Dock badge and notifications ride the same checked bridge: only the
+  // app window's own page may set them.
+  handle(SIMPLE_IPC.attention, (_account, count) => {
+    const value = typeof count === "number" && Number.isFinite(count) ? Math.floor(count) : 0;
+    app.dock?.setBadge(value > 0 ? String(value) : "");
+  });
+  handle(SIMPLE_IPC.notify, (_account, value) => {
+    const text = (field: unknown, limit: number) =>
+      typeof field === "string" ? field.slice(0, limit) : "";
+    const notification = value as Partial<Record<keyof SimpleNotification, unknown>> | null;
+    const agentId = text(notification?.agentId, 100);
+    if (!agentId) return;
+    if (!Notification.isSupported()) return;
+    const shown = new Notification({
+      title: text(notification?.title, 120) || options.productName,
+      body: text(notification?.body, 300),
+    });
+    shown.on("click", () => {
+      options.reveal();
+      const window = options.appWindow();
+      if (window && !window.contents.isDestroyed())
+        window.contents.send(SIMPLE_IPC.openAgent, agentId);
+    });
+    shown.show();
+  });
 
   return {
     async boot() {

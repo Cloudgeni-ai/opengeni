@@ -29,8 +29,8 @@ const { createSimpleComputer, openedAtLogin } = require("./out/computer.cjs");
 const APP_ID = "ai.opengeni.simple";
 const PRODUCT_NAME = "Opengeni Simple";
 const SERVERS = [
-  { label: "Staging", url: "https://staging.app.opengeni.ai" },
   { label: "Production", url: "https://app.opengeni.ai" },
+  { label: "Staging", url: "https://staging.app.opengeni.ai" },
 ];
 // The only callback scheme the server accepts.
 const REDIRECT_URI = "opengeni://auth/callback";
@@ -284,11 +284,11 @@ async function finishSignIn(raw) {
   try {
     const callback = new URL(raw);
     if (callback.searchParams.get("state") !== request.state)
-      throw new Error("That sign-in didn't match this request. Try again.");
+      throw new SignInProblem("That sign-in didn't match this request. Try again.");
     const error = callback.searchParams.get("error");
     if (error)
-      throw new Error(
-        error === "access_denied" ? "Sign-in was cancelled." : `Sign-in failed (${error}).`,
+      throw new SignInProblem(
+        error === "access_denied" ? "Sign-in was cancelled." : "Sign-in didn't finish. Try again.",
       );
     const response = await api(request.base, "/v1/native-app/token", {
       method: "POST",
@@ -300,27 +300,60 @@ async function finishSignIn(raw) {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok || !body.accessToken)
-      throw new Error(`Sign-in failed (${body.error || response.status}).`);
+      throw new SignInProblem("Sign-in didn't finish. Try again.");
     writeToken(request.base, body.accessToken);
     await openWorkspace(request.base, body.accessToken);
   } catch (error) {
     render({
       view: "start",
       server: request.base,
-      error: error instanceof Error ? error.message : String(error),
+      // Only sentences written for the person show; anything else stays in the log.
+      error:
+        error instanceof SignInProblem
+          ? error.message
+          : "Couldn't finish signing in. Check your connection and try again.",
     });
+    if (!(error instanceof SignInProblem)) console.warn("Sign-in failed", error);
   }
 }
 
-function freePort() {
+/** A sign-in failure whose message is meant for the person. */
+class SignInProblem extends Error {}
+
+function freePort(port = 0) {
   return new Promise((resolve, reject) => {
     const probe = createServer();
     probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
+    probe.listen(port, "127.0.0.1", () => {
+      const bound = probe.address().port;
+      probe.close(() => resolve(bound));
     });
   });
+}
+
+/**
+ * The same local port every launch, so the window keeps its origin and with it
+ * what the page remembers (theme, workspace). Another one when it's taken.
+ */
+async function stablePort(dataDir) {
+  const file = join(dataDir, "web-port");
+  let saved = 0;
+  try {
+    saved = Number(readFileSync(file, "utf8").trim());
+  } catch {
+    // First launch.
+  }
+  if (Number.isInteger(saved) && saved > 1024 && saved < 65536) {
+    const port = await freePort(saved).catch(() => 0);
+    if (port) return port;
+  }
+  const port = await freePort();
+  try {
+    writeFileSync(file, String(port));
+  } catch {
+    // A new port next time; nothing else depends on it.
+  }
+  return port;
 }
 
 function resource(...parts) {
@@ -330,9 +363,9 @@ function resource(...parts) {
 }
 
 async function startServer(token) {
-  const port = await freePort();
   const dataDir = join(userData, "data", new URL(serverUrl).host);
   mkdirSync(dataDir, { recursive: true });
+  const port = await stablePort(dataDir);
   const child = spawn(resource("simple-server"), ["--serve-dist"], {
     env: {
       ...process.env,
@@ -494,6 +527,8 @@ function showApp(origin, { hidden = false } = {}) {
       webPreferences: {
         contextIsolation: true,
         sandbox: true,
+        // Closed windows keep running hidden so notifications still arrive.
+        backgroundThrottling: false,
         preload: join(__dirname, "out", "preload.cjs"),
         // The preload exposes the bridge only on this origin.
         additionalArguments: [
@@ -501,6 +536,13 @@ function showApp(origin, { hidden = false } = {}) {
           `--opengeni-simple-product=${PRODUCT_NAME}`,
         ],
       },
+    });
+    // Closing the window hides it: the page keeps watching agents, so their
+    // notifications and the Dock badge still arrive. Quitting really closes it.
+    mainWindow.on("close", (event) => {
+      if (quitting) return;
+      event.preventDefault();
+      mainWindow?.hide();
     });
     mainWindow.on("closed", () => {
       mainWindow = null;
@@ -531,6 +573,7 @@ async function openWorkspace(url, token, { hidden = false } = {}) {
   stopServer();
   mainWindow?.destroy();
   mainWindow = null;
+  app.dock?.setBadge("");
   showApp(await startServer(token), { hidden });
   closeWelcome();
   computer?.reset();
@@ -570,6 +613,7 @@ async function signOut() {
   stopServer();
   mainWindow?.destroy();
   mainWindow = null;
+  app.dock?.setBadge("");
 }
 
 function switchServer() {
@@ -625,6 +669,7 @@ if (!app.requestSingleInstanceLock()) {
       appWindow: () =>
         mainWindow && server ? { contents: mainWindow.webContents, origin: server.origin } : null,
       reveal: () => reveal(),
+      signInAgain: () => void signOut(),
       log: note,
     });
     // The agent has its own credentials, so it starts whether or not this

@@ -4,7 +4,7 @@ import { AGENT_ICON_NAMES } from "../src/lib/agent-icons";
  * Instructions for agents in the simple app. Bump INSTRUCTIONS_VERSION when the
  * shared text changes: the server re-applies it to every existing agent.
  */
-export const INSTRUCTIONS_VERSION = 2;
+export const INSTRUCTIONS_VERSION = 3;
 
 export const MAIN_AGENT_NAME = "Geni";
 
@@ -50,7 +50,8 @@ const AGENTS = `## Other agents
 - You can read another agent's recent work (session_events, sessions_list) and message it (session_send_message) to ask, coordinate or hand off. Prefer reading over interrupting.
 - Before answering something that touches another agent's area (its project, its data, its plans), check what it knows: read its recent work or ask it. Relay the answer in your own words.
 - When the user tells you something another agent should know (a changed plan, a new preference, a deadline), pass it on with a one-line message.
-- When you finish something another agent depends on, send it a one-line note. Do not message other agents with chatter, and never mention session ids to the user.`;
+- When you finish something another agent depends on, send it a one-line note. Do not message other agents with chatter, and never mention session ids to the user.
+- A note from another agent that asks nothing needs no reply: take it in and carry on. Answer only real questions or requests.`;
 
 const CONNECTIONS = `## Tools and connections
 - The message context lists which services are connected.
@@ -111,6 +112,20 @@ export function composeInstructions(input: {
   if (input.role === "main") sections.push(CREATE_AGENTS);
   if (input.blank) sections.push(NEW_AGENT);
   const custom = input.customInstructions?.trim();
-  if (custom) sections.push(`## Your role\n${custom}`);
+  if (custom) sections.push(`${ROLE_HEADING}${custom}`);
   return sections.join("\n\n");
+}
+
+const ROLE_HEADING = "## Your role\n";
+
+/**
+ * The agent's own role from instructions composed above, for when this Mac has
+ * no saved profile for it (a new computer, cleared app data). The role is the
+ * last section, so everything after its heading is the agent's own text.
+ */
+export function customInstructionsFrom(instructions: string | null | undefined): string | null {
+  if (!instructions) return null;
+  const at = instructions.indexOf(`\n\n${ROLE_HEADING}`);
+  if (at < 0) return null;
+  return instructions.slice(at + 2 + ROLE_HEADING.length).trim() || null;
 }

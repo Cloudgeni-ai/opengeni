@@ -10,7 +10,7 @@ import { ChatView } from "./components/ChatView";
 import { SettingsDialog, type SettingsTab, type Theme } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { DraftAgentView, newDraft, type Draft } from "./components/DraftAgent";
-import { toAgents, type Agent } from "./lib/agents";
+import { archivedAgents, toAgents, type Agent } from "./lib/agents";
 import {
   appApi,
   client,
@@ -21,10 +21,12 @@ import {
   type EffortLevel,
 } from "./lib/app-api";
 import { AppEventsContext } from "./lib/app-events";
+import { appHost } from "./lib/app-host";
 import { avatarStyleId } from "./lib/avatar-styles";
 import { AppComputerProvider } from "./lib/this-computer";
 import { buildModelContext, type ReplyLength } from "./lib/context";
 import { Splash } from "./components/Splash";
+import { StartProblem } from "./components/StartProblem";
 import { Welcome } from "./components/Welcome";
 
 const THEME_KEY = "simple:theme";
@@ -62,7 +64,7 @@ export function App({
   onSwitchWorkspace: (id: string) => void;
 }) {
   const [boot, setBoot] = useState<Bootstrap | null>(null);
-  const [bootError, setBootError] = useState<string | null>(null);
+  const [bootError, setBootError] = useState<unknown>(undefined);
   const [state, setState] = useState<AppState | null>(null);
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -96,16 +98,14 @@ export function App({
   };
 
   const loadBoot = useCallback(() => {
-    setBootError(null);
+    setBootError(undefined);
     appApi
       .bootstrap(workspaceId)
       .then((value) => {
         setBoot(value);
         setState(value);
       })
-      .catch((error: unknown) =>
-        setBootError(error instanceof Error ? error.message : String(error)),
-      );
+      .catch((error: unknown) => setBootError(error ?? new Error("Unknown")));
   }, [workspaceId]);
   useEffect(loadBoot, [loadBoot]);
 
@@ -131,8 +131,7 @@ export function App({
           loaded = true;
         },
         (error: unknown) => {
-          if (!loaded && !stopped)
-            setBootError(error instanceof Error ? error.message : String(error));
+          if (!loaded && !stopped) setBootError(error ?? new Error("Unknown"));
         },
       );
     };
@@ -179,6 +178,10 @@ export function App({
     return () => clearInterval(timer);
   }, [boot, refreshCodex, workspaceId]);
 
+  const archived = useMemo(
+    () => archivedAgents(sessions ?? [], state?.profiles ?? []),
+    [sessions, state?.profiles],
+  );
   const agents = useMemo(
     () => toAgents(sessions ?? [], state?.profiles ?? [], state?.usage ?? []),
     [sessions, state],
@@ -193,7 +196,9 @@ export function App({
   const defaultEffort =
     (prefs.defaultEffort as EffortLevel | undefined) ?? boot?.config.defaultEffort ?? "balanced";
   const replyLength: ReplyLength = prefs.replyLength === "detailed" ? "detailed" : "short";
-  const notifications = prefs.notifications === "on";
+  // The Mac app notifies by default; a browser tab only when asked to.
+  const notifications =
+    prefs.notifications === "on" || (prefs.notifications !== "off" && appHost !== null);
   const setPref = (key: string, value: string) => {
     setState((current) =>
       current ? { ...current, prefs: { ...current.prefs, [key]: value } } : current,
@@ -280,23 +285,7 @@ export function App({
 
   useNotifications(agents, notifications, selected?.id ?? null, select);
 
-  if (bootError) {
-    return (
-      <div className="flex h-full items-center justify-center p-6 text-center">
-        <div>
-          <p className="text-lg font-medium">Couldn't start</p>
-          <p className="mt-1 max-w-md text-sm text-[var(--app-muted)]">{bootError}</p>
-          <button
-            type="button"
-            className="mt-4 rounded-full bg-[var(--app-accent)] px-4 py-2 text-sm font-medium text-white"
-            onClick={loadBoot}
-          >
-            Try again
-          </button>
-        </div>
-      </div>
-    );
-  }
+  if (bootError !== undefined) return <StartProblem error={bootError} onRetry={loadBoot} />;
   if (boot?.needsModel) return <Welcome workspaceId={workspaceId} onReady={loadBoot} />;
   if (!boot || !sessions || !selected) return <Splash />;
   const drafting =
@@ -308,6 +297,16 @@ export function App({
   const sidebar = (
     <Sidebar
       agents={agents}
+      archived={archived}
+      onRestore={async (id) => {
+        try {
+          await client.updateSessionArchive(workspaceId, id, { archived: false });
+          await refreshSessions();
+          select(id);
+        } catch {
+          window.alert("Couldn't restore this agent. Try again in a moment.");
+        }
+      }}
       selectedId={drafting ? null : selected.id}
       workspaceName={workspaces.length > 1 ? workspaceName : null}
       drafting={drafting}
@@ -370,6 +369,8 @@ export function App({
                   catalog={catalog}
                   onOpenAgent={select}
                   onOpenSidebar={() => setSidebarOpen(true)}
+                  onReconnectModel={() => setSettings("models")}
+                  fullAppUrl={boot?.config.fullAppUrl ?? null}
                 />
               )}
             </main>
@@ -414,38 +415,50 @@ export function App({
   );
 }
 
-/** A browser notification when an agent gets news while the tab is in the background. */
+/**
+ * A notification when an agent gets news while the person is elsewhere, and in
+ * the Mac app a Dock badge counting the agents that want them.
+ */
 function useNotifications(
   agents: ReturnType<typeof toAgents>,
   enabled: boolean,
   selectedId: string | null,
   select: (id: string) => void,
 ) {
+  const wants = (agent: Agent) => agent.unread || agent.needsYou || agent.failed;
+  const attention = agents.filter(
+    (agent) => agent.needsYou || (agent.unread && agent.id !== selectedId),
+  ).length;
+  useEffect(() => appHost?.setAttention(attention), [attention]);
+  useEffect(() => appHost?.onOpenAgent(select), [select]);
   const seen = useRef<Map<string, boolean> | null>(null);
   useEffect(() => {
     const previous = seen.current;
-    seen.current = new Map(agents.map((agent) => [agent.id, agent.unread || agent.needsYou]));
-    if (
-      !previous ||
-      !enabled ||
-      !("Notification" in window) ||
-      Notification.permission !== "granted"
-    )
-      return;
-    if (document.visibilityState === "visible") return;
+    seen.current = new Map(agents.map((agent) => [agent.id, wants(agent)]));
+    if (!previous || !enabled) return;
+    // In the app a window behind others still counts as elsewhere.
+    if (appHost ? document.hasFocus() : document.visibilityState === "visible") return;
+    if (!appHost && (!("Notification" in window) || Notification.permission !== "granted")) return;
     for (const agent of agents) {
-      const now = agent.unread || agent.needsYou;
-      if (now && previous.get(agent.id) === false) {
-        const notification = new Notification(agent.name, {
-          body: agent.needsYou ? "Needs your input" : "Has a reply for you",
-          tag: agent.id,
-          icon: "/favicon.svg",
-        });
-        notification.onclick = () => {
-          window.focus();
-          select(agent.id);
-        };
+      if (!wants(agent) || previous.get(agent.id) !== false) continue;
+      const body = agent.needsYou
+        ? "Needs your input"
+        : agent.failed
+          ? "Stopped. Open it to see why."
+          : "Has a reply for you";
+      if (appHost) {
+        appHost.notify({ title: agent.name, body, agentId: agent.id });
+        continue;
       }
+      const notification = new Notification(agent.name, {
+        body,
+        tag: agent.id,
+        icon: "/favicon.svg",
+      });
+      notification.onclick = () => {
+        window.focus();
+        select(agent.id);
+      };
     }
   }, [agents, enabled, selectedId, select]);
 }

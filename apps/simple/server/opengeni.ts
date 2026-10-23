@@ -6,6 +6,7 @@ import { getProfile, getPrefs, listProfiles, upsertProfile, type AgentProfile } 
 import {
   agentIdentity,
   composeInstructions,
+  customInstructionsFrom,
   INSTRUCTIONS_VERSION,
   MAIN_AGENT_NAME,
   type AgentRole,
@@ -273,16 +274,25 @@ export async function refreshAgentInstructions(workspaceId: string, sessions: Se
     const metadata = simpleMetadata(session);
     const role = metadata?.role ?? "agent";
     try {
+      // Without a profile here, keep the role the agent already has rather
+      // than replacing it with the shared text alone.
+      const customInstructions =
+        profile?.customInstructions ??
+        customInstructionsFrom(
+          session.instructions ?? (await api.getSession(workspaceId, session.id)).instructions,
+        );
       await applyAgentConfig(workspaceId, session, {
         role,
         name: profile?.name ?? session.title ?? MAIN_AGENT_NAME,
         description: profile?.description ?? null,
-        customInstructions: profile?.customInstructions ?? null,
-        blank: Boolean(metadata?.blank) && !profile?.customInstructions,
+        customInstructions,
+        blank: Boolean(metadata?.blank) && !customInstructions,
       });
       upsertProfile(workspaceId, session.id, {
         instructionsVersion: INSTRUCTIONS_VERSION,
         role,
+        // Kept here from now on, so the next refresh has the role too.
+        ...(profile?.customInstructions ? {} : { customInstructions }),
       });
     } catch (error) {
       console.warn(`Could not refresh instructions for ${session.id}`, error);
@@ -342,7 +352,9 @@ export async function applyProfileUpdate(
       : (clean(update.name, 40) ?? current?.name ?? session.title ?? "Agent");
   const description = clean(update.description, 160) ?? current?.description ?? null;
   const customInstructions =
-    clean(update.instructions, 8000) ?? current?.customInstructions ?? null;
+    clean(update.instructions, 8000) ??
+    current?.customInstructions ??
+    customInstructionsFrom(session.instructions);
   await applyAgentConfig(workspaceId, session, {
     role,
     name,
