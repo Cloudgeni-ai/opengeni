@@ -14,6 +14,11 @@ import {
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 
 import { OpenGeniProvider } from "../../provider";
+import {
+  OpenGeniLinkProvider,
+  type OpenGeniLinkRenderer,
+  type OpenGeniLinkResolver,
+} from "../../components/open-geni-links";
 import { SecretsUiProvider } from "../../secrets-ui";
 import { Button } from "../../ui/button";
 import { PortalContainerProvider } from "../../ui/portal-container";
@@ -114,6 +119,18 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Opens Opengeni object links in agent messages (files, Sites, editable
+   * artifacts) the host's way, such as its own page for an artifact. Return
+   * null for a link the app should handle: the session dock when it is on,
+   * otherwise the web app's page for the object through `openUrl`.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Draws the host's own links in agent messages (its scheme, in-app paths,
+   * web URLs). Return undefined to keep the default link.
+   */
+  renderLink?: OpenGeniLinkRenderer | undefined;
 }>;
 
 function trimSlash(url: string): string {
@@ -495,15 +512,17 @@ function SessionAppForWorkspace(props: SessionAppProps) {
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">
       <AppHostProvider host={host}>
-        <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
-          <SessionAppRoot className={props.className}>
-            <SessionAppGates
-              stateHost={stateHost}
-              workspaceId={props.workspaceId}
-              slots={props.slots}
-            />
-          </SessionAppRoot>
-        </SessionUiFeaturesProvider>
+        <OpenGeniLinkProvider resolveLink={props.resolveLink} renderLink={props.renderLink}>
+          <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
+            <SessionAppRoot className={props.className}>
+              <SessionAppGates
+                stateHost={stateHost}
+                workspaceId={props.workspaceId}
+                slots={props.slots}
+              />
+            </SessionAppRoot>
+          </SessionUiFeaturesProvider>
+        </OpenGeniLinkProvider>
       </AppHostProvider>
     </AppearanceProvider>
   );

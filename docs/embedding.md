@@ -150,6 +150,14 @@ context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
 With the dock off, entries that only open a dock panel hide with it.
 
+Links in agent messages to Opengeni objects (files, Sites, editable
+artifacts) open in the dock when it is on, and otherwise open the object's
+page in the web app through `openUrl`. `resolveLink` lets the host open them
+its own way, for example on its own page for that object: return
+`{ open }` (an action) or `{ href }` (a link) for the links it handles, and
+null for the rest. `renderLink` draws the host's own links (its scheme, its
+in-app paths). Both take the same functions as `OpenGeniLinkProvider`.
+
 The dock's heavier pieces are opt-in so a page that does not show them never
 downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
 (ideally from a lazily loaded module) to turn on highlighted diffs, the
