@@ -15,8 +15,8 @@ import {
 } from "../../../this-computer";
 import "../../../../styles/this-computer.css";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { cn } from "../../../lib/cn";
 
-import { Section } from "../../../ui/section";
 import { useAppContext } from "../../app-context";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
 import {
@@ -159,16 +159,20 @@ export function DesktopComputerUseRow({
   return <ComputerUseRow desktop={desktop} className={className} {...options} />;
 }
 
-/** Computer use on the Machines page: the switch in its own card. */
+/**
+ * Computer use on the Machines page: the switch in its own card, drawn like a
+ * `group` Section's card. Not a Section itself: this module is in the session
+ * page's eager graph (the sidebar notice), and Section's chunk is not.
+ */
 export function DesktopThisComputerPanel({ className }: { className?: string | undefined }) {
   const desktop = useDesktopThisComputer();
   if (!desktop || !desktop.computer.status || desktop.computer.status.state === "unavailable") {
     return null;
   }
   return (
-    <Section variant="group" className={className}>
+    <div className={cn("min-w-0 rounded-lg border border-border bg-surface px-5 py-1", className)}>
       <ComputerUseRow desktop={desktop} />
-    </Section>
+    </div>
   );
 }
 
