@@ -257,8 +257,12 @@ async function route(request: Request): Promise<Response> {
       workspaceId: string;
       shared?: boolean;
       requestId?: string;
+      firstMessage?: string;
+      modelContext?: string;
     }>(request);
     const workspaceId = requireString(input.workspaceId, "workspaceId");
+    // A new agent exists only once someone tells it what to do.
+    const firstMessage = requireString(input.firstMessage?.trim(), "firstMessage");
     const session = await createAgent({
       workspaceId,
       role: "agent",
@@ -267,6 +271,8 @@ async function route(request: Request): Promise<Response> {
       description: null,
       blank: true,
       shared: input.shared === true,
+      firstMessage,
+      modelContext: input.modelContext ?? null,
       idempotencyKey: `simple-app:new:${input.requestId ?? crypto.randomUUID()}`,
     });
     return json({ sessionId: session.id });

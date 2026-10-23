@@ -113,10 +113,13 @@ export const appApi = {
       method: "PUT",
       json: { workspaceId, values },
     }),
-  createBlankAgent: (workspaceId: string, shared: boolean) =>
+  createAgent: (
+    workspaceId: string,
+    input: { shared: boolean; firstMessage: string; modelContext: string; requestId: string },
+  ) =>
     request<{ sessionId: string }>("/app/agents", {
       method: "POST",
-      json: { workspaceId, shared, requestId: crypto.randomUUID() },
+      json: { workspaceId, ...input },
     }),
   usage: (workspaceId: string, sessionId: string, kind: "open" | "send") =>
     request<{ ok: true }>(`/app/agents/${sessionId}/usage`, {

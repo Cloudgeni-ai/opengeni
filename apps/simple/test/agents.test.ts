@@ -43,6 +43,26 @@ describe("toAgents", () => {
     expect(agents[0]?.name).toBe("Geni");
   });
 
+  test("hides a blank agent nobody ever wrote to, but not a fresh or used one", () => {
+    const blank = (id: string, overrides: Partial<Session>) =>
+      session(id, {
+        metadata: { simpleApp: { kind: "agent", role: "agent", blank: true } },
+        lastSequence: 3,
+        activeTurnId: null,
+        ...overrides,
+      } as Partial<Session>);
+    const agents = toAgents(
+      [
+        blank("abandoned", {}),
+        blank("just-made", { createdAt: iso(10_000) }),
+        blank("talked-to", { lastSequence: 40 }),
+      ],
+      [],
+      [],
+    );
+    expect(agents.map((agent) => agent.id)).toEqual(["just-made", "talked-to"]);
+  });
+
   test("derives working and needs-you from status", () => {
     const [running, waiting] = toAgents(
       [session("a", { status: "running" }), session("b", { status: "requires_action" })],
@@ -73,7 +93,7 @@ describe("organizeSidebar", () => {
     expect(ids(organizeSidebar(agents))).toEqual({
       main: ["main"],
       pinned: ["pin-early", "pin-late"],
-      agents: ["frequent", "rare"],
+      personal: ["frequent", "rare"],
     });
   });
 
@@ -83,7 +103,7 @@ describe("organizeSidebar", () => {
       [],
       [{ sessionId: "busy", score: 50, lastUsedAt: iso(DAY) }],
     );
-    expect(ids(organizeSidebar(agents)).agents).toEqual(["asking", "busy"]);
+    expect(ids(organizeSidebar(agents)).personal).toEqual(["asking", "busy"]);
   });
 
   test("folds untouched agents into Quiet but spares new ones", () => {
@@ -97,7 +117,16 @@ describe("organizeSidebar", () => {
     );
     const sections = organizeSidebar(agents);
     expect(ids(sections).quiet).toEqual(["old"]);
-    expect(ids(sections).agents).toEqual(["new"]);
+    expect(ids(sections).personal).toEqual(["new"]);
     expect(sections.find((section) => section.id === "quiet")?.collapsible).toBe(true);
+  });
+
+  test("splits personal agents from the workspace's shared ones", () => {
+    const shared = (id: string) =>
+      session(id, {
+        metadata: { simpleApp: { kind: "agent", role: "agent", shared: true } },
+      } as Partial<Session>);
+    const sections = organizeSidebar(toAgents([session("mine"), shared("team")], [], []));
+    expect(ids(sections)).toEqual({ main: [], personal: ["mine"], workspace: ["team"] });
   });
 });

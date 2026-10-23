@@ -123,7 +123,12 @@ export type SessionConversationProps = ClientOverride &
     timelineProps?:
       | Pick<
           MessageTimelineProps,
-          "turnSummary" | "renderAuthNeeded" | "emptyState" | "renderMessageSender"
+          | "turnSummary"
+          | "renderAuthNeeded"
+          | "emptyState"
+          | "renderMessageSender"
+          | "shouldRenderItem"
+          | "trailingState"
         >
       | undefined;
     /**
@@ -181,6 +186,11 @@ export type SessionConversationProps = ClientOverride &
      * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
      */
     modelPicker?: boolean | undefined;
+    /**
+     * Show the session goal pill (with Pause/Resume/Clear) above the composer.
+     * Defaults to true; a chat-only host that hides work can turn it off.
+     */
+    goalChrome?: boolean | undefined;
     /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
     modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
     /** Localized actions for already-sent user-message disclosure. */
@@ -326,6 +336,7 @@ function ConversationView({
   toolRegistry,
   timelineProps,
   computerConnection,
+  goalChrome,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   voiceInput: voiceInputRequested = true,
@@ -565,6 +576,12 @@ function ConversationView({
               ) : undefined)
             }
             emptyState={timelineProps?.emptyState}
+            {...(timelineProps?.shouldRenderItem
+              ? { shouldRenderItem: timelineProps.shouldRenderItem }
+              : {})}
+            {...(timelineProps?.trailingState !== undefined
+              ? { trailingState: timelineProps.trailingState }
+              : {})}
             renderMessageSender={timelineProps?.renderMessageSender}
             status={status}
             hasOlder={feed.hasOlder}
@@ -632,6 +649,7 @@ function ConversationView({
                 error={human.mutationError ? formatError(human.mutationError) : null}
               />
               <ConversationChrome
+                goal={goalChrome !== false}
                 sessionId={sessionId}
                 client={context.client}
                 workspaceId={context.workspaceId}
@@ -744,12 +762,14 @@ type ConversationChromeProps = {
   workspaceId: string;
   events: UseGoalOptions["events"];
   chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
+  goal: boolean;
 };
 
 /** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
 function ConversationChrome(props: ConversationChromeProps) {
   const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
   const canReachGoals =
+    props.goal &&
     typeof goals.getGoal === "function" &&
     typeof goals.updateGoal === "function" &&
     typeof goals.deleteGoal === "function";

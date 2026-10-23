@@ -290,6 +290,12 @@ export type MessageTimelineProps = {
    */
   shouldRenderAuthNeeded?: ((item: AuthNeededItem) => boolean) | undefined;
   /**
+   * Decide which projected items this timeline presents, e.g. a chat-only host
+   * that shows messages and cards but no work rows. Defaults to every item.
+   * Filtering happens before grouping, so hidden work leaves no summary row.
+   */
+  shouldRenderItem?: ((item: TimelineItem) => boolean) | undefined;
+  /**
    * Resolve a provider domain (from a reconnect card) to a logo URL the host
    * serves itself — the app maps it through its catalog + `catalogAssetUrl`.
    * Return null/undefined to fall back to a calm monogram. The library never
@@ -633,6 +639,7 @@ export function MessageTimeline({
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   shouldRenderAuthNeeded,
+  shouldRenderItem,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   loadRetainedScreenshot,
@@ -663,13 +670,15 @@ export function MessageTimeline({
   const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
     const projectedItems = items ?? buildTimeline(t, events ?? []);
-    if (!shouldRenderAuthNeeded) {
+    if (!shouldRenderAuthNeeded && !shouldRenderItem) {
       return projectedItems;
     }
     return projectedItems.filter(
-      (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
+      (item) =>
+        (item.kind !== "auth-needed" || !shouldRenderAuthNeeded || shouldRenderAuthNeeded(item)) &&
+        (!shouldRenderItem || shouldRenderItem(item)),
     );
-  }, [items, events, shouldRenderAuthNeeded, t]);
+  }, [items, events, shouldRenderAuthNeeded, shouldRenderItem, t]);
   const searchItem = searchTarget
     ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
     : undefined;

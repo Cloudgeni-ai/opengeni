@@ -1,4 +1,4 @@
-import { SessionConversation } from "@opengeni/react";
+import { SessionConversation, type TimelineItem } from "@opengeni/react";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import { Archive, Gauge, ImagePlus, Menu, MoreHorizontal, Pin, PinOff, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -97,9 +97,19 @@ export function ChatView(props: ChatViewProps) {
           catalog,
         }),
       emptyState: <EmptyState agent={agent} onPick={(text) => void send(text)} />,
+      shouldRenderItem: chatOnly,
+      trailingState: agent.working ? <WorkingRow key={agent.id} /> : null,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the empty state only needs identity
-    [agent.id, agent.name, agent.profile?.avatarArtifactId, catalog, send, workspaceId],
+    [
+      agent.id,
+      agent.name,
+      agent.profile?.avatarArtifactId,
+      agent.working,
+      catalog,
+      send,
+      workspaceId,
+    ],
   );
 
   return (
@@ -121,6 +131,7 @@ export function ChatView(props: ChatViewProps) {
               sendExtras: () => ({ modelContext: context() }),
               onSent: () => void appApi.usage(workspaceId, agent.id, "send"),
             }}
+            goalChrome={false}
             genieLoading={{ messages: { status: "Thinking…" } }}
           />
         </div>
@@ -379,6 +390,42 @@ function BehindTheScenes({
       </div>
     </aside>
   );
+}
+
+/** Three soft dots while the agent works; after a while, a word on why it takes long. */
+function WorkingRow() {
+  const [long, setLong] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setLong(true), 25_000);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <div className="mx-auto flex w-full max-w-3xl items-center gap-2.5 px-6 pt-2 pb-6 text-sm text-[var(--app-muted)]">
+      <span className="working-dots" aria-label="Working">
+        <span />
+        <span />
+        <span />
+      </span>
+      {long ? <span className="card-in">Working on it</span> : null}
+    </div>
+  );
+}
+
+/**
+ * The chat shows the conversation and the cards that need the person, never
+ * the work behind it (tool calls, helpers, waits, summaries).
+ */
+function chatOnly(item: TimelineItem) {
+  switch (item.kind) {
+    case "user-message":
+    case "human-input":
+    case "auth-needed":
+      return true;
+    case "agent-message":
+      return item.phase !== "commentary";
+    default:
+      return false;
+  }
 }
 
 /**

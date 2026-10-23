@@ -1,4 +1,4 @@
-import { ChevronDown, Loader2, Plus, Settings, X } from "lucide-react";
+import { ChevronDown, Plus, Settings, X } from "lucide-react";
 import { useState } from "react";
 import { organizeSidebar, type Agent } from "../lib/agents";
 import { AgentAvatar } from "./AgentAvatar";
@@ -7,7 +7,7 @@ export function Sidebar({
   agents,
   selectedId,
   workspaceName,
-  creating,
+  drafting,
   onSelect,
   onNew,
   onSettings,
@@ -16,7 +16,7 @@ export function Sidebar({
   agents: Agent[];
   selectedId: string | null;
   workspaceName: string | null;
-  creating: boolean;
+  drafting: boolean;
   onSelect: (id: string) => void;
   onNew: () => void;
   onSettings: () => void;
@@ -50,11 +50,15 @@ export function Sidebar({
         <button
           type="button"
           onClick={onNew}
-          disabled={creating}
-          className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm font-medium hover:bg-[var(--app-hover)] disabled:opacity-60"
+          aria-current={drafting ? "page" : undefined}
+          className={`flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm font-medium transition-colors ${
+            drafting
+              ? "bg-[var(--app-card)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+              : "hover:bg-[var(--app-hover)]"
+          }`}
         >
           <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--app-border)] bg-[var(--app-card)]">
-            {creating ? <Loader2 size={15} className="animate-spin" /> : <Plus size={16} />}
+            <Plus size={16} />
           </span>
           New agent
         </button>
@@ -148,17 +152,10 @@ function AgentRow({
         ) : null}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span
-            className={`truncate text-sm ${agent.unread || agent.needsYou ? "font-semibold" : "font-medium"}`}
-          >
-            {agent.name}
-          </span>
-          {agent.shared ? (
-            <span className="shrink-0 rounded-full bg-[var(--app-hover)] px-1.5 text-[10px] text-[var(--app-muted)]">
-              Shared
-            </span>
-          ) : null}
+        <div
+          className={`truncate text-sm ${agent.unread || agent.needsYou ? "font-semibold" : "font-medium"}`}
+        >
+          {agent.name}
         </div>
         {subtitle ? (
           <div

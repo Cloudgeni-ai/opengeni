@@ -105,6 +105,8 @@ export type CreateAgentInput = {
   description?: string | null;
   instructions?: string | null;
   firstMessage?: string | null;
+  /** Ordinary model-visible context attached to the first message. */
+  modelContext?: string | null;
   shared?: boolean;
   blank?: boolean;
   idempotencyKey: string;
@@ -148,7 +150,10 @@ export async function createAgent(input: CreateAgentInput): Promise<Session> {
     // Without a first message the session is an empty shell (no turn yet);
     // the API spells that start mode "realtime".
     ...(input.firstMessage?.trim()
-      ? { initialMessage: input.firstMessage.trim() }
+      ? {
+          initialMessage: input.firstMessage.trim(),
+          ...(input.modelContext?.trim() ? { modelContext: input.modelContext.trim() } : {}),
+        }
       : { startMode: "realtime" as const }),
   } as Parameters<typeof api.createSession>[1]);
   // Creation takes no title; name the chat right away so lists never show a placeholder.

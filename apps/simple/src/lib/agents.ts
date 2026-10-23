@@ -31,6 +31,27 @@ export function simpleMetadata(session: Session): SimpleMetadata | null {
 }
 
 const WORKING = new Set(["running", "queued", "recovering", "waiting_capacity", "starting"]);
+const ABANDONED_AFTER_MS = 2 * 60 * 1000;
+
+/**
+ * Older builds made a "New agent" the moment the button was pressed. One that
+ * was never told anything is clutter, not an agent.
+ */
+function isAbandonedBlank(
+  session: Session,
+  metadata: SimpleMetadata,
+  profile: AgentProfile | null,
+) {
+  return (
+    metadata.blank === true &&
+    (profile?.name ?? "New agent") === "New agent" &&
+    // Only creation bookkeeping, never a single turn.
+    session.lastSequence < 10 &&
+    session.activeTurnId == null &&
+    !WORKING.has(String(session.status)) &&
+    Date.now() - Date.parse(session.createdAt) > ABANDONED_AFTER_MS
+  );
+}
 
 export function toAgents(
   sessions: Session[],
@@ -40,7 +61,11 @@ export function toAgents(
   const profileById = new Map(profiles.map((profile) => [profile.sessionId, profile]));
   const usageById = new Map(usage.map((entry) => [entry.sessionId, entry]));
   return sessions
-    .filter((session) => simpleMetadata(session)?.kind === "agent" && !session.archived)
+    .filter((session) => {
+      const metadata = simpleMetadata(session);
+      if (metadata?.kind !== "agent" || session.archived) return false;
+      return !isAbandonedBlank(session, metadata, profileById.get(session.id) ?? null);
+    })
     .map((session) => {
       const metadata = simpleMetadata(session)!;
       const profile = profileById.get(session.id) ?? null;
@@ -76,10 +101,10 @@ const QUIET_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 const NEW_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
- * The sidebar organizes itself: Geni first, then pins, then agents ordered by
- * how much and how recently they are used (with anything that needs you or has
- * news lifted to the top). Agents nobody has touched in two weeks fold into
- * "Quiet".
+ * The sidebar organizes itself: Geni first, then pins, then personal agents and
+ * the workspace's shared agents, each ordered by how much and how recently they
+ * are used (with anything that needs you or has news lifted to the top). Agents
+ * nobody has touched in two weeks fold into "Quiet".
  */
 export function organizeSidebar(agents: Agent[]): SidebarSection[] {
   const now = Date.now();
@@ -114,7 +139,10 @@ export function organizeSidebar(agents: Agent[]): SidebarSection[] {
       ),
     });
   }
-  if (active.length) sections.push({ id: "agents", label: "Agents", agents: active });
+  const personal = active.filter((agent) => !agent.shared);
+  const workspace = active.filter((agent) => agent.shared);
+  if (personal.length) sections.push({ id: "personal", label: "Personal", agents: personal });
+  if (workspace.length) sections.push({ id: "workspace", label: "Workspace", agents: workspace });
   if (quiet.length)
     sections.push({
       id: "quiet",

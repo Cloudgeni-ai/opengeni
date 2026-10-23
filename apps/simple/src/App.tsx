@@ -8,7 +8,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatView } from "./components/ChatView";
 import { SettingsDialog, type SettingsTab, type Theme } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
-import { toAgents } from "./lib/agents";
+import { DraftAgentView, newDraft, type Draft } from "./components/DraftAgent";
+import { toAgents, type Agent } from "./lib/agents";
 import {
   appApi,
   client,
@@ -19,15 +20,17 @@ import {
   type EffortLevel,
 } from "./lib/app-api";
 import { AppEventsContext } from "./lib/app-events";
-import type { ReplyLength } from "./lib/context";
+import { buildModelContext, type ReplyLength } from "./lib/context";
 import { Splash } from "./components/Splash";
 import { Welcome } from "./components/Welcome";
 
 const THEME_KEY = "simple:theme";
 const SESSION_POLL_MS = 4000;
 const STATE_POLL_MS = 5000;
+const DRAFT = "new";
 
 function readHashAgent() {
+  if (window.location.hash === `#/${DRAFT}`) return DRAFT;
   const match = /^#\/([0-9a-f-]{36})$/.exec(window.location.hash);
   return match ? match[1]! : null;
 }
@@ -66,7 +69,9 @@ export function App({
   const [selectedId, setSelectedId] = useState<string | null>(readHashAgent);
   const [settings, setSettings] = useState<SettingsTab | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState<Draft>(newDraft);
+  // The agent made from the draft, shown as the draft until the list has it.
+  const [pendingId, setPendingId] = useState<string | null>(null);
   const [theme, setThemeState] = useState<Theme>(storedTheme);
 
   // Theme follows the system unless chosen.
@@ -208,7 +213,7 @@ export function App({
       setSelectedId(id);
       setSidebarOpen(false);
       if (window.location.hash !== `#/${id}`) window.history.pushState(null, "", `#/${id}`);
-      void appApi.usage(workspaceId, id, "open");
+      if (id !== DRAFT) void appApi.usage(workspaceId, id, "open");
     },
     [workspaceId],
   );
@@ -219,7 +224,12 @@ export function App({
   }, []);
   // A just-created agent may not be in the list yet; fetch until it is.
   useEffect(() => {
-    if (selectedId && sessions && !sessions.some((session) => session.id === selectedId)) {
+    if (
+      selectedId &&
+      selectedId !== DRAFT &&
+      sessions &&
+      !sessions.some((session) => session.id === selectedId)
+    ) {
       const timer = setTimeout(() => void refreshSessions().catch(() => {}), 800);
       return () => clearTimeout(timer);
     }
@@ -237,19 +247,38 @@ export function App({
     [changed],
   );
 
-  const newAgent = async () => {
-    setCreating(true);
+  // Opening the draft is instant and idempotent; the agent is made on the first message.
+  const newAgent = () => select(DRAFT);
+  const sendDraft = async (text: string) => {
+    const current = { ...draft, sending: text, error: null };
+    setDraft(current);
+    const self = { id: "this chat", name: "New agent", role: "agent" } as Agent;
     try {
-      const { sessionId } = await appApi.createBlankAgent(workspaceId, false);
-      await refreshSessions().catch(() => {});
-      await refreshState().catch(() => {});
+      const { sessionId } = await appApi.createAgent(workspaceId, {
+        shared: current.shared,
+        firstMessage: text,
+        requestId: current.requestId,
+        modelContext: buildModelContext({ self, agents, connections, replyLength }),
+      });
+      setPendingId(sessionId);
       select(sessionId);
+      await Promise.all([refreshSessions(), refreshState()]).catch(() => {});
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
-    } finally {
-      setCreating(false);
+      setDraft({
+        ...current,
+        text,
+        sending: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   };
+  // Once the new agent is listed, the draft starts over for next time.
+  useEffect(() => {
+    if (pendingId && agents.some((agent) => agent.id === pendingId)) {
+      setPendingId(null);
+      setDraft(newDraft());
+    }
+  }, [agents, pendingId]);
 
   useNotifications(agents, notifications, selected?.id ?? null, select);
 
@@ -272,16 +301,19 @@ export function App({
   }
   if (boot?.needsModel) return <Welcome workspaceId={workspaceId} onReady={loadBoot} />;
   if (!boot || !sessions || !selected) return <Splash />;
+  const drafting =
+    selectedId === DRAFT ||
+    (pendingId !== null && selectedId === pendingId && !agents.some((a) => a.id === pendingId));
 
   const workspaceName = workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? null;
   const sidebar = (
     <Sidebar
       agents={agents}
-      selectedId={selected.id}
+      selectedId={drafting ? null : selected.id}
       workspaceName={workspaces.length > 1 ? workspaceName : null}
-      creating={creating}
+      drafting={drafting}
       onSelect={select}
-      onNew={() => void newAgent()}
+      onNew={newAgent}
       onSettings={() => setSettings("general")}
       onClose={() => setSidebarOpen(false)}
     />
@@ -314,18 +346,28 @@ export function App({
               </button>
             </div>
           ) : null}
-          <ChatView
-            workspaceId={workspaceId}
-            agent={selected}
-            agents={agents}
-            effort={selected.profile?.effort ?? defaultEffort}
-            defaultEffort={defaultEffort}
-            replyLength={replyLength}
-            connections={connections}
-            catalog={catalog}
-            onOpenAgent={select}
-            onOpenSidebar={() => setSidebarOpen(true)}
-          />
+          {drafting ? (
+            <DraftAgentView
+              draft={draft}
+              workspaceName={workspaceName}
+              onChange={setDraft}
+              onSend={(text) => void sendDraft(text)}
+              onOpenSidebar={() => setSidebarOpen(true)}
+            />
+          ) : (
+            <ChatView
+              workspaceId={workspaceId}
+              agent={selected}
+              agents={agents}
+              effort={selected.profile?.effort ?? defaultEffort}
+              defaultEffort={defaultEffort}
+              replyLength={replyLength}
+              connections={connections}
+              catalog={catalog}
+              onOpenAgent={select}
+              onOpenSidebar={() => setSidebarOpen(true)}
+            />
+          )}
         </main>
       </div>
       {settings ? (
