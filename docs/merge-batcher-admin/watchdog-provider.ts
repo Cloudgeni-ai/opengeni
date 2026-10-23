@@ -1,9 +1,9 @@
 /** Executable adapters. The core bridge is separately implemented/reviewed by the
  * runtime owner; no stub bridge or guessed health proof is provided here. */
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { off, verifyStop } from "./off";
 import { type Archive, hydrate } from "./watchdog-journal";
 import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
@@ -49,6 +49,35 @@ export type RuntimeConfig = {
 };
 export const digest = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
+export function appPath(path: string): boolean {
+  return typeof path === "string" && path.startsWith("/app/") && resolve(path).startsWith("/app/");
+}
+async function loadBridge(
+  config: RuntimeConfig,
+  token: () => Promise<string>,
+): Promise<CoreBridge> {
+  if (
+    !appPath(await realpath(config.coreModule)) ||
+    !appPath(await realpath(config.operatorDirectory))
+  )
+    throw Error("Provider source escapes image application directory");
+  if (digest(await readFile(config.coreModule)) !== config.coreModuleDigest)
+    throw Error("Core bridge source digest changed");
+  const module = (await import(config.coreModule)) as {
+    createWatchdogBridge?: (
+      config: RuntimeConfig,
+      token: () => Promise<string>,
+    ) => Promise<CoreBridge>;
+  };
+  if (!module.createWatchdogBridge)
+    throw Error("Reviewed core bridge export missing; integration unqualified");
+  return module.createWatchdogBridge(config, token);
+}
+export type ProviderDependencies = {
+  loadBridge: typeof loadBridge;
+  off: typeof off;
+  transport?: typeof fetch;
+};
 async function run(args: string[], env: { [name: string]: string | undefined }): Promise<void> {
   const child = Bun.spawn(args, {
     env: { ...process.env, ...env },
@@ -65,35 +94,30 @@ async function run(args: string[], env: { [name: string]: string | undefined }):
 export async function createProvider(
   config: RuntimeConfig,
   cloud = new WatchdogCloud(),
+  dependencies: ProviderDependencies = { loadBridge, off },
 ): Promise<{ ports: Ports; close(): Promise<void> }> {
   if (
     config.schema !== 1 ||
     !/^projects\/[^/]+\/locations\/[^/]+\/jobs\/[^/]+$/.test(config.jobResource) ||
-    !config.coreModule.startsWith("/app/") ||
-    !config.operatorDirectory.startsWith("/app/") ||
+    !appPath(config.coreModule) ||
+    !appPath(config.operatorDirectory) ||
     config.watchdogImage !== config.binding.image ||
     !/^[a-f0-9]{64}$/.test(config.coreModuleDigest) ||
     !Number.isSafeInteger(config.incidentThread) ||
     config.incidentThread <= 0
   )
     throw Error("Complete reviewed provider binding and incident destination required");
-  const moduleBytes = await readFile(config.coreModule);
-  if (digest(moduleBytes) !== config.coreModuleDigest)
-    throw Error("Core bridge source digest changed");
-  const github = new WatchdogGitHub(cloud, config.app);
-  const stateWriter = new WatchdogGitHub(cloud, config.stateApp, fetch, "state-fence");
+  const github = new WatchdogGitHub(cloud, config.app, dependencies.transport ?? fetch);
+  const stateWriter = new WatchdogGitHub(
+    cloud,
+    config.stateApp,
+    dependencies.transport ?? fetch,
+    "state-fence",
+  );
   const store = new ObjectStore(cloud, config.bucket);
   const key = `${config.prefix}/${digest(JSON.stringify(config.binding))}`;
   // The module receives only a token callback for its reviewed state-only CAS.
-  const module = (await import(config.coreModule)) as {
-    createWatchdogBridge?: (
-      config: RuntimeConfig,
-      token: () => Promise<string>,
-    ) => Promise<CoreBridge>;
-  };
-  if (!module.createWatchdogBridge)
-    throw Error("Reviewed core bridge export missing; integration unqualified");
-  const core = await module.createWatchdogBridge(config, () => stateWriter.token());
+  const core = await dependencies.loadBridge(config, () => stateWriter.token());
   let directory: string | null = null;
   const journalObject = `${key}/off-journal.json`;
   async function materialize(create: boolean): Promise<string> {
@@ -183,44 +207,51 @@ export async function createProvider(
       const admin = await materialize(true);
       const oldToken = process.env.GH_TOKEN,
         oldJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+      let bytes: Buffer;
       try {
         process.env.GH_TOKEN = await github.token();
         process.env.BATCHER_ADMIN_JOURNAL_CONFIG = join(admin, "journal-config.json");
-        const receipt = await off(admin, "--apply-after-go");
-        const bytes = await readFile(receipt);
-        await core.verifyOffReceipt(incidentId, JSON.parse(bytes.toString("utf8")));
-        return digest(bytes);
+        const receipt = await dependencies.off(admin, "--apply-after-go");
+        bytes = await readFile(receipt);
       } finally {
         if (oldToken === undefined) delete process.env.GH_TOKEN;
         else process.env.GH_TOKEN = oldToken;
         if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
         else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
       }
+      await core.verifyOffReceipt(incidentId, JSON.parse(bytes.toString("utf8")));
+      return digest(bytes);
     },
     reconcile: async (_binding, incidentId) => {
-      await core.verifyClaim(incidentId, config.binding.activation);
-      const admin = await materialize(false);
-      const contract = JSON.parse(await readFile(join(admin, "stop-contract.json"), "utf8"));
-      for (const item of await readdir(admin, { withFileTypes: true })) {
-        if (!item.isDirectory() || !item.name.startsWith("off.")) continue;
-        try {
-          const bytes = await readFile(join(admin, item.name, "off-verified.json"));
-          const receipt = JSON.parse(bytes.toString("utf8"));
-          const operator = JSON.parse(
-            await readFile(join(admin, item.name, "operator-receipt.json"), "utf8"),
-          );
-          verifyStop(receipt.stop, operator, contract.deployment);
-          await core.verifyOffReceipt(incidentId, receipt);
-          await run(
-            ["bash", join(import.meta.dir, "stage.sh"), admin, "check-stable", "restored"],
-            { GH_TOKEN: await github.token() },
-          );
-          return digest(bytes);
-        } catch {
-          /* No complete receipt is not permission to repeat OFF. */
+      try {
+        await core.verifyClaim(incidentId, config.binding.activation);
+        const admin = await materialize(false);
+        const contract = JSON.parse(await readFile(join(admin, "stop-contract.json"), "utf8"));
+        for (const item of await readdir(admin, { withFileTypes: true })) {
+          if (!item.isDirectory() || !item.name.startsWith("off.")) continue;
+          try {
+            const bytes = await readFile(join(admin, item.name, "off-verified.json"));
+            const receipt = JSON.parse(bytes.toString("utf8"));
+            const operator = JSON.parse(
+              await readFile(join(admin, item.name, "operator-receipt.json"), "utf8"),
+            );
+            verifyStop(receipt.stop, operator, contract.deployment);
+            await core.verifyOffReceipt(incidentId, receipt);
+            await run(
+              ["bash", join(import.meta.dir, "stage.sh"), admin, "check-stable", "restored"],
+              { GH_TOKEN: await github.token() },
+            );
+            return digest(bytes);
+          } catch {
+            /* No complete receipt is not permission to repeat OFF. */
+          }
         }
+        return null;
+      } catch {
+        // Missing journals and unproven claims are sticky holds, not replay or
+        // reconstruction from a seed. Let tick persist held and notify once.
+        return null;
       }
-      return null;
     },
     notify: (id, reason, receipt, mode) =>
       github.notify(config.incidentThread, id, reason, receipt, mode),

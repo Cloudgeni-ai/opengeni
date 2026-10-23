@@ -279,6 +279,64 @@ test("durable journal failure blocks rule effect and OFF child before submission
     await h.close();
   }
 });
+
+test("successful journal path snapshots intent, response, verification and final OFF in order", async () => {
+  const h = await harness();
+  try {
+    const preload = join(h.root, "offline-preload.ts");
+    await writeFile(
+      preload,
+      `
+globalThis.fetch = async (url, init = {}) => {
+  if (String(url).includes('metadata.google.internal')) return Response.json({access_token:'fixture',expires_in:3600});
+  if (String(url).includes('/upload/')) {
+    const body = JSON.parse(String(init.body));
+    const event = {endpoint:'journal',method:'CHECKPOINT',files:Object.keys(body.files)};
+    await Bun.write(process.env.FIXTURE_LOG,await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify(event)+'\\n');
+    return Response.json({generation:String(Number(new URL(url).searchParams.get('ifGenerationMatch'))+1)});
+  }
+  throw Error('Unexpected offline transport');
+};
+`,
+    );
+    const wrapper = join(h.root, "bin/bun");
+    await writeFile(wrapper, `#!/bin/sh\nexec '${process.execPath}' --preload '${preload}' "$@"\n`);
+    await chmod(wrapper, 0o700);
+    const journal = join(h.root, "journal-config.json");
+    await writeFile(
+      journal,
+      JSON.stringify({ bucket: "fixture", object: "off", generation: "1", directory: h.root }),
+    );
+    const extra = { BATCHER_ADMIN_JOURNAL_CONFIG: journal };
+    expect((await h.run("create-guard", "--apply-after-go", extra)).code).toBe(0);
+    const events = (await h.events()) as unknown as { method: string; files?: string[] }[];
+    const write = events.findIndex((event) => event.method === "POST");
+    const snapshots = events
+      .map((event, index) => ({ ...event, index }))
+      .filter((event) => event.method === "CHECKPOINT");
+    const attemptPrefix = "plan/create-guard-attempt/";
+    expect(snapshots[0]!.index).toBeLessThan(write);
+    expect(snapshots[0]!.files).toContain(attemptPrefix + "intent");
+    expect(snapshots[0]!.files).not.toContain(attemptPrefix + "response.json");
+    expect(snapshots[1]!.index).toBeGreaterThan(write);
+    expect(snapshots[1]!.files).toContain(attemptPrefix + "response.json");
+    expect(snapshots[1]!.files).not.toContain(attemptPrefix + "verified");
+    expect(snapshots[2]!.files).toContain(attemptPrefix + "verified");
+    for (const stage of ["create-namespace", "admit"])
+      expect((await h.run(stage, "--apply-after-go", extra)).code).toBe(0);
+    const operator = await offHarness(h);
+    const result = await operator.run(extra);
+    expect(result.code).toBe(0);
+    const all = (await h.events()) as unknown as { method: string; files?: string[] }[];
+    const last = all.filter((event) => event.method === "CHECKPOINT").at(-1)!;
+    expect(last.files?.some((path) => /^off\.[^/]+\/off-verified.json$/.test(path))).toBe(true);
+    const stop = all.findIndex((event) => event.method === "STOP");
+    expect(all[stop - 1]?.method).toBe("CHECKPOINT");
+    expect(all[stop + 1]?.method).toBe("CHECKPOINT");
+  } finally {
+    await h.close();
+  }
+});
 test("both App-JWT GETs use explicit Bearer, without logging the secret", async () => {
   const h = await harness();
   try {

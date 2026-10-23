@@ -30,6 +30,11 @@ reconciliation: never reset/re-arm it automatically or replay an unknown effect.
 Each subsequent held run emits an alert even after its incident comment exists.
 
 Job bookkeeping uses remote object-generation CAS in a dedicated state bucket.
+Missing recovery journals or unverified claims become a sticky held incident
+with notification, never seed reconstruction or another OFF attempt. The
+temporary restoration credential is removed before core receipt verification;
+normal and restart verification use the same core credential boundary.
+
 Before OFF, the core bridge must also claim the incident and set the stop fence
 in the **same Git state.json CAS** used by writers and operators. The object claim
 is not a substitute for that authoritative fence.
@@ -95,6 +100,8 @@ The watchdog cannot detect itself while dead. The sweep's job/log read binding
 and configured thread must be qualified before enable. GitHub scheduling or
 availability can delay that independent alert; no missing-heartbeat guarantee
 is claimed during a GitHub outage. No channel or thread ID is guessed here.
+Only incident markers authored through the configured watchdog App count as
+receipts; arbitrary comments quoting the marker do not suppress notification.
 A missed-watchdog alert is never a reason to automatically turn the batcher ON.
 
 ## Provider and image boundary required from runtime owner

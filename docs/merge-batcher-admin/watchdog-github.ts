@@ -132,10 +132,16 @@ export class WatchdogGitHub {
       const response = await this.request(
         `/repos/Cloudgeni-ai/opengeni/issues/${thread}/comments?per_page=100&page=${page}`,
       );
-      const comments = (await response.json()) as { body?: string }[];
+      const comments = (await response.json()) as {
+        body?: string;
+        performed_via_github_app?: { id?: number };
+      }[];
       if (!Array.isArray(comments)) throw Error("Incomplete incident comment inventory");
       matches += comments.filter(
-        (comment) => typeof comment.body === "string" && comment.body.includes(marker),
+        (comment) =>
+          comment.performed_via_github_app?.id === this.app.appId &&
+          typeof comment.body === "string" &&
+          comment.body.includes(marker),
       ).length;
       if (!response.headers.get("link")?.includes('rel="next"')) break;
       if (page >= 100) throw Error("Incident pagination bound reached; absence unknown");

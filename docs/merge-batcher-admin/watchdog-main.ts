@@ -3,7 +3,10 @@ import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
 import { createProvider, type RuntimeConfig } from "./watchdog-provider";
 import { tick } from "./watchdog";
 
-export async function main(env = process.env): Promise<number> {
+export async function main(
+  env = process.env,
+  dependencies = { cloud: () => new WatchdogCloud(), createProvider },
+): Promise<number> {
   const started = new Date().toISOString();
   let config: RuntimeConfig | null = null;
   let executionName: string | null = null,
@@ -31,13 +34,13 @@ export async function main(env = process.env): Promise<number> {
       job.includes("/")
     )
       throw Error("Pinned config and actual Cloud Run execution required");
-    const cloud = new WatchdogCloud();
+    const cloud = dependencies.cloud();
     const pinned = await new ObjectStore(cloud, bucket).read<RuntimeConfig>(object, generation);
     if (!pinned) throw Error("Pinned config absent");
     config = pinned.value;
     if (!config.jobResource.endsWith(`/jobs/${job}`)) throw Error("Job identity mismatch");
     executionName = `${config.jobResource}/executions/${execution}`;
-    const provider = await createProvider(config, cloud);
+    const provider = await dependencies.createProvider(config, cloud);
     close = provider.close;
     if ((await provider.ports.execution(executionName)) !== "running")
       throw Error("Execution/source binding not proven");
@@ -72,11 +75,14 @@ export async function main(env = process.env): Promise<number> {
         schema: "batcher-watchdog/v1",
         executionName,
         jobResource: config?.jobResource ?? null,
-        watchdogImageDigest: config?.watchdogImage.split("@")[1] ?? null,
+        watchdogImageDigest:
+          typeof config?.watchdogImage === "string"
+            ? (config.watchdogImage.split("@")[1] ?? null)
+            : null,
         checkedAt: started,
         completedAt: new Date().toISOString(),
-        serviceUid: config?.binding.deploymentUid ?? null,
-        activationId: config?.binding.activation ?? null,
+        serviceUid: config?.binding?.deploymentUid ?? null,
+        activationId: config?.binding?.activation ?? null,
         stateSha,
         incidentId,
         result,

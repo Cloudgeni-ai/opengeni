@@ -66,6 +66,34 @@ test("lost upload response stays unknown and is not retried", async () => {
   await expect(new ObjectStore(cloud, "fixture-bucket").cas("object", null, {})).rejects.toThrow();
   expect(writes).toBe(1);
 });
+test("non-OK CAS responses are not retried or treated as committed", async () => {
+  for (const status of [403, 429, 500]) {
+    let writes = 0;
+    const cloud = new WatchdogCloud(
+      transport((url) => {
+        if (url.includes("metadata.google.internal"))
+          return json({ access_token: "fixture", expires_in: 3600 });
+        writes++;
+        return json({}, status);
+      }),
+    );
+    await expect(new ObjectStore(cloud, "fixture-bucket").cas("object", "7", {})).rejects.toThrow(
+      "outcome may be unknown",
+    );
+    expect(writes).toBe(1);
+  }
+});
+test("journal rejects symlink configuration before transport", async () => {
+  const root = await mkdtemp(join(tmpdir(), "watchdog-journal-link-"));
+  try {
+    await writeFile(join(root, "real.json"), "{}");
+    await symlink(join(root, "real.json"), join(root, "link.json"));
+    await expect(checkpoint(join(root, "link.json"))).rejects.toThrow("regular file");
+    await expect(checkpoint(root)).rejects.toThrow("regular file");
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
 test("OFF journal persists exact intent and excludes local locks/credential files", async () => {
   const root = await mkdtemp(join(tmpdir(), "watchdog-journal-test-"));
   try {
@@ -152,6 +180,23 @@ class KeyCloud extends WatchdogCloud {
     return key;
   }
 }
+test("extra token grants are rejected before repository reads", async () => {
+  let calls = 0;
+  const github = new WatchdogGitHub(
+    new KeyCloud(),
+    { appId: 1, installationId: 2, repositoryId: 3, keyVersion: "fixture" },
+    transport((_url, init) => {
+      calls++;
+      return json({
+        token: "fixture",
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+        permissions: { ...JSON.parse(String(init.body)).permissions, workflows: "write" },
+      });
+    }),
+  );
+  await expect(github.token()).rejects.toThrow("permissions mismatch");
+  expect(calls).toBe(1);
+});
 test("repository verification failures never leave a usable cached token", async () => {
   let mints = 0;
   const github = new WatchdogGitHub(
