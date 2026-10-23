@@ -73,6 +73,9 @@ type Operation = {
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
+  /** run_steps options of a step that names its element instead of carrying
+   * a token: how long CUA waits for it, and the check that holds first. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown> };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -113,6 +116,10 @@ export class CuaComputerBackend implements ComputerBackend {
     string,
     { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
   >();
+  /** Per window, the element's own label behind each CUA token of its latest
+   * reading: what CUA's lookup by name matches. An observed name can instead
+   * come from the element's text or drop Chrome's live memory figure. */
+  private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -469,7 +476,11 @@ export class CuaComputerBackend implements ComputerBackend {
     const actionOf: number[] = [];
     for (const [index, action] of actions.entries()) {
       try {
-        const operations = await this.operations({ ...command, action }, index > 0);
+        const operations = await this.operations(
+          { ...command, action },
+          index > 0,
+          steps.some((step) => step.stepOptions !== undefined),
+        );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -516,7 +527,7 @@ export class CuaComputerBackend implements ComputerBackend {
           // finds stale names an element of a window that changed since: the
           // batch stops there instead of acting on a lookalike CUA finds again.
           refind_stale: false,
-          steps: chunk.map((step) => ({ tool: step.name, args: step.args })),
+          steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
         });
       } catch (error) {
         // A later call refused before it ran: the earlier calls still did.
@@ -1016,6 +1027,16 @@ export class CuaComputerBackend implements ComputerBackend {
     );
     while (this.openingTokens.size > 32)
       this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.ownLabels.delete(targetId);
+    this.ownLabels.set(
+      targetId,
+      new Map(
+        state.elements
+          .filter((element) => element.element_token && element.label)
+          .map((element) => [element.element_token!, element.label!]),
+      ),
+    );
+    while (this.ownLabels.size > 32) this.ownLabels.delete(this.ownLabels.keys().next().value!);
     this.dateFieldTokens.delete(targetId);
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
@@ -1276,6 +1297,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private async operations(
     command: ComputerBackendActionCommand,
     laterInBatch = false,
+    /** An earlier action of the batch names its element (see namedOperation). */
+    afterNamed = false,
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
@@ -1437,7 +1460,21 @@ export class CuaComputerBackend implements ComputerBackend {
       );
     }
     if (action.type === "semantic") {
-      const node = this.locateObserved(command.targetId, observed, action.locator);
+      let node: InteractionSemanticNodeValue;
+      try {
+        node = this.locateObserved(command.targetId, observed, action.locator);
+      } catch (error) {
+        // Not in the batch's observation: an earlier action may bring it up.
+        const named =
+          laterInBatch &&
+          error instanceof ComputerBackendError &&
+          error.code === "locator_not_found" &&
+          ACTIONS_ON_UNSEEN.has(action.action)
+            ? namedOperation(this.identity.platform, args, action, null)
+            : null;
+        if (!named) throw error;
+        return [named];
+      }
       if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
         const field = this.dateFieldOf(command.targetId, node.ref);
         if (field)
@@ -1459,6 +1496,38 @@ export class CuaComputerBackend implements ComputerBackend {
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (afterNamed) {
+        // An earlier step found its element by name, which re-read the window
+        // and so retired every token of the batch's observation: this element
+        // is found by name too.
+        const token = this.elementToken(command.targetId, node.ref);
+        const special =
+          (action.action === "set_value" &&
+            this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
+          (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
+        // CUA finds an element by its own label only, and by that label it
+        // must find this one element.
+        const findable =
+          node.name !== undefined && node.name === this.ownLabels.get(command.targetId)?.get(token);
+        if (
+          findable &&
+          !special &&
+          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
+            .length > 1
+        )
+          throw unsupported(
+            "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
+          );
+        const named =
+          special || !findable ? null : namedOperation(this.identity.platform, args, action, node);
+        if (!named)
+          throw unsupported(
+            special
+              ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
+              : "This element has no label of its own, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+          );
+        return [named];
+      }
       if (action.action === "focus")
         return [
           {
@@ -1773,6 +1842,90 @@ const MAX_RUN_STEPS = 64;
 
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
+
+/** What a later action of a batch may do to an element its observation does
+ * not show yet: an action whose meaning does not depend on the element's kind. */
+const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
+  "invoke",
+  "show_menu",
+  "set_value",
+  "focus",
+]);
+
+/** How long a batch step that names its element waits for it to appear and
+ * enable: CUA's longest wait for one step. */
+const NAMED_STEP_WAIT_MS = 10_000;
+/** How long its lookup then waits, once the check found the element. */
+const NAMED_STEP_FIND_MS = 1_000;
+
+/** The roles macOS and Windows observations show, as CUA's lookup names
+ * them where they differ ("text" there is a text field; here it is static
+ * text). Linux observations show AT-SPI roles, which CUA reads as they are. */
+const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
+  textbox: "textfield",
+  text: "statictext",
+  radio: "radiobutton",
+  combobox: "popupbutton",
+};
+
+type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
+
+/** The step for a later action of a batch that names its element by role
+ * and name instead of carrying a token: CUA finds the element when the step
+ * runs, after waiting for it to appear and enable. `node` is the element as
+ * the batch's observation shows it, when it shows it; a ref or identifier
+ * locator then names it by its role and exact name. Null when the element
+ * cannot be named: a ref or identifier the observation does not show, or an
+ * element without a role and name. */
+export function namedOperation(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  action: SemanticAction,
+  node: InteractionSemanticNodeValue | null,
+): Operation | null {
+  if (action.action === "set_value" && action.value === undefined) return null;
+  const { locator } = action;
+  const byLocator = locator.kind === "role" || locator.kind === "label" || locator.kind === "text";
+  if (!byLocator && !node) return null;
+  const role = locator.kind === "role" ? locator.role : byLocator ? undefined : node!.role;
+  const name = byLocator ? (locator.kind === "role" ? locator.name : locator.text) : node!.name;
+  const exact = byLocator ? locator.exact === true : true;
+  const selector = {
+    ...(role !== undefined
+      ? { role: platform === "linux" ? role : (CUA_LOOKUP_ROLES[role] ?? role) }
+      : {}),
+    ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
+  };
+  if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // The check waits for the element; the lookup after it finds it at once.
+  const stepOptions = {
+    timeout_ms: NAMED_STEP_FIND_MS,
+    wait_for: {
+      ...selector,
+      pid: args.pid,
+      window_id: args.window_id,
+      enabled: true,
+      timeout_ms: NAMED_STEP_WAIT_MS,
+    },
+  };
+  if (action.action === "set_value")
+    return {
+      name: "set_value",
+      args: { ...args, ...selector, value: String(action.value) },
+      stepOptions,
+    };
+  return {
+    name: "click",
+    args: {
+      ...args,
+      ...selector,
+      button: action.action === "show_menu" ? "right" : "left",
+      ...(action.action === "focus" ? { action: "focus" } : {}),
+      delivery_mode: "background",
+    },
+    stepOptions,
+  };
+}
 
 /** `select` is the natural verb for a radio button or tab, which the platform
  * offers only as a press, so it presses one rather than being refused. */
