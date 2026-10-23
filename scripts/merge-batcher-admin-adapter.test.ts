@@ -7,10 +7,11 @@ import { WatchdogCloud } from "../docs/merge-batcher-admin/watchdog-cloud";
 import { WatchdogGitHub } from "../docs/merge-batcher-admin/watchdog-github";
 import {
   appPath,
-  createProvider,
+  createProvider as actualCreateProvider,
   digest,
   type CoreBridge,
   type RuntimeConfig,
+  type ProviderDependencies,
 } from "../docs/merge-batcher-admin/watchdog-provider";
 import { main } from "../docs/merge-batcher-admin/watchdog-main";
 import { prepare, type Snapshot } from "../docs/merge-batcher-admin/bundle";
@@ -50,10 +51,23 @@ const config: RuntimeConfig = {
   coreModule: "/app/core.ts",
   coreModuleDigest: "b".repeat(64),
   operatorDirectory: "/app/operator",
+  operatorManifestDigest: "f".repeat(64),
   app: { appId: 1, installationId: 2, repositoryId: 3, keyVersion: "fixture" },
   stateApp: { appId: 5425399, installationId: 2, repositoryId: 3, keyVersion: "fixture" },
   incidentThread: 9,
 };
+// These adapter-ordering fixtures deliberately isolate post-build hydration;
+// the real hydrator has its own source/provider/receipt regression suite.
+function createProvider(
+  c: RuntimeConfig,
+  cloud: WatchdogCloud,
+  dependencies: ProviderDependencies,
+) {
+  return actualCreateProvider(c, cloud, {
+    hydrateOperator: async (cfg) => cfg.operatorDirectory,
+    ...dependencies,
+  });
+}
 class Cloud extends WatchdogCloud {
   objects = new Map<string, { generation: string; value: unknown }>();
   requests: string[] = [];
@@ -288,6 +302,7 @@ test("default loader confines real paths; drained verifier rejects forced proof 
     ).toString("base64");
     let port: ProviderEvidencePort | undefined;
     const provider = await relocated.createProvider(cfg, cloud, {
+      hydrateOperator: async (target) => target.operatorDirectory,
       loadBridge: async (_c, _t, evidence) => {
         port = evidence;
         return bridge();

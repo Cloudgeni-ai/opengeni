@@ -128,6 +128,9 @@ It reads `WATCHDOG_CONFIG_BUCKET`, `WATCHDOG_CONFIG_OBJECT` and the immutable
 `WATCHDOG_CONFIG_GENERATION`, then verifies its actual Cloud Run execution/job/image
 before running policy. `RuntimeConfig` in `watchdog-provider.ts` defines the
 configuration; it is not generated from ambient credentials or an old activation.
+Post-build receipt preparation and exact resource/credential requirements are in
+[watchdog-post-build.md](watchdog-post-build.md). The operator manifest digest is
+required; packaged image files contain no deployment receipt or self-image digest.
 
 The runtime-owned, source-digest-pinned bridge exports
 `createWatchdogBridge(config, stateToken, providerEvidence)` and implements `CoreBridge`:

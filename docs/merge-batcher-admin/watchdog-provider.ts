@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { off, verifyStop, type DrainedReceipt } from "./off";
 import { verify, type Plan, type RuleSet, type Snapshot } from "./bundle";
 import { type Archive, hydrate } from "./watchdog-journal";
+import { hydrateOperator } from "./watchdog-deployment";
 import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
 import { WatchdogGitHub, type AppBinding } from "./watchdog-github";
 import {
@@ -57,6 +58,7 @@ export type RuntimeConfig = {
   coreModule: string;
   coreModuleDigest: string;
   operatorDirectory: string;
+  operatorManifestDigest: string;
   app: AppBinding;
   stateApp: AppBinding;
   incidentThread: number;
@@ -114,6 +116,7 @@ export type ProviderDependencies = {
   off: typeof off;
   transport?: typeof fetch;
   run?: typeof run;
+  hydrateOperator?: typeof hydrateOperator;
 };
 async function run(args: string[], env: { [name: string]: string | undefined }): Promise<string> {
   const child = Bun.spawn(args, {
@@ -142,6 +145,7 @@ export async function createProvider(
     !appPath(config.operatorDirectory) ||
     config.watchdogImage !== config.binding.image ||
     !/^[a-f0-9]{64}$/.test(config.coreModuleDigest) ||
+    !/^[a-f0-9]{64}$/.test(config.operatorManifestDigest) ||
     !Number.isSafeInteger(config.incidentThread) ||
     config.incidentThread <= 0
   )
@@ -157,6 +161,7 @@ export async function createProvider(
   const key = `${config.prefix}/${digest(JSON.stringify(config.binding))}`;
   // The module receives only a token callback for its reviewed state-only CAS.
   let directory: string | null = null;
+  const operators = new Map<string, string>();
   const journalObject = `${key}/off-journal.json`;
   async function materialize(create: boolean, readOnly = false): Promise<string> {
     if (directory && !readOnly) return directory;
@@ -167,12 +172,7 @@ export async function createProvider(
         throw Error("Unfinished OFF has no durable journal; no reconstruction from seed");
       const seed = await store.read<Archive>(config.seedObject, config.seedGeneration);
       if (!seed) throw Error("Pinned original OFF archive unavailable");
-      if (readOnly) snapshot = seed;
-      else {
-        const generation = await store.cas(journalObject, null, seed.value);
-        if (!generation) throw Error("OFF journal creation CAS lost; no provider write");
-        snapshot = { generation, value: seed.value };
-      }
+      snapshot = seed;
     }
     const path = await mkdtemp(join(tmpdir(), "batcher-watchdog-"));
     await hydrate(path, snapshot.value);
@@ -185,6 +185,15 @@ export async function createProvider(
       contract.deployment.image !== config.binding.image
     )
       throw Error("OFF target/binding mismatch");
+    operators.set(
+      path,
+      await (dependencies.hydrateOperator ?? hydrateOperator)(config, path, cloud),
+    );
+    if (!latest && !readOnly) {
+      const generation = await store.cas(journalObject, null, snapshot.value);
+      if (!generation) throw Error("OFF journal creation CAS lost; no provider write");
+      snapshot = { generation, value: snapshot.value };
+    }
     await writeFile(
       join(path, "journal-config.json"),
       JSON.stringify({
@@ -256,7 +265,7 @@ export async function createProvider(
       const admin = await materialize(false);
       const contract = JSON.parse(await readFile(join(admin, "stop-contract.json"), "utf8"));
       const operator = JSON.parse(
-        await readFile(join(config.operatorDirectory, "deployment-receipt.json"), "utf8"),
+        await readFile(join(operators.get(admin)!, "deployment-receipt.json"), "utf8"),
       );
       const result = receipt as { stop?: Parameters<typeof verifyStop>[0] };
       if (!result?.stop) throw Error("Real STOP receipt required");
@@ -362,6 +371,7 @@ export async function createProvider(
                 process.env.BATCHER_ADMIN_JOURNAL_CONFIG = adminJournal;
               }
             },
+            operators.get(admin)!,
           );
           bytes = await readFile(receipt);
         } finally {

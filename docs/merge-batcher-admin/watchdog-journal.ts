@@ -7,7 +7,14 @@ function allowed(path: string): boolean {
   return (
     !path.split("/").some((part) => !part || part === "." || part === "..") &&
     !path.includes("\\") &&
-    (path === "stop-contract.json" || path.startsWith("plan/") || /^off\.[^/]+\//.test(path)) &&
+    ([
+      "stop-contract.json",
+      "deployment-binding.json",
+      "operator-initial-receipt.json",
+      "operator/deployment-receipt.json",
+    ].includes(path) ||
+      path.startsWith("plan/") ||
+      /^off\.[^/]+\//.test(path)) &&
     !path.split("/").some((part) => part.endsWith("-lock") || part === "off-lock")
   );
 }
@@ -19,7 +26,12 @@ export async function archive(directory: string): Promise<Archive> {
       if (item.isSymbolicLink()) throw Error("Journal refuses symlinks");
       if (item.isDirectory()) {
         if (item.name.endsWith("-lock") || item.name === "off-lock") continue;
-        if (path === "plan" || path.startsWith("plan/") || /^off\.[^/]+(?:\/|$)/.test(path))
+        if (
+          path === "operator" ||
+          path === "plan" ||
+          path.startsWith("plan/") ||
+          /^off\.[^/]+(?:\/|$)/.test(path)
+        )
           await walk(path);
       } else if (allowed(path))
         files[path] = (await readFile(join(directory, path))).toString("base64");

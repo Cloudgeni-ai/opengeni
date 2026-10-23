@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile, cp } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -69,7 +69,7 @@ await off(${JSON.stringify(h.root)}, '--apply-after-go', async (receipt, action)
   if (!receipt.stop.disabled || receipt.operator.uid !== receipt.runtime.uid) throw Error('bad drain');
   await Bun.write(process.env.FIXTURE_LOG, await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify({endpoint:action,method:'GATE'})+'\\n');
   if (process.env.REJECT_GATE === action || process.env.REJECT_GATE === 'all') throw Error('unknown durable hold');
-});
+}, process.env.HYDRATED_OPERATOR);
 `,
       );
       const child = Bun.spawn(["bun", runner], {
@@ -836,6 +836,22 @@ test("observed applied forward PUT can be reconciled before reverse restoration"
     expect((await h.run("reconcile-admit")).code).toBe(0);
     for (const action of ["restore-admission", "delete-namespace", "delete-guard"])
       expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF executes only the verified hydrated operator without an image-local receipt", async () => {
+  const h = await harness();
+  try {
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h),
+      copied = join(h.root, "hydrated-operator");
+    await cp(operator.runtime, copied, { recursive: true });
+    await rm(join(operator.runtime, "deployment-receipt.json"));
+    expect(await operator.gated({ HYDRATED_OPERATOR: copied })).toBe(0);
+    expect(await Bun.file(join(operator.runtime, "deployment-receipt.json")).exists()).toBe(false);
   } finally {
     await h.close();
   }

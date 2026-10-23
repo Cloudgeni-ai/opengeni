@@ -261,19 +261,22 @@ export async function off(
   adminPath: string,
   optIn: string,
   beforeRestore?: RestoreGate,
+  hydratedOperator?: string,
 ): Promise<string> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
   const admin = resolve(adminPath),
     planDir = join(admin, "plan");
   const contract = await json<Contract>(join(admin, "stop-contract.json"));
+  const operatorDirectory = hydratedOperator ?? contract.directory;
   if (contract.schemaVersion !== 1 || !isAbsolute(contract.directory))
     throw new Error("Invalid STOP contract");
-  if (JSON.stringify(await hashes(contract.directory)) !== JSON.stringify(contract.sources))
+  if (!isAbsolute(operatorDirectory)) throw Error("Absolute operator directory required");
+  if (JSON.stringify(await hashes(operatorDirectory)) !== JSON.stringify(contract.sources))
     throw new Error("Reviewed STOP source changed");
   if (
     JSON.stringify(
-      identity(await json<Deployment>(join(contract.directory, "deployment-receipt.json"))),
+      identity(await json<Deployment>(join(operatorDirectory, "deployment-receipt.json"))),
     ) !== JSON.stringify(contract.deployment)
   )
     throw new Error("STOP target changed");
@@ -286,13 +289,13 @@ export async function off(
     // prevent the already-bound runtime's durable stop operation.
     const result = JSON.parse(
       await command(
-        [process.execPath, join(contract.directory, "control.ts"), "stop"],
+        [process.execPath, join(operatorDirectory, "control.ts"), "stop"],
         attempt,
         "stop",
       ),
     ) as Stop;
     const operatorReceipt = await json<Deployment>(
-      join(contract.directory, "deployment-receipt.json"),
+      join(operatorDirectory, "deployment-receipt.json"),
     );
     await writeFile(join(attempt, "operator-receipt.json"), JSON.stringify(operatorReceipt), {
       flag: "wx",
