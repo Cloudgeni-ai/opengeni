@@ -1,3 +1,4 @@
+import { isIntegrationDefinitionEnabled } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -1054,13 +1055,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
       readCodexAppsDesignation(),
     ]);
   }
-  apiIntegrations = apiIntegrations.filter(apiIntegrationIsExecutable);
+  apiIntegrations = apiIntegrations.filter((integration) =>
+    apiIntegrationIsExecutable(integration, settings, workspaceId),
+  );
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
+      workspaceId,
     ),
     codexAppsDesignation !== null,
   );
@@ -1100,7 +1104,7 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
   options.signal?.throwIfAborted();
   const apiIntegrations = (
     await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
-  ).filter(apiIntegrationIsExecutable);
+  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
   options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
@@ -1111,6 +1115,7 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
+      workspaceId,
     ),
     codexAppsDesignation !== null,
   );
@@ -1166,22 +1171,33 @@ async function listInstalledApiIntegrationsForDelegations(
   return [...byServerId.values()];
 }
 
-function apiIntegrationIsExecutable(integration: ApiIntegrationRuntime): boolean {
-  return !(
-    integration.definitionProvenance === "curated" && integration.definitionId === "google-drive"
+function apiIntegrationIsExecutable(
+  integration: ApiIntegrationRuntime,
+  settings: Settings,
+  workspaceId?: string,
+): boolean {
+  return (
+    isIntegrationDefinitionEnabled(integration.definitionId, {
+      teamsEnabled: settings.microsoftTeamsToolsEnabled,
+      teamsAllowedWorkspaceIds: settings.microsoftTeamsAllowedWorkspaceIds,
+      ...(workspaceId ? { workspaceId } : {}),
+    }) &&
+    !(integration.definitionProvenance === "curated" && integration.definitionId === "google-drive")
   );
 }
 
 export function settingsWithApiIntegrationServers(
   settings: Settings,
   integrations: readonly ApiIntegrationRuntime[],
+  workspaceId?: string,
 ): Settings {
   if (integrations.length === 0) return settings;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = integrations
     .filter(
       (integration) =>
-        apiIntegrationIsExecutable(integration) && !existingIds.has(integration.serverId),
+        apiIntegrationIsExecutable(integration, settings, workspaceId) &&
+        !existingIds.has(integration.serverId),
     )
     .map((integration) => ({
       id: integration.serverId,

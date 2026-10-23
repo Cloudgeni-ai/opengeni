@@ -1,3 +1,4 @@
+import { integrationAvailable } from "../integrations/teams-rollout";
 import { GOOGLE_CONNECTOR_SETUP_UNAVAILABLE } from "../integrations/google-connector-availability";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Hono } from "hono";
@@ -174,7 +175,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: ["workspace"],
         setup: ["installation"],
       }),
-      ...CORE_INTEGRATION_DEFINITIONS.map((definition) => {
+      ...CORE_INTEGRATION_DEFINITIONS.filter((definition) =>
+        integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id),
+      ).map((definition) => {
         const readiness = curatedOAuthReadiness(deps.settings, definition);
         return ConnectProvider.parse({
           id: definition.id,
@@ -591,6 +594,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (!Array.isArray(ids)) return [];
         return CORE_INTEGRATION_DEFINITIONS.filter(
           (definition) =>
+            integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id) &&
             ids.includes(definition.id) &&
             definition.provider.id === connection.metadata.providerFamily,
         ).map((definition) =>

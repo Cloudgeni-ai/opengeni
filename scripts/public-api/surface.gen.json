@@ -5357,6 +5357,51 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
       "sdk": [
@@ -34069,6 +34114,10 @@
       "resolveSiteClientScript": "value",
       "SITE_BROWSER_RUNTIME": "value",
       "SITE_CLIENT_SCRIPT_PATH": "value"
+    },
+    "@opengeni/sdk/teams": {
+      "teamsApi": "value",
+      "TeamsBotStatus": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",

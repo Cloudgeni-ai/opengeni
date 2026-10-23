@@ -2717,6 +2717,7 @@ BEGIN
       END LOOP;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'wake_teams_route_for_session_event()',
       'sync_usage_maintenance_due()',
       'arm_usage_allowances_for_membership()',
       'read_sender_connection(uuid,uuid,uuid,text)',

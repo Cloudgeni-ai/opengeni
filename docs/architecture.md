@@ -2976,6 +2976,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
 | Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
@@ -3162,3 +3163,16 @@ Deployment operator context is configured through
 `OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` and composed by runtime persistent
 instruction inspection for both modular and legacy agents. Persona overrides
 do not remove it. See `docs/local-development.md`.
+
+Teams admission uses an internal durable inbox proof at native session/message commit
+(`packages/core/src/application/teams-private-session.ts` and `packages/db/src/teams-private-
+session.ts`). It binds the exact installation generation, actor, linked human, route, message,
+and current lease. Personal Teams conversations may create private sessions in an authorized
+shared workspace under the existing organization privacy policy; this does not mint managed-
+browser authority or permit Personal workspace binding, visibility changes, forks, or
+approvals.
+
+Teams reply discovery uses a content-free sequence wake on relevant durable session events.
+The owner-only trigger updates the reserved route in the event transaction; delivery still
+checks the exact linked human and current session audience before reading reply content.
+Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.

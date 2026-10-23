@@ -256,6 +256,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "wake_teams_route_for_session_event()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -2041,6 +2042,12 @@ export const FORCE_RLS_TABLES = [
   "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  "teams_bot_routes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -2331,6 +2338,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "subscription_session_bindings",
   "subscription_settings",
   "subscription_turn_failures",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  "teams_bot_routes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -6141,6 +6154,15 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     }
+    if (
+      routine.name === "wake_teams_route_for_session_event()" &&
+      (routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== tableByName.get("teams_bot_routes")?.owner ||
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
+    )
+      violations.push("Teams wake trigger has unsafe execution, ownership or search path");
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
       ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(

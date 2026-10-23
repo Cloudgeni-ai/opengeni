@@ -257,3 +257,47 @@ describe("session visibility and fork product activation stays on its exact publ
     expect(doc).toContain("session_list_snapshots");
   });
 });
+
+test("Teams message admission and private creation have exactly one trusted product caller", async () => {
+  const permitted = new Map([
+    [
+      "teamsConversation",
+      new Set(["apps/api/src/integrations/teams-bot.ts", "packages/core/src/domain/sessions.ts"]),
+    ],
+    [
+      "authorizeTeamsConversationAdmission",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/core/src/domain/sessions.ts",
+      ]),
+    ],
+    [
+      "requireTeamsConversationProof",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/db/src/teams-private-session.ts",
+      ]),
+    ],
+  ]);
+  for (const root of [
+    "apps/api/src",
+    "apps/worker/src",
+    "apps/web/src",
+    "packages/core/src",
+    "packages/db/src",
+    "packages/contracts/src",
+    "packages/sdk/src",
+    "packages/runtime/src",
+  ]) {
+    for (const file of await sourceFiles(root)) {
+      const source = await readFile(join(repo, file), "utf8");
+      for (const [marker, allowed] of permitted) {
+        if (source.includes(marker))
+          expect(
+            allowed.has(file),
+            `${file} expands the trusted Teams private-creation seam through ${marker}`,
+          ).toBe(true);
+      }
+    }
+  }
+});

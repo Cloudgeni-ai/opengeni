@@ -1747,6 +1747,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 0918 Teams durable integration state: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 6
+            : 0) +
           // 0908 personal Site opens: full DML and FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1813,7 +1819,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
-        1; // 0909 session message search texts: read and insert, FORCE-RLS.
+        1 + // 0909 session message search texts: read and insert, FORCE-RLS.
+        6; // 0918 Teams durable integration state: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -3669,4 +3676,32 @@ describe("runtime database posture evaluator", () => {
       );
     }
   });
+});
+
+test("Teams wake is owner-only with its exact definer and search-path boundary", () => {
+  const posture = safePosture();
+  posture.tables.push({ ...posture.tables[0]!, name: "teams_bot_routes" });
+  const routine = {
+    name: "wake_teams_route_for_session_event()",
+    owner: "opengeni_migrator",
+    execute: false,
+    publicExecute: false,
+    securityDefiner: true,
+    configuration: ["search_path=pg_catalog, public, pg_temp"],
+  };
+  posture.privateRoutines.push(routine);
+  const violation = "Teams wake trigger has unsafe execution, ownership or search path";
+  expect(evaluateRuntimeDatabasePosture(posture, options)).not.toContain(violation);
+  for (const patch of [
+    { execute: true },
+    { publicExecute: true },
+    { securityDefiner: false },
+    { owner: "other_owner" },
+    { configuration: ["search_path=pg_temp, public"] },
+  ]) {
+    const original = { ...routine };
+    Object.assign(routine, patch);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(violation);
+    Object.assign(routine, original);
+  }
 });

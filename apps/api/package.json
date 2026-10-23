@@ -44,6 +44,7 @@
     "@hono/zod-validator": "^0.7.6",
     "@keeper-security/secrets-manager-core": "17.6.0",
     "@llamaindex/liteparse": "2.14.2",
+    "@microsoft/teams.apps": "2.1.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/artifact-tool": "workspace:*",

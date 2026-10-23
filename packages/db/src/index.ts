@@ -90252,3 +90252,7 @@ export {
 export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";
 export * from "./session-usage-limits";
 export * from "./boot-connect";
+
+export * from "./teams-conversations";
+
+export * from "./teams-private-session";

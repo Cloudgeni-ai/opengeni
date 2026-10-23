@@ -81,6 +81,93 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("an already prepared Teams tool cannot resolve credentials after rollout is disabled", async () => {
+    const item = { ...integration(), definitionId: "microsoft-teams" };
+    const settings = testSettings({ microsoftTeamsToolsEnabled: true });
+    let resolutions = 0;
+    let providerCalls = 0;
+    const [registration] = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async () => {
+        resolutions++;
+        throw new Error("must not resolve");
+      },
+      fetchImpl: async () => {
+        providerCalls++;
+        return Response.json({});
+      },
+    });
+    settings.microsoftTeamsToolsEnabled = false;
+    await expect(registration!.server.callTool("list_items", {}, null)).rejects.toMatchObject({
+      code: "integration_disabled",
+      outcome: "not_started",
+    });
+    expect(resolutions).toBe(0);
+    expect(providerCalls).toBe(0);
+  });
+
+  test("Teams rollout revocation during native credential or physical authorization prevents provider I/O", async () => {
+    for (const revokeAt of ["resolve", "authorize"] as const) {
+      const item = { ...integration(), definitionId: "microsoft-teams" };
+      const settings = testSettings({ microsoftTeamsAllowedWorkspaceIds: [authority.workspaceId] });
+      let providerCalls = 0;
+      let authorizations = 0;
+      const [registration] = buildApiIntegrationServersForTurn({
+        settings,
+        integrations: [item],
+        authority,
+        resolveCredential: async () => {
+          if (revokeAt === "resolve") settings.microsoftTeamsAllowedWorkspaceIds = [];
+          return {
+            status: "ok",
+            connectionId: item.connectionRef!.connectionId!,
+            headers: { Authorization: "Bearer fixture" },
+            authorizeProviderRequest: async () => {
+              authorizations++;
+              if (revokeAt === "authorize") settings.microsoftTeamsAllowedWorkspaceIds = [];
+              return true;
+            },
+          };
+        },
+        fetchImpl: async () => {
+          providerCalls++;
+          return Response.json({});
+        },
+      });
+      await expect(registration!.server.callTool("list_items", {}, null)).rejects.toMatchObject({
+        code: "authorization_rejected",
+        outcome: "not_started",
+      });
+      expect(authorizations).toBe(revokeAt === "resolve" ? 0 : 1);
+      expect(providerCalls).toBe(0);
+    }
+  });
+
+  test("Teams runtime remains unavailable after installation when rollout is disabled", () => {
+    const teams = {
+      ...integration(),
+      definitionId: "microsoft-teams",
+      definitionProvenance: "curated" as const,
+    };
+    const settings = testSettings({
+      microsoftTeamsToolsEnabled: false,
+      microsoftTeamsAllowedWorkspaceIds: ["pilot"],
+    });
+    const build = (workspaceId: string) =>
+      buildApiIntegrationServersForTurn({
+        settings,
+        integrations: [teams],
+        authority: { ...authority, workspaceId },
+        resolveCredential: async () => {
+          throw new Error("disabled server must not resolve credentials");
+        },
+      });
+    expect(build("other")).toEqual([]);
+    expect(build("pilot")).toHaveLength(1);
+  });
+
   test("one integration exposes personal and workspace routes with exact preflight generations", async () => {
     const item = integration();
     const bindings: McpConnectionAccountBinding[] = ["subject", "workspace"].map((scope, index) => {

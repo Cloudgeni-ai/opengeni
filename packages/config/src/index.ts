@@ -588,6 +588,27 @@ const SettingsSchema = z.object({
   // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
   googleConnectorSetupEnabled: EnvBoolean.default(true),
   googleDriveMcpEnabled: EnvBoolean.default(false),
+  microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  microsoftTeamsAllowedWorkspaceIds: z.preprocess(
+    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
+    z.array(z.string().uuid()).default([]),
+  ),
+  teamsBotEnabled: EnvBoolean.default(false),
+  teamsBotAllowedTenantIds: z.preprocess(
+    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
+    z.array(z.string().uuid()).default([]),
+  ),
+  teamsBotAllowedChannelIds: z.preprocess(
+    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim()).filter(Boolean) : value,
+    z.array(z.string().max(550).refine(value => value[36] === ":" && z.string().uuid().safeParse(value.slice(0,36)).success && value.slice(37).length>0)).default([]),
+  ),
+  teamsBotSetupAdminIds: z.preprocess(
+    (value) => typeof value === "string" ? value.split(",").map((id) => id.trim().toLowerCase()).filter(Boolean) : value,
+    z.array(z.string().regex(/^[0-9a-f-]{36}:[0-9a-f-]{36}$/).refine(value => value.split(":").every(id => z.string().uuid().safeParse(id).success))).default([]),
+  ),
+  teamsBotClientId: z.string().uuid().optional(),
+  teamsBotClientSecret: z.string().min(1).optional(),
+  teamsBotTenantId: z.string().uuid().optional(),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
@@ -5110,6 +5131,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
+    microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
+    teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
+    teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
+    teamsBotAllowedChannelIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS"),
+    teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
+    teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
+    teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
+    teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",

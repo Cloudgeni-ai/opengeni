@@ -114,6 +114,7 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||
+    path === "/v1/integrations/teams/messages" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
     path === "/v1/integrations/slack/interactions" ||
