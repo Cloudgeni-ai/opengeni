@@ -171,6 +171,9 @@ export type PrepareBrowserSessionCreateInput = {
   linkedComputerSessionId?: string | null;
   resolveDefaultRevision?: boolean;
   capabilities?: BrowserSessionCapabilitiesValue;
+  /** Workspace storing an attached-device placement's Chrome profile, where
+   *  its machine is enrolled. Defaults to this workspace. */
+  attachedDeviceWorkspaceId?: string | null;
 };
 
 export type PrepareBrowserSessionEndInput = {
@@ -223,6 +226,9 @@ export type BrowserSessionControlRecord = {
   session: BrowserSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Workspace storing an attached-device placement's Chrome profile, which
+   *  can be another workspace than the session's; null otherwise. */
+  deviceWorkspaceId: string | null;
   /** Placement hosting browserd. It equals the logical sandbox placement for
    * managed browsers and remains the source home sandbox for remote browsers. */
   controllerHostSandboxGroupId: string | null;
@@ -823,6 +829,7 @@ async function controlRecordFromRows(
     session: browserSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: createdAssociations[0]!.sessionId,
+    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     controllerHostSandboxGroupId: row.controllerHostSandboxGroupId,
     createOperationId: row.createOperationId,
     networkRouteAuthority: networkRouteAuthorityFromRow(row),
@@ -939,7 +946,11 @@ export async function prepareBrowserSessionCreate(
           });
         }
 
-        const placementColumns = placementToColumns(input.placement);
+        const placementColumns = placementToColumns(
+          input.placement,
+          input.workspaceId,
+          input.attachedDeviceWorkspaceId,
+        );
         const controllerHostSandboxGroupId =
           input.placement.kind === "sandbox_group"
             ? input.placement.sandboxGroupId
@@ -1278,11 +1289,16 @@ async function resolveCreateIdentitySelection(
   return { identityId: identity.id, baseRevisionId: baseRevisionId ?? null };
 }
 
-function placementToColumns(placement: InteractionPlacement): {
+function placementToColumns(
+  placement: InteractionPlacement,
+  workspaceId: string,
+  attachedDeviceWorkspaceId: string | null | undefined,
+): {
   placementKind: BrowserSessionRow["placementKind"];
   sandboxGroupId: string | null;
   connectedSandboxId: string | null;
   deviceId: string | null;
+  deviceWorkspaceId: string | null;
   externalProviderId: string | null;
   externalPlacementId: string | null;
 } {
@@ -1291,6 +1307,8 @@ function placementToColumns(placement: InteractionPlacement): {
     sandboxGroupId: placement.kind === "sandbox_group" ? placement.sandboxGroupId : null,
     connectedSandboxId: placement.kind === "connected_machine" ? placement.sandboxId : null,
     deviceId: placement.kind === "attached_device" ? placement.deviceId : null,
+    deviceWorkspaceId:
+      placement.kind === "attached_device" ? (attachedDeviceWorkspaceId ?? workspaceId) : null,
     externalProviderId: placement.kind === "external_provider" ? placement.providerId : null,
     externalPlacementId: placement.kind === "external_provider" ? placement.placementId : null,
   };
@@ -2951,7 +2969,9 @@ export async function touchBrowserSessionController(
         if (observed.placementKind === "attached_device") {
           if (!observed.deviceId || !observed.placementInstanceId) return false;
           const current = await attachedDeviceGenerationMatches(tx, {
+            accountId: input.accountId,
             workspaceId: input.workspaceId,
+            deviceWorkspaceId: observed.deviceWorkspaceId ?? input.workspaceId,
             deviceId: observed.deviceId,
             placementInstanceId: observed.placementInstanceId,
           });

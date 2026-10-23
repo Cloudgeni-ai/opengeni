@@ -300,6 +300,9 @@ type BrowserPlacement = {
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
   transport: PlacementBrowserTransport;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 export function registerBrowserSessionRoutes(
@@ -463,6 +466,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           existing?.session.placement ?? request.placement ?? null,
+          existing?.deviceWorkspaceId ?? null,
           existing?.session.controller?.placementInstanceId ?? null,
           "browser.create",
           context.req.raw.signal,
@@ -472,7 +476,13 @@ export function registerBrowserSessionRoutes(
             if (!prepared) {
               prepared = await prepareBrowserSessionCreate(
                 deps.db,
-                browserCreateInput(grant, workspaceId, request, placement.placement),
+                browserCreateInput(
+                  grant,
+                  workspaceId,
+                  request,
+                  placement.placement,
+                  placement.attachedDeviceWorkspaceId,
+                ),
               );
             }
             stages.mark("prepare");
@@ -2673,6 +2683,7 @@ export function registerBrowserSessionRoutes(
             sourceSession,
             grant,
             prepared.session.placement,
+            before.deviceWorkspaceId,
             null,
             "browser.resume",
             context.req.raw.signal,
@@ -3026,6 +3037,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.control",
       context.req.raw.signal,
@@ -3316,7 +3328,13 @@ export function registerBrowserSessionRoutes(
         // completing under the bound generation fences that controller off.
         if (
           !binding ||
-          (await browserControllerGone(grant, workspaceId, record.session.placement))
+          (await browserControllerGone(
+            grant,
+            workspaceId,
+            record.session.placement,
+            record.deviceWorkspaceId,
+            binding.placementInstanceId,
+          ))
         ) {
           const completed = await completeBrowserSessionEnd(deps.db, {
             accountId: grant.accountId,
@@ -3342,6 +3360,7 @@ export function registerBrowserSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "browser.end",
           context.req.raw.signal,
@@ -3637,6 +3656,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,
@@ -3818,6 +3838,9 @@ export function registerBrowserSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -3831,6 +3854,7 @@ export function registerBrowserSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         recordAttachedBrowserUnavailable(deps.observability, "disconnected");
@@ -3907,6 +3931,7 @@ export function registerBrowserSessionRoutes(
           browserName: device.browserName,
           browserVersion: device.browserVersion,
         },
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -4499,6 +4524,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -4583,12 +4609,15 @@ export function registerBrowserSessionRoutes(
     );
   }
 
-  /** See `interactionControllerGone`: a removed machine or a disconnected
-   * Chrome device; a managed browser on a machine that is only offline waits. */
+  /** See `interactionControllerGone`: a removed machine, or a Chrome profile
+   * that is disconnected, restarted, gone or no longer reachable here; a
+   * managed browser on a machine that is only offline waits. */
   async function browserControllerGone(
     grant: AccessGrant,
     workspaceId: string,
     placement: InteractionPlacement | null,
+    deviceWorkspaceId: string | null,
+    placementInstanceId: string | null,
   ): Promise<boolean> {
     if (placement?.kind !== "connected_machine" && placement?.kind !== "attached_device") {
       return false;
@@ -4596,7 +4625,9 @@ export function registerBrowserSessionRoutes(
     return await interactionControllerGone(
       deps.db,
       await attachedBrowserViewer(deps, grant, workspaceId),
-      placement,
+      placement.kind === "attached_device"
+        ? { ...placement, deviceWorkspaceId, placementInstanceId }
+        : placement,
     );
   }
 
@@ -4815,6 +4846,7 @@ export function registerBrowserSessionRoutes(
       sourceSession,
       grant,
       record.session.placement,
+      record.deviceWorkspaceId,
       retained?.placementInstanceId ?? null,
       "browser.resume",
       context.req.raw.signal,
@@ -4997,6 +5029,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.resume",
         context.req.raw.signal,
@@ -5055,6 +5088,7 @@ export function registerBrowserSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         "browser.suspend",
         context.req.raw.signal,
@@ -5106,6 +5140,7 @@ export function browserCreateInput(
   workspaceId: string,
   request: CreateBrowserSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   if (request.storageMode === "ephemeral_context" && placement.kind !== "sandbox_group") {
     throw new BrowserControlUnsupportedError(
@@ -5159,6 +5194,7 @@ export function browserCreateInput(
         : engine === "lightpanda"
           ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
           : {}),
+    attachedDeviceWorkspaceId: attached ? (attachedDeviceWorkspaceId ?? null) : null,
   };
 }
 
