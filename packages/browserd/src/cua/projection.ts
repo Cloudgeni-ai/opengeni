@@ -126,6 +126,18 @@ export function opensOnInvoke(element: { readonly actions: readonly string[] }):
 }
 
 /**
+ * Whether a macOS element is a number field that takes a value: an
+ * AXIncrementor (Chrome's `<input type=number>`, a native stepper) that is
+ * not one part of a date or time field. A part takes neither the focus nor
+ * a value on its own (see dateFields).
+ */
+function isNumberField(element: CuaElement, byIndex: ReadonlyMap<number, CuaElement>): boolean {
+  if (element.role !== "AXIncrementor") return false;
+  const parent = element.parent_index === undefined ? undefined : byIndex.get(element.parent_index);
+  return parent?.role !== "AXDateField" && parent?.role !== "AXTimeField";
+}
+
+/**
  * The macOS elements that belong to web content, by element_index: an
  * AXWebArea and everything CUA lists under it. WebKit and Chromium report
  * AXShowMenu on every element of a page; it opens the page's context menu,
@@ -427,6 +439,7 @@ export function projectElements(
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
     const protectedReason = protectionFor(element.role, platform);
+    const numberField = platform === "macos" && isNumberField(element, byIndex);
     const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
@@ -462,6 +475,7 @@ export function projectElements(
                   "AXSlider",
                   "AXPopUpButton",
                 ].includes(element.role)) ||
+              numberField ||
               typedFields.has(element.element_index)
       )
         actions.push("set_value");
@@ -495,7 +509,7 @@ export function projectElements(
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
-      role: (roles[element.role] ?? element.role).slice(0, 256),
+      role: (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256),
       ...(label
         ? { name: label.slice(0, 8_192) }
         : containedText && !protectedReason

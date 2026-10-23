@@ -67,9 +67,10 @@ type Operation = {
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
-  /** A text field's value before set_value wrote this one: a field that
-   * still reads it afterwards did not take the write. */
-  expectText?: { ref: string; value: string; before: string };
+  /** A text or number field's value before set_value wrote this one: a
+   * field that still reads it afterwards did not take the write. A number
+   * field (`numeric`) compares as numbers, and reading empty fails too. */
+  expectText?: { ref: string; value: string; before: string; numeric?: true };
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
@@ -1567,13 +1568,14 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...(node.role === "textbox" &&
+            ...((node.role === "textbox" || node.role === "spinbutton") &&
             (node.value === undefined || typeof node.value === "string")
               ? {
                   expectText: {
                     ref: node.ref,
                     value: String(action.value),
                     before: node.value ?? "",
+                    ...(node.role === "spinbutton" ? { numeric: true as const } : {}),
                   },
                 }
               : {}),
@@ -1866,6 +1868,7 @@ const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
   text: "statictext",
   radio: "radiobutton",
   combobox: "popupbutton",
+  spinbutton: "incrementor",
 };
 
 type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
@@ -2099,7 +2102,9 @@ async function readPermissions(
 
 /** What the input a set of steps sent did not do, read from the window
  * afterwards: a date field that reads another value than the one typed into
- * its parts, a text field that still reads what it did before set_value.
+ * its parts, a text field that still reads what it did before set_value, a
+ * number field that reads its old value or nothing instead of the number it
+ * was given.
  * The input ran either way, so these are not refusals. A date field Chrome
  * left without a value reads what its parts read (see projectElements). A
  * field the reading no longer shows is left to the caller's own look. */
@@ -2153,6 +2158,22 @@ function inputFailures(
       const reading = read(expected.ref);
       if (!reading.found) continue;
       const now = reading.value ?? "";
+      if (expected.numeric) {
+        // A number field reads its number back as a number ("7.50" reads
+        // "7.5"), and reads empty when it refused the text it was given.
+        const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
+        const same = (a: string, b: string) => a === b || number(a) === number(b);
+        if (
+          !same(now, expected.value) &&
+          (same(now, expected.before) || (now.trim() === "" && expected.value.trim() !== ""))
+        )
+          failures.push(
+            `the number field ${expected.ref} reads ${
+              now.trim() ? `"${now.slice(0, 64)}"` : "empty"
+            } instead of the value it was given; give it a plain number, such as 42 or 7.5`,
+          );
+        continue;
+      }
       // The value is not repeated: it may be a secret typed at dispatch.
       if (now === expected.before && now !== expected.value)
         failures.push(
