@@ -237,7 +237,7 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
     // withheld usage-history routines, the later 0890 reconciliation tables,
-    // the 0909 message search text table and the Site opens table. The previous
+    // the 0909 message search text table, Site opens, and the six Teams tables. The previous
     // runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
@@ -246,8 +246,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
-      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
+      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -278,11 +278,18 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         options,
       ),
     ).toEqual([
-      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens",
+      "RLS tables are absent from the declared contract: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
       "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table session_message_search_texts grants excess runtime privileges: SELECT, INSERT",
       "table site_opens grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_inbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_installations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_links grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_outbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_proofs grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
     ]);
   } finally {
     await client?.close();
