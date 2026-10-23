@@ -341,11 +341,12 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
   isTerminal?(): boolean;
-  /** Whether a JavaScript dialog is waiting for an answer in one of its tabs.
+  /** When the most recent JavaScript dialog still waiting for an answer in
+   * one of its tabs opened (epoch milliseconds), or null when none is.
    * Releasing the browser then would lose it: a relaunched browser no longer
    * has it, and in the person's own Chrome a debugger attached later can
    * neither see nor answer it. */
-  hasOpenDialog?(): boolean;
+  openDialogSince?(): number | null;
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
@@ -620,11 +621,11 @@ export class BrowserSupervisor {
     const idleBefore = this.now() - this.idleReleaseMs;
     const released: string[] = [];
     for (const runtime of [...this.sessions.values()]) {
-      if (!idleReleasable(runtime, idleBefore)) continue;
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
       // A download still transferring is the browser at work with nobody
       // calling it; stopping the browser would fail the download.
       if (await downloadInProgress(runtime)) continue;
-      if (!idleReleasable(runtime, idleBefore)) continue;
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
       const browserSessionId = runtime.options.browserSessionId;
       if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
         continue;
@@ -1395,7 +1396,7 @@ export class BrowserSupervisor {
         });
         continue;
       }
-      if (restartPreservesRuntime(runtime)) continue;
+      if (restartPreservesRuntime(runtime, this.now())) continue;
       const kind =
         runtime.recovery !== null
           ? "browser_recovery"
@@ -3701,13 +3702,13 @@ function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
 }
 
 /** A browser nobody is using that its next request can bring back: no
- * request, live view, recording, recovery or unanswered JavaScript dialog in
- * progress (an agent waiting on a dialog is still using the browser, and
- * releasing it would lose the dialog). A managed browser
+ * request, live view, recording, recovery or recent unanswered JavaScript
+ * dialog in progress (an agent waiting on a dialog is still using the
+ * browser, and releasing it would lose the dialog). A managed browser
  * needs a stopped profile its next request can relaunch. A session in the
  * person's own Chrome needs nothing kept here: its tabs live on in Chrome, and
  * its next request continues in the tab it was using. */
-function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
+function idleReleasable(runtime: Runtime, idleBefore: number, now: number): boolean {
   const transport = runtime.options.transport.kind;
   return (
     (transport === "managed" || transport === "attached_chrome") &&
@@ -3717,7 +3718,7 @@ function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
     runtime.recovery === null &&
     runtime.externalAuthTail === null &&
     runtime.controller.isIdle() &&
-    runtime.driver.hasOpenDialog?.() !== true &&
+    !awaitsDialogAnswer(runtime, now) &&
     (transport === "attached_chrome"
       ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
       : hasPreservableWorkingRuntime(runtime))
@@ -3736,14 +3737,26 @@ async function downloadInProgress(runtime: Runtime): Promise<boolean> {
   }
 }
 
+/** How long an unanswered JavaScript dialog keeps its session's browser from
+ * an idle release or an agent restart. A dialog nobody answered in that time
+ * is taken as forgotten (or its close was never reported); losing it then is
+ * better than holding the browser, and the machine's updates, indefinitely. */
+const DIALOG_HOLD_MS = 30 * 60_000;
+
+/** Whether the session has a JavaScript dialog an agent may still answer. */
+function awaitsDialogAnswer(runtime: Runtime, now: number): boolean {
+  const since = runtime.driver.openDialogSince?.() ?? null;
+  return since !== null && now - since < DIALOG_HOLD_MS;
+}
+
 /** A restart now loses neither admitted work nor unrecoverable session state. */
-function restartPreservesRuntime(runtime: Runtime): boolean {
+function restartPreservesRuntime(runtime: Runtime, now: number): boolean {
   if (runtime.recovery !== null || runtime.externalAuthTail !== null) return false;
   if (!runtime.controller.isIdle()) return false;
   // A session whose driver already ended has no live state left to lose.
   if (runtime.driver.isTerminal?.()) return true;
   // A restart would lose a dialog the agent has yet to answer.
-  if (runtime.driver.hasOpenDialog?.()) return false;
+  if (awaitsDialogAnswer(runtime, now)) return false;
   // Attached Chrome lives outside this controller: its tabs and pages survive
   // our restart (only the empty tabs the session opened close, and Chrome's
   // debugger is released), and the session's next request continues in the

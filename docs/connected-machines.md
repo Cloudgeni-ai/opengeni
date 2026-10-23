@@ -815,7 +815,8 @@ are adopted by the next controller. The agent checks every owned browserd scope 
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
 busy attached browser sessions, browsers without a durable working runtime,
-sessions with an unanswered JavaScript dialog, and isolated virtual desktops. A quiescent managed browser with a durable working
+sessions with a JavaScript dialog unanswered for less than 30 minutes, and
+isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
 adopts the same process on its next request, even when the old launcher was
@@ -2092,7 +2093,10 @@ trusted to name the same tabs after the extension reconnects.
 
 A session waiting on a JavaScript dialog is still in use: neither an idle
 release nor an agent restart lets go of its browser until the dialog is
-answered, for attached and managed browsers alike. Chrome offers a dialog only
+answered, for attached and managed browsers alike, or until it has been open
+for 30 minutes: a dialog nobody answered by then is taken as forgotten (or its
+close was never reported), and losing it is better than holding the browser
+and the machine's updates indefinitely. Chrome offers a dialog only
 to the debugger that was attached when it opened; a debugger attached later can
 neither see nor answer it, and the page answers nothing until the person does.
 For the same reason, a session that continues in its earlier tab waits at most

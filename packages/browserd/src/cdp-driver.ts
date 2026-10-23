@@ -1328,13 +1328,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return this.preserveHeadlessSessionCookies;
   }
 
-  /** Whether a JavaScript dialog is waiting for an answer in any tab. Chrome
-   * offers a dialog only to the debugger that was attached when it opened:
-   * one attached later can neither see nor answer it, and the page stays
-   * blocked. Letting go of the browser now would strand it. */
-  hasOpenDialog(): boolean {
-    for (const state of this.states.values()) if (state.dialog) return true;
-    return false;
+  /** When the most recent JavaScript dialog still waiting for an answer
+   * opened (epoch milliseconds), or null when none is. Chrome offers a dialog
+   * only to the debugger that was attached when it opened: one attached later
+   * can neither see nor answer it, and the page stays blocked. Letting go of
+   * the browser now would strand it. */
+  openDialogSince(): number | null {
+    let newest: number | null = null;
+    for (const state of this.states.values()) {
+      if (!state.dialog) continue;
+      const openedAt = Date.parse(state.dialog.openedAt);
+      if (Number.isFinite(openedAt) && (newest === null || openedAt > newest)) newest = openedAt;
+    }
+    return newest;
   }
 
   async target(targetId: string): Promise<BrowserTargetValue | null> {

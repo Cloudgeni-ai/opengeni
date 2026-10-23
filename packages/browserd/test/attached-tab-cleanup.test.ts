@@ -374,6 +374,29 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
     });
   });
 
+  test("a dialog nobody answered for half an hour no longer holds the browser or updates", async () => {
+    await withChrome(async ({ chrome, clock, open }) => {
+      const supervisor = await open();
+      const session = reference(15);
+      const tab = (
+        await supervisor.createSession({ ...session, headed: true, transport: TRANSPORT })
+      ).observation.target.id;
+      chrome.tabs.get(tab)!.url = "https://work.example.test/";
+      chrome.dialog(tab, true);
+      await waitFor(async () => (await supervisor.observe(session, tab)).dialog !== null);
+      clock.now += 29 * MINUTE;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(supervisor.updateBlockers()).toHaveLength(1);
+      // Forgotten, or its close was never reported: the session is released
+      // and an update may restart the controller, losing the dialog.
+      clock.now += 2 * MINUTE;
+      expect(supervisor.updateBlockers()).toEqual([]);
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
+      expect(chrome.attached.size).toBe(0);
+      expect(chrome.tabs.has(tab)).toBe(true);
+    });
+  });
+
   test("a controller shutdown closes the session's empty tab and lets go of Chrome", async () => {
     await withChrome(async ({ chrome, root, open }) => {
       const supervisor = await open();
