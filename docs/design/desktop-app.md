@@ -350,6 +350,46 @@ lifecycle and launch identity.
 
 Screen control is a switch in the Connect dialog.
 
+### Settings → Computer use
+
+One page (desktop only) shows what Opengeni may do on this computer. The
+Computer use switch (`ComputerUseRow`) comes first; the rows under it apply
+only while it is on and are shown disabled while it is off. One row per
+capability, each with one switch or one action:
+
+- **Control the screen.** On asks for Screen Recording, Accessibility and
+  Input Monitoring one at a time (the system prompt the first time, then the
+  exact System Settings pane), and reconnects with screen-control consent if
+  the connection lacks it. Off restarts the hosted agent with
+  `OPENGENI_AGENT_SCREEN_CONTROL=off`: the agent's desktop is
+  `TurnedOffDesktop`, which offers no display, captures nothing and injects
+  nothing, and says why, whatever the connection's consent says. It also
+  reports no screen-control consent or macOS permission states, starts its
+  browser controllers with no computer backend (so no ComputerSession can
+  reach the screen), and asks for no grants at startup or enrollment. The
+  agent's `permissions` answer carries `screenControlSwitch: true`; with an
+  older agent the row is unavailable rather than pretending to be off.
+- **Google Chrome.** Off restarts the agent with
+  `OPENGENI_AGENT_BROWSER_EXTENSION=off`, so it releases its Chrome
+  native-messaging host and starts no attached-browser bridge. The row shows
+  whether the Opengeni Browser extension is connected and links to it.
+- **Desktop, Documents and Downloads** (from the screen list, or from the
+  status's `folders` while screen control is off), **Microsoft Excel** (the
+  add-in's setup page), **App-shots** (moved here from Settings → Machines)
+  and the **Microphone**, which when off makes the app refuse every
+  microphone request.
+
+The switches are on by default, so nothing changes for people who already use
+these features, and persist in `computer-capabilities.json` in the app's data
+folder. A file that can't be read counts as everything off until a save
+replaces it (a damaged one is also copied to `.corrupt`), and a save or agent
+restart that fails shows on its row. While another agent holds this computer,
+the rows say so. Changing the screen or Chrome switch restarts the agent, which stops
+its running work; the page says so. Rows refresh when the window regains
+focus, so a grant made in System Settings shows as Allowed on return. Screen
+control and Chrome switches apply to an agent the app runs; for an existing
+service, or while another agent serves this computer, they are shown disabled.
+
 The menu bar / tray item shows whether the computer is connected and offers
 Open, Pause this computer, Resume and Quit.
 On macOS it also lists any permission the agent still lacks and opens that
@@ -376,7 +416,7 @@ composer of the chat they are using: a screenshot plus the window's app,
 title and accessibility text, including text scrolled out of view. They add a
 sentence and send. Nothing is sent by itself.
 
-- **Off by default.** Settings → Machines → App-shots turns it on, picks the
+- **Off by default.** Settings → Computer use → App-shots turns it on, picks the
   shortcut and shows the Screen Recording and Accessibility permissions. On
   macOS the default is both Command keys pressed together; any modifier pair
   or an ordinary key combination works. Without Accessibility only the

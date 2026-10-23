@@ -21,15 +21,17 @@ const CHECKABLE = new Set(["media", "clipboard-sanitized-write", "clipboard-read
  * Whether a permission request from a page is granted. `trusted` is true only
  * for the account's own page in its own view. A media request is granted for
  * the microphone alone: a request that names the camera, or names nothing
- * (an unknown shape), is refused.
+ * (an unknown shape), is refused, and so is every media request while the
+ * person has turned the microphone off on the This computer page.
  */
 export function grantsPermissionRequest(
   trusted: boolean,
   permission: string,
-  details: { mediaTypes?: readonly string[] | undefined } = {},
+  details: { mediaTypes?: readonly string[] | undefined; microphone?: boolean | undefined } = {},
 ): boolean {
   if (!trusted || !REQUESTABLE.has(permission)) return false;
   if (permission !== "media") return true;
+  if (details.microphone === false) return false;
   const types = details.mediaTypes ?? [];
   return types.length > 0 && types.every((type) => type === "audio");
 }
@@ -37,15 +39,16 @@ export function grantsPermissionRequest(
 /**
  * Whether a permission check from a page reports the permission as granted.
  * A media check about the camera reports it as not granted, so the page never
- * offers a camera it cannot use.
+ * offers a camera it cannot use; with the microphone turned off, no media is.
  */
 export function grantsPermissionCheck(
   trusted: boolean,
   permission: string,
-  details: { mediaType?: string | undefined } = {},
+  details: { mediaType?: string | undefined; microphone?: boolean | undefined } = {},
 ): boolean {
   if (!trusted || !CHECKABLE.has(permission)) return false;
-  return permission !== "media" || details.mediaType !== "video";
+  if (permission !== "media") return true;
+  return details.microphone !== false && details.mediaType !== "video";
 }
 
 /** The permission handlers of an Electron session. */

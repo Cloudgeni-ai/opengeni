@@ -284,6 +284,7 @@ export const CLIENT_PAGES = [
   "organization",
   "insights",
   "machines",
+  "computer-use",
   "files",
   "agents",
   "secrets",

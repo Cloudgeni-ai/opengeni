@@ -183,6 +183,15 @@ export interface ThisComputerDeps {
    * is false.
    */
   browserExtensionIds?: readonly string[];
+  /**
+   * What the person lets the app's agent do on this computer, read every time
+   * the agent starts. `screenControl: false` starts it without the screen (no
+   * capture, no input, no question to the system); `browserExtension: false`
+   * removes its Chrome extension bridge. Absent: both on. Call
+   * `agentSwitchesChanged` after a change. A separately installed agent
+   * service isn't started by the app, so these don't reach it.
+   */
+  agentSwitches?(): { screenControl: boolean; browserExtension: boolean };
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
   /**
@@ -746,6 +755,10 @@ export class ThisComputer {
     if (this.removedOnServer(reading, connection)) return removed();
     const permissions = await this.permissionList();
     const missing = permissions?.some((permission) => !permission.granted) ?? false;
+    // Without the screen-control list, the guarded folders still have their
+    // answer: agents read files whether or not they see the screen.
+    const folders =
+      !permissions && this.deps.platform === "darwin" ? await this.foldersAllowed() : undefined;
     return {
       ...base,
       state: this.state.paused ? "paused" : "connected",
@@ -756,6 +769,7 @@ export class ThisComputer {
             systemNames: macSystemNames(this.deps.systemLanguages?.() ?? [], this.deps.systemNames),
           }
         : {}),
+      ...(folders !== undefined ? { folders } : {}),
       ...(missing && this.askingRecently ? { setupPending: true } : {}),
       ...(permissions ? { requestedPermissions: [...this.state.requested] } : {}),
       ...(!this.state.paused && this.agent.state !== "running" ? { reconnecting: true } : {}),
@@ -1454,6 +1468,63 @@ export class ThisComputer {
     this.machineCache = null;
   }
 
+  /**
+   * Whether the app runs this computer's agent itself, so `agentSwitches`
+   * reach it. False for a separately installed agent service.
+   */
+  get runsOwnAgent(): boolean {
+    return this.supported && !this.serviceBacked;
+  }
+
+  /**
+   * Another agent on this computer holds it, so the app's agent waits and the
+   * person's switches don't reach the one serving.
+   */
+  get anotherAgentServes(): boolean {
+    return this.agent.state === "elsewhere";
+  }
+
+  /** This computer was connected (or since reconnected) with screen control. */
+  get screenControlConnected(): boolean {
+    return this.state.screenControl;
+  }
+
+  /**
+   * Whether the agent the app runs honours its screen-control switch: true or
+   * false from its `permissions` answer, null when there is no answer (no
+   * agent installed, a separately installed service, or no reply).
+   */
+  async screenControlSwitchSupported(): Promise<boolean | null> {
+    if (!this.runsOwnAgent || !existsSync(this.hostedPath)) return null;
+    try {
+      const permissions = await this.permissions();
+      return permissions ? permissions.screenControlSwitch === true : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The person changed `agentSwitches`: a running agent starts again with them. */
+  async agentSwitchesChanged(): Promise<void> {
+    this.permissionsCache = null;
+    if (this.runsOwnAgent && this.agent.state !== "stopped") await this.agent.restart();
+    this.deps.onChange();
+  }
+
+  /** The agent's environment for the person's switches. */
+  private switchEnv(): Record<string, string> {
+    const switches = this.deps.agentSwitches?.();
+    return {
+      ...(switches?.screenControl === false ? { OPENGENI_AGENT_SCREEN_CONTROL: "off" } : {}),
+      ...(switches?.browserExtension === false ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" } : {}),
+    };
+  }
+
+  /** Screen control is turned off in the app, so its permissions aren't needed. */
+  private get screenControlTurnedOff(): boolean {
+    return this.deps.agentSwitches?.().screenControl === false;
+  }
+
   // --- The agent's file -------------------------------------------------------------------------
 
   private hasAnyAgent(): boolean {
@@ -1607,7 +1678,7 @@ export class ThisComputer {
         // Plain text: the log is a file, not a terminal.
         // The app's own config folder, so it runs this app's connections and
         // never meets another agent's single-instance lock.
-        env: { ...process.env, ...HOST_ENV, ...this.agentEnv, NO_COLOR: "1" },
+        env: { ...process.env, ...HOST_ENV, ...this.agentEnv, ...this.switchEnv(), NO_COLOR: "1" },
         stdio: ["ignore", log ?? "ignore", log ?? "ignore"],
         windowsHide: true,
       });
@@ -1701,6 +1772,8 @@ export class ThisComputer {
   private async permissionList(): Promise<ThisComputerPermission[] | null> {
     if (this.serviceBacked) return null;
     if (!this.state.screenControl || this.deps.platform !== "darwin") return null;
+    // Turned off: none of these is needed. The folders are reported on their own.
+    if (this.screenControlTurnedOff) return null;
     const permissions = await this.permissions();
     if (!permissions?.required) return null;
     const list: ThisComputerPermission[] = [

@@ -21,6 +21,7 @@ const PAGES = new Set([
   "organization",
   "insights",
   "machines",
+  "computer-use",
   "files",
   "agents",
   "secrets",

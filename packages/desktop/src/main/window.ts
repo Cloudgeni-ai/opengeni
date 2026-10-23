@@ -45,6 +45,11 @@ export interface WindowEvents {
   /** The window was closed by the person. */
   closed(): void;
   focused(): void;
+  /**
+   * Whether pages may use the microphone, as set on the This computer page.
+   * Absent: they may.
+   */
+  microphoneAllowed?(): boolean;
 }
 
 /**
@@ -366,11 +371,17 @@ export class MainWindow {
     contents.session.setPermissionRequestHandler((requester, permission, callback, details) => {
       const trusted = sameOrigin(details.requestingUrl, target.baseUrl) && requester === contents;
       const mediaTypes = "mediaTypes" in details ? details.mediaTypes : undefined;
-      callback(grantsPermissionRequest(trusted, permission, { mediaTypes }));
+      callback(
+        grantsPermissionRequest(trusted, permission, {
+          mediaTypes,
+          microphone: this.events.microphoneAllowed?.() ?? true,
+        }),
+      );
     });
     contents.session.setPermissionCheckHandler((_requester, permission, origin, details) =>
       grantsPermissionCheck(sameOrigin(origin, target.baseUrl), permission, {
         mediaType: details.mediaType,
+        microphone: this.events.microphoneAllowed?.() ?? true,
       }),
     );
     // USB, serial and HID devices are never offered, and a Web Bluetooth

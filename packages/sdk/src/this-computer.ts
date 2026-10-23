@@ -171,6 +171,12 @@ export interface ThisComputerStatus {
    */
   permissions?: ThisComputerPermission[];
   /**
+   * On a Mac without that list (screen control turned off, or connected
+   * without it): whether agents may read Desktop, Documents and Downloads,
+   * i.e. the `files` permission on its own. Absent elsewhere and from older apps.
+   */
+  folders?: boolean;
+  /**
    * The person started setting up and hasn't allowed every permission yet.
    * Screens reopen the steps, e.g. after macOS restarted the app for a grant.
    */
