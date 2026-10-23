@@ -14,6 +14,13 @@ import {
 } from "react";
 
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "../../../artifacts";
+import {
+  useZoomPan,
+  useZoomPanShortcuts,
+  ZoomControls,
+  ZoomPanSurface,
+  type ZoomPanController,
+} from "../../../components/zoom-pan-image";
 import { createWorkspaceRetainedArtifactLoader } from "../../../timeline";
 import { Button } from "../../../ui/button";
 import { containedPortal } from "../../../ui/portal-container";
@@ -23,7 +30,6 @@ import { EditableArtifactSurface } from "../../lib/app-surfaces";
 import { artifactKey, isEditableArtifactKind } from "../../lib/artifact-catalog";
 import { saveRetainedArtifact } from "../../lib/retained-artifact-download";
 import { toast } from "../../lib/toast";
-import { cn } from "../../lib/utils";
 import { LoadingPanel } from "../common";
 import { ArtifactTypeIcon } from "./artifact-page-chrome";
 import {
@@ -141,6 +147,8 @@ export function ArtifactViewer({
   const content = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const sources = useImageSources(workspaceId);
+  // Zoom belongs to the image on screen: stepping starts the next one fitted.
+  const zoom = useZoomPan(currentKey);
 
   // The artifact left the list (archived, deleted, refreshed away): nothing to show.
   useEffect(() => {
@@ -156,6 +164,7 @@ export function ArtifactViewer({
   );
 
   const isImage = item?.kind === "image";
+  useZoomPanShortcuts(zoom, isImage);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -186,7 +195,10 @@ export function ArtifactViewer({
   // A horizontal swipe on a touch screen steps too.
   const swipe = useRef<{ x: number; y: number } | null>(null);
   const onPointerDown = (event: PointerEvent) => {
-    swipe.current = event.pointerType === "touch" ? { x: event.clientX, y: event.clientY } : null;
+    // A zoomed image pans under the finger instead.
+    const zoomed = zoom.view !== null && !zoom.view.fit;
+    swipe.current =
+      event.pointerType === "touch" && !zoomed ? { x: event.clientX, y: event.clientY } : null;
   };
   const onPointerUp = (event: PointerEvent) => {
     const start = swipe.current;
@@ -233,6 +245,12 @@ export function ArtifactViewer({
             <Dialog.Title className="min-w-0 flex-1 truncate text-sm font-medium">
               {item.title}
             </Dialog.Title>
+            {item.kind === "image" ? (
+              <ZoomControls
+                controller={zoom}
+                className="mr-1 hidden border-r border-border/80 pr-2 sm:flex"
+              />
+            ) : null}
             <div className="flex shrink-0 items-center gap-1">
               <Button
                 type="button"
@@ -282,7 +300,7 @@ export function ArtifactViewer({
             className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-2"
             {...(item.kind === "image" ? { onPointerDown, onPointerUp } : {})}
           >
-            <ViewerBody key={artifactKey(item)} workspaceId={workspaceId} item={item} />
+            <ViewerBody key={artifactKey(item)} workspaceId={workspaceId} item={item} zoom={zoom} />
           </div>
         </Dialog.Content>
       </DialogContainedPortal>
@@ -291,8 +309,17 @@ export function ArtifactViewer({
 }
 
 /** The image itself, or the preview the artifact has in the session panel. */
-function ViewerBody({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
-  if (item.kind === "image") return <ViewerImage workspaceId={workspaceId} item={item} />;
+function ViewerBody({
+  workspaceId,
+  item,
+  zoom,
+}: {
+  workspaceId: string;
+  item: ArtifactCatalogItem;
+  zoom: ZoomPanController;
+}) {
+  if (item.kind === "image")
+    return <ViewerImage workspaceId={workspaceId} item={item} zoom={zoom} />;
   if (isEditableArtifactKind(item.kind))
     return <EditableArtifactSurface workspaceId={workspaceId} artifactId={item.id} embedded />;
   return (
@@ -336,7 +363,15 @@ function usableImage(artifact: { available: boolean }, artifactId: string) {
   );
 }
 
-function ViewerImage({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
+function ViewerImage({
+  workspaceId,
+  item,
+  zoom,
+}: {
+  workspaceId: string;
+  item: ArtifactCatalogItem;
+  zoom: ZoomPanController;
+}) {
   const { client, accessKeyVersion } = useAppContext();
   const sources = useImageSources(workspaceId);
   const scope = retainedImageScope(accessKeyVersion, workspaceId, item.id);
@@ -385,6 +420,7 @@ function ViewerImage({ workspaceId, item }: { workspaceId: string; item: Artifac
       load={sources.load}
       alt={item.title}
       onRetry={retryFresh}
+      zoom={zoom}
     />
   );
 }
@@ -412,66 +448,38 @@ function ImageUnavailable({ title, onRetry }: { title: string; onRetry: () => vo
 }
 
 /**
- * The image fitted to the window and never scaled past its own pixels, so it
- * stays sharp. When it is larger than the window, a click shows it at actual
- * size (scrollable) and another click fits it again.
+ * The image fitted to the window (small screenshots enlarged up to 2x), with
+ * zoom and pan: click for actual size, Cmd/Ctrl + wheel, pinch, the header's
+ * buttons or Cmd/Ctrl + plus, minus and zero.
  */
 function ZoomableImage({
   artifact,
   load,
   alt,
   onRetry,
+  zoom,
 }: {
   artifact: RetainedArtifactReference;
   load: ImageSources["load"];
   alt: string;
   onRetry: () => void;
+  zoom: ZoomPanController;
 }) {
   const image = useRetainedImageObjectUrl(artifact, load);
   const [failed, setFailed] = useState(false);
-  const [zoomable, setZoomable] = useState(false);
-  const [actualSize, setActualSize] = useState(false);
   const noticeable = useNoticeable(image.kind === "loading");
   if (image.kind === "loading") return <ImageLoading visible={noticeable} />;
   if (image.kind !== "ready" || failed) return <ImageUnavailable title={alt} onRetry={onRetry} />;
   return (
-    <div className={cn("absolute inset-0", actualSize ? "overflow-auto" : "overflow-hidden")}>
-      {/* Always the same element, so measuring never remounts the image. */}
-      <button
-        type="button"
-        aria-label={actualSize ? "Fit to window" : "Show at actual size"}
-        aria-pressed={actualSize}
-        disabled={!zoomable && !actualSize}
-        onClick={() => setActualSize((value) => !value)}
-        className={cn(
-          "flex p-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset sm:p-6",
-          actualSize
-            ? "min-h-full min-w-full cursor-zoom-out"
-            : "size-full items-center justify-center",
-          !actualSize && zoomable && "cursor-zoom-in",
-        )}
-      >
-        <img
-          src={image.url}
-          alt={alt}
-          draggable={false}
-          width={artifact.dimensions?.width}
-          height={artifact.dimensions?.height}
-          onLoad={(event) => {
-            const element = event.currentTarget;
-            setZoomable(
-              element.naturalWidth > element.clientWidth + 1 ||
-                element.naturalHeight > element.clientHeight + 1,
-            );
-          }}
-          onError={() => setFailed(true)}
-          className={cn(
-            "block rounded-md shadow-og-lg",
-            actualSize ? "m-auto max-w-none" : "h-auto max-h-full w-auto max-w-full object-contain",
-          )}
-        />
-      </button>
-    </div>
+    <ZoomPanSurface
+      controller={zoom}
+      src={image.url}
+      alt={alt}
+      naturalSize={artifact.dimensions ?? null}
+      onError={() => setFailed(true)}
+      imageClassName="rounded-md shadow-og-lg"
+      labels={{ zoomIn: "Show at actual size", fit: "Fit to window" }}
+    />
   );
 }
 

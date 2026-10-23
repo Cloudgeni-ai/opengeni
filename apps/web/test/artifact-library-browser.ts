@@ -287,6 +287,28 @@ try {
     const startPosition = (await viewerPosition.textContent()) ?? "";
     assert.match(startPosition, /^\d+ of \d+$/);
     await page.screenshot({ path: `${output}/viewer-${suffix}.png` });
+    // Ctrl + plus zooms the image itself, larger on screen, and Ctrl + 0 fits it again.
+    const viewerImage = viewer.locator("[data-zoom-pan-surface] img");
+    await viewerImage.and(page.locator("[data-zoom-scale]")).waitFor();
+    const fittedScale = Number(await viewerImage.getAttribute("data-zoom-scale"));
+    const fittedWidth = (await viewerImage.boundingBox())?.width ?? 0;
+    await page.keyboard.press("Control+Equal");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) > fitted,
+      fittedScale,
+    );
+    assert.ok(((await viewerImage.boundingBox())?.width ?? 0) > fittedWidth);
+    await page.keyboard.press("Control+Digit0");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) === fitted,
+      fittedScale,
+    );
     await page.keyboard.press("ArrowRight");
     await page.waitForFunction(
       (previous) =>

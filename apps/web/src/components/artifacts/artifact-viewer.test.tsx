@@ -42,8 +42,15 @@ mock.module("@opengeni/react/app/app-context", () => ({
 
 let ArtifactLibrary: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactLibrary;
 
+// Pixel sizes: one large screenshot and one small enough to be enlarged.
+const dimensions: Record<string, { width: number; height: number }> = {
+  "shot-1": { width: 2000, height: 1500 },
+  "shot-2": { width: 400, height: 300 },
+};
+
 function reference(artifactId: string): RetainedArtifactReference {
   return {
+    ...(dimensions[artifactId] ? { dimensions: dimensions[artifactId] } : {}),
     available: true,
     artifactId,
     kind: "file",
@@ -325,4 +332,116 @@ test("the workspace library keeps opening images on their page, where it browses
   await openFromList(container, "shot-2.png");
   expect(viewer()).toBeNull();
   expect(selected).toEqual(["image:shot-2"]);
+});
+
+test("images zoom with the keyboard, buttons and clicks, and start fitted again after a step", async () => {
+  app.client = fakeClient().client;
+  // The image area measures 1000 x 800 CSS pixels.
+  const measure = HTMLElement.prototype.getBoundingClientRect;
+  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+    if (!this.hasAttribute("data-zoom-pan-surface")) return measure.call(this);
+    return {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width: 1000,
+      height: 800,
+      right: 1000,
+      bottom: 800,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+  try {
+    const container = await render(() => <Library />);
+    await openFromList(container, "shot-1.png");
+    const percent = () => viewer()!.querySelector("[data-zoom-percent]")?.textContent;
+    const zoomKey = async (key: string) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        viewer()!.dispatchEvent(event);
+      });
+      return event;
+    };
+    const click = async (x: number, y: number) => {
+      const surface = viewer()!.querySelector("[data-zoom-pan-surface]")!;
+      const init = {
+        bubbles: true,
+        clientX: x,
+        clientY: y,
+        pointerId: 1,
+        pointerType: "mouse",
+        button: 0,
+      };
+      await act(async () => {
+        surface.dispatchEvent(new PointerEvent("pointerdown", init));
+        surface.dispatchEvent(new PointerEvent("pointerup", init));
+      });
+    };
+
+    // A 2000 x 1500 screenshot fits the 1000 x 800 area (less its padding) at 48%.
+    expect(percent()).toBe("48%");
+    const zoomIn = await zoomKey("=");
+    // Claimed, so neither the browser nor the desktop window zooms instead.
+    expect(zoomIn.defaultPrevented).toBe(true);
+    expect(percent()).toBe("50%");
+    await zoomKey("+");
+    expect(percent()).toBe("75%");
+    await zoomKey("-");
+    expect(percent()).toBe("50%");
+    await zoomKey("0");
+    expect(percent()).toBe("48%");
+    await act(async () => control("Zoom in").click());
+    expect(percent()).toBe("50%");
+    await act(async () => control("Zoom out").click());
+    expect(percent()).toBe("48%");
+    expect(control("Zoom out").disabled).toBe(true);
+
+    // A click shows actual size, keeping the clicked point under the pointer.
+    await click(500, 400);
+    expect(percent()).toBe("100%");
+    const image = viewer()!.querySelector<HTMLImageElement>("[data-zoom-pan-surface] img")!;
+    expect(image.style.width).toBe("2000px");
+    expect(image.style.transform).toBe("translate3d(-500px, -350px, 0)");
+    await click(500, 400);
+    expect(percent()).toBe("48%");
+
+    // Zoom never carries over: the next image starts fitted, and so does this one again.
+    await zoomKey("=");
+    await zoomKey("=");
+    expect(percent()).toBe("75%");
+    await press("ArrowRight");
+    // A small screenshot is enlarged to fit, but never past 2x.
+    expect(viewerTitle()).toBe("shot-2.png");
+    expect(percent()).toBe("200%");
+    await click(500, 400);
+    expect(percent()).toBe("100%");
+    await press("ArrowLeft");
+    expect(percent()).toBe("48%");
+
+    // A document is not an image: Cmd/Ctrl + plus is left to the window.
+    await press("ArrowRight");
+    await press("ArrowRight");
+    expect(viewerTitle()).toBe("Plan");
+    expect(viewer()!.querySelector("[data-zoom-controls]")).toBeNull();
+    expect((await zoomKey("=")).defaultPrevented).toBe(false);
+
+    await press("Escape");
+    expect(viewer()).toBeNull();
+    const outside = new KeyboardEvent("keydown", {
+      key: "=",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(outside);
+    expect(outside.defaultPrevented).toBe(false);
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = measure;
+  }
 });
