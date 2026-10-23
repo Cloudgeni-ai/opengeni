@@ -2252,6 +2252,101 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect((await sites())[0]?.[0]).toBe(newer.siteId);
   }, 60_000);
 
+  test("a Site stays in its chat's project when people start or move conversations on it", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    const project = await createChannel(db, { ...workspace, name: "UI/UX" });
+    const elsewhere = await createChannel(db, { ...workspace, name: "Bugfixes" });
+    const chat = await session({ ...workspace, message: "Audit it", channelId: project.id });
+    const siteId = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    await admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+          sandbox_backend, initiator_kind, initiator_subject_id)
+        values (${turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${chat.id},
+          ${crypto.randomUUID()}, ${`wf-${turnId}`}, 'completed', 1000, 'Build a page',
+          'test-model', 'medium', 'none', 'subject', ${subjectId})`;
+      await tx`
+        insert into workspace_artifacts (id, account_id, workspace_id, slug, title,
+          current_version_id, created_by_subject_id, visibility)
+        values (${siteId}, ${workspace.accountId}, ${workspace.workspaceId},
+          ${`site-${siteId.slice(0, 8)}`}, 'Audit', ${versionId}, ${subjectId}, 'workspace_shared')`;
+      await tx`
+        insert into workspace_artifact_versions (id, account_id, workspace_id, artifact_id,
+          revision, content_key, content_sha256, size_bytes, operation_key, source_session_id,
+          source_turn_id, source_attempt_id, source_execution_generation, created_by_subject_id)
+        values (${versionId}, ${workspace.accountId}, ${workspace.workspaceId}, ${siteId}, 1,
+          ${`blob-${siteId}`}, ${"a".repeat(64)}, 10, ${`op-${siteId}`}, ${chat.id},
+          ${turnId}, ${crypto.randomUUID()}, 1, ${subjectId})`;
+    });
+    const rows = async () =>
+      (
+        (
+          await listSessionEntriesForSubject(db, workspace.workspaceId, {
+            subjectId,
+            parentSessionId: null,
+            siteConversations: "group",
+            includePinned: false,
+            limit: 10,
+          })
+        ).siteGroups ?? []
+      )
+        .map((group) => [group.channelId, group.conversations])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const ask = (message: string) =>
+      session({
+        ...workspace,
+        message,
+        // The API passes "no project" on as null, never omitted.
+        channelId: null,
+        metadata: { _opengeniSiteOrigin: { siteId, title: "Audit" } },
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    expect(await rows()).toEqual([[project.id, 0]]);
+
+    // A new conversation is filed with its Site, so the Site keeps its place.
+    const first = await ask("Hello test");
+    expect(first.channelId).toBe(project.id);
+    expect(await rows()).toEqual([[project.id, 1]]);
+
+    // A conversation someone moves elsewhere nests there, and the Site stays
+    // in its own project, with or without conversations left in it.
+    await setSessionChannel(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: first.id,
+      channelId: elsewhere.id,
+    });
+    expect(await rows()).toEqual(
+      [
+        [project.id, 0],
+        [elsewhere.id, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
+    await setSessionChannel(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: first.id,
+      channelId: null,
+    });
+    expect(await rows()).toEqual(
+      [
+        [project.id, 0],
+        [null, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
+    await ask("Another question");
+    expect(await rows()).toEqual(
+      [
+        [project.id, 1],
+        [null, 1],
+      ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    );
+  }, 60_000);
+
   test("bounds Site rows and reports the omission", async () => {
     if (!available) return;
     const { workspace, subjectId } = await siteViewerWorkspace();
