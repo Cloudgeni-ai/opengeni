@@ -77,10 +77,12 @@
   in use rise and untouched ones sort down like old sessions, without being
   hidden. Archiving, restoring, rolling back or any other write to the Site's
   record is not activity. Opens are personal and never visible to anyone
-  else; a Site page cannot record one. The console records one open per visit
-  to the Site view: not again when its client is replaced, only once a page
-  that loaded hidden is shown, and not for a reload or a restored tab that
-  shows the Site again as its first page. Without
+  else; a Site page cannot record one. The console records one open per page
+  (router history entry) that shows the Site view: not again when its client
+  is replaced, only once a page that loaded hidden is shown, and not again
+  when a reload, a restored tab or going Back shows a page where this tab
+  already recorded it (remembered in `sessionStorage` after the write
+  succeeds). Without a router history key, every visit counts. Without
   conversations a row has no count and nothing to disclose; it opens the
   Site view. Conversations someone moved to another project still nest under
   the Site's row in that project.

@@ -8,43 +8,44 @@ type SiteOpenedClient = {
   recordSiteOpened?: (workspaceId: string, siteId: string) => Promise<unknown>;
 };
 
-// The history entry this document first showed, and whether the person has
-// gone back or forward since. A reload or restored tab keeps its entry's key.
-const firstEntryKey = historyEntryKey();
-let movedThroughHistory = false;
-if (typeof window !== "undefined") {
-  window.addEventListener("popstate", () => {
-    movedThroughHistory = true;
-  });
-}
+const OPENED_ENTRY_KEY = "opengeni:site-opened:";
 
+/**
+ * The console router's key for the page being shown (TanStack history state).
+ * A reload, a restored tab or coming back to the page keeps it; going to the
+ * Site again gets a new one.
+ */
 function historyEntryKey(): string | undefined {
-  if (typeof window === "undefined") return undefined;
   const state: unknown = window.history.state;
   const key =
     state && typeof state === "object" ? (state as { __TSR_key?: unknown }).__TSR_key : undefined;
   return typeof key === "string" ? key : undefined;
 }
 
-/**
- * A reload, or a tab the browser restored, that shows this Site again as its
- * first page. The person opened it before; showing it again is not an open.
- * Any later visit in the same document is a navigation of their own.
- */
-function reloadedOntoSite(siteId: string): boolean {
-  if (typeof window === "undefined" || typeof performance === "undefined") return false;
-  const [entry] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
-  if (entry?.type !== "reload" && entry?.type !== "back_forward") return false;
-  if (movedThroughHistory || window.location.href !== entry.name) return false;
-  const key = historyEntryKey();
-  if (key === undefined || key !== firstEntryKey) return false;
-  return window.location.pathname.endsWith(`/sites/${encodeURIComponent(siteId)}`);
+/** Whether this tab already recorded opening the Site on this page. */
+function openedOnThisPage(siteId: string, entry: string | undefined): boolean {
+  if (entry === undefined) return false;
+  try {
+    return window.sessionStorage.getItem(OPENED_ENTRY_KEY + siteId) === entry;
+  } catch {
+    return false;
+  }
+}
+
+function rememberOpenedOnThisPage(siteId: string, entry: string | undefined): void {
+  if (entry === undefined) return;
+  try {
+    window.sessionStorage.setItem(OPENED_ENTRY_KEY + siteId, entry);
+  } catch {
+    // Without storage a reload of this page counts as another open.
+  }
 }
 
 /**
  * Opening a Site in the app counts as activity on its sidebar row, once per
- * visit. A new client for the same person doesn't open it again, a hidden page
- * counts once it is shown, and a reload or restored tab is not an open.
+ * page the person goes to. A new client for the same person doesn't open it
+ * again, a hidden page counts once it is shown, and a reload, a restored tab
+ * or coming back to a page where the open was already recorded doesn't count.
  */
 export function useRecordSiteOpened(
   client: SiteOpenedClient,
@@ -57,7 +58,8 @@ export function useRecordSiteOpened(
   }, [client]);
   useEffect(() => {
     if (typeof clientRef.current.recordSiteOpened !== "function") return;
-    if (reloadedOntoSite(siteId)) return;
+    const entry = historyEntryKey();
+    if (openedOnThisPage(siteId, entry)) return;
     let current = true;
     const record = () => {
       document.removeEventListener("visibilitychange", whenShown);
@@ -66,6 +68,7 @@ export function useRecordSiteOpened(
       latest
         .recordSiteOpened(workspaceId, siteId)
         .then(() => {
+          rememberOpenedOnThisPage(siteId, entry);
           if (!current) return;
           window.dispatchEvent(
             new CustomEvent<SiteOpenedDetail>(SITE_OPENED_EVENT, {

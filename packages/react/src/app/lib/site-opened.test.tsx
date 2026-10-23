@@ -10,25 +10,16 @@ const sitePath = `/workspaces/${workspaceId}/sites/${siteId}`;
 
 type SiteOpenedModule = typeof import("./site-opened");
 let useRecordSiteOpened: SiteOpenedModule["useRecordSiteOpened"];
-let navigationType: NavigationTimingType | null = null;
-let firstUrl = "";
 let visibility: DocumentVisibilityState = "visible";
 let root: Root | null = null;
-const opens: string[] = [];
+let failing = false;
+const opens: Array<[string, string]> = [];
 
 beforeAll(async () => {
   GlobalRegistrator.register({ url: "https://app.example.test/" });
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  // This document's first page is the Site, in history entry "first".
-  window.history.replaceState({ __TSR_key: "first" }, "", sitePath);
-  firstUrl = window.location.href;
-  const entries = performance.getEntriesByType.bind(performance);
-  performance.getEntriesByType = ((type: string) =>
-    type === "navigation" && navigationType
-      ? [{ type: navigationType, name: firstUrl } as unknown as PerformanceEntry]
-      : entries(type)) as typeof performance.getEntriesByType;
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     get: () => visibility,
@@ -36,18 +27,19 @@ beforeAll(async () => {
   ({ useRecordSiteOpened } = await import("./site-opened"));
 });
 afterEach(async () => {
-  await act(async () => root?.unmount());
-  root = null;
+  await close();
   opens.length = 0;
-  navigationType = null;
   visibility = "visible";
+  failing = false;
+  window.sessionStorage.clear();
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-function client() {
+function client(name = "client") {
   return {
     recordSiteOpened: async (_workspace: string, opened: string) => {
-      opens.push(opened);
+      if (failing) throw new Error("offline");
+      opens.push([name, opened]);
       return { openedAt: new Date().toISOString() };
     },
   };
@@ -58,71 +50,77 @@ function Probe(props: { client: ReturnType<typeof client>; siteId: string }) {
   return null;
 }
 
-async function show(props: { client: ReturnType<typeof client>; siteId: string }) {
-  root ??= createRoot(document.createElement("div"));
+/** Shows the Site view on the page the router keyed `entry`. */
+async function show(entry: string | null, props = { client: client(), siteId }) {
+  if (root === null) {
+    window.history.replaceState(entry === null ? null : { __TSR_key: entry }, "", sitePath);
+    root = createRoot(document.createElement("div"));
+  }
   await act(async () => root!.render(<Probe {...props} />));
 }
 
-test("one open per visit: a new client for the same person does not open the Site again", async () => {
-  await show({ client: client(), siteId });
-  expect(opens).toEqual([siteId]);
-  // Refreshed credentials replace the client while the Site stays open.
-  await show({ client: client(), siteId });
-  await show({ client: client(), siteId });
-  expect(opens).toEqual([siteId]);
-  await show({ client: client(), siteId: otherSiteId });
-  expect(opens).toEqual([siteId, otherSiteId]);
+/** Leaves the Site view; a reload is closing it and showing the same page again. */
+async function close() {
+  await act(async () => root?.unmount());
+  root = null;
+}
+
+const opened = () => opens.map(([, site]) => site);
+
+test("one open per page: a new client for the same person does not open the Site again", async () => {
+  await show("a");
+  await show("a", { client: client(), siteId });
+  await show("a", { client: client(), siteId });
+  expect(opened()).toEqual([siteId]);
+  await show("a", { client: client(), siteId: otherSiteId });
+  expect(opened()).toEqual([siteId, otherSiteId]);
 });
 
-test("a page that loads hidden opens the Site only once it is shown", async () => {
+test("a reload, restored tab or return to a page where it was opened is not another open", async () => {
+  await show("a");
+  await close();
+  await show("a");
+  await close();
+  expect(opened()).toEqual([siteId]);
+  // Going to the Site again is a new page and a new open.
+  await show("b");
+  expect(opened()).toEqual([siteId, siteId]);
+});
+
+test("a reload after the open was never recorded still opens the Site", async () => {
+  // The Site view never loaded (or its write failed) before the app reloaded.
+  failing = true;
+  await show("a");
+  await close();
+  failing = false;
+  await show("a");
+  expect(opened()).toEqual([siteId]);
+});
+
+test("without a router key every visit opens the Site", async () => {
+  await show(null);
+  await close();
+  await show(null);
+  expect(opened()).toEqual([siteId, siteId]);
+});
+
+test("a page that loads hidden opens the Site, with the latest client, once it is shown", async () => {
   visibility = "hidden";
-  await show({ client: client(), siteId });
+  await show("a", { client: client("first"), siteId });
+  await show("a", { client: client("refreshed"), siteId });
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
   expect(opens).toEqual([]);
   visibility = "visible";
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
-  expect(opens).toEqual([siteId]);
+  expect(opens).toEqual([["refreshed", siteId]]);
 });
 
 test("a page left hidden and closed never opens the Site", async () => {
   visibility = "hidden";
-  await show({ client: client(), siteId });
-  await act(async () => root?.unmount());
-  root = null;
+  await show("a");
+  await close();
   visibility = "visible";
   await act(async () => document.dispatchEvent(new Event("visibilitychange")));
   expect(opens).toEqual([]);
-});
-
-test("a reload or restored tab showing the Site again is not an open; going there is", async () => {
-  for (const type of ["reload", "back_forward"] as const) {
-    navigationType = type;
-    await show({ client: client(), siteId });
-    await act(async () => root?.unmount());
-    root = null;
-  }
-  expect(opens).toEqual([]);
-  // A link opened in a new page, or another Site, is an open.
-  navigationType = "navigate";
-  await show({ client: client(), siteId });
-  await act(async () => root?.unmount());
-  root = null;
-  navigationType = "reload";
-  await show({ client: client(), siteId: otherSiteId });
-  expect(opens).toEqual([siteId, otherSiteId]);
-  await act(async () => root?.unmount());
-  root = null;
-
-  // After a reload, navigating away and back to the Site opens it.
-  window.history.pushState({ __TSR_key: "second" }, "", `/workspaces/${workspaceId}/sessions/x`);
-  window.history.pushState({ __TSR_key: "third" }, "", sitePath);
-  await show({ client: client(), siteId });
-  await act(async () => root?.unmount());
-  root = null;
-  // So does going back to the first page.
-  window.history.replaceState({ __TSR_key: "first" }, "", sitePath);
-  window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
-  await show({ client: client(), siteId });
-  expect(opens).toEqual([siteId, otherSiteId, siteId, siteId]);
 });
