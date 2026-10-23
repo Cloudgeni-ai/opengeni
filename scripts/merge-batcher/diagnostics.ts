@@ -15,13 +15,17 @@ export function redactDiagnostic(
     if (
       value &&
       value.length >= 4 &&
-      /token|secret|password|credential|private.key|authorization/i.test(key)
+      /token|secret|password|credential|private.key|authorization|api[_-]?key|cookie/i.test(key)
     ) {
       for (const secret of [value, ...value.split(/\r?\n/).filter((v) => v.length >= 16)])
         clean = clean.split(secret).join("[REDACTED]");
     }
   }
   clean = clean
+    .replace(
+      /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\s*:[^\r\n]*/gi,
+      "$1: [REDACTED]",
+    )
     .replace(
       /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g,
       "[REDACTED PRIVATE KEY]",
@@ -31,11 +35,11 @@ export function redactDiagnostic(
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[REDACTED JWT]")
     .replace(/https?:\/\/[^\s"'<>]+/gi, "[REDACTED URL]")
     .replace(
-      /((?:token|secret|password|credential|authorization|private[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      /((?:token|secret|password|credential|authorization|private[_-]?key|api[_-]?key|cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
       "$1[REDACTED]",
     )
     .replace(/\b[A-Za-z0-9_=-]{80,}\b/g, "[REDACTED OPAQUE VALUE]")
-    .replace(/^[A-Za-z0-9+/=_-]{80,}$/gm, "[REDACTED KEY MATERIAL]");
+    .replace(/^[A-Za-z0-9+/=_-]{40,}$/gm, "[REDACTED KEY MATERIAL]");
   return Buffer.from(clean).subarray(0, limit).toString("utf8");
 }
 export function errorDiagnostic(
@@ -49,7 +53,13 @@ export function errorDiagnostic(
     operation?: unknown;
     status?: unknown;
   } | null;
-  const text = (v: unknown, n: number) => redactDiagnostic(typeof v === "string" ? v : "", env, n);
+  let truncated = false;
+  const text = (v: unknown, n: number) => {
+    const raw = typeof v === "string" ? v : "";
+    const clean = redactDiagnostic(raw, env, Number.MAX_SAFE_INTEGER);
+    if (Buffer.byteLength(raw) > n || Buffer.byteLength(clean) > n) truncated = true;
+    return Buffer.from(clean).subarray(0, n).toString("utf8");
+  };
   const message =
     error instanceof Error
       ? error.message
@@ -82,6 +92,7 @@ export function errorDiagnostic(
         ? (e!.status as number)
         : null,
   };
+  result.diagnosticTruncated ||= truncated;
   // Keep the entire JSON record inside the supervisor's bounded stderr tail,
   // including JSON escaping of arbitrary diagnostic text.
   while (Buffer.byteLength(JSON.stringify(result)) > 6144) {
@@ -102,6 +113,14 @@ export function parseErrorDiagnostic(
     const v = JSON.parse(line);
     if (
       v?.schema !== "batcher-child-failure/v1" ||
+      !["name", "message", "stack", "phase", "operation"].every(
+        (key) => typeof v[key] === "string",
+      ) ||
+      typeof v.diagnosticTruncated !== "boolean" ||
+      !(
+        v.httpStatus === null ||
+        (Number.isInteger(v.httpStatus) && v.httpStatus >= 100 && v.httpStatus <= 599)
+      ) ||
       !["unsafe_controller_failure", "provider_failure", "unclassified_child_failure"].includes(
         v.category,
       )
