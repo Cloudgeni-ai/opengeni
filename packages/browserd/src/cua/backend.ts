@@ -1573,11 +1573,15 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            // A slider is only checked when the window reads its value: many
-            // native sliders expose a range but no readable value.
+            // A slider is only checked when the window reads its value as a
+            // number: many native sliders expose a range but no readable
+            // value, and some read it as text such as "50 %".
             ...(((node.role === "textbox" || node.role === "spinbutton") &&
               (node.value === undefined || typeof node.value === "string")) ||
-            (node.role === "slider" && typeof node.value === "string" && node.value.trim() !== "")
+            (node.role === "slider" &&
+              typeof node.value === "string" &&
+              node.value.trim() !== "" &&
+              Number.isFinite(Number(node.value)))
               ? {
                   expectText: {
                     ref: node.ref,
