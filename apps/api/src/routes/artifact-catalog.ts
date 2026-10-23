@@ -20,7 +20,7 @@ import {
   hasPermission,
   requireAccessGrantAuthorization,
   requireLiveAgentAttemptAuthorization,
-  requireSessionAuthorization,
+  requireSessionAuthorizations,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   siteViewerForGrant,
@@ -30,7 +30,7 @@ import {
 import {
   getFilesForSubject,
   getGeneratedImageArtifacts,
-  getSessionAuthorityProjection,
+  getSessionAuthorityProjections,
   isWorkspaceArtifactVisible,
   listArtifactCatalogCandidates,
   nestedPostgresSqlState,
@@ -207,31 +207,46 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       }
     }
     const sourceDecisions = new Map<string, Promise<boolean>>();
+    const prepareSourceDecisions = (sessionIds: readonly string[]) => {
+      const pending = [...new Set(sessionIds)].filter((id) => !sourceDecisions.has(id));
+      if (!pending.length) return;
+      if (!hasPermission(grant.permissions, "sessions:read")) {
+        for (const id of pending) sourceDecisions.set(id, Promise.resolve(false));
+        return;
+      }
+      const batch = requireSessionAuthorizations(deps, grant, {
+        sessionIds: pending,
+        operation: "session.read",
+        surface: "http",
+      }).then(async (decisions) => {
+        // Keep the independent visibility proof AFTER every host decision in
+        // this bounded window. A permissive null is not provenance authority,
+        // and a source revoked during a host callback must remain hidden.
+        const visible = await getSessionAuthorityProjections(
+          deps.db,
+          workspaceId,
+          pending.filter((_id, index) => decisions[index]!.status === "fulfilled"),
+        );
+        return { decisions, visible };
+      });
+      for (const [index, id] of pending.entries()) {
+        sourceDecisions.set(
+          id,
+          batch.then(({ decisions, visible }) => {
+            const decision = decisions[index]!;
+            if (decision.status === "fulfilled") return visible.has(id);
+            const error = decision.reason;
+            if (error instanceof SessionAuthorizationDeniedError) return false;
+            if (error instanceof SessionAuthorizationUnavailableError)
+              throw new HTTPException(503, { message: "Session authorization is unavailable" });
+            throw error;
+          }),
+        );
+      }
+    };
     const canReadSession = (sessionId: string): Promise<boolean> => {
-      if (!hasPermission(grant.permissions, "sessions:read")) return Promise.resolve(false);
-      const cached = sourceDecisions.get(sessionId);
-      if (cached) return cached;
-      const decision = (async () => {
-        try {
-          await requireSessionAuthorization(deps, grant, {
-            sessionId,
-            operation: "session.read",
-            surface: "http",
-          });
-          // The optional-host seam can return null for both a shared standalone
-          // session and an RLS-hidden/missing row. Prove visibility independently
-          // AFTER it, so a permissive null is never itself provenance authority.
-          return !!(await getSessionAuthorityProjection(deps.db, workspaceId, sessionId));
-        } catch (error) {
-          if (error instanceof SessionAuthorizationDeniedError) return false;
-          if (error instanceof SessionAuthorizationUnavailableError)
-            throw new HTTPException(503, { message: "Session authorization is unavailable" });
-          throw error;
-        }
-      })();
-      // Cache in-flight decisions too: many rows can share one source session.
-      sourceDecisions.set(sessionId, decision);
-      return decision;
+      prepareSourceDecisions([sessionId]);
+      return sourceDecisions.get(sessionId)!;
     };
     context.header("cache-control", "private, no-store");
     return withSessionRlsActorContext(actor, async () => {
@@ -326,6 +341,11 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
             }
             accepted.push({ item, candidate });
           }
+          prepareSourceDecisions(
+            accepted.flatMap(({ candidate }) =>
+              candidate.source_session_id ? [candidate.source_session_id] : [],
+            ),
+          );
           const authorizedItems = await Promise.all(
             accepted.map(async ({ item, candidate }) => {
               if (

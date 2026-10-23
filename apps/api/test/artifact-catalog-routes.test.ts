@@ -52,6 +52,8 @@ function fixture(
     readBatch?: EditableArtifactApplicationPort["readArtifacts"];
     privateSession?: boolean;
     absentSession?: boolean;
+    sourceSessionIds?: string[];
+    hiddenAfterHost?: () => boolean;
     agentAttempt?: Partial<Parameters<typeof signDelegatedAccessToken>[1]>;
     file?: Record<string, unknown>;
     files?: Array<Record<string, unknown>>;
@@ -81,27 +83,27 @@ function fixture(
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
       if (compiled.sql.includes("target.id as target_id")) {
         expect(compiled.params).toContain(workspaceId);
-        expect(compiled.params).toContain(sessionId);
+        const requested = (options.sourceSessionIds ?? [sessionId]).filter((id) =>
+          compiled.params.includes(id),
+        );
+        expect(requested.length).toBeGreaterThan(0);
         // The consolidated authorization read returns target facts even when
         // no caller attempt is present. Missing/RLS-hidden targets stay absent;
         // missing caller/turn facts must not grant an agent live authority.
-        return options.absentSession
-          ? []
-          : [
-              {
-                target_id: sessionId,
-                target_account_id: accountId,
-                target_root_session_id: sessionId,
-                target_visibility: options.privateSession ? "user_private" : "workspace_shared",
-                target_authority_epoch: 1,
-                target_owner_subject_id: options.privateSession ? "user:someone-else" : null,
-                target_agent_access: "workspace",
-                target_memory_scope: "workspace",
-                caller_account_id: null,
-                caller_root_session_id: null,
-                turn_id: null,
-              },
-            ];
+        return requested.map((id) => ({
+          requested_session_id: id,
+          target_id: options.absentSession ? null : id,
+          target_account_id: accountId,
+          target_root_session_id: id,
+          target_visibility: options.privateSession ? "user_private" : "workspace_shared",
+          target_authority_epoch: 1,
+          target_owner_subject_id: options.privateSession ? "user:someone-else" : null,
+          target_agent_access: "workspace",
+          target_memory_scope: "workspace",
+          caller_account_id: null,
+          caller_root_session_id: null,
+          turn_id: null,
+        }));
       }
       if (
         compiled.sql.includes("current_setting('opengeni.account_id'") ||
@@ -161,7 +163,19 @@ function fixture(
                       file: files.find((file) => file.id === artifact.artifactId),
                       uploadStatus: "uploaded",
                     }))
-                : [],
+                : tableName === "sessions" &&
+                    fields &&
+                    !options.absentSession &&
+                    !options.hiddenAfterHost?.()
+                  ? (options.sourceSessionIds ?? [sessionId])
+                      .filter((id) => params.includes(id))
+                      .map((id) => ({
+                        sessionId: id,
+                        rootSessionId: id,
+                        visibility: options.privateSession ? "user_private" : "workspace_shared",
+                        ownerSubjectId: options.privateSession ? "user:someone-else" : null,
+                      }))
+                  : [],
           ).then(resolve, reject);
         },
         limit: async () => {
@@ -895,6 +909,57 @@ test("concurrent provenance reads deduplicate the source and keep host denials a
       );
     }
   }
+});
+
+test("distinct source sessions share one fact read and one post-host visibility read", async () => {
+  const ids = Array.from({ length: 6 }, () => crypto.randomUUID());
+  const seen: string[] = [];
+  const { request, queries, selectedTables } = fixture(
+    [ids.map((id, index) => candidate(`site-${index}`, "site", { source_session_id: id }))],
+    {
+      sourceSessionIds: ids,
+      sessionAuthorization: {
+        authorizeSession: async ({ target }) => {
+          seen.push(target.sessionId);
+          return { allowed: true };
+        },
+      },
+    },
+  );
+  const response = await request("", ["artifacts:read", "sessions:read"]);
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(
+    (await response.json()).items.map((item: { sourceSessionId: string }) => item.sourceSessionId),
+  ).toEqual(ids);
+  expect(seen.sort()).toEqual([...ids].sort());
+  expect(queries.filter(({ sql }) => sql.includes("target.id as target_id"))).toHaveLength(1);
+  expect(selectedTables.filter((table) => table === "sessions")).toHaveLength(1);
+});
+
+test("visibility is checked after every host callback in the window", async () => {
+  const ids = [sessionId, crypto.randomUUID()];
+  let revoked = false;
+  const { request } = fixture(
+    [ids.map((id, index) => candidate(`site-${index}`, "site", { source_session_id: id }))],
+    {
+      sourceSessionIds: ids,
+      hiddenAfterHost: () => revoked,
+      sessionAuthorization: {
+        authorizeSession: async ({ target }) => {
+          if (target.sessionId === ids[1]) {
+            await Promise.resolve();
+            revoked = true;
+          }
+          return { allowed: true };
+        },
+      },
+    },
+  );
+  const response = await request("", ["artifacts:read", "sessions:read"]);
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(
+    (await response.json()).items.map((item: { sourceSessionId?: string }) => item.sourceSessionId),
+  ).toEqual([undefined, undefined]);
 });
 
 test("mixed file batches omit denied and pending files and never read their generated metadata", async () => {
