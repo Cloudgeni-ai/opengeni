@@ -2810,12 +2810,19 @@ the ingress class (`ingress.className`, or the legacy
 class name. It sets
 `nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_404"` and
 `proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so ingress-nginx
-retries a 404 on another web pod. This is best effort: the controller's
-balancer can pick the same pod again for a retry (reported upstream as
-[ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852),
-and certain with `upstream-hash-by`), so it raises the chance of reaching a pod
-that has the asset without guaranteeing it. An asset that no pod has costs up to
-`nextUpstreamTries` upstream requests before the 404.
+retries a 404 on another web pod. The default round-robin balancer can pick the
+same pod again for a retry
+([ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852)),
+so the asset Ingress also sets `nginx.ingress.kubernetes.io/load-balance: ewma`,
+whose balancer skips endpoints the request already tried until none is left.
+ingress-nginx keeps one balancer per Service port for every Ingress that routes
+to it, so the asset Ingress routes to its own `<release>-web-assets` Service,
+which selects the same web pods; the primary Ingress keeps its balancer. Keep
+`nextUpstreamTries` above the most web pods of one build that can serve at once
+(replicas, or the autoscaler maximum): a page of the new build may first try
+every old pod. An asset that no pod has costs up to `nextUpstreamTries`
+upstream requests before the 404. Setting `upstream-hash-by` or a load-balance
+annotation in `webAssetsIngress.annotations` replaces this behaviour.
 
 The asset Ingress covers only hosts and asset paths whose longest matching
 primary route (`Prefix` or `ImplementationSpecific`) already goes to the web

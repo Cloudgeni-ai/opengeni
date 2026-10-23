@@ -1225,16 +1225,21 @@ ingress:
   # routes only the hashed asset paths (/assets, /office/assets,
   # /react-demo/assets) of hosts that already send them to the web service, and
   # has ingress-nginx retry a 404, connection error or timeout on another web
-  # pod (best effort: a retry can land on the same pod). It keeps the primary
-  # Ingress class, TLS and rendered annotations, except cert-manager,
-  # external-dns, canary, rewrite-target, app-root, server-snippet and
-  # server-alias annotations; `annotations` here are applied last.
+  # pod. It balances through its own `<release>-web-assets` Service with EWMA,
+  # which never retries an endpoint the request already tried while an untried
+  # one remains. It keeps the primary Ingress class, TLS and rendered
+  # annotations, except cert-manager, external-dns, canary, rewrite-target,
+  # app-root, server-snippet and server-alias annotations; `annotations` here
+  # are applied last.
   webAssetsIngress:
     enabled: true
     # Render only when ingress.className contains "nginx". Set false to render
     # it for an ingress-nginx controller registered under another class name.
     requireNginxClassName: true
-    # Attempts for one asset request, including the first.
+    # Attempts for one asset request, including the first. Keep it above the
+    # most web pods of one build that can serve at once during a rollout
+    # (replicas, or the autoscaler maximum): a page of the new build may first
+    # try every old pod.
     nextUpstreamTries: 3
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
