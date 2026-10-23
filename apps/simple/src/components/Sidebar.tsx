@@ -132,6 +132,8 @@ function AgentRow({
     : agent.working
       ? "Working…"
       : (agent.description ?? (agent.role === "main" ? "Your main agent" : null));
+  // The open chat is being read, whatever the server's unread mark says.
+  const unread = agent.unread && !selected;
   return (
     <button
       type="button"
@@ -153,7 +155,7 @@ function AgentRow({
       </div>
       <div className="min-w-0 flex-1">
         <div
-          className={`truncate text-sm ${agent.unread || agent.needsYou ? "font-semibold" : "font-medium"}`}
+          className={`truncate text-sm ${unread || agent.needsYou ? "font-semibold" : "font-medium"}`}
         >
           {agent.name}
         </div>
@@ -165,7 +167,7 @@ function AgentRow({
           </div>
         ) : null}
       </div>
-      {agent.unread || agent.needsYou ? (
+      {unread || agent.needsYou ? (
         <span
           className={`h-2 w-2 shrink-0 rounded-full ${agent.needsYou ? "bg-amber-500" : "bg-[var(--app-accent)]"}`}
           aria-label={agent.needsYou ? "Needs you" : "Unread"}

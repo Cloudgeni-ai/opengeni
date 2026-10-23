@@ -1,7 +1,8 @@
 # Opengeni Simple
 
-An experimental, chat-first Opengeni client for internal use. The sidebar shows
-only your agents; everything else lives in Settings.
+An experimental, chat-first Opengeni Mac app for internal use. The sidebar shows
+only your agents; everything else lives in Settings. The browser build in
+`bun run dev` is for development only.
 
 - **Geni** is the main agent. Every workspace gets one on first visit.
 - **One continuous chat per agent.** Ask Geni for a new agent, or press **New
@@ -19,9 +20,16 @@ only your agents; everything else lives in Settings.
 - **Self-organizing sidebar.** Geni first, then pins, then agents ranked by how
   much and how recently you use them. Agents untouched for two weeks fold into
   **Quiet**.
-- **Personal and shared agents** follow Opengeni's own session visibility and
-  workspace permissions.
-- Every agent gets an AI-painted avatar once a model that can draw is connected.
+- **Personal and workspace agents.** New agent asks who it's for; the sidebar
+  groups them under Personal and Workspace, following Opengeni's own session
+  visibility and workspace permissions. Agents check with each other when one
+  knows more about a topic.
+- **Icon avatars.** Each agent picks an icon from a curated set
+  (`src/lib/agent-icons.ts`), or gets the best match for its name; the avatar
+  style in Settings colors them. **Change icon** is in the agent's menu.
+- **This computer.** When a task needs the Mac (its Chrome, or the screen with
+  permission), the agent asks in the chat and a card turns it on. Settings >
+  Computer has the same switch and the optional Chrome extension.
 
 ## How it fits
 
@@ -31,7 +39,7 @@ proxy. Opengeni owns sessions, permissions and execution; this app has no
 authority of its own.
 
 A small Bun companion server (`server/`) keeps app-only state in SQLite
-(`data/simple.sqlite`): agent profiles (emoji, description, avatar), sidebar
+(`data/simple.sqlite`): agent profiles (icon, description, effort), sidebar
 usage, applied action blocks and preferences. It forwards the caller's cookie
 and authorization headers, so Opengeni sees the real person.
 
@@ -43,7 +51,7 @@ content) and shows a card instead. Agent instructions live in
 agents. Per-message app context (other agents, connected services, reply
 style) rides on each message as `modelContext`, never in instructions.
 
-## Run
+## Run (development)
 
 Start the Opengeni stack first (`bun run dev` at the repo root), then:
 
@@ -91,6 +99,11 @@ desktop/build.sh   # Linux or macOS; writes desktop/release/mac-arm64/Opengeni S
 # on the Mac, the bundle is unsigned: sign it ad hoc once
 codesign --force --deep -s - "/Applications/Opengeni Simple.app"
 ```
+
+Connect sign-ins (Slack, GitHub and so on) open in the default browser; the
+app keeps a hidden placeholder window so the chat sees the connection finish.
+"This computer" runs the connected-machine agent as the app's helper while the
+app is open, so macOS lists the permissions under this app.
 
 Logs: `~/Library/Application Support/Opengeni Simple/{app,server}.log`.
 

@@ -144,7 +144,8 @@ export function DraftAgentView({
           <textarea
             ref={input}
             rows={1}
-            value={draft.text}
+            // The sent text shows as a message; it comes back here only if creating fails.
+            value={busy ? "" : draft.text}
             disabled={busy}
             placeholder="Tell your new agent what it's for"
             onChange={(event) => onChange({ ...draft, text: event.target.value, error: null })}
