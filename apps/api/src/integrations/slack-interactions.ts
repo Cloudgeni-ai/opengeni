@@ -141,6 +141,7 @@ import {
   createSessionForRequest,
   getActorNewSessionModelChoice,
   hasPermission,
+  recordSlackEvent,
   requireAccessContext,
   requireAccessGrant,
   requireSessionAuthorizationListScope,
@@ -550,6 +551,22 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    // The workspace's Slack event source, when it has one, records channel
+    // activity for automations. Conversations below never depend on it.
+    try {
+      await recordSlackEvent({
+        db: deps.db,
+        settings: deps.settings,
+        workspaceId: installation.workspaceId,
+        teamId,
+        body: signed.rawBytes,
+      });
+    } catch (error) {
+      console.error("[slack-interactions] recording the Slack event failed", {
+        workspaceId: installation.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     const event = record(payload.event);
     const appHomeEvent = slackAppHomeOpenedEvent(payload);
     if (appHomeEvent) {
@@ -5958,7 +5975,7 @@ async function readSignedSlackRequest(c: Context, deps: ApiRouteDeps) {
   ) {
     throw new HTTPException(401, { message: "invalid Slack signature" });
   }
-  return { rawBody };
+  return { rawBody, rawBytes };
 }
 
 function normalizedFormInteraction(

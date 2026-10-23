@@ -9,6 +9,8 @@ export * from "./mcp-event-types";
 export * from "./mcp-events-protocol";
 export * from "./normalize";
 export * from "./occurrence-payload";
+export * from "./slack-events";
+export * from "./slack-source";
 export * from "./sources";
 export * from "./webhook-adapters";
 export * from "./webhook-signatures";
