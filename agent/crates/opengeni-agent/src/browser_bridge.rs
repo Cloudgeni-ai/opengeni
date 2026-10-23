@@ -56,6 +56,14 @@ const MAX_TAB_TITLE_BYTES: usize = 8_192;
 const MAX_TAB_URL_BYTES: usize = 65_536;
 const TAB_URL_TOO_LONG: &str = "This tab's address is too long for Opengeni to control";
 
+/// Reading buffered debugger events changes nothing in the browser. Every live
+/// attached connection polls continuously, so treating a poll as accepted work
+/// would keep a self-update waiting for as long as any connection exists, and
+/// refusing one during an idle probe would break every event stream.
+fn is_passive_request(payload: &serde_json::Value) -> bool {
+    payload.get("type").and_then(serde_json::Value::as_str) == Some("debugger.poll")
+}
+
 /// Failures at the trusted local browser-bridge boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserBridgeError {
@@ -1781,11 +1789,18 @@ async fn serve_controller(
         let request_responses = responses.clone();
         // Reserve before spawn/first await. A controller peer's disappearing
         // waiter cannot cancel an accepted extension command or its publisher.
-        let reservation = inventory.update_drain.reserve_work(None);
+        // A passive event poll is neither reserved nor refused: losing one in
+        // a swap only makes the controller resynchronize its event cursor.
+        let passive = is_passive_request(&payload);
+        let reservation = if passive {
+            None
+        } else {
+            inventory.update_drain.reserve_work(None)
+        };
         if let Some(reservation) = &reservation {
             reservation.describe(format!("attached-browser request {request_id}"));
         }
-        let accepted = reservation.is_some();
+        let accepted = passive || reservation.is_some();
         let reply_reservation = reservation.clone();
         let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
             reservation,
@@ -2884,6 +2899,41 @@ mod tests {
         assert_eq!(refused["requestId"], refused_id);
         assert_eq!(refused["error"]["code"], "update_draining");
         assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // An event poll behind the same fence is still served and is not
+        // counted as work that holds the update back.
+        let poll_id = "55555555-5555-4555-8555-555555555555";
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type":"request", "protocolVersion":1, "requestId":poll_id, "deviceId":device_id,
+                "expectedConnectionGeneration":generation,
+                "payload":{"type":"debugger.poll", "afterSequence":0, "limit":100}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let poll_command = read_json(&mut extension).await;
+        assert_eq!(poll_command["requestId"], poll_id);
+        assert_eq!(poll_command["payload"]["type"], "debugger.poll");
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        write_native_frame(
+            &mut extension,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":poll_id, "deviceId":device_id,
+                "connectionGeneration":generation, "ok":true,
+                "payload":{"events":[], "cursor":0, "truncated":false}, "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let polled = read_json(&mut controller).await;
+        assert_eq!(polled["requestId"], poll_id);
+        assert_eq!(polled["ok"], true);
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
         write_native_frame(
             &mut extension,
             &serde_json::to_vec(&json!({
