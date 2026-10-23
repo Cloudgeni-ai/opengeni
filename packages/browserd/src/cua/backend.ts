@@ -1573,8 +1573,11 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...((node.role === "textbox" || node.role === "spinbutton" || node.role === "slider") &&
-            (node.value === undefined || typeof node.value === "string")
+            // A slider is only checked when the window reads its value: many
+            // native sliders expose a range but no readable value.
+            ...(((node.role === "textbox" || node.role === "spinbutton") &&
+              (node.value === undefined || typeof node.value === "string")) ||
+            (node.role === "slider" && typeof node.value === "string" && node.value.trim() !== "")
               ? {
                   expectText: {
                     ref: node.ref,
@@ -2172,6 +2175,8 @@ function inputFailures(
         // value, nothing (a number field that refused text), or where a
         // slider's steps or range stopped it.
         const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
+        // A slider that no longer reads a value says nothing about the write.
+        if (expected.numeric === "slider" && now.trim() === "") continue;
         if (now !== expected.value && number(now) !== number(expected.value))
           failures.push(
             `the ${expected.numeric} ${expected.ref} reads ${

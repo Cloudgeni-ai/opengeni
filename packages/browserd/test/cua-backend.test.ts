@@ -3227,6 +3227,8 @@ describe("CUA desktop boundary", () => {
         shows: ((written: string) => string) | null = (written) => written;
         /** A range input "Volume" from 0 to 100 in steps of 7. */
         volume = "14";
+        /** Whether the window reads Volume's value, as many native sliders don't. */
+        volumeReadable = true;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const args = JSON.parse(argumentsJson) as Record<string, unknown>;
           const steps =
@@ -3278,7 +3280,7 @@ describe("CUA desktop boundary", () => {
               parent_index: 0,
               role: "AXSlider",
               label: "Volume",
-              value: this.volume,
+              ...(this.volumeReadable ? { value: this.volume } : {}),
               actions: ["AXIncrement", "AXDecrement"],
             },
           ];
@@ -3368,9 +3370,9 @@ describe("CUA desktop boundary", () => {
       test("a slider its steps or range stop short of the value fails", async () => {
         const fixture = new NumberFixture();
         const { backend, observation } = await open(fixture);
-        const setVolume = (observation: ComputerBackendObservation, value: string) =>
+        const setVolume = (current: ComputerBackendObservation, value: string) =>
           backend.dispatch({
-            ...command(observation),
+            ...command(current),
             action: {
               type: "semantic",
               locator: { kind: "role", role: "slider", name: "Volume" },
@@ -3393,6 +3395,30 @@ describe("CUA desktop boundary", () => {
               `the slider ${observation.roots.find((node) => node.name === "Volume")!.ref} reads "${reads}" instead of the value it was given; give it a value within its range that its steps reach`,
             );
           }
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a slider whose value the window does not read is not checked", async () => {
+        const fixture = new NumberFixture();
+        fixture.volumeReadable = false;
+        const { backend, observation } = await open(fixture);
+        try {
+          const after = await backend.dispatch({
+            ...command(observation),
+            action: {
+              type: "semantic",
+              locator: {
+                kind: "ref",
+                ref: observation.roots.find((node) => node.name === "Volume")!.ref,
+              },
+              action: "set_value",
+              value: "28",
+            },
+          });
+          expect(after!.roots.find((node) => node.name === "Volume")!.value).toBeUndefined();
+          expect(fixture.volume).toBe("28");
         } finally {
           await backend.close();
         }
