@@ -134,7 +134,7 @@ export const ListWorkspaceWebhooksResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type ListWorkspaceWebhooksResponse = z.infer<typeof ListWorkspaceWebhooksResponse>;
 
-/** Organization webhooks fan out session events only; usage events are per-workspace. */
+/** Organization webhooks fan out session and recording events; usage events are per-workspace. */
 export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
   "usage.threshold_reached",
   "usage.exhausted",

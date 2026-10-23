@@ -2582,6 +2582,7 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 ] as const;
 
 export * from "./transcription-recordings";
+export * from "./recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>

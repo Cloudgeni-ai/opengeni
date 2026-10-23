@@ -147,12 +147,13 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
     !(
       typeof event.sessionId === "string" ||
       ((event.sessionId === null || event.sessionId === undefined) &&
-        [
+        ([
           "usage.threshold_reached",
           "usage.exhausted",
           "usage.period_reset",
           OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
-        ].includes(event.type))
+        ].includes(event.type) ||
+          event.type.startsWith("recording.")))
     )
   ) {
     throw new OpenGeniSignatureError();
