@@ -105,6 +105,8 @@ function attachedBrowserDevice(): AttachedBrowserDevice {
 function attachedBrowserBridge(): AttachedBrowserBridge {
   return {
     enrollmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    sandboxId: null,
+    machineName: null,
     state: "online",
     bridgeGeneration: "bridge-generation-1",
     inventoryRevision: 4,

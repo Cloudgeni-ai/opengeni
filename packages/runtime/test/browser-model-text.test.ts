@@ -168,6 +168,48 @@ describe("browser model text", () => {
     ]);
   });
 
+  test("an opened Chrome profile names the computer it is on", () => {
+    const session = {
+      id: "11111111-1111-4111-8111-111111111111",
+      lifecycle: "active",
+      placement: { kind: "attached_device" },
+      engine: "chromium",
+    };
+    const chosen = "22222222-2222-4222-8222-222222222222";
+    const other = "33333333-3333-4333-8333-333333333333";
+    const unknown = "44444444-4444-4444-8444-444444444444";
+    expect(
+      browserOpenText({
+        session,
+        targets: [],
+        attachedProfile: {
+          id: chosen,
+          name: "Person 1",
+          profileLabel: "ada@example.com",
+          machine: "Ada's Mac mini",
+          onThisMachine: true,
+        },
+        otherAttachedProfiles: [
+          { id: other, name: "Work", machine: "Ada's MacBook Pro" },
+          { id: unknown, name: "Old" },
+        ],
+      }).split("\n"),
+    ).toEqual([
+      `BrowserSession ${session.id} (active): chromium on the user's own Chrome`,
+      `Attached Chrome profile: "Person 1" (ada@example.com) on "Ada's Mac mini" (this session's machine) deviceId ${chosen}`,
+      `Other attached profiles: "Work" on "Ada's MacBook Pro" deviceId ${other}; "Old" deviceId ${unknown}`,
+      "No tabs are open.",
+    ]);
+    // A profile on another computer says which, with no marker.
+    expect(
+      browserOpenText({
+        session,
+        targets: [],
+        attachedProfile: { id: other, name: "Work", machine: "Ada's MacBook Pro" },
+      }).split("\n")[1],
+    ).toBe(`Attached Chrome profile: "Work" on "Ada's MacBook Pro" deviceId ${other}`);
+  });
+
   test("open, tabs and read views", () => {
     const session = {
       id: "11111111-1111-4111-8111-111111111111",

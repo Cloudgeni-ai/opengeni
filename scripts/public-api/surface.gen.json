@@ -11126,6 +11126,8 @@
         "$.enrollmentId": "string!",
         "$.inventoryRevision": "integer!",
         "$.lastSeenAt": "string!",
+        "$.machineName": "string! null",
+        "$.sandboxId": "string! null",
         "$.state": "enum!=[\"\\\"offline\\\"\",\"\\\"online\\\"\"]"
       }
     },
