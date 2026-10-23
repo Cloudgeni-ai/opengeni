@@ -853,7 +853,9 @@ exact stacked candidate tree. Its verified latest-attempt success may land even
 when full-main CI is red or unknown; full main CI remains an independent backstop,
 not a candidate admission gate. Development validation is not a comment-based
 admission gate. The controller may retry a failed candidate's entire Batch CI once,
-using trusted code-failure or positive exact-attempt failed/timed-out job evidence.
+using exact-attempt evidence classified as trusted code failure, verified
+infrastructure failure, provider cancellation, no-job-logs, or positive
+failed/timed-out job evidence.
 After a trusted second code failure, split the cohort and durably park failing
 singleton heads without blame or ejection,
 while other ready heads proceed. A new ready event or main advancement does not

@@ -360,7 +360,8 @@ wrong attempts/branches/workflows and other conclusions are unknown, never
 evidence against a PR. Archive reading is bounded and never extracts paths.
 
 Only the candidate's own first completed
-Batch CI attempt with trusted code-failure or positive exact-attempt
+Batch CI attempt with exact-attempt evidence classified as trusted code failure,
+verified infrastructure failure, provider cancellation, no-job-logs, or positive
 failed/timed-out job evidence may request one
 whole-workflow retry; main, Version and release runs are excluded. The exact
 run/attempt, request time and reason are durably recorded in Git and stage evidence.
@@ -495,8 +496,9 @@ Merge-tree conflicts retain their distinct
 conflict reason and comment path, not a fabricated CI failure. Legacy receipt
 `retryable` flags do not override the controller's single exact-attempt retry policy.
 
-Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible trusted
-code-failure or positive failed/timed-out job evidence waits at least 60 seconds and for admission headroom
+Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible exact-attempt
+evidence (trusted code failure, verified infrastructure failure, provider cancellation,
+no-job-logs, or positive failed/timed-out job evidence) waits at least 60 seconds and for admission headroom
 before the single allowed retry; unknown evidence cannot request it. Retry intent
 is durable before effect submission. An uncertain effect uses bounded, backed-off
 provider observations, not additional CI attempts, and is never blindly replayed
