@@ -125,6 +125,13 @@ e2e(
         url: "data:text/html,",
       });
       await bridge.request({ type: "debugger.attach", tabId: leftover.tab.id });
+      // A crashed controller's tab has long since loaded; a tab Chromium
+      // still lists without an address is retried by a later sweep instead.
+      await waitFor(async () =>
+        (await bridge.pages()).some(
+          (page) => page.id === leftover.tab.id && page.url === "data:text/html,",
+        ),
+      );
       const crashedDirectory = join(root, "sessions", crashed.browserSessionId);
       await mkdir(crashedDirectory, { recursive: true, mode: 0o700 });
       const exited = Bun.spawn(["true"]);

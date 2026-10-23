@@ -511,6 +511,23 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
     });
   });
 
+  test("a leftover tab Chrome lists without an address yet is retried, not abandoned", async () => {
+    await withChrome(async ({ chrome, root, open }) => {
+      const loading = chrome.open("");
+      await writeLeftovers(root, 17, { createdTabs: [loading] });
+      const supervisor = await open();
+      expect(await supervisor.releaseAttachedLeftovers()).toEqual([]);
+      expect(chrome.tabs.has(loading)).toBe(true);
+      expect(ledger(root, 17)).toMatchObject({ settled: false, createdTabs: [loading] });
+
+      // Once it has loaded and shows nothing, the next sweep closes it.
+      chrome.tabs.get(loading)!.url = BLANK;
+      expect(await supervisor.releaseAttachedLeftovers()).toEqual([reference(17).browserSessionId]);
+      expect(chrome.tabs.has(loading)).toBe(false);
+      expect(ledger(root, 17)).toMatchObject({ settled: true, createdTabs: [] });
+    });
+  });
+
   test("a session a live controller still holds is left to it", async () => {
     await withChrome(async ({ chrome, root, open }) => {
       const blank = chrome.open(BLANK);
