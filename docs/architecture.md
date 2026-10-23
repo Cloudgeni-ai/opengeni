@@ -162,6 +162,16 @@ Generic event appends (including explicit field updates), history checkpoints,
 open-suffix attachment and transport/token markers use that narrow projection
 too; none needs frozen session or attempt configuration to perform its write.
 
+The worker stream batcher (`apps/worker/src/activities/streaming.ts`) flushes a
+requested queue prefix, not every fragment that arrives during an append. Later
+deltas retain the existing 100 ms trailing window unless a leading-edge, size or
+explicit flush includes them. First text and structural events remain prompt;
+structural checkpoints stay atomic with their event, drains stay serialized, and
+the existing high-water backpressure and retained failure behavior remain intact.
+The offline worker benchmark accepts `OPENGENI_BENCH_STREAM_CHUNKS` and
+`OPENGENI_BENCH_STREAM_DELAY_MS` to exercise paced streams, verifying both stored
+delta text and final model history rather than only a completed turn status.
+
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
 the frozen human's direct-child content. Finals cover earlier activity, not newer

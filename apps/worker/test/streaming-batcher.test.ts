@@ -23,6 +23,101 @@ const PTY: SessionEventType = "terminal.pty.output.delta"; // stays structural
 const TOOLCALL: SessionEventType = "agent.toolCall.created"; // structural
 
 describe("atomic structural checkpoints", () => {
+  test("an active append does not pull later deltas through an unopened flush window", async () => {
+    const realNow = Date.now;
+    Date.now = () => 1_000_000;
+    const batches: number[][] = [];
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batcher = createRuntimeBatcher(async (events) => {
+      batches.push(events.map((event) => (event.payload as { n: number }).n));
+      if (batches.length === 1) await first;
+    });
+    try {
+      await batcher.push(delta(0));
+      await batcher.push(delta(1));
+      release();
+      for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+      expect(batches).toEqual([[0]]);
+      await batcher.flush();
+      expect(batches).toEqual([[0], [1]]);
+    } finally {
+      release();
+      await batcher.flush();
+      Date.now = realNow;
+    }
+  });
+
+  test("a structural flush durably covers its boundary without pulling later ordinary deltas", async () => {
+    const realNow = Date.now;
+    Date.now = () => 1_000_000;
+    const batches: Array<{ events: number[]; mutations: number[] }> = [];
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
+      batches.push({
+        events: events.map((event) => (event.payload as { n: number }).n),
+        mutations,
+      });
+      if (batches.length === 1) await first;
+    });
+    try {
+      await batcher.push(delta(0));
+      const checkpoint = batcher.push(delta(1, TOOLCALL), 1);
+      await batcher.push(delta(2));
+      release();
+      await checkpoint;
+      expect(batches).toEqual([
+        { events: [0], mutations: [] },
+        { events: [1], mutations: [1] },
+      ]);
+      await batcher.flush();
+      expect(batches.at(-1)).toEqual({ events: [2], mutations: [] });
+    } finally {
+      release();
+      await batcher.flush();
+      Date.now = realNow;
+    }
+  });
+
+  test("deltas deferred behind an active append still flush on model silence", async () => {
+    const batches: number[][] = [];
+    let release!: () => void;
+    const first = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let secondFlushed!: () => void;
+    const second = new Promise<void>((resolve) => {
+      secondFlushed = resolve;
+    });
+    const batcher = createRuntimeBatcher(async (events) => {
+      batches.push(events.map((event) => (event.payload as { n: number }).n));
+      if (batches.length === 1) await first;
+      else secondFlushed();
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await batcher.push(delta(0));
+      await batcher.push(delta(1));
+      release();
+      await Promise.race([
+        second,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Deferred delta was never flushed")), 2_000);
+        }),
+      ]);
+      expect(batches).toEqual([[0], [1]]);
+    } finally {
+      clearTimeout(timeout);
+      release();
+      await batcher.flush();
+    }
+  });
+
   test("keeps each mutation with its structural event across the batch-size boundary", async () => {
     const batches: Array<{ events: number[]; mutations: number[] }> = [];
     let release!: () => void;
