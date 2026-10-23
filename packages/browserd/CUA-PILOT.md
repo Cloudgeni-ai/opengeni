@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`9473a6f980186eb894e6a52da7ffb105c2177b0f`: upstream `cua-driver-rs-v0.37.0`
+`0b3fc0dc46ae1b0657323b4028f939f8d351636d`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -22,12 +22,19 @@ A press that puts the caret in a text field reports a confirmed effect when the
 field then holds the keyboard focus, instead of an unconfirmed click.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
+A `run_steps` lookup or check may set `exact: true`, so its name must be the
+element's whole label rather than the start of a word in it.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
 A `computer_act` batch runs as one `run_steps` call only where the worker offers
 `refind_stale`, so every step stays bound to the observation the batch was
-checked against; on Windows a batch's actions are sent one at a time. CUA is the
+checked against. The exception is a later action whose role, label or text
+locator the observation does not show (an earlier action brings it up): it is
+sent by role and name, and CUA finds it when the step runs after waiting up to
+10 s for it to appear and enable. Every element-targeted action after it is
+then found by name too, because CUA's lookup re-reads the window and retires the
+observation's tokens. On Windows a batch's actions are sent one at a time. CUA is the
 default on macOS, on Windows and for explicitly selected isolated Linux
 desktops. Linux host desktops retain the native default.
 
@@ -129,7 +136,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/9473a6f980186eb894e6a52da7ffb105c2177b0f/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/0b3fc0dc46ae1b0657323b4028f939f8d351636d/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

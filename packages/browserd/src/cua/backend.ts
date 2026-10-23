@@ -472,7 +472,11 @@ export class CuaComputerBackend implements ComputerBackend {
     const actionOf: number[] = [];
     for (const [index, action] of actions.entries()) {
       try {
-        const operations = await this.operations({ ...command, action }, index > 0);
+        const operations = await this.operations(
+          { ...command, action },
+          index > 0,
+          steps.some((step) => step.stepOptions !== undefined),
+        );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -1279,6 +1283,8 @@ export class CuaComputerBackend implements ComputerBackend {
   private async operations(
     command: ComputerBackendActionCommand,
     laterInBatch = false,
+    /** An earlier action of the batch names its element (see namedOperation). */
+    afterNamed = false,
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
@@ -1444,7 +1450,14 @@ export class CuaComputerBackend implements ComputerBackend {
       try {
         node = this.locateObserved(command.targetId, observed, action.locator);
       } catch (error) {
-        const named = laterInBatch ? namedOperation(args, action, error) : null;
+        // Not in the batch's observation: an earlier action may bring it up.
+        const named =
+          laterInBatch &&
+          error instanceof ComputerBackendError &&
+          error.code === "locator_not_found" &&
+          ACTIONS_ON_UNSEEN.has(action.action)
+            ? namedOperation(this.identity.platform, args, action, null)
+            : null;
         if (!named) throw error;
         return [named];
       }
@@ -1469,6 +1482,24 @@ export class CuaComputerBackend implements ComputerBackend {
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (afterNamed) {
+        // An earlier step found its element by name, which re-read the window
+        // and so retired every token of the batch's observation: this element
+        // is found by name too.
+        const token = this.elementToken(command.targetId, node.ref);
+        const special =
+          (action.action === "set_value" &&
+            this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
+          (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
+        const named = special ? null : namedOperation(this.identity.platform, args, action, node);
+        if (!named)
+          throw unsupported(
+            special
+              ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
+              : "This element has no name, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+          );
+        return [named];
+      }
       if (action.action === "focus")
         return [
           {
@@ -1784,12 +1815,24 @@ const MAX_RUN_STEPS = 64;
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
 
+/** What a later action of a batch may do to an element its observation does
+ * not show yet: an action whose meaning does not depend on the element's kind. */
+const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
+  "invoke",
+  "show_menu",
+  "set_value",
+  "focus",
+]);
+
 /** How long a batch step that names its element waits for it to appear and
  * enable: CUA's longest wait for one step. */
 const NAMED_STEP_WAIT_MS = 10_000;
+/** How long its lookup then waits, once the check found the element. */
+const NAMED_STEP_FIND_MS = 1_000;
 
-/** The roles observations show, as CUA's lookup names them where they
- * differ ("text" there is a text field; here it is static text). */
+/** The roles macOS and Windows observations show, as CUA's lookup names
+ * them where they differ ("text" there is a text field; here it is static
+ * text). Linux observations show AT-SPI roles, which CUA reads as they are. */
 const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
   textbox: "textfield",
   text: "statictext",
@@ -1799,31 +1842,36 @@ const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
 
 type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
 
-/** A later action of a batch whose element the batch's observation does not
- * show: an earlier action may bring it up (the next page, a loading form, a
- * dialog). It names the element by role and name, and CUA finds it when the
- * step runs, after waiting for it to appear and enable. Only a role, label or
- * text locator can name an element not yet seen, and only an invoke, menu or
- * set_value acts on one found this way; anything else stays refused. */
-function namedOperation(
+/** The step for a later action of a batch that names its element by role
+ * and name instead of carrying a token: CUA finds the element when the step
+ * runs, after waiting for it to appear and enable. `node` is the element as
+ * the batch's observation shows it, when it shows it; a ref or identifier
+ * locator then names it by its role and exact name. Null when the element
+ * cannot be named: a ref or identifier the observation does not show, or an
+ * element without a role and name. */
+export function namedOperation(
+  platform: "macos" | "windows" | "linux",
   args: Record<string, unknown>,
   action: SemanticAction,
-  error: unknown,
+  node: InteractionSemanticNodeValue | null,
 ): Operation | null {
-  if (!(error instanceof ComputerBackendError) || error.code !== "locator_not_found") return null;
-  const { locator } = action;
-  if (locator.kind !== "role" && locator.kind !== "label" && locator.kind !== "text") return null;
-  if (action.action !== "invoke" && action.action !== "show_menu" && action.action !== "set_value")
-    return null;
   if (action.action === "set_value" && action.value === undefined) return null;
-  const name = locator.kind === "role" ? locator.name : locator.text;
+  const { locator } = action;
+  const byLocator = locator.kind === "role" || locator.kind === "label" || locator.kind === "text";
+  if (!byLocator && !node) return null;
+  const role = locator.kind === "role" ? locator.role : byLocator ? undefined : node!.role;
+  const name = byLocator ? (locator.kind === "role" ? locator.name : locator.text) : node!.name;
+  const exact = byLocator ? locator.exact === true : true;
   const selector = {
-    ...(locator.kind === "role" ? { role: CUA_LOOKUP_ROLES[locator.role] ?? locator.role } : {}),
-    ...(name !== undefined && name !== "" ? { name } : {}),
+    ...(role !== undefined
+      ? { role: platform === "linux" ? role : (CUA_LOOKUP_ROLES[role] ?? role) }
+      : {}),
+    ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
   };
-  if (!("role" in selector) && !("name" in selector)) return null;
+  if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // The check waits for the element; the lookup after it finds it at once.
   const stepOptions = {
-    timeout_ms: NAMED_STEP_WAIT_MS,
+    timeout_ms: NAMED_STEP_FIND_MS,
     wait_for: {
       ...selector,
       pid: args.pid,
@@ -1844,6 +1892,7 @@ function namedOperation(
       ...args,
       ...selector,
       button: action.action === "show_menu" ? "right" : "left",
+      ...(action.action === "focus" ? { action: "focus" } : {}),
       delivery_mode: "background",
     },
     stepOptions,

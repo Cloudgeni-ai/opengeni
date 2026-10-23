@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { CuaComputerBackend } from "../src/cua/backend";
+import { CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
 import type {
@@ -2455,7 +2455,7 @@ describe("CUA desktop boundary", () => {
         expect(steps[1]!.args).not.toHaveProperty("element_token");
         expect(steps[1]).toMatchObject({
           args: { pid: 42, window_id: 1, role: "textfield", name: "Seats", value: "12" },
-          timeout_ms: 10_000,
+          timeout_ms: 1_000,
           wait_for: {
             role: "textfield",
             name: "Seats",
@@ -2473,6 +2473,69 @@ describe("CUA desktop boundary", () => {
       } finally {
         await backend.close();
       }
+    });
+
+    test("after a step found by name, later elements are found by name too", async () => {
+      // CUA's lookup re-reads the window, which retires the tokens of the
+      // batch's observation, so a later token would stop the batch as stale.
+      const fixture = new BatchFixture();
+      const { backend, observation } = await open(fixture);
+      try {
+        const apply = observation.roots[0]!;
+        const crossing: ComputerBackendActionCommand = {
+          ...batch(observation),
+          action: {
+            type: "batch",
+            actions: [
+              { type: "keyboard", action: "press", value: "enter" },
+              {
+                type: "semantic",
+                locator: { kind: "role", role: "textbox", name: "Seats", exact: true },
+                action: "set_value",
+                value: "4",
+              },
+              { type: "semantic", locator: { kind: "ref", ref: apply.ref }, action: "invoke" },
+            ],
+          },
+        };
+        await backend.dispatch(crossing);
+        const { steps } = fixture.calls.find((call) => call.name === "run_steps")!.args as {
+          steps: { tool: string; args: Record<string, unknown> }[];
+        };
+        expect(steps[1]!.args).toMatchObject({ role: "textfield", name: "Seats", exact: true });
+        expect(steps[2]!.args).toMatchObject({ role: "button", name: "Apply", exact: true });
+        expect(steps[2]!.args).not.toHaveProperty("element_token");
+      } finally {
+        await backend.close();
+      }
+    });
+
+    test("a named step uses the lookup's role names, except AT-SPI roles on Linux", () => {
+      const args = { pid: 7, window_id: 3, session: "s" };
+      const fill = {
+        type: "semantic",
+        locator: { kind: "role", role: "text", name: "Email" },
+        action: "set_value",
+        value: "a@b.c",
+      } as const;
+      expect(namedOperation("macos", args, fill, null)?.args).toMatchObject({
+        role: "statictext",
+        name: "Email",
+      });
+      expect(namedOperation("linux", args, fill, null)?.args).toMatchObject({
+        role: "text",
+        name: "Email",
+      });
+      expect(namedOperation("linux", args, fill, null)?.args).not.toHaveProperty("exact");
+      // A ref names nothing on its own: without the observed element it stays refused.
+      expect(
+        namedOperation(
+          "macos",
+          args,
+          { type: "semantic", locator: { kind: "ref", ref: "s1:9" }, action: "invoke" },
+          null,
+        ),
+      ).toBeNull();
     });
 
     test("an element not yet seen is refused first in a batch, by ref, or for other actions", async () => {
