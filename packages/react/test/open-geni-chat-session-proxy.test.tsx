@@ -14,10 +14,17 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom({ clock: "virtual" });
 
+/**
+ * Real-time budget, under bun's 5 s test timeout. The file's clock is virtual:
+ * a deadline on it passes in a few instant jumps, before a loaded runner has
+ * settled the relay's fetches and digests.
+ */
+const realDeadline = (ms: number) => Bun.nanoseconds() + ms * 1_000_000;
+
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 3_000;
+  const deadline = realDeadline(4_000);
   while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(message);
+    if (Bun.nanoseconds() >= deadline) throw new Error(message);
     await flush(10);
   }
 }
@@ -566,18 +573,29 @@ async function mountStockChat(
     if (revokeObjectURL) Object.defineProperty(URL, "revokeObjectURL", revokeObjectURL);
     else Reflect.deleteProperty(URL, "revokeObjectURL");
   };
-  await flush(400);
+  // Ready when the composer is on screen; a fixed sleep races a loaded CI runner.
+  await waitFor(
+    () => view.container.querySelector("textarea") !== null,
+    "the composer did not render",
+  );
   const buttons = () =>
     [...view.container.querySelectorAll("button")].map(
       (button) => button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "",
     );
-  const click = async (label: RegExp) => {
-    const target = [...view.container.querySelectorAll<HTMLElement>("button,[role=button]")].find(
-      (element) => label.test(element.getAttribute("aria-label") ?? element.textContent ?? ""),
+  const find = (label: RegExp) =>
+    [...view.container.querySelectorAll<HTMLElement>("button,[role=button]")].find((element) =>
+      label.test(element.getAttribute("aria-label") ?? element.textContent ?? ""),
     );
+  /** Click the first control matching `label` once it appears; false if it never does. */
+  const click = async (label: RegExp) => {
+    const deadline = realDeadline(4_000);
+    let target = find(label);
+    while (!target && Bun.nanoseconds() < deadline) {
+      await flush(10);
+      target = find(label);
+    }
     if (!target) return false;
     await actRun(() => target.click());
-    await flush(200);
     return true;
   };
   return { container: view.container, browser, upstream, click, buttons };
@@ -593,7 +611,15 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     const chat = await mountStockChat({ createSession: (input) => input });
     // Expand the browser screenshot so its retained bytes load.
     await chat.click(/Observed browser/);
-    await flush(300);
+    await waitFor(
+      () =>
+        chat.browser.includes(`200 POST /v1/workspaces/${WS}/artifacts/${VID}/playback-source`) &&
+        chat.browser.includes(
+          `206 GET /v1/workspaces/${WS}/sessions/${S}/artifacts/${SHOT}/content`,
+        ) &&
+        chat.container.querySelector("video") !== null,
+      "the session's media did not load",
+    );
     const text = chat.container.textContent ?? "";
     expect(text).not.toContain("retrieval is not configured");
     expect(text).not.toContain("retrieval failed");
@@ -636,11 +662,16 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
 
   test("goal controls pause, resume and clear through the relay", async () => {
     const chat = await mountStockChat({}, {}, undefined, true);
-    expect(chat.container.textContent).toContain("Goal");
-    expect(await chat.click(/^Pause goal$/)).toBe(true);
-    expect(await chat.click(/^Resume goal$/)).toBe(true);
-    expect(await chat.click(/^Clear goal$/)).toBe(true);
     const goal = `/v1/workspaces/${WS}/sessions/${S}/goal`;
+    expect(await chat.click(/^Pause goal$/)).toBe(true);
+    expect(chat.container.textContent).toContain("Goal");
+    expect(await chat.click(/^Resume goal$/)).toBe(true);
+    await waitFor(
+      () => chat.upstream.filter((line) => line.startsWith(`PATCH ${goal}`)).length === 2,
+      "the goal did not resume",
+    );
+    expect(await chat.click(/^Clear goal$/)).toBe(true);
+    await waitFor(() => chat.browser.includes(`204 DELETE ${goal}`), "the goal was not cleared");
     expect(chat.browser.filter((line) => line.endsWith(goal) || line.includes(`${goal} `))).toEqual(
       expect.arrayContaining([`200 GET ${goal}`, `200 PATCH ${goal}`, `204 DELETE ${goal}`]),
     );
@@ -651,7 +682,10 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
   test("a sub-agent's chat opens in place from its card", async () => {
     const chat = await mountStockChat();
     expect(await chat.click(/^Open agent session$/)).toBe(true);
-    await flush(300);
+    await waitFor(
+      () => (chat.container.textContent ?? "").includes("Check the report numbers"),
+      "the sub-agent's chat did not open",
+    );
     expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}`);
     expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}/events`);
     expect(chat.container.textContent).toContain("Check the report numbers");
@@ -706,7 +740,7 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     const attach = (container: HTMLElement) =>
       container.querySelector("[data-og-conversation-composer] [aria-label='Attach files']");
     const member = await mountStockChat();
-    expect(attach(member.container)).not.toBeNull();
+    await waitFor(() => attach(member.container) !== null, "the member has no attach control");
     await unmountChat();
     const visitor = await mountStockChat({
       resolve: () => ({ workspaceId: WS, user: "visitor:abc", visitor: true }),
@@ -714,13 +748,19 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(visitor.container.querySelector("textarea")).not.toBeNull();
     expect(attach(visitor.container)).toBeNull();
     // Agent-produced media still loads for the visitor.
-    expect(visitor.browser).toContain(`200 POST /v1/workspaces/${WS}/files/${IMG}/download-url`);
+    await waitFor(
+      () => visitor.browser.includes(`200 POST /v1/workspaces/${WS}/files/${IMG}/download-url`),
+      "the visitor did not load agent-produced media",
+    );
     await unmountChat();
     const allowed = await mountStockChat({
       resolve: () => ({ workspaceId: WS, user: "visitor:abc", visitor: true }),
       visitorUploads: true,
     });
-    expect(attach(allowed.container)).not.toBeNull();
+    await waitFor(
+      () => attach(allowed.container) !== null,
+      "visitor uploads did not enable the attach control",
+    );
   });
 
   test("voice input opts out per conversation", async () => {
@@ -764,9 +804,11 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
           props
         ]!.onChange({ target: textarea });
       });
-      await flush(50);
       expect(await chat.click(/^Send/)).toBe(true);
-      await flush(200);
+      await waitFor(
+        () => chat.container.querySelector('[role="alert"]') !== null,
+        "the refusal was not shown",
+      );
       expect(chat.browser).toContain(`404 POST /v1/workspaces/${WS}/sessions route_not_allowed`);
       expect(
         [...chat.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
