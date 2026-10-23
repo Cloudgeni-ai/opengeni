@@ -2510,6 +2510,73 @@ describe("CUA desktop boundary", () => {
       }
     });
 
+    test("after a step found by name, an element CUA cannot find by its shown name is refused up front", async () => {
+      const crossing = (observation: ComputerBackendObservation): ComputerBackendActionCommand => ({
+        ...batch(observation),
+        action: {
+          type: "batch",
+          actions: [
+            { type: "keyboard", action: "press", value: "enter" },
+            {
+              type: "semantic",
+              locator: { kind: "role", role: "textbox", name: "Seats" },
+              action: "set_value",
+              value: "4",
+            },
+            {
+              type: "semantic",
+              locator: { kind: "ref", ref: observation.roots[0]!.ref },
+              action: "invoke",
+            },
+          ],
+        },
+      });
+      // Shown without Chrome's live memory figure, which CUA's lookup matches.
+      const memory = new BatchFixture();
+      memory.applyLabel = "Inbox - Memory usage - 85.2 MB";
+      const first = await open(memory);
+      try {
+        expect(first.observation.roots[0]!.name).toBe("Inbox");
+        const failure = await first.backend
+          .dispatch(crossing(first.observation))
+          .catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toContain("no label of its own");
+        expect(memory.ran).toBe(false);
+      } finally {
+        await first.backend.close();
+      }
+      // Two buttons by the same name: the lookup could not tell them apart.
+      class TwinFixture extends BatchFixture {
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const response = await super.callTool(name, argumentsJson);
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            data.elements.push({
+              ...data.elements[0],
+              element_index: 2,
+              element_token: `${data.snapshot_id}:2`,
+              frame: { x: 120, y: 60, w: 40, h: 20 },
+            });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const twins = new TwinFixture();
+      const second = await open(twins);
+      try {
+        const failure = await second.backend
+          .dispatch(crossing(second.observation))
+          .catch((error: unknown) => error);
+        expect(failure).toMatchObject({ dispatched: false });
+        expect(String((failure as Error).message)).toContain("Several elements here");
+        expect(twins.ran).toBe(false);
+      } finally {
+        await second.backend.close();
+      }
+    });
+
     test("a named step uses the lookup's role names, except AT-SPI roles on Linux", () => {
       const args = { pid: 7, window_id: 3, session: "s" };
       const fill = {

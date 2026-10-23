@@ -116,6 +116,10 @@ export class CuaComputerBackend implements ComputerBackend {
     string,
     { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
   >();
+  /** Per window, the element's own label behind each CUA token of its latest
+   * reading: what CUA's lookup by name matches. An observed name can instead
+   * come from the element's text or drop Chrome's live memory figure. */
+  private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -1023,6 +1027,16 @@ export class CuaComputerBackend implements ComputerBackend {
     );
     while (this.openingTokens.size > 32)
       this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.ownLabels.delete(targetId);
+    this.ownLabels.set(
+      targetId,
+      new Map(
+        state.elements
+          .filter((element) => element.element_token && element.label)
+          .map((element) => [element.element_token!, element.label!]),
+      ),
+    );
+    while (this.ownLabels.size > 32) this.ownLabels.delete(this.ownLabels.keys().next().value!);
     this.dateFieldTokens.delete(targetId);
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
@@ -1491,12 +1505,26 @@ export class CuaComputerBackend implements ComputerBackend {
           (action.action === "set_value" &&
             this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
           (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
-        const named = special ? null : namedOperation(this.identity.platform, args, action, node);
+        // CUA finds an element by its own label only, and by that label it
+        // must find this one element.
+        const findable =
+          node.name !== undefined && node.name === this.ownLabels.get(command.targetId)?.get(token);
+        if (
+          findable &&
+          !special &&
+          observed.roots.filter((other) => other.role === node.role && other.name === node.name)
+            .length > 1
+        )
+          throw unsupported(
+            "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
+          );
+        const named =
+          special || !findable ? null : namedOperation(this.identity.platform, args, action, node);
         if (!named)
           throw unsupported(
             special
               ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
-              : "This element has no name, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+              : "This element has no label of its own, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
           );
         return [named];
       }
