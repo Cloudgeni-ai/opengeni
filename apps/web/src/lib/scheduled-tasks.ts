@@ -845,6 +845,7 @@ const RUN_TRIGGER_LABEL: Record<ScheduledTaskRun["triggerType"], string> = {
   manual: "Run now",
   initial: "First run",
   provider_event: "Provider event",
+  event: "Event",
   retry: "Retry",
   repair: "Repair",
 };
