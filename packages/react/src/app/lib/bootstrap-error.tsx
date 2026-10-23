@@ -3,6 +3,11 @@ export type BootstrapErrorContext = "client_configuration" | "workspace_access";
 export type BootstrapErrorPresentation = Readonly<{
   title: string;
   description: string;
+  /**
+   * Startup is still retrying by itself (an update or a dropped connection):
+   * show a calm waiting state with retry as a secondary action.
+   */
+  recovering?: true | undefined;
 }>;
 
 type ErrorMetadata = {
@@ -91,10 +96,16 @@ function errorMetadata(error: unknown): ErrorMetadata {
   };
 }
 
-/** Only transient bootstrap reads qualify; presentation copy is not retry authority. */
+/**
+ * Only transient bootstrap reads qualify; presentation copy is not retry
+ * authority. The maintenance marker is transient: the deployment is updating
+ * and answers again on its own.
+ */
 export function isTransientBootstrapError(error: unknown, context: BootstrapErrorContext): boolean {
   const metadata = errorMetadata(error);
-  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) return false;
+  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) {
+    return metadata.status === null || metadata.status >= 500 || metadata.status === 0;
+  }
   if (metadata.status !== null) {
     return (
       [0, 502, 503, 504].includes(metadata.status) ||
@@ -108,6 +119,46 @@ export function isTransientBootstrapError(error: unknown, context: BootstrapErro
       error.message,
     )
   );
+}
+
+/** Startup is waiting for the API and will continue by itself. */
+export type BootstrapWaitingPresentation = BootstrapErrorPresentation &
+  Readonly<{ recovering: true }>;
+
+/**
+ * How long an ordinary transient failure reads as "reconnecting" before
+ * startup names the problem (it still reconnects by itself after that).
+ */
+export const BOOTSTRAP_CALM_WINDOW_MS = 120_000;
+
+const updatingPresentation: BootstrapWaitingPresentation = {
+  title: "Updating",
+  description: "This page continues by itself when the update finishes.",
+  recovering: true,
+};
+
+const reconnectingPresentation: BootstrapWaitingPresentation = {
+  title: "Reconnecting",
+  description: "This page continues by itself when the connection is back.",
+  recovering: true,
+};
+
+/**
+ * The calm state shown while startup keeps retrying a transient failure: an
+ * update (the maintenance marker) for as long as it lasts, any other transient
+ * failure for the calm window, then the named problem, still retrying.
+ */
+export function bootstrapWaitingPresentation(
+  error: unknown,
+  context: BootstrapErrorContext,
+  elapsedMs: number,
+): BootstrapWaitingPresentation {
+  const metadata = errorMetadata(error);
+  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) {
+    return updatingPresentation;
+  }
+  if (elapsedMs < BOOTSTRAP_CALM_WINDOW_MS) return reconnectingPresentation;
+  return { ...bootstrapErrorPresentation(error, context), recovering: true };
 }
 
 /**

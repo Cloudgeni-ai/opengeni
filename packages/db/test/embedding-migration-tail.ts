@@ -173,6 +173,8 @@ export const embeddingMigrationTail = [
   // Rewrites the inbox projection and push triggers after 0674 and resolves
   // the session's person through 0661; replay after both so its bodies win.
   "0678_inbox_mute_session_replies.sql",
+  // Adds the schedule column to 0678's mute table and redefines its functions.
+  "0915_inbox_mute_scheduled_runs.sql",
   // Redefines 0674's session_hands_back_v1, which reads sessions.input_wait_turn_id
   // from withheld 0402; replay after 0674 so its body wins.
   "0694_inbox_skip_live_call_replies.sql",

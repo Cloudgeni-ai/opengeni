@@ -10083,6 +10083,9 @@ export const sessionHistoryItems = pgTable(
     turnPositionIdx: index("session_history_items_turn_position_idx")
       .on(table.turnId, table.position)
       .where(sql`${table.turnId} IS NOT NULL`),
+    scopeTurnPositionIdx: index("session_history_items_scope_turn_position_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );
 

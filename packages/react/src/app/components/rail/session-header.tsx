@@ -81,7 +81,7 @@ import {
   type InlineRename,
 } from "../../lib/session-rename";
 import { pinLiveAnnouncement } from "../../lib/pin-live-announcement";
-import type { SessionRepliesMute } from "../../lib/inbox";
+import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
@@ -520,7 +520,7 @@ export function SessionHeader({
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
-                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+                {repliesMuteLabel(repliesMute)}
               </DropdownMenuItem>
             ) : null}
             {onOpenUsageLimit ? (

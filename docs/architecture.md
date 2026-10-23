@@ -2463,6 +2463,11 @@ Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute.
+Source provenance batches canonical session-authorization facts within each
+bounded projection window, retaining the same per-session host decisions. A
+separate live visibility read follows those decisions, so revocation during a
+host callback cannot expose the source ID. Both reads use the canonical scalar
+helpers' set-based implementations; no authority is cached across requests.
 Shared pins live in private discovery metadata, not content domains. The catalog
 and its bounded publication branch apply pin-first keysets globally; pin writes
 require publishing and target-domain read authority ([library](artifact-library.md)).

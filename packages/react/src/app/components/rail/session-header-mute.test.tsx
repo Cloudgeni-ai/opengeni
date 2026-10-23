@@ -88,7 +88,7 @@ test("the session menu mutes and unmutes replies only where it applies", async (
   document.body.append(container);
   const root = createRoot(container);
   const toggles: boolean[] = [];
-  const render = (repliesMute: { muted: boolean } | null) => (
+  const render = (repliesMute: { muted: boolean; scope?: "session" | "schedule" } | null) => (
     <SessionHeader
       session={session}
       ancestors={[]}
@@ -125,6 +125,14 @@ test("the session menu mutes and unmutes replies only where it applies", async (
     await act(async () => root.render(render({ muted: true })));
     expect(items()).toContain("Unmute replies");
     expect(items()).not.toContain("Mute replies");
+    // A run of a schedule that starts a new chat each time: the mute covers
+    // the schedule, and the menu says so.
+    await act(async () => root.render(render({ muted: false, scope: "schedule" })));
+    await act(async () => item("Mute this schedule's replies")!.click());
+    expect(toggles).toEqual([false, false]);
+    await act(async () => root.render(render({ muted: true, scope: "schedule" })));
+    expect(items()).toContain("Unmute this schedule's replies");
+    expect(items()).not.toContain("Unmute replies");
   } finally {
     await act(async () => root.unmount());
     container.remove();

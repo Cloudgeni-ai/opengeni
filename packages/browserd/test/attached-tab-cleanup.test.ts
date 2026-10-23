@@ -397,6 +397,26 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
     });
   });
 
+  test("a tab Chrome reports without an address, or with a very long one, never fails a session", async () => {
+    await withChrome(async ({ chrome, open }) => {
+      // Chrome reports a tab it just created, or one still loading, without
+      // an address; a page's own data: URL can be very long.
+      chrome.open("");
+      const long = chrome.open(`data:text/html,${"x".repeat(70_000)}`);
+      const supervisor = await open();
+      const session = reference(16);
+      const created = await supervisor.createSession({
+        ...session,
+        headed: true,
+        transport: TRANSPORT,
+      });
+      const targets = await supervisor.listTargets(session);
+      expect(targets.map((target) => target.id)).toEqual(
+        expect.arrayContaining([created.observation.target.id, long]),
+      );
+    });
+  });
+
   test("a controller shutdown closes the session's empty tab and lets go of Chrome", async () => {
     await withChrome(async ({ chrome, root, open }) => {
       const supervisor = await open();
@@ -488,6 +508,23 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         transport: TRANSPORT,
       });
       expect(recovered.observation.target.id).toBe(used);
+    });
+  });
+
+  test("a leftover tab Chrome lists without an address yet is retried, not abandoned", async () => {
+    await withChrome(async ({ chrome, root, open }) => {
+      const loading = chrome.open("");
+      await writeLeftovers(root, 17, { createdTabs: [loading] });
+      const supervisor = await open();
+      expect(await supervisor.releaseAttachedLeftovers()).toEqual([]);
+      expect(chrome.tabs.has(loading)).toBe(true);
+      expect(ledger(root, 17)).toMatchObject({ settled: false, createdTabs: [loading] });
+
+      // Once it has loaded and shows nothing, the next sweep closes it.
+      chrome.tabs.get(loading)!.url = BLANK;
+      expect(await supervisor.releaseAttachedLeftovers()).toEqual([reference(17).browserSessionId]);
+      expect(chrome.tabs.has(loading)).toBe(false);
+      expect(ledger(root, 17)).toMatchObject({ settled: true, createdTabs: [] });
     });
   });
 

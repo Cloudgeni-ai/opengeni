@@ -1,8 +1,8 @@
-// A sub-session page after its question was answered: the real timeline,
-// composer and styles. `?who=agent` (default) shows the parent agent's answer,
-// `?who=person` the same question answered by the person; `?light` for the
-// light theme.
-import { ChatComposer, MessageTimeline } from "@opengeni/react";
+// A sub-session page after its question was answered: the real timeline (with
+// the app's readable turns), composer and styles. `?who=agent` (default) shows
+// the parent agent's answer, `?who=person` the same question answered by the
+// person; `?open` expands the turn's work details; `?light` for the light theme.
+import { ChatComposer, DisclosureDefaultsProvider, MessageTimeline } from "@opengeni/react";
 import type { SessionEvent } from "@opengeni/sdk";
 import { useMemo } from "react";
 import { createRoot } from "react-dom/client";
@@ -19,6 +19,7 @@ import "../src/styles.css";
 const params = new URLSearchParams(location.search);
 if (params.has("light")) document.documentElement.dataset.ogTheme = "light";
 const respondedByKind = params.get("who") === "person" ? "human" : "agent_attempt";
+const open = params.has("open");
 
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
@@ -91,7 +92,9 @@ function Page() {
           Review PR #4418
         </header>
         <div className="min-h-0 flex-1">
-          <MessageTimeline className="h-full" events={events} />
+          <DisclosureDefaultsProvider defaultOpen={open}>
+            <MessageTimeline className="h-full" events={events} turnSummary={{ rolling: true }} />
+          </DisclosureDefaultsProvider>
         </div>
         <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
           <div className="mx-auto w-full max-w-3xl">

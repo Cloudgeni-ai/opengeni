@@ -1,5 +1,15 @@
 # @opengeni/browserd
 
+## 0.4.5
+
+### Patch Changes
+
+- 3e378e5: A tab in the person's own Chrome that reports no address yet (one Chrome just opened or is still loading) or a very long one (a large `data:` page) no longer fails listing the browser's tabs or starting a session there.
+- 104a12e: Cleaning up after a crashed controller no longer abandons a tab it opened that Chrome still lists without an address: the tab stays recorded and a later sweep closes it once it shows it is empty.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/interaction@4.8.0
+
 ## 0.4.4
 
 ### Patch Changes

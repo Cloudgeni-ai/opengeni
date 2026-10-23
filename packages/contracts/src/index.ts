@@ -4377,6 +4377,13 @@ export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
     // can still attach to a fresh channel. Real revocation is the mint refusing
     // to issue new tokens plus the 120 s TTL bounding the old ones.
     authorityEpoch: z.number().int().positive().optional(),
+    // A Connected Machine relay stream binds the token to its exact channel:
+    // the machine (agent) and the stream instance. `workspaceId` is then the
+    // workspace the machine is enrolled in, which is the relay's routing
+    // namespace and can differ from the chat's workspace. Optional for rolling
+    // compatibility: older relays ignore them, provider tunnels omit them.
+    agentId: z.string().min(1).max(256).optional(),
+    channelId: z.string().min(1).max(512).optional(),
   }),
 );
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
@@ -17312,11 +17319,14 @@ export function accessContextHasInbox(
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export const SessionInboxMute = /* @__PURE__ */ defineSchema(() =>
   z.object({
     repliesMuted: z.boolean(),
+    scope: z.enum(["session", "schedule"]).optional(),
   }),
 );
 export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
@@ -19572,7 +19582,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // An id that does not name a rig in the workspace is a 422.
       rigId: z.string().uuid().nullable().optional(),
       // The workspace channel to file this session under (rail organization only).
-      // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+      // Omitted/null ⇒ unfiled (inbox), except that a Site conversation is filed
+      // in its Site's project. An id that does not name a channel in the
       // workspace is a 422.
       channelId: z.string().uuid().nullable().optional(),
       goal: GoalSpec.optional(),

@@ -311,7 +311,9 @@ export function SessionMachineCapabilityCard({
         }
         skill={false}
         expanded={false}
-        complete={activeMachine !== null || desktopReady}
+        // Running on some other machine doesn't answer the agent's request for
+        // this one: the card stays open with Allow until the chat is on it.
+        complete={!asking && (activeMachine !== null || desktopReady)}
         completeLabel={
           activeMachine
             ? outcome?.sandboxId === activeMachine.sandboxId

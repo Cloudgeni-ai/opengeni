@@ -84,6 +84,8 @@ function restrictedPageError(reason: string): InteractionDefiniteDriverError {
   );
 }
 
+const MAX_TAB_URL_LENGTH = 65_536;
+
 type AttachedTab = {
   id: string;
   title: string;
@@ -292,8 +294,10 @@ export function createAttachedChromeDriver(
  * crashed controller, or a cleanup that could not reach the browser): close
  * the tabs it opened that are still blank and release the debugger
  * attachments it held. A tab that shows a page, or that a live session in
- * this process holds, stays. Returns the record to keep; it is settled when
- * nothing is left to do. A profile that reconnected under another generation
+ * this process holds, stays. A tab Chrome reports without an address yet
+ * (just created, or still loading) is neither: it stays recorded for a later
+ * sweep. Returns the record to keep; it is settled when nothing is left to
+ * do. A profile that reconnected under another generation
  * can no longer be addressed with these tab ids, so its record settles as is.
  * Any other failure throws, for a later retry.
  */
@@ -334,7 +338,13 @@ export async function settleAttachedTabLedger(
     for (const tabId of ledger.createdTabs) {
       const tab = tabs.get(tabId);
       if (!tab) continue;
-      if (tab.url === null || !isBlankTabUrl(tab.url) || held(tabId)) {
+      if (tab.url === null) {
+        // Whether it ends up blank or showing a page is not known yet.
+        createdTabs.push(tabId);
+        settled = false;
+        continue;
+      }
+      if (!isBlankTabUrl(tab.url) || held(tabId)) {
         createdTabs.push(tabId);
         continue;
       }
@@ -1268,10 +1278,20 @@ function requireTab(value: unknown): AttachedTab {
   return {
     id: requireTargetId(tab.id),
     title: boundedString(tab.title, 0, 8_192, "tab title"),
-    url: tab.url === null ? null : boundedString(tab.url, 1, 65_536, "tab URL"),
+    url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
   };
+}
+
+/** A tab's address as Chrome reports it, or null when it reports none yet.
+ * One tab's unusual address never fails a listing or a session's start:
+ * Chrome reports a tab it has just created, or one still loading, with an
+ * empty address, and a page's own address (a large data: URL) can be far
+ * longer than anything we need to read of it. */
+function tabUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {

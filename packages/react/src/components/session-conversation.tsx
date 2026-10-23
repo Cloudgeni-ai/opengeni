@@ -53,6 +53,7 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -399,6 +400,13 @@ function ConversationView({
     loadFailed,
   } = conversation;
   const context = conversation;
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    feed.connectionState,
+    feed.initialLoading,
+  );
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
@@ -710,7 +718,7 @@ function ConversationView({
                   )
                 }
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-                composer={composer}
+                composer={composerView}
                 attachments={uploadsEnabled ? files : undefined}
                 // Nothing can be written (typed, dictated or chosen) into a
                 // session the host is still creating.

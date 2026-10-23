@@ -26,6 +26,7 @@ import {
   getInboxItem,
   getInboxSettings,
   getMemberNotificationsAllowed,
+  getSessionReplyMuteScope,
   getSessionRepliesMuted,
   getSessionTitles,
   listInboxItems,
@@ -319,13 +320,18 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       operation: "session.read",
       surface: "http",
     }).catch(muteSessionError);
-    const read = () => getSessionRepliesMuted(deps.db, { workspaceId, sessionId, subjectId });
-    const muted = authorization
+    const read = async () => {
+      const muted = await getSessionRepliesMuted(deps.db, { workspaceId, sessionId, subjectId });
+      return muted === null
+        ? null
+        : { muted, scope: await getSessionReplyMuteScope(deps.db, { workspaceId, sessionId }) };
+    };
+    const state = authorization
       ? await withResolvedSessionAuthorization(authorization, read)
       : await read();
-    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
+    if (state === null) throw new HTTPException(404, { message: "Session not found" });
     c.header("cache-control", "private, no-store");
-    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
+    return c.json(SessionInboxMute.parse({ repliesMuted: state.muted, scope: state.scope }));
   });
 
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/inbox-mute", async (c) => {
@@ -342,12 +348,21 @@ export function registerInboxRoutes(app: Hono, deps: ApiRouteDeps): void {
       operation: "session.attention.write",
       surface: "http",
     }).catch(muteSessionError);
-    const write = () =>
-      setSessionRepliesMuted(deps.db, { workspaceId, sessionId, subjectId, muted: repliesMuted });
-    const muted = authorization
+    const write = async () => {
+      const muted = await setSessionRepliesMuted(deps.db, {
+        workspaceId,
+        sessionId,
+        subjectId,
+        muted: repliesMuted,
+      });
+      return muted === null
+        ? null
+        : { muted, scope: await getSessionReplyMuteScope(deps.db, { workspaceId, sessionId }) };
+    };
+    const state = authorization
       ? await withResolvedSessionAuthorization(authorization, write)
       : await write();
-    if (muted === null) throw new HTTPException(404, { message: "Session not found" });
-    return c.json(SessionInboxMute.parse({ repliesMuted: muted }));
+    if (state === null) throw new HTTPException(404, { message: "Session not found" });
+    return c.json(SessionInboxMute.parse({ repliesMuted: state.muted, scope: state.scope }));
   });
 }

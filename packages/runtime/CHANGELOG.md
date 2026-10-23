@@ -1,5 +1,28 @@
 # @opengeni/runtime
 
+## 4.8.0
+
+### Patch Changes
+
+- 85fb89e: Live views of a Connected Machine (browser, desktop, terminal) work when the machine is connected in a different workspace than the chat using it. The relay viewer token used to carry the chat's workspace, so the relay refused it with "viewer token workspace does not match the channel key". The token now names the machine's relay channel (its workspace, machine and stream), and the relay only accepts it for that exact stream.
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/capabilities@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/interaction@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/tool-gateway@4.8.0
+  - @opengeni/vaults@4.8.0
+  - @opengeni/agent-proto@4.8.0
+  - @opengeni/decisions@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes

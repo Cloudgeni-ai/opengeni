@@ -32,6 +32,11 @@ import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
 import { usePage } from "../../lib/navigation";
+import {
+  OPENGENI_UPDATING_NOTICE,
+  TRANSIENT_RECONNECT_INTERVAL_MS,
+} from "../../../lib/transient-retry";
+import { useCalmServiceFailure } from "../../../lib/use-calm-service-failure";
 
 /** The built-in card for connecting a person's own computer to this chat. */
 export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
@@ -351,6 +356,19 @@ function SessionCapabilitySetup({
     catalog.authorityKey,
     setBusy,
   ]);
+  // While Opengeni is updating, keep reloading the catalog until it answers;
+  // a failure that outlasts a normal update shows as the problem it is.
+  const catalogUpdating = useCalmServiceFailure(catalog.loadError);
+  const refreshCatalogRef = useRef(catalog.refresh);
+  refreshCatalogRef.current = catalog.refresh;
+  useEffect(() => {
+    if (!catalogUpdating || catalog.loading) return;
+    const timer = setTimeout(
+      () => void refreshCatalogRef.current(),
+      TRANSIENT_RECONNECT_INTERVAL_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [catalog.loadError, catalog.loading, catalogUpdating]);
   const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
   const rawItemId = rawItem?.id;
   const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
@@ -534,6 +552,11 @@ function SessionCapabilitySetup({
         <p role="status" className="flex items-center gap-2 text-sm text-fg-muted">
           <Loader2Icon className="size-4 animate-spin" />
           Loading connection details…
+        </p>
+      ) : catalogUpdating && !item ? (
+        <p role="status" className="flex items-center gap-2 text-sm text-fg-muted">
+          <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+          {OPENGENI_UPDATING_NOTICE(t)}
         </p>
       ) : catalog.loadError || !item ? (
         <Notice

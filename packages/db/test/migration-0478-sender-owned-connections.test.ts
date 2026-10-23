@@ -32,6 +32,8 @@ const inboxTriggerTailMigrations = [
   "0677_local_human_inbox_recipient.sql",
   // Compiles SQL bodies against 0661's session person resolver.
   "0678_inbox_mute_session_replies.sql",
+  // Extends 0678's mute table and functions.
+  "0915_inbox_mute_scheduled_runs.sql",
 ];
 const withheldMigrations = [
   migration,

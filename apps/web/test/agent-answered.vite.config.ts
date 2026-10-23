@@ -7,7 +7,7 @@ import { previewHost } from "./preview-host";
 
 // Preview of a sub-session question answered by its parent agent or the person:
 // `vite --config test/agent-answered.vite.config.ts`, then open
-// /test/agent-answered.html?who=agent|person (add &light).
+// /test/agent-answered.html?who=agent|person (add &open, &light).
 export default defineConfig({
   plugins: [react(), tailwindcss(), previewHost()],
   server: {

@@ -62,6 +62,9 @@ e2e(
       });
     const supervisors: BrowserSupervisor[] = [];
     try {
+      // The person's own tab: Chromium may list its startup tab only a moment
+      // after it reports its DevTools endpoint.
+      await waitFor(async () => (await bridge.pages()).length > 0);
       const person = (await bridge.pages()).map((page) => page.id);
       const supervisor = await open();
       supervisors.push(supervisor);
@@ -122,6 +125,13 @@ e2e(
         url: "data:text/html,",
       });
       await bridge.request({ type: "debugger.attach", tabId: leftover.tab.id });
+      // A crashed controller's tab has long since loaded; a tab Chromium
+      // still lists without an address is retried by a later sweep instead.
+      await waitFor(async () =>
+        (await bridge.pages()).some(
+          (page) => page.id === leftover.tab.id && page.url === "data:text/html,",
+        ),
+      );
       const crashedDirectory = join(root, "sessions", crashed.browserSessionId);
       await mkdir(crashedDirectory, { recursive: true, mode: 0o700 });
       const exited = Bun.spawn(["true"]);
@@ -327,8 +337,12 @@ class ChromeDebuggerBridge {
         return {} as T;
       case "tabs.close": {
         const tabId = String(payload.tabId);
+        const targetId = this.target(tabId);
         await this.detach(tabId);
-        await this.browser.send("Target.closeTarget", { targetId: this.target(tabId) });
+        await this.browser.send("Target.closeTarget", { targetId });
+        // chrome.tabs.remove resolves once the tab is gone; Target.closeTarget
+        // returns while Chromium may still list the closing target.
+        await waitFor(async () => !(await this.targetListed(targetId)));
         return { tabs: await this.tabs() } as T;
       }
       case "debugger.attach": {
@@ -389,6 +403,13 @@ class ChromeDebuggerBridge {
 
   private target(tabId: unknown): string {
     return this.tabIds.get(String(tabId))!;
+  }
+
+  private async targetListed(targetId: string): Promise<boolean> {
+    const { targetInfos } = await this.browser.send<{
+      targetInfos: Array<{ targetId: string }>;
+    }>("Target.getTargets");
+    return targetInfos.some((target) => target.targetId === targetId);
   }
 
   private async tabs() {

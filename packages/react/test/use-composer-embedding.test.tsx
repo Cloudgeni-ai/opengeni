@@ -6,68 +6,86 @@ import { flushSync } from "react-dom";
 
 import { useComposer } from "../src/hooks/use-composer";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
+import {
+  actRun,
+  flush,
+  registerDom,
+  renderComponent,
+  renderHook,
+  withVirtualClock,
+} from "./render-hook";
 
 registerDom();
 
 describe("useComposer embedding policy", () => {
-  test("uncertain delivery keeps its bounded support reference across remount without storing diagnostics", async () => {
-    const sessionId = crypto.randomUUID();
-    const error = new OpenGeniApiError(0, "private diagnostic body", {
-      code: "network_error",
-      retryable: true,
-      outcomeUnknown: true,
-      correlationId: "support-reference",
-      displayMessage: "Opengeni private transport diagnostic",
-    });
-    const client = fakeClient({
-      sendMessage: async () => {
-        throw error;
-      },
-    });
-    const render = () =>
-      renderHook(
-        () =>
-          useComposer(sessionId, {
-            client,
-            workspaceId: WORKSPACE_ID,
-            draftPersistence: "disabled",
-            initialPolicy: {
-              model: "host-default",
-              reasoningEffort: "medium",
-              latencyMode: "standard",
-            },
-          }),
-        undefined,
-      );
-    const initial = await render();
-    await actRun(() => initial.result.current.setValue("Keep this message"));
-    await actRun(() => initial.result.current.send());
-    await flush(40);
-    expect(initial.result.current.optimisticMessages?.[0]).toMatchObject({
-      state: "failed",
-      outcomeUnknown: true,
-      correlationId: "support-reference",
-    });
-    await initial.unmount();
-    const remounted = await render();
-    try {
+  test("uncertain delivery keeps its bounded support reference across remount without storing diagnostics", async () =>
+    // A dropped transport is held as an update for a while; this is the one
+    // that outlasts it and is reported.
+    await withVirtualClock(async () => {
+      const sessionId = crypto.randomUUID();
+      const error = new OpenGeniApiError(0, "private diagnostic body", {
+        code: "network_error",
+        retryable: true,
+        outcomeUnknown: true,
+        correlationId: "support-reference",
+        displayMessage: "Opengeni private transport diagnostic",
+      });
+      const client = fakeClient({
+        sendMessage: async () => {
+          throw error;
+        },
+      });
+      const render = () =>
+        renderHook(
+          () =>
+            useComposer(sessionId, {
+              client,
+              workspaceId: WORKSPACE_ID,
+              draftPersistence: "disabled",
+              initialPolicy: {
+                model: "host-default",
+                reasoningEffort: "medium",
+                latencyMode: "standard",
+              },
+            }),
+          undefined,
+        );
+      const initial = await render();
+      await actRun(() => initial.result.current.setValue("Keep this message"));
+      await actRun(() => initial.result.current.send());
       await flush(40);
-      expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
-        "Reference: support-reference.",
-      );
-      expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
-        "Check its status before retrying",
-      );
-      const stored = Array.from({ length: sessionStorage.length }, (_, index) =>
-        sessionStorage.getItem(sessionStorage.key(index)!),
-      ).join("\n");
-      expect(stored).not.toContain("private diagnostic body");
-      expect(stored).not.toContain("Opengeni private transport diagnostic");
-    } finally {
-      await remounted.unmount();
-    }
-  });
+      expect(initial.result.current.optimisticMessages?.[0]).toMatchObject({
+        state: "sending",
+        outcomeUnknown: true,
+      });
+      expect(initial.result.current.reconnecting).toBe(true);
+      await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+      expect(initial.result.current.reconnecting).toBe(false);
+      expect(initial.result.current.optimisticMessages?.[0]).toMatchObject({
+        state: "failed",
+        outcomeUnknown: true,
+        correlationId: "support-reference",
+      });
+      await initial.unmount();
+      const remounted = await render();
+      try {
+        await flush(40);
+        expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
+          "Reference: support-reference.",
+        );
+        expect(remounted.result.current.optimisticMessages?.[0]?.error).toContain(
+          "Check its status before retrying",
+        );
+        const stored = Array.from({ length: sessionStorage.length }, (_, index) =>
+          sessionStorage.getItem(sessionStorage.key(index)!),
+        ).join("\n");
+        expect(stored).not.toContain("private diagnostic body");
+        expect(stored).not.toContain("Opengeni private transport diagnostic");
+      } finally {
+        await remounted.unmount();
+      }
+    }));
   test("refused-message Edit preserves attachments and annotations without overwriting a newer draft", async () => {
     const sessionId = crypto.randomUUID();
     const resource = { kind: "file" as const, fileId: crypto.randomUUID() };
