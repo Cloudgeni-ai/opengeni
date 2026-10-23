@@ -9,14 +9,22 @@ import { verify, type Plan, type RuleSet, type Snapshot } from "./bundle";
 import { type Archive, hydrate } from "./watchdog-journal";
 import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
 import { WatchdogGitHub, type AppBinding } from "./watchdog-github";
-import type { Binding, Observation, Ports, Record as WatchRecord } from "./watchdog";
+import {
+  PreEffectConflict,
+  type Binding,
+  type Observation,
+  type Ports,
+  type Record as WatchRecord,
+} from "./watchdog";
 
 export type CoreBridge = {
   /** Validates complete runtime-health/v1 and stable double-read Git envelope,
    * plus configured deployment/config/activation and complete effect safety. */
   observe(): Promise<Observation>;
   /** SAME state.json CAS fence shared with operator OFF/START and child writes.
-   * A conflicting/unknown result must not be converted to a successful fence. */
+   * conflict means definitive rejection with NO submitted fence/effect by this
+   * invocation. Ambiguous submission is unknown; existing ownership is owned.
+   * Neither conflict nor unknown may be converted to a successful fence. */
   claimStop(
     expectedStateSha: string,
     incidentId: string,
@@ -59,6 +67,8 @@ export type ProviderEvidence = {
   /** Authenticated raw Cloud Run resource. Core must validate full identity/config. */
   service: unknown;
   policy: "applied" | "manual" | "drift";
+  /** Exact saved-plan phase. Intermediate restoration is not arbitrary drift. */
+  phase: "applied" | "namespace" | "guard" | "restored" | "drift";
   inventoryDigest: string;
 };
 export type ProviderEvidencePort = {
@@ -204,19 +214,29 @@ export async function createProvider(
     const snapshot = JSON.parse(bytes.toString("utf8")) as Snapshot;
     const plan = JSON.parse(await readFile(join(admin, "plan/plan.json"), "utf8")) as Plan;
     let policy: ProviderEvidence["policy"] = "drift";
+    let phase: ProviderEvidence["phase"] = "drift";
     try {
       verify(plan, snapshot, "restored");
       policy = "manual";
+      phase = "restored";
     } catch {
       try {
         const guard = JSON.parse(
           await readFile(join(admin, "plan/guard-receipt.json"), "utf8"),
         ) as RuleSet;
-        const namespace = JSON.parse(
-          await readFile(join(admin, "plan/namespace-receipt.json"), "utf8"),
-        ) as RuleSet;
-        verify(plan, snapshot, "applied", { guard, namespace });
-        policy = "applied";
+        const namespace = await readFile(join(admin, "plan/namespace-receipt.json"), "utf8")
+          .then((receiptBytes) => JSON.parse(receiptBytes) as RuleSet)
+          .catch(() => undefined);
+        for (const candidate of ["applied", "namespace", "guard"] as const) {
+          try {
+            verify(plan, snapshot, candidate, { guard, ...(namespace ? { namespace } : {}) });
+            phase = candidate;
+            if (candidate === "applied") policy = "applied";
+            break;
+          } catch {
+            /* Only exact verified phases qualify. */
+          }
+        }
       } catch {
         /* Complete authenticated mismatch is drift, never Manual. */
       }
@@ -226,6 +246,7 @@ export async function createProvider(
       serviceResource: config.serviceResource,
       service,
       policy,
+      phase,
       inventoryDigest: digest(bytes),
     };
   }
@@ -249,6 +270,15 @@ export async function createProvider(
     },
   };
   const core = await dependencies.loadBridge(config, () => stateWriter.token(), evidence);
+  for (const method of [
+    "observe",
+    "claimStop",
+    "verifyClaim",
+    "verifyBeforeRestore",
+    "verifyOffReceipt",
+  ] as const)
+    if (typeof core?.[method] !== "function")
+      throw Error("Core verifier missing; integration unqualified");
   async function execution(runId: string): Promise<"running" | "terminal" | "unknown"> {
     if (
       !runId.startsWith(`${config.jobResource}/executions/`) ||
@@ -287,7 +317,16 @@ export async function createProvider(
     },
     execution,
     off: async (expected, incidentId) => {
-      const fence = await core.claimStop(expected.revision, incidentId);
+      const fence = await core.claimStop(expected.revision, incidentId).catch(() => {
+        throw Error("Core claim outcome unknown; reconciliation required");
+      });
+      if (
+        fence.outcome === "conflict" &&
+        fence.incidentId === incidentId &&
+        fence.activation === config.binding.activation &&
+        /^[a-f0-9]{40}$/.test(fence.stateSha)
+      )
+        throw new PreEffectConflict("Definitive rejected state CAS; no OFF effects");
       if (
         !["claimed", "owned"].includes(fence.outcome) ||
         fence.incidentId !== incidentId ||
@@ -295,45 +334,51 @@ export async function createProvider(
         !/^[a-f0-9]{40}$/.test(fence.stateSha)
       )
         throw Error("Core stop fence conflict/unknown; no OFF restore");
-      await core.verifyClaim(incidentId, config.binding.activation);
-      const admin = await materialize(true);
-      const oldToken = process.env.GH_TOKEN,
-        oldJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
-      let bytes: Buffer;
       try {
-        process.env.GH_TOKEN = await github.token();
-        process.env.BATCHER_ADMIN_JOURNAL_CONFIG = join(admin, "journal-config.json");
-        if (typeof core.verifyBeforeRestore !== "function")
-          throw Error("Core pre-restoration verifier missing; integration unqualified");
-        const receipt = await dependencies.off(
-          admin,
-          "--apply-after-go",
-          async (drained, action) => {
-            // The core callback uses only its state credential, never the ambient
-            // rules-administration token used by the real OFF subprocesses.
-            const adminToken = process.env.GH_TOKEN;
-            const adminJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
-            if (oldToken === undefined) delete process.env.GH_TOKEN;
-            else process.env.GH_TOKEN = oldToken;
-            if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
-            else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
-            try {
-              await core.verifyBeforeRestore(incidentId, drained, action);
-            } finally {
-              process.env.GH_TOKEN = adminToken;
-              process.env.BATCHER_ADMIN_JOURNAL_CONFIG = adminJournal;
-            }
-          },
-        );
-        bytes = await readFile(receipt);
-      } finally {
-        if (oldToken === undefined) delete process.env.GH_TOKEN;
-        else process.env.GH_TOKEN = oldToken;
-        if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
-        else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
+        await core.verifyClaim(incidentId, config.binding.activation);
+        const admin = await materialize(true);
+        const oldToken = process.env.GH_TOKEN,
+          oldJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+        let bytes: Buffer;
+        try {
+          process.env.GH_TOKEN = await github.token();
+          process.env.BATCHER_ADMIN_JOURNAL_CONFIG = join(admin, "journal-config.json");
+          const receipt = await dependencies.off(
+            admin,
+            "--apply-after-go",
+            async (drained, action) => {
+              // The core callback uses only its state credential, never the ambient
+              // rules-administration token used by the real OFF subprocesses.
+              const adminToken = process.env.GH_TOKEN;
+              const adminJournal = process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+              if (oldToken === undefined) delete process.env.GH_TOKEN;
+              else process.env.GH_TOKEN = oldToken;
+              if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+              else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
+              try {
+                await core.verifyBeforeRestore(incidentId, drained, action);
+              } finally {
+                process.env.GH_TOKEN = adminToken;
+                process.env.BATCHER_ADMIN_JOURNAL_CONFIG = adminJournal;
+              }
+            },
+          );
+          bytes = await readFile(receipt);
+        } finally {
+          if (oldToken === undefined) delete process.env.GH_TOKEN;
+          else process.env.GH_TOKEN = oldToken;
+          if (oldJournal === undefined) delete process.env.BATCHER_ADMIN_JOURNAL_CONFIG;
+          else process.env.BATCHER_ADMIN_JOURNAL_CONFIG = oldJournal;
+        }
+        await core.verifyOffReceipt(incidentId, JSON.parse(bytes.toString("utf8")));
+        return digest(bytes);
+      } catch (error) {
+        // No callback after a successful/owned fence may masquerade as a
+        // rejected pre-effect CAS and cause the durable intent to be released.
+        if (error instanceof PreEffectConflict)
+          throw Error("Post-claim outcome requires reconciliation", { cause: error });
+        throw error;
       }
-      await core.verifyOffReceipt(incidentId, JSON.parse(bytes.toString("utf8")));
-      return digest(bytes);
     },
     reconcile: async (_binding, incidentId) => {
       try {

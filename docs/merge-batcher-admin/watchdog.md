@@ -29,7 +29,13 @@ Before an action claim, uncertainty (including unavailable/stale health, unknown
 writes or drift) leaves the record watching: emit an alert with the stable
 activation incident key and re-observe next scheduled run. No OFF is executed
 until a fresh observation qualifies. Deduplicate the issue surface, not the
-per-run monitoring signal. After a claim, `held` means disarmed pending operator
+per-run monitoring signal. The invocation may release only its own bookkeeping
+intent before any remote fence/effect: failed/changed reread, or a bound definitive
+core CAS rejection proving no submission. Release itself is generation-CAS;
+loss/crash leaves conservative reconciliation. A later run makes a new observation,
+not a retry of the rejected request. The bridge must never report `conflict` for
+an ambiguous submission, owned claim, or successful fence. Those remain sticky.
+After a remote claim, `held` means disarmed pending operator
 reconciliation: never reset/re-arm it automatically or replay an unknown effect.
 Each subsequent held run emits an alert even after its incident comment exists.
 
@@ -141,7 +147,12 @@ current state and all unknown/in-flight effects. Rejection retains STOP and the
 remaining protections; a prior successful callback is never cached. This callback
 does not inherit the rules-administration credential. `verifyDrained` deliberately
 does not require Manual policy: intermediate inventory is checked by the OFF
-stages, and core must validate actual post-STOP identity/scaling rather than guess
+stages. Its explicit `phase` is one of `applied`, `namespace`, `guard`, `restored`,
+or `drift`, verified against the exact saved plan and receipts. Before each reverse
+stage the gate accepts only its corresponding exact phase, never arbitrary drift.
+The coarse `policy` remains conservative (intermediate is not applied or Manual);
+gate implementations must use `phase`, not mistake intermediate policy for drift.
+Core must validate actual post-STOP identity/scaling rather than guess
 a generation increment. Manual verification remains mandatory in `verifyStopped`.
 The optional hook on the ordinary operator API preserves its existing invocation;
 the watchdog bridge hook is required and missing implementations fail closed.

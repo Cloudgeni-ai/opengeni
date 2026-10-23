@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
-import { rm, writeFile } from "node:fs/promises";
+import { rm, writeFile, readFile, mkdtemp, mkdir, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { WatchdogCloud } from "../docs/merge-batcher-admin/watchdog-cloud";
 import { WatchdogGitHub } from "../docs/merge-batcher-admin/watchdog-github";
 import {
@@ -14,7 +15,11 @@ import {
 import { main } from "../docs/merge-batcher-admin/watchdog-main";
 import { prepare, type Snapshot } from "../docs/merge-batcher-admin/bundle";
 import type { ProviderEvidencePort } from "../docs/merge-batcher-admin/watchdog-provider";
-import type { Observation, Ports } from "../docs/merge-batcher-admin/watchdog";
+import {
+  PreEffectConflict,
+  type Observation,
+  type Ports,
+} from "../docs/merge-batcher-admin/watchdog";
 
 const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
@@ -144,6 +149,202 @@ test("application prefix refuses normalized traversal", () => {
   ])
     expect(appPath(path)).toBe(false);
 });
+test("every bridge method is required at load before claim, token or journal effects", async () => {
+  for (const method of [
+    "observe",
+    "claimStop",
+    "verifyClaim",
+    "verifyBeforeRestore",
+    "verifyOffReceipt",
+  ] as const) {
+    const core = bridge(),
+      cloud = seeded();
+    let effects = 0;
+    core.claimStop = async () => {
+      effects++;
+      throw Error("unexpected claim");
+    };
+    delete (core as Partial<CoreBridge>)[method];
+    await expect(
+      createProvider(config, cloud, {
+        loadBridge: async () => core,
+        off: async () => {
+          effects++;
+          return "";
+        },
+        transport: (async () => {
+          effects++;
+          throw Error("unexpected token");
+        }) as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow("Core verifier missing");
+    expect(effects).toBe(0);
+    expect(cloud.requests).toHaveLength(0);
+  }
+});
+test("only a bound definitive rejected claim produces a pre-effect conflict", async () => {
+  for (const outcome of ["conflict", "unknown", "owned"] as const) {
+    const core = bridge(),
+      cloud = seeded();
+    core.claimStop = async (_sha, id) => ({
+      outcome,
+      incidentId: id,
+      activation: "epoch",
+      stateSha: "c".repeat(40),
+    });
+    core.verifyClaim = async () => {
+      throw Error("unproven owned claim");
+    };
+    const provider = await createProvider(config, cloud, {
+      loadBridge: async () => core,
+      transport,
+      off: async () => {
+        throw Error("unexpected OFF");
+      },
+    });
+    try {
+      await provider.ports.off({ revision: "d".repeat(40) } as Observation, "incident");
+      throw Error("unexpected success");
+    } catch (error) {
+      expect(error instanceof PreEffectConflict).toBe(outcome === "conflict");
+    }
+    expect(cloud.requests).toHaveLength(0);
+  }
+});
+test("exceptions and successful fences cannot impersonate a rejected pre-effect claim", async () => {
+  for (const stage of ["claim", "verify"] as const) {
+    const core = bridge();
+    if (stage === "claim")
+      core.claimStop = async () => {
+        throw new PreEffectConflict("untrusted error");
+      };
+    else
+      core.verifyClaim = async () => {
+        throw new PreEffectConflict("already fenced");
+      };
+    const provider = await createProvider(config, seeded(), {
+      loadBridge: async () => core,
+      transport,
+      off: async () => {
+        throw Error("unexpected");
+      },
+    });
+    let caught: unknown;
+    try {
+      await provider.ports.off({ revision: "d".repeat(40) } as Observation, "incident");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught instanceof PreEffectConflict).toBe(false);
+  }
+});
+
+test("default loader confines real paths; drained verifier rejects forced proof and final verification requires Manual", async () => {
+  const root = await mkdtemp(join(tmpdir(), "watchdog-port-"));
+  const directories = new Set<string>();
+  try {
+    // Test-only relocation of the image root; exercise the actual loader and
+    // evidence code without writing /app or weakening production confinement.
+    const source = await readFile(
+      join(import.meta.dir, "../docs/merge-batcher-admin/watchdog-provider.ts"),
+      "utf8",
+    );
+    const base = join(import.meta.dir, "../docs/merge-batcher-admin");
+    await writeFile(
+      join(root, "provider.ts"),
+      source
+        .replaceAll('"/app/"', JSON.stringify(root + "/"))
+        .replaceAll('from "./', `from "${base}/`),
+    );
+    const relocated = (await import(
+      join(root, "provider.ts")
+    )) as typeof import("../docs/merge-batcher-admin/watchdog-provider");
+    await mkdir(join(root, "operator"));
+    await symlink("/etc/passwd", join(root, "core.ts"));
+    const cfg = {
+      ...config,
+      coreModule: join(root, "core.ts"),
+      operatorDirectory: join(root, "operator"),
+    };
+    await expect(relocated.createProvider(cfg, seeded())).rejects.toThrow("escapes");
+    await rm(join(root, "core.ts"));
+    await writeFile(join(root, "core.ts"), "export {};\n");
+    await symlink("/etc", join(root, "outside"));
+    await expect(
+      relocated.createProvider({ ...cfg, operatorDirectory: join(root, "outside") }, seeded()),
+    ).rejects.toThrow("escapes");
+    const deployment = {
+      uid: "uid",
+      image,
+      uri: "https://fixture.test",
+      stopProof: { uid: "uid", stateSha: "a".repeat(40), outcome: "drained-state-observed" },
+    };
+    await writeFile(join(root, "operator/deployment-receipt.json"), JSON.stringify(deployment));
+    const cloud = seeded();
+    const archive = cloud.objects.get("seed")!.value as { files: { [key: string]: string } };
+    archive.files["stop-contract.json"] = Buffer.from(
+      JSON.stringify({ directory: cfg.operatorDirectory, deployment }),
+    ).toString("base64");
+    let port: ProviderEvidencePort | undefined;
+    const provider = await relocated.createProvider(cfg, cloud, {
+      loadBridge: async (_c, _t, evidence) => {
+        port = evidence;
+        return bridge();
+      },
+      transport,
+      off: async (admin) => {
+        directories.add(admin);
+        throw Error("materialized only");
+      },
+      run: async (args) => {
+        const admin = args[2]!;
+        directories.add(admin);
+        const path = join(admin, "snapshot.json");
+        await writeFile(path, JSON.stringify({ rulesets: [] }));
+        return path;
+      },
+    });
+    await provider.ports
+      .off({ revision: "d".repeat(40) } as Observation, "incident")
+      .catch(() => {});
+    const stop = {
+      command: "stop",
+      disabled: true,
+      manualZero: true,
+      taggedRevisionsMayRemain: false,
+      stopPersisted: true,
+      drainProven: true,
+      forced: false,
+      priorDrainProof: false,
+      outcome: "drained-state-observed",
+      stateBefore: "a".repeat(40),
+      stateAfter: "a".repeat(40),
+      writer: {
+        state: "stopped",
+        writerActive: false,
+        writerPid: null,
+        uncertainOutcome: false,
+        reconciliationRequired: false,
+      },
+    };
+    const beforeReads = cloud.requests.filter((url) => url.includes("run.googleapis.com")).length;
+    await expect(port!.verifyDrained({ stop: { ...stop, forced: true } })).rejects.toThrow(
+      "STOP is not proven",
+    );
+    await expect(
+      port!.verifyDrained({ stop: { ...stop, stateAfter: "b".repeat(40) } }),
+    ).rejects.toThrow("STOP is not proven");
+    expect(cloud.requests.filter((url) => url.includes("run.googleapis.com")).length).toBe(
+      beforeReads,
+    );
+    expect((await port!.verifyDrained({ stop })).phase).toBe("drift");
+    await expect(port!.verifyStopped({ stop })).rejects.toThrow("Manual inventory not proven");
+  } finally {
+    for (const directory of directories) await rm(directory, { recursive: true });
+    await rm(root, { recursive: true });
+  }
+});
 test("provider evidence uses authenticated complete rules snapshots and never synthesizes STOP", async () => {
   const before: Snapshot = {
     repository: {
@@ -223,8 +424,13 @@ test("provider evidence uses authenticated complete rules snapshots and never sy
       rulesets: [{ ...before.rulesets[0]!, ...prepared.admission }, guard, namespace],
     };
     expect((await port!.read()).policy).toBe("applied");
+    snapshot = { ...before, rulesets: [...before.rulesets, guard, namespace] };
+    expect((await port!.read()).phase).toBe("namespace");
+    snapshot = { ...before, rulesets: [...before.rulesets, guard] };
+    expect((await port!.read()).phase).toBe("guard");
     snapshot = { ...before, rulesets: [] };
     expect((await port!.read()).policy).toBe("drift");
+    expect((await port!.read()).phase).toBe("drift");
     fail = true;
     await expect(port!.read()).rejects.toThrow("unavailable");
     await expect(port!.verifyStopped({})).rejects.toThrow();
@@ -244,6 +450,18 @@ test("core callbacks never inherit temporary restoration identity; seed is gener
     const core = bridge(),
       calls: string[] = [],
       cloud = seeded();
+    const pinned = cloud.objects.get("seed")!;
+    cloud.objects.set("seed", { generation: "8", value: { schema: 1, files: {} } });
+    const request = cloud.request.bind(cloud);
+    cloud.request = async (url, init) => {
+      if (url.includes("/o/seed") && new URL(url).searchParams.get("generation") === "7") {
+        cloud.requests.push(url);
+        return Response.json(
+          new URL(url).searchParams.get("alt") === "media" ? pinned.value : { generation: "7" },
+        );
+      }
+      return request(url, init);
+    };
     const check = (stage: string) => {
       calls.push(stage);
       expect(process.env.GH_TOKEN).toBeUndefined();
@@ -344,7 +562,7 @@ test("unknown fence submits no OFF and restart missing journal or claim is null 
     });
     await expect(
       provider.ports.off({ revision: "d".repeat(40) } as Observation, "id"),
-    ).rejects.toThrow("fence");
+    ).rejects.toThrow(outcome === "conflict" ? "rejected state CAS" : "fence");
     expect(cloud.requests).toEqual([]);
     expect(effects).toBe(0);
     expect(await provider.ports.reconcile(config.binding, "id")).toBeNull();
@@ -422,6 +640,11 @@ test("malformed config emits one terminal event; mismatched own execution never 
       cloud.objects.set("config", { generation: "1", value });
       let reads = 0;
       const ports = {
+        now: Date.now,
+        heartbeat: async () => {},
+        load: async () => null,
+        cas: async () => "1",
+        alert: async () => {},
         execution: async () => "unknown",
         read: async () => {
           reads++;

@@ -83,6 +83,9 @@ export type Ports = {
 export const staleAfterMs = 15 * 60_000;
 export const maxObservationAgeMs = 120_000;
 export const missedCompletionAfterMs = 20 * 60_000;
+/** Only a definitive rejected CAS, with no fence/effect submitted by this
+ * invocation. Never use for transport errors, unknown outcomes or owned claims. */
+export class PreEffectConflict extends Error {}
 
 function same(a: Binding, b: Binding): boolean {
   return (
@@ -338,33 +341,33 @@ export async function tick(ports: Ports, expected: Binding, runId: string): Prom
     observationRevision: observation.revision,
   };
   if (!(await save({ ...value, phase: "off-intent", incident }))) return finish("cas-lost");
+  async function reobserve(): Promise<string> {
+    // Only this invocation's still-owned journal intent can be released. A
+    // crash/CAS loss leaves it for conservative reconciliation, never stealing.
+    if (!(await save({ ...value, phase: "watching", incident: null, reason: null })))
+      return finish("cas-lost");
+    await ports.alert("Definitive pre-effect observation conflict; reobserve next run");
+    return finish("observation-conflict");
+  }
   // Revalidate after the exclusive action claim. Adapter must also bind/fence the
   // activation remotely; this read is not claimed as an atomic provider fence.
   let current: Observation;
   try {
     current = await ports.read();
   } catch {
-    await ports.alert("Health reread unavailable after claim; no OFF executed");
-    return finish("off-intent");
+    return reobserve();
   }
   if (
     current.revision !== observation.revision ||
     classify(current, expected, ports.now()) !== trigger
   ) {
-    if (
-      !(await save({
-        ...value,
-        phase: "held",
-        reason: "Observation changed after claim; no OFF executed",
-      }))
-    )
-      return finish("cas-lost");
-    return notify();
+    return reobserve();
   }
   let receipt: string;
   try {
     receipt = await ports.off(current, incident.id);
-  } catch {
+  } catch (error) {
+    if (error instanceof PreEffectConflict) return reobserve();
     // Keep the pre-effect intent. Next invocation performs read-only reconciliation.
     await ports.alert("OFF incomplete or unknown; protections retained until verified");
     return finish("off-intent");

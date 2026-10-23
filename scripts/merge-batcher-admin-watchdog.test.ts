@@ -6,6 +6,7 @@ import {
   tick,
   staleAfterMs,
   missedCompletionAfterMs,
+  PreEffectConflict,
   type Binding,
   type Observation,
   type Ports,
@@ -289,7 +290,7 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     await Promise.all([tick(f.ports, binding, "a"), tick(f.ports, binding, "b")]);
     expect(f.calls.off).toBe(1);
   });
-  test("changed health after action claim holds without OFF", async () => {
+  test("changed health before remote claim reobserves without OFF or stealing", async () => {
     const f = fixture();
     f.patch({ stopped: true });
     const read = f.ports.read;
@@ -298,14 +299,12 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
       if (f.calls.read > 1) value.revision = "newer";
       return value;
     };
-    expect(await tick(f.ports, binding, "a")).toBe("held");
+    expect(await tick(f.ports, binding, "a")).toBe("observation-conflict");
     expect(f.calls.off).toBe(0);
-    const reads = f.calls.read;
-    expect(await tick(f.ports, binding, "b")).toBe("held");
-    expect(await tick(f.ports, binding, "c")).toBe("held");
-    expect(f.calls.read).toBe(reads);
-    expect(f.alerts.length).toBe(2);
-    expect(f.messages.size).toBe(1);
+    expect(f.stored()!.value.phase).toBe("watching");
+    f.ports.read = read;
+    expect(await tick(f.ports, binding, "b")).toBe("manual");
+    expect(f.calls.off).toBe(1);
   });
   test("observation age alone rejects otherwise healthy consistent timestamps", async () => {
     const f = fixture();
@@ -340,7 +339,7 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     expect(f.calls.cas).toBe(cas);
     expect(f.messages.size).toBe(0);
   });
-  test("post-claim trigger change holds even when revision is unchanged", async () => {
+  test("pre-effect trigger change reobserves even when revision is unchanged", async () => {
     const f = fixture();
     f.patch({ stopped: true });
     const read = f.ports.read;
@@ -349,8 +348,66 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
       if (f.calls.read > 1) value.stopped = false;
       return value;
     };
-    expect(await tick(f.ports, binding, "a")).toBe("held");
+    expect(await tick(f.ports, binding, "a")).toBe("observation-conflict");
     expect(f.calls.off).toBe(0);
+  });
+  test("only definitive pre-effect rejection is released; failed release CAS stays conservative", async () => {
+    for (const loseRelease of [false, true]) {
+      const f = fixture();
+      f.patch({ stopped: true });
+      const off = f.ports.off,
+        cas = f.ports.cas;
+      f.ports.off = async () => {
+        if (loseRelease) f.ports.cas = async () => null;
+        throw new PreEffectConflict("rejected without effects");
+      };
+      expect(await tick(f.ports, binding, "a")).toBe(
+        loseRelease ? "cas-lost" : "observation-conflict",
+      );
+      expect(f.stored()!.value.phase).toBe(loseRelease ? "off-intent" : "watching");
+      f.ports.cas = cas;
+      f.ports.off = off;
+      expect(await tick(f.ports, binding, "b")).toBe(loseRelease ? "held" : "manual");
+      expect(f.calls.off).toBe(loseRelease ? 0 : 1);
+    }
+  });
+  test("failed reread before any remote claim can reobserve next execution", async () => {
+    const f = fixture();
+    f.patch({ stopped: true });
+    const read = f.ports.read;
+    let count = 0;
+    f.ports.read = async () => {
+      if (++count === 2) throw Error("transient");
+      return read();
+    };
+    expect(await tick(f.ports, binding, "a")).toBe("observation-conflict");
+    expect(f.calls.off).toBe(0);
+    expect(await tick(f.ports, binding, "b")).toBe("manual");
+  });
+  test("phase envelope and Manual unknown negative controls", () => {
+    const f = fixture(),
+      now = f.ports.now();
+    const phase = {
+      id: "phase",
+      kind: "cycle",
+      startedAt: now - 1000,
+      timeoutMs: 900_000,
+      marginMs: 120_000,
+      deadlineAt: now - 1000 + 1_020_000,
+    };
+    expect(classify({ ...f.observation(), phase }, binding, now)).toBe("healthy");
+    for (const patch of [
+      { phase: { ...phase, marginMs: 119_999, deadlineAt: phase.deadlineAt - 1 } },
+      { phase: { ...phase, deadlineAt: phase.deadlineAt + 1 } },
+      { phase: { ...phase, startedAt: now + 1, deadlineAt: now + 1 + 1_020_000 } },
+      { phase: { ...phase, kind: "unconfigured" } },
+      {
+        binding: { ...binding, phaseLimits: { cycle: { timeoutMs: 899_999, marginMs: 120_000 } } },
+      },
+      { heartbeatAt: 99_999 },
+      { policy: "manual", writes: "unknown" },
+    ] as Partial<Observation>[])
+      expect(classify({ ...f.observation(), ...patch }, binding, now)).toBe("unknown");
   });
   test("empty OFF receipt preserves intent; later ticks never replay it", async () => {
     const f = fixture();
