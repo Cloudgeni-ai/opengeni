@@ -24,6 +24,7 @@ import {
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type ComputerInteractionDriver,
+  type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
   LatestComputerFrameSubscription,
@@ -40,6 +41,7 @@ import {
   type ComputerBackendCaptureOptions,
   type ComputerBackendFrame,
   type ComputerBackendObservation,
+  type ComputerBackendRoleStandIn,
   type ComputerBackendTarget,
   type ComputerBackend,
 } from "./computer-backend";
@@ -223,17 +225,25 @@ export class ComputerDriver implements ComputerInteractionDriver {
     }
   }
 
-  async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
+  async dispatch(
+    command: ComputerActionCommand,
+    trace?: InteractionDispatchTrace,
+  ): Promise<ComputerObservationValue | null> {
     this.assertOpen();
     this.typedSecrets.remember(command.secretValues);
     const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeActionCommandSecrets(command);
+    // A stand-in names an element's label, which could show a typed secret.
+    const standIn = trace
+      ? (item: ComputerBackendRoleStandIn) =>
+          trace.record(redactInteractionSecretValues(item, secretValues))
+      : undefined;
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
       this.assertActionBatch(command, client);
       const native = nativeCommand(materialized);
-      const observation = await client.dispatch(native).catch(async (error: unknown) => {
+      const observation = await client.dispatch(native, standIn).catch(async (error: unknown) => {
         // A pasted value stays on the seat clipboard, where clipboard reads
         // would expose it; text with resolved secrets is never pasted.
         const text =

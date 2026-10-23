@@ -6,6 +6,8 @@ import {
   BrowserTarget,
   ComputerNativeCommand,
   ComputerNativeReceipt,
+  ComputerActionReceipt,
+  INTERACTION_MAX_ACTIONS_PER_BATCH,
   ComputerOperationCommand,
   ComputerOperationReceipt,
   ComputerOperationObservation,
@@ -256,7 +258,12 @@ export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
-  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
+  /** Drivers record on `trace` each action that acted on an element of another
+   * role than its locator named (a ComputerActionRoleStandIn). */
+  dispatch(
+    command: ComputerActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<ComputerObservationValue | null>;
   validateNative?(command: ComputerNativeCommand): Promise<void>;
   dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
@@ -317,10 +324,10 @@ export class ComputerInteractionController {
             );
           await options.driver.validateNative(command);
         },
-        dispatch: (command) =>
+        dispatch: (command, trace) =>
           command.targetId === null
             ? options.driver.dispatchNative!(command)
-            : options.driver.dispatch(command),
+            : options.driver.dispatch(command, trace),
       },
       authority: {
         authorizeDispatch: async (command) => {
@@ -459,6 +466,12 @@ export class ComputerInteractionController {
             observation: input.observation,
             error: input.error,
           });
+        },
+        // The computer driver records an action that acted on an element of
+        // another role than the one named (see ComputerActionRoleStandIn).
+        maxDispatchTraceItems: INTERACTION_MAX_ACTIONS_PER_BATCH,
+        attachDispatchTrace(receipt, items) {
+          return ComputerActionReceipt.parse({ ...receipt, roleStandIns: items });
         },
         recoverReceipt(receipt, settledAt) {
           if (

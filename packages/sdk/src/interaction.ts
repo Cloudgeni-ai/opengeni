@@ -1425,6 +1425,18 @@ export type ComputerActionReceipt = {
   settledAt: string | null;
   observation: ComputerObservation | null;
   error: InteractionError | null;
+  /** Actions that acted on an element of another role than the one named. */
+  roleStandIns?: ComputerActionRoleStandIn[] | undefined;
+};
+
+/** An action that named a button or link by role and name, when nothing of
+ * that role had the name and the one element of the other of the two roles
+ * with that exact name was used instead. */
+export type ComputerActionRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
 };
 
 export type ComputerSessionHeartbeatResponse = {

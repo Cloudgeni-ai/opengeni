@@ -2711,6 +2711,245 @@ describe("CUA desktop boundary", () => {
       }
     });
 
+    describe("a button that is a link here, or a link that is a button", () => {
+      /** The fixture's window, with a link for each of `links` after its
+       * button "Apply" and its password field. */
+      class LinkFixture extends BatchFixture {
+        links: string[] = [];
+        /** The element CUA reports it used for a step of a run that ran. */
+        standIns: Record<number, { role: string; name: string }> = {};
+        override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+          const response = await super.callTool(name, argumentsJson);
+          if (name === "run_steps" && !this.reply) {
+            const data = JSON.parse(response.structuredJson!);
+            for (const step of data.steps)
+              if (this.standIns[step.index]) step.target = { stand_in: this.standIns[step.index] };
+            response.structuredJson = JSON.stringify(data);
+          }
+          if (name !== "get_window_state" || !response.structuredJson) return response;
+          const data = JSON.parse(response.structuredJson);
+          if (data.elements)
+            for (const [offset, label] of this.links.entries())
+              data.elements.push({
+                element_index: 2 + offset,
+                element_token: `${data.snapshot_id}:${2 + offset}`,
+                role: "AXLink",
+                label,
+                actions: ["AXPress"],
+                frame: { x: 110 + offset * 10, y: 60, w: 40, h: 20 },
+              });
+          response.structuredJson = JSON.stringify(data);
+          return response;
+        }
+      }
+      const named = (
+        observation: ComputerBackendObservation,
+        role: string,
+        name: string,
+        action: "invoke" | "set_value" = "invoke",
+      ): ComputerBackendActionCommand => ({
+        ...command(observation),
+        action: {
+          type: "semantic",
+          locator: { kind: "role", role, name, exact: true },
+          action,
+          ...(action === "set_value" ? { value: "x" } : {}),
+        } as ComputerBackendActionCommand["action"],
+      });
+      const token = (observation: ComputerBackendObservation, index: number) =>
+        `${observation.observationId.split(":").pop()}:${index}`;
+      const asBatch = (
+        first: ComputerBackendActionCommand,
+        ...rest: ComputerBackendActionCommand["action"][]
+      ): ComputerBackendActionCommand => ({
+        ...first,
+        action: {
+          type: "batch",
+          actions: [first.action, ...rest],
+        } as ComputerBackendActionCommand["action"],
+      });
+      const enter = {
+        type: "keyboard",
+        action: "press",
+        value: "enter",
+      } as ComputerBackendActionCommand["action"];
+
+      test("a batch's first action naming a button shown as a link goes to CUA by role and name", async () => {
+        const fixture = new LinkFixture();
+        fixture.links = ["Edit billing"];
+        fixture.standIns = { 0: { role: "AXLink", name: "Edit billing" } };
+        const { backend, observation } = await open(fixture);
+        try {
+          const reported: unknown[] = [];
+          await backend.dispatch(
+            asBatch(named(observation, "button", "Edit billing"), enter),
+            (standIn) => reported.push(standIn),
+          );
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            tool: string;
+            args: Record<string, unknown>;
+            wait_for?: Record<string, unknown>;
+          }[];
+          // CUA decides, once the window has settled, whether the link is the
+          // one meant; nothing is retargeted from the batch's observation.
+          expect(steps[0]!.tool).toBe("click");
+          expect(steps[0]!.args.element_token).toBeUndefined();
+          expect(steps[0]!.args).toMatchObject({
+            role: "button",
+            name: "Edit billing",
+            exact: true,
+          });
+          expect(steps[0]!.wait_for).toMatchObject({ role: "button", name: "Edit billing" });
+          expect(reported).toEqual([
+            { actionIndex: 0, requestedRole: "button", role: "link", name: "Edit billing" },
+          ]);
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("a first action with nothing alike, a value write or a single action fails at once", async () => {
+        const fixture = new LinkFixture();
+        fixture.links = ["Edit billing"];
+        const { backend, observation } = await open(fixture);
+        try {
+          for (const attempt of [
+            // Nothing of either role has the name.
+            asBatch(named(observation, "button", "Upgrade"), enter),
+            // A value is not pressed: no stand-in.
+            asBatch(named(observation, "button", "Edit billing", "set_value")),
+            // One action on its own keeps its immediate answer.
+            named(observation, "button", "Edit billing"),
+          ]) {
+            const failure = await backend.dispatch(attempt).catch((error: unknown) => error);
+            expect(failure).toMatchObject({ code: "locator_not_found", dispatched: false });
+          }
+          expect(fixture.ran).toBe(false);
+          expect(mutations(fixture)).toHaveLength(0);
+          // A button of the name is acted on by its token, as before.
+          await backend.dispatch(asBatch(named(observation, "button", "Apply"), enter));
+          const steps = fixture.calls.find((call) => call.name === "run_steps")!.args.steps as {
+            args: Record<string, unknown>;
+          }[];
+          expect(steps[0]!.args.element_token).toBe(token(observation, 0));
+        } finally {
+          await backend.close();
+        }
+      });
+
+      const upgrade = (observation: ComputerBackendObservation) => ({
+        ...batch(observation),
+        action: {
+          type: "batch",
+          actions: [
+            { type: "keyboard", action: "press", value: "enter" },
+            {
+              type: "semantic",
+              locator: { kind: "role", role: "button", name: "Upgrade", exact: true },
+              action: "invoke",
+            },
+          ],
+        } as ComputerBackendActionCommand["action"],
+      });
+
+      test("a stand-in CUA used for a later action is reported once that action ran", async () => {
+        const used = { role: "AXLink", name: "Upgrade" };
+        const fixture = new LinkFixture();
+        fixture.standIns = { 1: used };
+        const { backend, observation } = await open(fixture);
+        try {
+          const reported: unknown[] = [];
+          await backend.dispatch(upgrade(observation), (standIn) => reported.push(standIn));
+          expect(reported).toEqual([
+            { actionIndex: 1, requestedRole: "button", role: "link", name: "Upgrade" },
+          ]);
+        } finally {
+          await backend.close();
+        }
+        // The batch stopped at that action: nothing is reported for it.
+        const stopped = new LinkFixture();
+        stopped.reply = {
+          ok: false,
+          total: 2,
+          executed: 2,
+          failed_step: 1,
+          steps: [
+            { index: 0, ok: true, message: "ok" },
+            {
+              index: 1,
+              ok: false,
+              phase: "action",
+              message: "did not confirm",
+              target: { stand_in: used },
+            },
+          ],
+        };
+        const second = await open(stopped);
+        try {
+          const reported: unknown[] = [];
+          await second.backend
+            .dispatch(upgrade(second.observation), (standIn) => reported.push(standIn))
+            .catch(() => undefined);
+          expect(reported).toEqual([]);
+        } finally {
+          await second.backend.close();
+        }
+      });
+
+      test("the receipt names each stand-in, without a typed secret", async () => {
+        const secret = "synthetic-pin-4711";
+        const fixture = new LinkFixture();
+        fixture.standIns = { 1: { role: "AXLink", name: `Upgrade ${secret}` } };
+        const backend = await CuaComputerBackend.open(fixture);
+        try {
+          const computerSessionId = crypto.randomUUID();
+          const controllerGeneration = "controller-fixture";
+          const controller = new ComputerInteractionController({
+            computerSessionId,
+            controllerGeneration,
+            driver: new ComputerDriver({
+              computerSessionId,
+              controllerGeneration,
+              client: backend,
+            }),
+          });
+          const target = (await backend.targets())[0]!;
+          const observation = await controller.observe(target.id);
+          const raw = "{{" + "secret:Card/pin}}";
+          const receipt = await controller.run({
+            protocolVersion: 1,
+            operationId: crypto.randomUUID(),
+            computerSessionId,
+            controllerGeneration,
+            targetId: target.id,
+            expectedTargetGeneration: observation.target.targetGeneration,
+            expectedObservationId: observation.observationId,
+            expectedFrameId: null,
+            actor: { kind: "agent", subjectId: "agent:fixture" },
+            action: {
+              type: "batch",
+              actions: [
+                { type: "keyboard", action: "type", value: raw },
+                {
+                  type: "semantic",
+                  locator: { kind: "role", role: "button", name: "Upgrade", exact: true },
+                  action: "invoke",
+                },
+              ],
+            },
+            secretValues: { [referenceKey(parseSecretReference(raw))]: secret },
+          });
+          expect(receipt.state).toBe("completed");
+          expect(receipt.roleStandIns).toEqual([
+            { actionIndex: 1, requestedRole: "button", role: "link", name: "Upgrade [secret]" },
+          ]);
+          expect(JSON.stringify(receipt)).not.toContain(secret);
+        } finally {
+          await backend.close();
+        }
+      });
+    });
+
     test("a batch CUA stopped says how far it got", async () => {
       const step = (index: number, fields: Record<string, unknown>) => ({
         ok: true,

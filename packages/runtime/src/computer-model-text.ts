@@ -530,6 +530,20 @@ function computerErrorLine(error: NonNullable<ComputerTextError>): string {
   }`;
 }
 
+type ComputerTextRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
+};
+
+/** An action that named a button that is a link here, or a link that is a
+ * button, and acted on it: says so, so the next call names the right role. */
+function roleStandInLine(standIn: ComputerTextRoleStandIn, batch: boolean): string {
+  const { requestedRole, role, name } = standIn;
+  return `${batch ? `Action ${standIn.actionIndex + 1}` : "The action"} named ${requestedRole} ${quoted(name)}, but no ${requestedRole} here has that name, so it used the ${role} ${quoted(name)}; name it as role ${quoted(role)} next time.`;
+}
+
 export function computerActionText(
   receipt:
     | {
@@ -539,6 +553,7 @@ export function computerActionText(
         state: string;
         error: ComputerTextError;
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       }
     | {
         type: "batch";
@@ -547,6 +562,7 @@ export function computerActionText(
         steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         observationPrecedesStop?: boolean | undefined;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -554,6 +570,7 @@ export function computerActionText(
     `Action ${receipt.state} on ${receipt.targetId} (operation ${receipt.operationId}).`,
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
@@ -572,6 +589,7 @@ function computerBatchText(receipt: {
   steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
   observationPrecedesStop?: boolean | undefined;
+  roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -628,6 +646,7 @@ function computerBatchText(receipt: {
     lines.push(
       `Action ${receipt.steps.length} opened ${opened}; act on that target with the observation below.`,
     );
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, true));
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }

@@ -150,15 +150,29 @@ const RunStepsReport = z.object({
         hint: z.unknown().optional(),
         /** The window-change report lines of the step's action. */
         window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+        /** The element the step's lookup found. `stand_in` is set when no
+         * element had the role named and the one element of a role pressed
+         * alike with that exact name was used: its own role and label. */
+        target: z
+          .object({
+            stand_in: z
+              .object({ role: z.string().max(256), name: z.string().max(65_536).nullish() })
+              .optional(),
+          })
+          .optional(),
       }),
     )
     .max(64)
     .default([]),
 });
 
+/** A step of a run_steps call whose lookup used an element of another role,
+ * by the step's index in the call: the element's own role and label. */
+export type RunStepsStandIn = { step: number; role: string; name: string };
+
 /** How a CUA run_steps batch ended. */
 export type RunStepsOutcome =
-  | { kind: "completed"; windowChanges: string }
+  | { kind: "completed"; windowChanges: string; standIns: RunStepsStandIn[] }
   | {
       kind: "stopped";
       /** The actions that completed before the one the batch stopped at. */
@@ -170,6 +184,8 @@ export type RunStepsOutcome =
       /** CUA's own code for the stopped action, when it gave one. */
       cuaCode: string | null;
       message: string;
+      /** Of the steps that ran before the one the batch stopped at. */
+      standIns: RunStepsStandIn[];
     };
 
 /** Run actions in one CUA run_steps call: in order, stopping at the first
@@ -205,6 +221,11 @@ export async function runSteps(
     );
   }
   const total = args.steps.length;
+  const standIns = (before: number): RunStepsStandIn[] =>
+    report.steps.slice(0, before).flatMap((step, index) => {
+      const used = step.target?.stand_in;
+      return used?.role && used.name ? [{ step: index, role: used.role, name: used.name }] : [];
+    });
   if (report.failed_step == null) {
     if (reply.isError || report.ok === false || report.executed !== total)
       throw new ComputerBackendError(
@@ -216,6 +237,7 @@ export async function runSteps(
     return {
       kind: "completed",
       windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
+      standIns: standIns(total),
     };
   }
   const index = report.failed_step;
@@ -243,6 +265,7 @@ export async function runSteps(
     code: mapped ?? null,
     cuaCode: step.code ?? null,
     message: `${step.message?.trim() || "CUA reported no reason"}${hint}`,
+    standIns: standIns(index),
   };
 }
 

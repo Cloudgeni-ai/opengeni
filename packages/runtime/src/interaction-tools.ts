@@ -942,6 +942,9 @@ const ComputerActionBatchReceipt = z
     /** The observation was read before the action the batch stopped at, and
      * a fresh read after it failed. */
     observationPrecedesStop: z.boolean(),
+    /** Actions that acted on an element of another role than the one named,
+     * by their index in the batch. */
+    roleStandIns: ComputerActionReceipt.shape.roleStandIns,
   })
   .strict();
 const ComputerActOutput = z.union([ComputerActionReceipt, ComputerActionBatchReceipt]);
@@ -2895,6 +2898,7 @@ async function actInComputerBatch(
   let observation: Observation | null = null;
   let observedAfterLastAction = true;
   const steps: z.output<typeof ComputerActionBatchReceipt>["steps"] = [];
+  const roleStandIns: NonNullable<z.output<typeof ComputerActionBatchReceipt>["roleStandIns"]> = [];
   for (const [index, action] of actions.entries()) {
     const stepOperationId = derivedOperationId("computer-batch", operationId, String(index));
     let receipt: Receipt | null = null;
@@ -2985,6 +2989,8 @@ async function actInComputerBatch(
       }
     }
     steps.push({ operationId: receipt.operationId, state: receipt.state, error: receipt.error });
+    for (const standIn of receipt.roleStandIns ?? [])
+      roleStandIns.push({ ...standIn, actionIndex: index });
     if (receipt.observation) observation = receipt.observation;
     if (receipt.state !== "completed") {
       observedAfterLastAction = receipt.observation !== null;
@@ -3012,6 +3018,7 @@ async function actInComputerBatch(
     steps,
     observation,
     observationPrecedesStop: !observedAfterLastAction && observation !== null,
+    ...(roleStandIns.length ? { roleStandIns } : {}),
   };
 }
 
@@ -3119,6 +3126,7 @@ async function actInComputerNativeBatch(
     steps,
     observation,
     observationPrecedesStop: false,
+    ...(receipt.roleStandIns?.length ? { roleStandIns: receipt.roleStandIns } : {}),
   };
 }
 

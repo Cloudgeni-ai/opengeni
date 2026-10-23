@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`ebb89394077e84b49e47b22764a0dcaadc9432d3`: upstream `cua-driver-rs-v0.37.0`
+`9cbd934c37402ee351aa13c2303a81fd09e9116c`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -49,6 +49,20 @@ A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
 element's whole label rather than the start of a word in it.
+A `run_steps` lookup or presence check for a button or link that finds nothing
+of that role uses the one element of the other of the two with that exact name
+(button and link are pressed alike, and on the web models often confuse them),
+and its step report and `role_note` say which element it used and to name its
+role next time. It never does so for a pick by position, a text write or a
+drag, nor for a toggle button or anything with a pressed or checked state, and
+a true match in any window wins. It takes the stand-in only from a complete
+reading of the window (never one cut at the 2,000-element cap) whose content
+has stayed the same for 1.5 s, so a button an earlier step brings up wins over
+a link of its name. Several such elements never hold a wait or a lookup: once
+the window's content has stayed the same for 1.5 s the step fails as
+`ambiguous`, naming them. A window that never settles before the step's
+deadline fails as it did before, and a name shown only on an element of an
+unrelated role waits its whole time.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -57,7 +71,10 @@ A `computer_act` batch runs as one `run_steps` call only where the worker offers
 checked against. The exception is a later action whose role, label or text
 locator the observation does not show (an earlier action brings it up): it is
 sent by role and name, and CUA finds it when the step runs after waiting up to
-10 s for it to appear and enable. Every element-targeted action after it is
+10 s for it to appear and enable. So is a first action that names a button or
+link the observation does not show when it shows an element of the other of the
+two with that name: CUA's stand-in above decides whether it is the one meant.
+Every element-targeted action after it is
 then found by name too, because CUA's lookup re-reads the window and retires the
 observation's tokens. On Windows a batch's actions are sent one at a time. CUA is the
 default on macOS, on Windows and for explicitly selected isolated Linux
@@ -161,7 +178,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ebb89394077e84b49e47b22764a0dcaadc9432d3/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/9cbd934c37402ee351aa13c2303a81fd09e9116c/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
