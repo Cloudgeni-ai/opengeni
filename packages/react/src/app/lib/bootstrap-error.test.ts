@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import { ApiError } from "./app-api";
-import { bootstrapErrorPresentation } from "./bootstrap-error";
+import {
+  BOOTSTRAP_CALM_WINDOW_MS,
+  bootstrapErrorPresentation,
+  bootstrapWaitingPresentation,
+  isTransientBootstrapError,
+} from "./bootstrap-error";
 
 describe("bootstrap error presentation", () => {
   test("turns the maintenance API payload into calm maintenance copy", () => {
@@ -85,5 +90,56 @@ describe("bootstrap error presentation", () => {
       description: "Your workspace access couldn't be loaded. Try again.",
     });
     expect(JSON.stringify(presentation)).not.toContain("forbidden by proxy");
+  });
+});
+
+describe("bootstrap waiting", () => {
+  const parked = () => new OpenGeniApiError(503, JSON.stringify({ error: "maintenance" }));
+
+  test("the maintenance marker is transient in every bootstrap context", () => {
+    expect(isTransientBootstrapError(parked(), "client_configuration")).toBe(true);
+    expect(isTransientBootstrapError(parked(), "workspace_access")).toBe(true);
+    expect(
+      isTransientBootstrapError(
+        new ApiError(503, JSON.stringify({ error: "maintenance" })),
+        "client_configuration",
+      ),
+    ).toBe(true);
+    // A marker on a client error is not an update.
+    expect(
+      isTransientBootstrapError(
+        { status: 403, body: JSON.stringify({ error: "maintenance" }) },
+        "client_configuration",
+      ),
+    ).toBe(false);
+  });
+
+  test("an update reads as Updating for as long as it lasts", () => {
+    for (const elapsedMs of [0, BOOTSTRAP_CALM_WINDOW_MS * 10]) {
+      expect(bootstrapWaitingPresentation(parked(), "client_configuration", elapsedMs)).toEqual({
+        title: "Updating",
+        description: "This page continues by itself when the update finishes.",
+        recovering: true,
+      });
+    }
+  });
+
+  test("another transient failure reconnects calmly, then names the problem", () => {
+    const failure = new OpenGeniApiError(502, "", { mutation: false });
+    expect(bootstrapWaitingPresentation(failure, "client_configuration", 5_000)).toEqual({
+      title: "Reconnecting",
+      description: "This page continues by itself when the connection is back.",
+      recovering: true,
+    });
+    expect(
+      bootstrapWaitingPresentation(failure, "client_configuration", BOOTSTRAP_CALM_WINDOW_MS),
+    ).toEqual({
+      ...bootstrapErrorPresentation(failure, "client_configuration"),
+      recovering: true,
+    });
+    const offline = new TypeError("Failed to fetch");
+    expect(
+      bootstrapWaitingPresentation(offline, "workspace_access", BOOTSTRAP_CALM_WINDOW_MS + 1).title,
+    ).toBe("Can't connect");
   });
 });

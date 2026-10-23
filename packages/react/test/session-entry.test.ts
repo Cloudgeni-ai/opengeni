@@ -174,7 +174,10 @@ describe("session-only entry", () => {
     // arguments with the pure tool-argument parser (tree-shaken to that read).
     expect(reactSources.some((id) => id.endsWith("/src/timeline/invoked-tool.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/timeline/parsers.ts"))).toBe(true);
-    expect(reactSources.length).toBe(55);
+    // The renderer-free transient-failure rules the composer uses to hold a
+    // send calmly while Opengeni is updating.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/transient-retry.ts"))).toBe(true);
+    expect(reactSources.length).toBe(56);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

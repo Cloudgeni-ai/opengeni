@@ -1,4 +1,4 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { isMaintenanceError, OpenGeniApiError } from "@opengeni/sdk";
 import { type OpenGeniText } from "../messages/runtime";
 
 /*
@@ -18,6 +18,27 @@ export const TRANSIENT_RECONNECT_INTERVAL_MS = 3_000;
 export const OPENGENI_UPDATING_NOTICE = (t: OpenGeniText) =>
   t("lib.transientRetry.opengeniIsUpdatingWeLl");
 
+/**
+ * An explicit action (Stop, Resume, Steer, a direct send) that failed only
+ * because Opengeni is updating. It is not retried automatically, so it never
+ * reads as "we'll reconnect": the person is told calmly to try again.
+ */
+export const OPENGENI_UPDATING_ACTION_NOTICE = (t: OpenGeniText) =>
+  t("lib.transientRetry.actionMayNotHaveGoneThrough");
+
+const actionFailures = new WeakSet<object>();
+
+/** Record that `error` is the failure of an explicit action, not a background read or save. */
+export function markActionFailure<T>(error: T): T {
+  if (typeof error === "object" && error !== null) actionFailures.add(error);
+  return error;
+}
+
+/** True for a failure recorded with {@link markActionFailure}. */
+export function isActionFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && actionFailures.has(error);
+}
+
 const NETWORK_FAILURE =
   /failed to fetch|fetch failed|networkerror|load failed|network request failed/iu;
 
@@ -28,13 +49,38 @@ const NETWORK_FAILURE =
  */
 export function isTransientServiceFailure(error: unknown): boolean {
   if (isAbort(error)) return false;
+  if (isMaintenanceError(error)) return true;
   if (error instanceof OpenGeniApiError) {
+    // The API said this exact failure is not worth retrying.
+    if (error.retryable === false) return false;
     if (error.status === 502 || error.status === 503 || error.status === 504) return true;
     if (error.status === 500) return error.retryable;
     // The SDK reports a mutation whose response never arrived as status 0.
     return error.status === 0 && error.code === "network_error";
   }
   return error instanceof TypeError && NETWORK_FAILURE.test(error.message);
+}
+
+/**
+ * How long an ordinary transient failure stays calm (shown as "updating"
+ * rather than as an error). A normal deploy or failover ends well inside it;
+ * a failure that outlasts it is reported as the error it is. The maintenance
+ * marker is a planned update and stays calm for as long as it lasts.
+ */
+export const SERVICE_UPDATING_CALM_WINDOW_MS = 120_000;
+
+/**
+ * True when `error` should read as "updating, reconnecting" rather than as a
+ * failure: the maintenance marker, or a transient failure first seen at
+ * `since` and not yet past the calm window at `now`.
+ */
+export function isCalmServiceFailure(
+  error: unknown,
+  since: number,
+  now: number = Date.now(),
+): boolean {
+  if (isMaintenanceError(error)) return true;
+  return isTransientServiceFailure(error) && now - since < SERVICE_UPDATING_CALM_WINDOW_MS;
 }
 
 export type RetryTransientOptions = {

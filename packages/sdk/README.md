@@ -1359,6 +1359,26 @@ const client = new OpenGeniClient({
 `isTransientRequestError(error)` reports whether an error is this kind of
 transient failure, for callers that keep their own longer retry loop.
 
+While a deployment is parked for an update, the API answers every request with
+`{"error":"maintenance"}` (normally HTTP 503). The client decodes it into an
+`OpenGeniApiError` with `code: "maintenance"` (`OPENGENI_MAINTENANCE_ERROR_CODE`),
+`retryable: true` and `outcomeUnknown: false`: nothing ran, so a mutation can be
+retried with the same idempotency key. Its message carries no support
+reference. `isMaintenanceError(error)` detects it, and `isTransientRequestError`
+treats it as transient. A park can last minutes, so keep retrying it at a calm
+pace rather than reporting a failure.
+
+```ts
+import { isMaintenanceError } from "@opengeni/sdk";
+
+try {
+  await client.sendMessage(workspaceId, sessionId, { text, clientEventId });
+} catch (error) {
+  if (isMaintenanceError(error)) showUpdating(); // retry later with the same clientEventId
+  else throw error;
+}
+```
+
 ## Streaming guarantees
 
 `client.streamEvents(...)` (and the underlying `streamSessionEvents`) delivers

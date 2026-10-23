@@ -28,6 +28,7 @@ import {
   type FailedSessionRetryInput,
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
+import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { isPaymentRequiredError } from "../lib/model-access";
@@ -2761,6 +2762,13 @@ function SessionChatPane(props: {
       }
     },
   });
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    props.connectionState,
+    props.initialLoading,
+  );
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
       return {
@@ -3846,7 +3854,7 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composer}
+                composer={composerView}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}

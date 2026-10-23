@@ -13,6 +13,7 @@ import * as SonnerPackage from "sonner";
 import { flush, registerDom, renderComponent } from "../../../test/render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../test/fake-client";
 import { DEFAULT_TRANSIENT_READ_RETRY } from "../../hooks/internal";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../../lib/transient-retry";
 import { useSession } from "../../hooks/use-session";
 import { useSessionEvents } from "../../hooks/use-session-events";
 import { AppContext, type AppContextValue } from "../app-context";
@@ -108,7 +109,7 @@ describe("session page failure toasts", () => {
     }
   });
 
-  test("a persistent transient outage toasts each failure once, despite background retries", async () => {
+  test("a persistent transient outage toasts each failure once, after the update window", async () => {
     toastError.mockClear();
     const client = fakeClient({
       getSession: async () => {
@@ -123,8 +124,46 @@ describe("session page failure toasts", () => {
     try {
       await flush(DEFAULT_TRANSIENT_READ_RETRY.quietWindowMs - 3_000);
       expect(toastTitles()).toEqual([]);
+      // The reads surface their error after the quiet window, but a normal
+      // update can still be underway: no toast yet.
       await flush(DEFAULT_TRANSIENT_READ_RETRY.backgroundDelayMs * 4);
+      expect(rendered.container.textContent).toBe("failed");
+      expect(toastTitles()).toEqual([]);
+      // Outlasting the update window makes it a real problem: one toast each.
+      await flush(SERVICE_UPDATING_CALM_WINDOW_MS);
       expect(toastTitles().sort()).toEqual(["Event stream disconnected", "Failed to load session"]);
+      await flush(DEFAULT_TRANSIENT_READ_RETRY.backgroundDelayMs * 8);
+      expect(toastTitles()).toHaveLength(2);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a long maintenance window never toasts and recovers on its own", async () => {
+    toastError.mockClear();
+    let parked = true;
+    const maintenance = () =>
+      new OpenGeniApiError(503, JSON.stringify({ error: "maintenance" }), { mutation: false });
+    const client = fakeClient({
+      getSession: async () => {
+        if (parked) throw maintenance();
+        return session;
+      },
+      listEvents: async () => {
+        if (parked) throw maintenance();
+        return [];
+      },
+      streamEvents: liveStream(),
+    });
+    const rendered = await renderComponent(<SessionPageReads client={client} />);
+    try {
+      await flush(10 * 60_000);
+      expect(rendered.container.textContent).toBe("loading");
+      expect(toastTitles()).toEqual([]);
+      parked = false;
+      await flush(10_000);
+      expect(rendered.container.textContent).toBe("Deploy-safe");
+      expect(toastTitles()).toEqual([]);
     } finally {
       await rendered.unmount();
     }
