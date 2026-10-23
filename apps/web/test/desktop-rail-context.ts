@@ -28,6 +28,7 @@ const context = {
   },
 };
 export const useAppContext = () => context;
+export const useOptionalAppContext = useAppContext;
 let collapsed = false;
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => {
