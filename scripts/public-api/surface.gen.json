@@ -24816,7 +24816,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.repliesMuted": "boolean!"
+        "$.repliesMuted": "boolean!",
+        "$.scope": "enum?=[\"\\\"schedule\\\"\",\"\\\"session\\\"\"]"
       }
     },
     "SessionLineageResponse": {
