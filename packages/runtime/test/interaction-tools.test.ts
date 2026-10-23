@@ -3856,6 +3856,101 @@ describe("interaction attempt tools", () => {
     expect(observed).toBe(1);
   });
 
+  test("computer_open with applicationId launches the app and observes its window in one call", async () => {
+    const window = computerTarget();
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const appWindow = { ...computerTarget(), id: "window-calculator", title: "Calculator" };
+    const session = {
+      ...discoveredComputerSession(randomUUID(), sessionId),
+      lifecycle: "active" as const,
+      placement: { kind: "connected_machine" as const, sandboxId: randomUUID() },
+      controller: {
+        controllerId: "controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const requests: ComputerActionRequest[] = [];
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [session] }),
+        listComputerTargets: async () => ({ computerSessionId, targets: [window, screen] }),
+        observeComputerTarget: async () => {
+          observed += 1;
+          return computerObservation(window);
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return {
+            ...computerReceipt(value.operationId, computerObservation(appWindow)),
+            targetId: value.targetId,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const operationId = randomUUID();
+    const open = (args: Record<string, unknown>, id = operationId) =>
+      environment.callModel({
+        operationId: id,
+        modelName: "interaction__computer_open",
+        subjectId: "model:test",
+        arguments: { placement: session.placement, ...args },
+      });
+    const result = await open({ applicationId: "com.apple.calculator" });
+    // The launch rides on the screen target, fenced from the target list.
+    expect(observed).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      targetId: "screen-1",
+      expectedTargetGeneration: screen.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: null,
+      action: { type: "launch", applicationId: "com.apple.calculator" },
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("2 targets:");
+    expect(text).toContain(
+      "This action opened window-calculator; act on that target with the observation below.",
+    );
+    expect(result.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+    });
+
+    // A retried call repeats the same launch operation; a plain open launches nothing.
+    await open({ applicationId: "com.apple.calculator" });
+    expect(requests[1]!.operationId).toBe(requests[0]!.operationId);
+    const plain = await open({}, randomUUID());
+    expect(requests).toHaveLength(2);
+    expect(plain.structuredContent).not.toHaveProperty("launch");
+  });
+
   test("an action naming its observation is fenced from the target list without a re-read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
