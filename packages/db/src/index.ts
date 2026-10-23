@@ -23,6 +23,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
+export * from "./workspace-model-catalog-inputs";
 import {
   modelCallTimingColumns,
   modelCallTimingOrNull,
