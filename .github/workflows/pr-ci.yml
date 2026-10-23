@@ -1,0 +1,152 @@
+name: PR CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+# Reserve one PR fan-out at a time. Native FIFO is not a hard provider-priority
+# guarantee. The queue has a provider limit of 100 waiting runs; overflow cannot
+# become admission success. Only the separate supersession handler cancels runs.
+concurrency:
+  group: pr-ci-fanout
+  queue: max
+  cancel-in-progress: false
+
+env:
+  OPENGENI_TEST_MAX_CONCURRENCY: "2"
+  OPENGENI_TYPECHECK_CONCURRENCY: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 320
+    outputs:
+      docs_only: ${{ steps.identity.outputs.docs_only }}
+      head: ${{ steps.identity.outputs.head }}
+      unit_count: ${{ steps.plan.outputs.unit_count }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - id: identity
+        name: Bind current exact PR head and docs-only paths
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/github-pr-ci.ts identity
+      - name: Yield admission to main and candidate CI
+        if: ${{ steps.identity.outputs.docs_only != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/github-pr-ci.ts priority pr
+      - id: plan
+        name: Plan all affected files
+        env:
+          BASE_SHA: ${{ steps.identity.outputs.base }}
+          HEAD_SHA: ${{ steps.identity.outputs.head }}
+        run: |
+          set -euo pipefail
+          bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output "$RUNNER_TEMP/pr-plan.json"
+          echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo 'unit_matrix=[{"index":0,"total":2},{"index":1,"total":2}]' >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pr-impact-plan
+          path: ${{ runner.temp }}/pr-plan.json
+          if-no-files-found: error
+
+  contracts:
+    needs: plan
+    if: ${{ needs.plan.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-impact-plan
+          path: ${{ runner.temp }}/pr-plan
+      - run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
+      - run: bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --exclude publish-closure --exclude sdk-compat --exclude example-builds
+
+  units:
+    needs: plan
+    if: ${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-impact-plan
+          path: ${{ runner.temp }}/pr-plan
+      - name: Test every selected unit file
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: |
+          set -euo pipefail
+          bun scripts/ci/batch-setup.ts postgres
+          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json" --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+
+  ready:
+    name: PR CI
+    needs: [plan, contracts, units]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all selected hosted work
+        env:
+          PLAN: ${{ needs.plan.result }}
+          DOCS: ${{ needs.plan.outputs.docs_only }}
+          CONTRACTS: ${{ needs.contracts.result }}
+          UNITS: ${{ needs.units.result }}
+          COUNT: ${{ needs.plan.outputs.unit_count }}
+        run: |
+          set -euo pipefail
+          test "$PLAN" = success
+          if [ "$DOCS" = true ]; then
+            test "$CONTRACTS" = skipped && test "$UNITS" = skipped
+          else
+            test "$CONTRACTS" = success
+            if [ "$COUNT" = 0 ]; then test "$UNITS" = skipped; else test "$UNITS" = success; fi
+          fi

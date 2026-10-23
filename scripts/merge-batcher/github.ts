@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
-import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
+import { type ReadyEvent } from "./evidence";
+import { admitGitHub, type HostedCheck, type RequiredCheck } from "./github-admission";
 import {
   type Config,
   type Manifest,
@@ -48,7 +49,13 @@ const CAPACITY_HOLD_REASONS: Record<CapacityHold, string> = {
 export function isControlPlanePath(path: unknown): boolean {
   return (
     typeof path === "string" &&
-    (path === ".github/workflows/batch-ci.yml" ||
+    ([
+      ".github/workflows/batch-ci.yml",
+      ".github/workflows/pr-ci.yml",
+      ".github/workflows/pr-ci-superseded.yml",
+      ".github/workflows/merge-queue.yml",
+    ].includes(path) ||
+      path === "scripts/ci/github-pr-ci.ts" ||
       path.startsWith("scripts/ci/batch-") ||
       path.startsWith("scripts/merge-batcher/") ||
       /^scripts\/ci\/(?:impact|run-unit-shard|profile-command|shared-pg)(?:[./-]|$)/.test(path) ||
@@ -106,6 +113,7 @@ export class GitHubAuth {
             actions: "write",
             pull_requests: "write",
             issues: "write",
+            checks: "read",
           }
         : this.env.BATCHER_MODE === "shadow-ci"
           ? {
@@ -114,8 +122,15 @@ export class GitHubAuth {
               actions: "read",
               pull_requests: "read",
               issues: "read",
+              checks: "read",
             }
-          : { contents: "read", actions: "read", pull_requests: "read", issues: "read" };
+          : {
+              contents: "read",
+              actions: "read",
+              pull_requests: "read",
+              issues: "read",
+              checks: "read",
+            };
     const response = await this.transport(
       `https://api.github.com/app/installations/${installation}/access_tokens`,
       {
@@ -407,12 +422,47 @@ export class GitHubReader {
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
+    const rules = await this.get(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
+    if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
+    if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
+      throw Error("Required workflow rules need explicit hosted-check mapping before admission");
+    const classic = await this.classicBranchPolicy();
+    const required: RequiredCheck[] = rules
+      .filter((r) => r.type === "required_status_checks")
+      .flatMap((r) =>
+        (r.parameters?.required_status_checks ?? []).map((c: Json) => ({
+          context: c.context,
+          integrationId: c.integration_id,
+        })),
+      );
+    required.push(
+      ...(classic?.requiredStatusChecks ?? []).map((c: Json) => ({
+        context: c.context,
+        integrationId: c.app?.databaseId ?? null,
+      })),
+    );
+    if (required.some((c) => typeof c.context !== "string" || !c.context))
+      throw new Error("Malformed required checks");
+    const reviewRequired =
+      Boolean(classic?.requiresApprovingReviews || classic?.requiresCodeOwnerReviews) ||
+      rules.some(
+        (r) =>
+          r.type === "pull_request" &&
+          (r.parameters?.required_approving_review_count > 0 ||
+            r.parameters?.require_code_owner_review ||
+            r.parameters?.require_last_push_approval),
+      );
+    const conversationResolutionRequired =
+      Boolean(classic?.requiresConversationResolution) ||
+      rules.some(
+        (r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution,
+      );
     for (const pull of pulls) {
       const number = Number(pull.number);
       const queueReady =
         Array.isArray(pull.labels) && pull.labels.some((l: Json) => l.name === "queue-ready");
-      if (!pull.auto_merge && !queueReady) {
-        excluded.push({ number, reason: "no ready signal" });
+      if (!queueReady) {
+        excluded.push({ number, reason: "queue-ready label required" });
         continue;
       }
       let events: ReadyEvent[];
@@ -425,34 +475,150 @@ export class GitHubReader {
         excluded.push({ number, reason: "actual ready-event timeline unavailable" });
         continue;
       }
-      const comments = (await this.pages(`issues/${number}/comments`)).map(
-        (x): Comment => ({
-          id: String(x.id),
-          body: x.body,
-          updatedAt: x.updated_at,
-          authorAssociation: x.author_association,
-        }),
-      );
+      const checks = await this.hostedChecks(pull.head?.sha ?? "");
+      const review =
+        reviewRequired || conversationResolutionRequired
+          ? await this.nativeReview(number)
+          : { decision: null, unresolved: false };
       const files = await this.pages(`pulls/${number}/files`);
       const controlPlane = files.some((file) =>
         [file.filename, file.previous_filename].some(isControlPlanePath),
       );
-      const input: PullInput = {
+      const admission = admitGitHub({
         controlPlane,
         number,
         headSha: pull.head?.sha ?? "",
         headRef: pull.head?.ref ?? "",
         draft: Boolean(pull.draft),
-        autoMerge: Boolean(pull.auto_merge),
         queueReady,
         events,
-        comments,
-      };
-      const admission = admit(input);
+        checks,
+        required,
+        reviewRequired,
+        reviewDecision: review.decision,
+        conversationResolutionRequired,
+        unresolvedThreads: review.unresolved,
+      });
       if (admission.ready) ready.push(admission.ready);
       else excluded.push({ number, reason: admission.reason });
     }
     return { ready, excluded };
+  }
+  async openPullNumbers(): Promise<number[]> {
+    const pulls = await this.pages("pulls?state=open");
+    if (pulls.some((p) => !Number.isSafeInteger(p.number) || p.number <= 0))
+      throw Error("Invalid open PR inventory");
+    return [...new Set(pulls.map((p) => p.number as number))].sort((a, b) => a - b);
+  }
+  async classicBranchPolicy(): Promise<Json | null> {
+    const [owner, name] = this.config.repository.split("/");
+    const response = await this.transport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query ClassicBranchPolicy($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){branchProtectionRule{requiresApprovingReviews requiresCodeOwnerReviews requiresConversationResolution requiredStatusChecks{context app{databaseId}}}}}}`,
+        variables: { owner, name, ref: `refs/heads/${this.config.baseBranch}` },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    this.checkRateLimit(response);
+    if (!response.ok) throw new ProviderError(response.status, "branch protection");
+    const data = (await response.json()) as Json,
+      ref = data.data?.repository?.ref;
+    if (data.errors || !ref || !("branchProtectionRule" in ref))
+      throw Error("Classic branch protection unavailable");
+    return ref.branchProtectionRule;
+  }
+  async hostedChecks(head: string): Promise<HostedCheck[]> {
+    if (!/^[a-f0-9]{40}$/.test(head)) return [];
+    const checks = await this.pages(`commits/${head}/check-runs?filter=latest`, "check_runs");
+    const runs = new Map<number, { run: Json; jobs: Json[] }>();
+    const result: HostedCheck[] = [];
+    for (const check of checks) {
+      if (check.app?.slug !== "github-actions") continue;
+      const match = String(check.details_url ?? "").match(
+        /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)(?:\/|$)/,
+      );
+      if (!match) continue;
+      const id = Number(match[1]);
+      if (!runs.has(id)) {
+        const run = (await this.get(`actions/runs/${id}`)) as Json;
+        const jobs = await this.pages(
+          `actions/runs/${id}/attempts/${run.run_attempt}/jobs`,
+          "jobs",
+        );
+        runs.set(id, { run, jobs });
+      }
+      const { run, jobs } = runs.get(id)!;
+      const exactJob = jobs.find((j) =>
+        String(j.check_run_url).endsWith(`/check-runs/${check.id}`),
+      );
+      const hosted =
+        jobs.length > 0 &&
+        jobs
+          .filter((j) => j.conclusion !== "skipped")
+          .every(
+            (j) =>
+              Array.isArray(j.labels) &&
+              !j.labels.includes("self-hosted") &&
+              j.labels.some((l: string) => /^(ubuntu|windows|macos)-/.test(l)),
+          ) &&
+        !!exactJob &&
+        exactJob.status === "completed" &&
+        exactJob.conclusion === "success";
+      result.push({
+        id: check.id,
+        name: check.name,
+        headSha: check.head_sha,
+        status: check.status,
+        conclusion: check.conclusion,
+        appId: check.app.id,
+        appSlug: check.app.slug,
+        runId: id,
+        attempt: run.run_attempt,
+        workflow: String(run.path).split("@")[0]!,
+        runHeadSha: run.head_sha,
+        hosted,
+      });
+    }
+    return result;
+  }
+  async nativeReview(number: number): Promise<{ decision: string | null; unresolved: boolean }> {
+    const [owner, name] = this.config.repository.split("/");
+    let cursor: string | null = null,
+      unresolved = false,
+      decision: string | null = null;
+    for (let page = 0; page < 1000; page++) {
+      const response = await this.transport("https://api.github.com/graphql", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await this.auth.token()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `query BranchReview($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100,after:$cursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}`,
+          variables: { owner, name, number, cursor },
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      this.checkRateLimit(response);
+      if (!response.ok) throw new ProviderError(response.status, "native review");
+      const data = (await response.json()) as Json,
+        pull = data.data?.repository?.pullRequest,
+        threads = pull?.reviewThreads;
+      if (data.errors || !Array.isArray(threads?.nodes) || !threads.pageInfo)
+        throw Error("Native branch review unavailable");
+      decision = pull.reviewDecision ?? null;
+      unresolved ||= threads.nodes.some((t: Json) => t.isResolved !== true);
+      if (!threads.pageInfo.hasNextPage) return { decision, unresolved };
+      if (typeof threads.pageInfo.endCursor !== "string" || threads.pageInfo.endCursor === cursor)
+        throw Error("Review pagination stalled");
+      cursor = threads.pageInfo.endCursor;
+    }
+    throw Error("Review pagination incomplete");
   }
   async runs(manifest: Manifest, branch: string): Promise<Run[]> {
     const raw = await this.pages(

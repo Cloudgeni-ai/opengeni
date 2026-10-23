@@ -142,6 +142,7 @@ export interface Ledger {
   invalidated: string[];
   ejected: Ejection[];
   parked?: ParkedPull[];
+  onNotices?: Record<string, { at: string; recipients: number[] }>;
   recovery: { batchId: string; pulls: Pull[] }[];
   retries: Record<string, RetryIntent>;
   codeFailures: Record<string, string[]>;
@@ -705,6 +706,7 @@ export interface Config {
   gitDir: string;
   outputDir: string;
   operatorOffEvidence?: string;
+  onNoticeId?: string;
   port: number;
   fetchTimeoutSeconds: number;
   missingRunSeconds: number;
@@ -758,6 +760,7 @@ export function config(env: Record<string, string | undefined>): Config {
     leaseSeconds: integer("BATCHER_LEASE_SECONDS", 120, 3600),
     gitDir: env.BATCHER_GIT_DIR ?? "/data/objects.git",
     outputDir: env.BATCHER_OUTPUT_DIR ?? "/data/shadow",
+    ...(env.BATCHER_ON_NOTICE_ID ? { onNoticeId: env.BATCHER_ON_NOTICE_ID } : {}),
     ...(env.BATCHER_OPERATOR_OFF_EVIDENCE
       ? { operatorOffEvidence: env.BATCHER_OPERATOR_OFF_EVIDENCE }
       : {}),

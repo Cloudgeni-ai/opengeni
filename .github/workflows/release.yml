@@ -199,11 +199,20 @@ jobs:
       # main instead; its admission job binds candidate execution and checks to
       # the exact bot-authored head only after base-owned validation succeeds.
       - name: Dispatch exact-head Version PR CI
+        id: version_ci
         if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           VERSION_PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
         run: node scripts/check-release-pr-automation.mjs dispatch-version-ci
+
+      - name: Queue Version PR and trigger ordinary exact-head hosted CI
+        if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION_PR_NUMBER: ${{ steps.version_ci.outputs.automation_pr_number }}
+          VERSION_HEAD_SHA: ${{ steps.version_ci.outputs.automation_head_sha }}
+        run: bun scripts/ci/github-pr-ci.ts queue-version
 
   publish:
     name: Publish verified release

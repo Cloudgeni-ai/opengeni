@@ -124,6 +124,10 @@ async function fixture() {
     };
     workflowRuns: Run[] = [];
     comments: string[] = [];
+    priorComments: string[] = [];
+    override async openPullNumbers() {
+      return [1, 99];
+    }
     calls: string[] = [];
     busy = false;
     commentReadFails = false;
@@ -160,7 +164,7 @@ async function fixture() {
     override async hasComment(_number: number, marker: string) {
       if (this.commentReadThrottled) throw new ProviderError(429, "read");
       if (this.commentReadFails) throw new Error("observation unavailable");
-      return this.comments.some((body) => body.includes(marker));
+      return [...this.priorComments, ...this.comments].some((body) => body.includes(marker));
     }
     override async currentAttempt(run: Run) {
       const latest = this.workflowRuns
@@ -252,10 +256,23 @@ async function fixture() {
     await writer.transaction([{ ref: cfg.stateRef, expected: old.sha, next: sha }]);
     return sha;
   };
-  const publish = async () => {
+  const publish = async (flushQueued = true) => {
     const result = await controller().step();
     expect(result.action.kind).toBe("build");
     expect(result.manifest).not.toBeNull();
+    if (flushQueued) {
+      // Establish the new queued-comment lifecycle before tests attach their
+      // landing/retry race hooks. Preserve provider comments for reconciliation;
+      // clear only the assertions' observation window, not durable effects.
+      await executor().maintain();
+      expect(
+        [...api.priorComments, ...api.comments].some((body) =>
+          body.startsWith("Queued exact head"),
+        ),
+      ).toBe(true);
+      api.priorComments.push(...api.comments.splice(0));
+      api.calls.length = 0;
+    }
     return result.manifest!;
   };
   const verdict = (m: Manifest, outcome: Run["outcome"] = "success") => {
@@ -363,6 +380,27 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           !args.some((a) => a.startsWith("--force-with-lease=refs/heads/main") || a === "--force"),
       ),
     ).toBe(true);
+  });
+  test("queued publication comment lost response is reconciled once after restart", async () => {
+    const f = await fixture();
+    await f.publish(false);
+    f.api.response = "lost";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    expect(f.api.comments[0]).toContain("Queued exact head");
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+  });
+  test("explicit ON notice includes unready open PRs and survives executor restart", async () => {
+    const f = await fixture();
+    f.cfg.onNoticeId = "rollout-20261023";
+    await f.executor().maintain();
+    await f.executor().maintain();
+    await f.executor().maintain();
+    expect((await f.state()).ledger.onNotices?.["rollout-20261023"]?.recipients).toEqual([1, 99]);
+    expect(f.api.comments).toHaveLength(2);
+    expect(f.api.calls.some((c) => c.includes("/issues/99/comments"))).toBe(true);
+    expect(f.api.comments.every((c) => c.includes("Merges now go through the batcher"))).toBe(true);
   });
   test("head race after final read lands snapshot and automatically queues only newer delta", async () => {
     const f = await fixture(),
