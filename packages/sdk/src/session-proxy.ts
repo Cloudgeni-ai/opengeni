@@ -55,8 +55,9 @@ type ProxyFacade = {
  * it from the request body or path. `{ user, tenant }`: one workspace per
  * tenant. `{ user }`: one workspace per user. `{ user, workspaceId }`: your
  * own workspace. Tenant and per-user mapping require the `Opengeni` facade
- * from `@opengeni/sdk/chat`; workspaces are created on first use and Opengeni
- * adds the user on their first request.
+ * from `@opengeni/sdk/chat`; workspaces are created on first use. A tenant
+ * workspace's signed-in user is added with the facade's `memberPermissions`
+ * when those are set, else by Opengeni on their first request.
  */
 export type SessionProxyResolution = (
   | { workspaceId: string; tenant?: undefined }
@@ -925,7 +926,14 @@ async function resolveWorkspace(
   }
   if (resolved.workspaceId) return resolved.workspaceId;
   if (resolved.tenant && isFacade(target)) {
-    return await target.workspaceId({ tenant: resolved.tenant });
+    // A signed-in user joins with the facade's `memberPermissions` when those
+    // are set; an anonymous visitor is left to Opengeni's first-use defaults.
+    return target.workspaceIdFor && !resolved.visitor
+      ? await target.workspaceIdFor(
+          { tenant: resolved.tenant, user: resolved.user, source },
+          { isolation: "tenant" },
+        )
+      : await target.workspaceId({ tenant: resolved.tenant });
   }
   if (
     !("tenant" in resolved) &&
