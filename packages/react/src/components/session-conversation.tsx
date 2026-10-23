@@ -224,9 +224,11 @@ export type SessionConversationProps = ClientOverride &
     /** Conversation-owned copy (error actions). */
     labels?: Partial<SessionConversationLabels> | undefined;
     /**
-     * The signed-in person's subject id. When set, Up in an empty composer
-     * pulls their latest waiting prompt back for editing; prompts from anyone
-     * else are never recalled. Omit it and Up keeps its normal behaviour.
+     * The signed-in person's subject id, as recorded on their turns
+     * (`turn.initiator.subjectId`). When set, Up in an empty composer pulls
+     * their latest waiting prompt back for editing; prompts from anyone else,
+     * including ones your backend sends with a service key, are never
+     * recalled. Omit it and Up keeps its normal behaviour.
      */
     viewerSubjectId?: string | null | undefined;
     /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
