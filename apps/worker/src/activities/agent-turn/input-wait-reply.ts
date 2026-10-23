@@ -82,21 +82,22 @@ export async function inputWaitReply(input: {
 }
 
 /**
- * The agent message a yielded wait's `reply` argument becomes, or null.
+ * The agent message an accepted wait's `reply` argument becomes, or null.
  *
  * Text a model writes before a tool call can come back only as a summary
  * (Claude's progress updates), but a tool argument always arrives verbatim, so
  * the reply is shown as the turn's answer exactly as written, whoever started
  * the turn. It is not shown twice when the model also wrote the same text as
- * its latest message.
+ * its latest message, or when it was already published once the wait was
+ * accepted (the worker then records it as the latest message).
  */
 export function inputWaitReplyMessage(input: {
-  inputWaitYielded: boolean;
+  waitAccepted: boolean;
   waitReply: string | null;
   latestAssistantMessageText: string | null;
 }): { text: string; messageId: string; phase: "final_answer" } | null {
   const reply = input.waitReply;
-  if (!input.inputWaitYielded || reply === null || reply.trim().length === 0) return null;
+  if (!input.waitAccepted || reply === null || reply.trim().length === 0) return null;
   if (input.latestAssistantMessageText?.trim() === reply.trim()) return null;
   return { text: reply, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" };
 }

@@ -242,14 +242,14 @@ describe("a wait's reply argument is the verbatim answer", () => {
   test("it becomes its own final message, unless that text was already shown", () => {
     expect(
       inputWaitReplyMessage({
-        inputWaitYielded: true,
+        waitAccepted: true,
         waitReply: verbatim,
         latestAssistantMessageText: "Here are the pictures.",
       }),
     ).toEqual({ text: verbatim, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" });
     expect(
       inputWaitReplyMessage({
-        inputWaitYielded: true,
+        waitAccepted: true,
         waitReply: verbatim,
         latestAssistantMessageText: `${verbatim}\n`,
       }),
@@ -257,7 +257,7 @@ describe("a wait's reply argument is the verbatim answer", () => {
     for (const waitReply of [null, "", " \n"]) {
       expect(
         inputWaitReplyMessage({
-          inputWaitYielded: true,
+          waitAccepted: true,
           waitReply,
           latestAssistantMessageText: null,
         }),
@@ -265,7 +265,7 @@ describe("a wait's reply argument is the verbatim answer", () => {
     }
     expect(
       inputWaitReplyMessage({
-        inputWaitYielded: false,
+        waitAccepted: false,
         waitReply: verbatim,
         latestAssistantMessageText: null,
       }),

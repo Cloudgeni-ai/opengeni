@@ -4158,11 +4158,18 @@ tool call is not always delivered verbatim (Claude Opus 5.5 and Sonnet 5.5
 return a longer note there as a progress-update thinking block whose readable
 text is only Anthropic's summary, see [model providers](./model-providers.md)),
 but a tool argument always is. When the accepted wait carries a `reply`,
-settlement publishes it as an `agent.message.completed` with `phase`
-`final_answer` and `messageId` `wait_for_input:reply`, before `turn.completed`,
-whoever started the turn, unless it equals the turn's latest message. For a
-turn that a human or API message started, it is also `turn.completed.payload.reply`,
-ahead of the latest message. The first accepted wait's reply wins.
+the worker publishes it durably before the first tool result it records after
+the wait was accepted (after that response's own text), as an
+`agent.message.completed` with `phase` `final_answer` and `messageId`
+`wait_for_input:reply`, whoever started the turn, unless it equals the turn's
+latest message. An approval pause or a retried activity therefore does not lose
+it, and settlement publishes it only if that did not happen. For a turn that a
+human or API message started, it is also
+`turn.completed.payload.reply`, ahead of the latest message; a resumed
+activity finds it as the turn's newest durable message. The first accepted
+wait's reply wins. The API tool itself ignores `reply`: only the turn worker's
+model tool path shows it, so a `wait_for_input` a Code Mode script calls does
+not show its `reply`.
 
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace

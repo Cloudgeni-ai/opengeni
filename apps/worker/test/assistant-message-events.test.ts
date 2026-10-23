@@ -724,6 +724,16 @@ describe("assistant message events from a real agent turn", () => {
         { text: REPLY, messageId: WAIT_REPLY_MESSAGE_ID, phase: "final_answer" },
       ]);
       expect(turnCompleted(events)).toEqual({ output: "", reply: REPLY });
+      // Published as soon as the wait is accepted, before its tool result,
+      // so an approval pause or a retried activity cannot lose it.
+      const replyAt = events.findIndex(
+        (event) =>
+          event.type === "agent.message.completed" &&
+          (event.payload as { messageId?: unknown }).messageId === WAIT_REPLY_MESSAGE_ID,
+      );
+      const waitOutputAt = events.findIndex((event) => event.type === "agent.toolCall.output");
+      expect(replyAt).toBeGreaterThan(-1);
+      expect(replyAt).toBeLessThan(waitOutputAt);
     }, 60_000);
 
     test("a short text beside the summary is kept, and the reply is the answer", async () => {

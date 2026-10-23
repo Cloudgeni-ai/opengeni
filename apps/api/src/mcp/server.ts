@@ -3171,7 +3171,7 @@ function registerGoalTools(
       inputSchema: {
         reply: z4
           .string()
-          .optional()
+          .nullish()
           .describe(
             "Your complete message to the person, shown to them verbatim as your reply (Markdown, tables and artifact images work). Pass it whenever this turn answers a person's message, and then do not also write the answer before this call. Omit it when there is nothing new to tell them.",
           ),
