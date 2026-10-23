@@ -28,9 +28,25 @@ const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 
 // The header and rows only render inside the app shell, which always provides
 // the app context; their chat actions (copy link, pin) run through it. The
-// fixture runs none of them, so any read of the context fails loudly.
+// fixture supplies the read-only workspace grant used to label archive actions.
+// All unexpected context reads and action calls still fail loudly.
 const appContext = new Proxy({} as AppContextValue, {
   get(_target, key) {
+    if (key === "accessContext") {
+      return {
+        subjectId: "rail-preview-user",
+        workspaceGrants: [
+          {
+            accountId: "rail-preview-organization",
+            workspaceId: "workspace",
+            subjectId: "rail-preview-user",
+            permissionMode: "explicit",
+            permissions: ["sessions:control"],
+          },
+        ],
+        accountGrants: [],
+      } satisfies AppContextValue["accessContext"];
+    }
     throw new Error(`The session rail fixture's app context has no ${String(key)}`);
   },
 });
@@ -83,6 +99,7 @@ function SessionRailRowMetadataFixture() {
   } as Session);
   const [quickActionSession, setQuickActionSession] = useState({
     id: "quick-actions",
+    workspaceId: "workspace",
     archived: false,
     parentSessionId: null,
     pinned: false,
