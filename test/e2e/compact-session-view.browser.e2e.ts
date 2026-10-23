@@ -957,7 +957,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         // usable, not turn them into a failed request for older sessions.
         expect(await rail.getByRole("button", { name: /^Retry sessions in/ }).count()).toBe(0);
         await rail.getByText("Unrelated 00", { exact: true }).waitFor();
-        for (let visible = 8; visible <= 48; visible += 4) {
+        for (let visible = pendingRows + 4; visible <= pendingRows + 44; visible += 4) {
           await disclosure.click();
           await waitFor(async () => (await rootRows.count()) === visible);
           expect(await rootRow.count()).toBe(0);
@@ -1016,7 +1016,7 @@ describe("compact session view on the live local workspace route (API fixture)",
           );
           throw error;
         });
-        await waitFor(async () => (await rootRows.count()) === 52);
+        await waitFor(async () => (await rootRows.count()) === pendingRows + 48);
         await archiveFixture.childReadStarted.promise;
         // Root membership and branch materialization are separate commits.
         // Keep the restoring branch response in flight to prove that seeing
