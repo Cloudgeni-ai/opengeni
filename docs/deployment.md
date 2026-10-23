@@ -4110,6 +4110,11 @@ Useful settings:
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
+- For a private collector CA alongside compute-control TLS, the Helm chart's
+  `computeControl.apiTls.additionalCaConfigMaps` composes explicitly selected
+  public CA bundles with compute trust before API/control/turn startup. See the
+  [chart trust configuration](../deploy/helm/opengeni/README.md#additional-trust-beside-compute-control-tls).
+  CA changes require a normal pod rollout; never disable TLS verification.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 
