@@ -128,6 +128,8 @@ beforeAll(async () => {
     },
   });
   ({ ArtifactLibrary } = await import("@opengeni/react/app/components/artifacts/artifact-library"));
+  // The library lazy-loads the viewer; load it up front so a cold runner does not race it.
+  await import("@opengeni/react/app/components/artifacts/artifact-viewer");
 });
 
 afterAll(async () => {
@@ -171,13 +173,15 @@ const viewerTitle = () => viewer()?.querySelector("h2")?.textContent;
 const control = (label: string) =>
   viewer()!.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
 
-async function openFromList(container: HTMLElement, title: string) {
+async function openFromList(container: HTMLElement, title: string, { opens = true } = {}) {
   const action = [...container.querySelectorAll<HTMLElement>("[data-card-action]")].find(
     (candidate) => candidate.textContent === title,
   );
   expect(action).toBeDefined();
   await act(async () => action!.click());
   await settle();
+  for (let waited = 0; opens && !viewer() && waited < 5000; waited += 20)
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
 }
 
 async function press(key: string, target: Element = viewer()!) {
@@ -310,7 +314,7 @@ test("neighbouring images load ahead; documents still open where they are edited
   await act(async () => control("Close").click());
 
   // A document opens in the session's panel, as before, not in the viewer.
-  await openFromList(container, "Plan");
+  await openFromList(container, "Plan", { opens: false });
   expect(viewer()).toBeNull();
   expect(selected).toEqual(["document:plan"]);
 });
@@ -329,7 +333,7 @@ test("the workspace library keeps opening images on their page, where it browses
       onSelect={(item) => selected.push(`${item.kind}:${item.id}`)}
     />
   ));
-  await openFromList(container, "shot-2.png");
+  await openFromList(container, "shot-2.png", { opens: false });
   expect(viewer()).toBeNull();
   expect(selected).toEqual(["image:shot-2"]);
 });
