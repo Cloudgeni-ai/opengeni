@@ -61,11 +61,7 @@ import {
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
@@ -136,9 +132,6 @@ beforeAll(async () => {
     available = false;
     return;
   }
-  // The Slack event source tests write event_ingress_routes, which migration
-  // 0937 withholds from the runtime role until the follow-up release.
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 

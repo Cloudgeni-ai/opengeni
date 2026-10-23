@@ -1773,9 +1773,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 7
             : 0) +
-          // 0929 credential-free event ingress routes: no RLS; 0937 withholds
-          // their runtime DML (RUNTIME_DEFERRED_FULL_DML_TABLES).
-          (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
+          // 0929 credential-free event ingress routes: full DML, no RLS.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0932 MCP Events subscriptions: full DML and FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1860,9 +1863,7 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
-      // 0937 withholds its runtime DML until the previous release knows it.
-      expect(RUNTIME_FULL_DML_TABLES).not.toContain("event_ingress_routes");
-      expect(runtimePosture.RUNTIME_DEFERRED_FULL_DML_TABLES).toEqual(["event_ingress_routes"]);
+      expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
@@ -1926,8 +1927,7 @@ describe("runtime database posture evaluator", () => {
         "DELETE",
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount -
-          1 + // event_ingress_routes: runtime DML deferred by 0937.
+        tableCount +
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
@@ -3749,7 +3749,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("definer and event_ingress_routes grants withheld by 0937", () => {
+describe("runtime definers granted by 0938", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3791,7 +3791,7 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
     posture.privateRoutines.push(
-      ...runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES.map((name) => routine(name, execute)),
+      ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
     return posture;
   }
@@ -3807,10 +3807,10 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
   };
   const eventViolations = (posture: RuntimeDatabasePosture, with_ = eventOptions) =>
     evaluateRuntimeDatabasePosture(posture, with_).filter((violation) =>
-      /event_ingress_routes|deferred definer/.test(violation),
+      /event_ingress_routes|runtime definer/.test(violation),
     );
 
-  test("all four routines are known: accepted with runtime EXECUTE withheld or granted", () => {
+  test("all four routines are known, and runtime EXECUTE on them is required", () => {
     const pinnedPaths = [
       'search_path="opengeni_tenant", opengeni_private, public',
       "search_path=pg_catalog, public, pg_temp",
@@ -3822,40 +3822,44 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
         eventViolations(posture, { ...eventOptions, targetSchema: "opengeni_tenant" }),
       ).toEqual([]);
     }
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
+    expect(runtimePosture.RUNTIME_DEFINER_ROUTINES).toEqual([
       "list_due_event_trigger_tasks_v1(integer)",
       "prune_event_intake_v1(integer, integer, integer)",
       "list_stalled_recording_work_v1(integer)",
       "list_due_mcp_event_subscriptions_v1(integer)",
       "list_due_event_source_feeds_v1(integer)",
     ]);
-    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
+      runtimePosture.RUNTIME_DEFINER_ROUTINES.map(
+        (name) => `runtime role lacks EXECUTE on private routine ${name}`,
+      ),
+    );
   });
 
   test("each routine keeps its own definer, owner, PUBLIC, trigger and search_path checks", () => {
-    for (const name of runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES) {
+    for (const name of runtimePosture.RUNTIME_DEFINER_ROUTINES) {
       const cases: Array<[Partial<ReturnType<typeof routine>>, string]> = [
-        [{ securityDefiner: false }, `deferred definer ${name} is not SECURITY DEFINER`],
-        [{ publicExecute: true }, `PUBLIC can execute deferred definer ${name}`],
-        [{ triggerCallable: true }, `deferred definer ${name} is trigger-callable`],
-        [{ hasDependents: true }, `deferred definer ${name} has catalog dependents`],
+        [{ securityDefiner: false }, `runtime definer ${name} is not SECURITY DEFINER`],
+        [{ publicExecute: true }, `PUBLIC can execute runtime definer ${name}`],
+        [{ triggerCallable: true }, `runtime definer ${name} is trigger-callable`],
+        [{ hasDependents: true }, `runtime definer ${name} has catalog dependents`],
         [
           { owner: "someone_else" },
-          `deferred definer ${name} owner someone_else does not match its tables' owner`,
+          `runtime definer ${name} owner someone_else does not match its tables' owner`,
         ],
-        [{ configuration: [] }, `deferred definer ${name} has no pinned search_path`],
+        [{ configuration: [] }, `runtime definer ${name} has no pinned search_path`],
         [
           { configuration: ["search_path=pg_temp, public"] },
-          `deferred definer ${name} has no pinned search_path`,
+          `runtime definer ${name} has no pinned search_path`,
         ],
         [
           { configuration: ["search_path=attacker, public"] },
-          `deferred definer ${name} has no pinned search_path`,
+          `runtime definer ${name} has no pinned search_path`,
         ],
         [
           { configuration: ["search_path=public, pg_temp, pg_catalog"] },
-          `deferred definer ${name} has no pinned search_path`,
+          `runtime definer ${name} has no pinned search_path`,
         ],
       ];
       for (const [unsafe, expected] of cases) {
@@ -3873,9 +3877,7 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
-      expect(eventViolations(posture)).toEqual([
-        `deferred definer ${name} is missing or ambiguous`,
-      ]);
+      expect(eventViolations(posture)).toEqual([`runtime definer ${name} is missing or ambiguous`]);
     }
     const beforeRecordings = eventPosture(false);
     beforeRecordings.tables = beforeRecordings.tables.filter(
@@ -3885,42 +3887,5 @@ describe("definer and event_ingress_routes grants withheld by 0937", () => {
       (entry) => entry.name !== "list_stalled_recording_work_v1(integer)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
-  });
-
-  test("event_ingress_routes takes no runtime DML or all four, never part", () => {
-    const binaryContract: RuntimeDatabasePostureOptions = {
-      rlsStrategy: "force",
-      expectedRole: "opengeni_app",
-      targetSchema: "public",
-    };
-    const routes = (change: Partial<RuntimeTablePosture>) => {
-      const posture = eventPosture(false);
-      posture.tables.push({ ...eventTable("event_ingress_routes", false, false), ...change });
-      return eventViolations(posture, binaryContract);
-    };
-    expect(routes({})).toEqual([]);
-    expect(routes({ select: true, insert: true, update: true, delete: true })).toEqual([]);
-    // has_any_column_privilege reports table-level grants too.
-    expect(
-      routes({
-        select: true,
-        insert: true,
-        update: true,
-        delete: true,
-        columnPrivileges: ["SELECT", "INSERT", "UPDATE"],
-      }),
-    ).toEqual([]);
-    expect(routes({ select: true, columnPrivileges: ["SELECT"] })).toEqual([
-      "table event_ingress_routes grants partial runtime DML: SELECT",
-    ]);
-    expect(routes({ select: true })).toEqual([
-      "table event_ingress_routes grants partial runtime DML: SELECT",
-    ]);
-    expect(routes({ columnPrivileges: ["SELECT"] })).toEqual([
-      "table event_ingress_routes grants partial runtime DML: SELECT",
-    ]);
-    expect(routes({ truncate: true })).toEqual([
-      "table event_ingress_routes grants excess runtime privileges: TRUNCATE",
-    ]);
   });
 });

@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { createDb, type DbClient } from "../src/database";
@@ -363,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary accepts the grants 0937 withholds once the follow-up release makes them",
+  "this binary requires the definer and event_ingress_routes grants 0938 makes",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -371,32 +370,19 @@ realTest(
         await inspectRuntimeDatabasePosture(client!.db, options),
         options,
       );
-    const revokeDeferred = () =>
-      admin.unsafe(`
-        REVOKE EXECUTE ON FUNCTION
-          opengeni_private.list_due_event_trigger_tasks_v1(integer),
-          opengeni_private.prune_event_intake_v1(integer, integer, integer),
-          opengeni_private.list_stalled_recording_work_v1(integer),
-          opengeni_private.list_due_mcp_event_subscriptions_v1(integer),
-          opengeni_private.list_due_event_source_feeds_v1(integer)
-          FROM opengeni_app;
-        REVOKE ALL ON TABLE event_ingress_routes FROM opengeni_app;
-      `);
+    expect(await current()).toEqual([]);
     try {
-      expect(await current()).toEqual([]);
-      await grantDeferredRuntimeAccess(admin);
-      expect(await current()).toEqual([]);
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
+      );
       await admin`REVOKE DELETE ON TABLE event_ingress_routes FROM opengeni_app`;
       expect(await current()).toContain(
-        "table event_ingress_routes grants partial runtime DML: SELECT, INSERT, UPDATE",
-      );
-      await revokeDeferred();
-      await admin`GRANT SELECT (route_id) ON TABLE event_ingress_routes TO opengeni_app`;
-      expect(await current()).toContain(
-        "table event_ingress_routes grants partial runtime DML: SELECT",
+        "table event_ingress_routes lacks required runtime privileges: DELETE",
       );
     } finally {
-      await revokeDeferred();
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
+      await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

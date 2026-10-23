@@ -19,11 +19,7 @@ import {
   reserveRecordingChunks,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -346,7 +342,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
 });
 
 describe("stalled recording recovery", () => {
-  test("is a quiet no-op while 0937 withholds EXECUTE, and restarts work once granted", async () => {
+  test("restarts a deletion whose workflow never started", async () => {
     if (!client || !shared) return;
     const db = client.db;
     const suffix = crypto.randomUUID();
@@ -375,15 +371,10 @@ describe("stalled recording recovery", () => {
       UPDATE recordings SET updated_at = now() - interval '10 minutes' WHERE id = ${recordingId}
     `;
     const starts: string[] = [];
-    const debug: string[] = [];
     const services = async () =>
       ({
         db,
-        observability: {
-          warn: () => undefined,
-          info: () => undefined,
-          debug: (message: string) => debug.push(message),
-        },
+        observability: { warn: () => undefined, info: () => undefined },
         startRecordingWorkflow: async (work: { recordingId: string }) => {
           starts.push(work.recordingId);
           return "started";
@@ -396,15 +387,6 @@ describe("stalled recording recovery", () => {
       cancellationSignal: () => undefined,
     });
 
-    for (let pass = 0; pass < 2; pass += 1) {
-      expect(await run.recoverRecordingWorkflows()).toEqual({ found: 0, started: 0, failed: 0 });
-    }
-    expect(starts).toEqual([]);
-    expect(debug).toEqual([
-      "Recording workflow recovery skipped: runtime EXECUTE is not granted yet",
-    ]);
-
-    await grantDeferredRuntimeAccess(shared.admin);
     const recovered = await run.recoverRecordingWorkflows();
     expect(recovered.failed).toBe(0);
     expect(starts).toContain(recordingId);

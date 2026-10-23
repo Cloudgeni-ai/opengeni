@@ -252,8 +252,9 @@ runtime EXECUTE (and a new non-RLS table without runtime DML), and register it
 in `DEFERRED_RUNTIME_PRIVATE_ROUTINES` (or `RUNTIME_DEFERRED_FULL_DML_TABLES`)
 so readiness accepts it with or without the grant. Code that calls it treats
 `insufficient_privilege` as "not yet". Grant it in a later rolling migration
-once that binary is the previous release. 0929, 0930, 0932 and 0935 granted
-on creation instead; 0937 withholds those grants again.
+once that binary is the previous release, and require it from then on. 0929,
+0930, 0932 and 0935 granted on creation instead; 0937 withheld those grants
+again and 0938 restored them.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
