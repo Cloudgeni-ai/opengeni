@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { markFailurePhase } from "./diagnostics";
 import {
   assertSha,
   canonical,
@@ -259,19 +260,23 @@ export class AtomicGitWriter {
     const current = await this.git.remoteRefs(this.remote);
     if (updates.some((u) => (current.get(u.ref) ?? null) !== u.expected))
       throw new Error("Stale remote ref snapshot");
-    await this.git.exec([
-      "push",
-      "--atomic",
-      "--porcelain",
-      `--force-with-lease=${this.stateRef}:${fence.expected ?? ""}`,
-      // An empty expected value is a create-only predicate: an existing
-      // candidate is rejected even if it would be a fast-forward. Main NEVER
-      // receives force-with-lease authorization.
-      ...updates
-        .filter((u) => u.ref !== this.stateRef && u.ref !== this.baseRef && u.expected === null)
-        .map((u) => `--force-with-lease=${u.ref}:`),
-      this.remote,
-      ...updates.map((u) => `${u.next}:${u.ref}`),
-    ]);
+    await this.git
+      .exec([
+        "push",
+        "--atomic",
+        "--porcelain",
+        `--force-with-lease=${this.stateRef}:${fence.expected ?? ""}`,
+        // An empty expected value is a create-only predicate: an existing
+        // candidate is rejected even if it would be a fast-forward. Main NEVER
+        // receives force-with-lease authorization.
+        ...updates
+          .filter((u) => u.ref !== this.stateRef && u.ref !== this.baseRef && u.expected === null)
+          .map((u) => `--force-with-lease=${u.ref}:`),
+        this.remote,
+        ...updates.map((u) => `${u.next}:${u.ref}`),
+      ])
+      .catch((error) => {
+        throw markFailurePhase(error, "atomic-push");
+      });
   }
 }

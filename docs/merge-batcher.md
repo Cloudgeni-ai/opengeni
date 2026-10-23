@@ -1,5 +1,29 @@
 # Portable merge batcher
 
+## Active child diagnostics
+
+The active CLI emits `batcher-child-failure/v1` on stderr, retaining bounded,
+credential-redacted error name, message, stack, phase, operation and HTTP status.
+The complete JSON record fits within 6144 bytes; truncation is explicit. Atomic
+push errors retain their unsafe phase through outer controller handling. This is
+diagnostic evidence, never permission to replay a transaction: existing CAS,
+unknown-effect reconciliation, admission and candidate-CI retry rules remain
+authoritative. Supervisors must preserve unsafe holds rather than interpreting
+every nonzero child exit as an ordinary retry.
+
+The supervised active child must emit a valid structured failure record. Missing,
+malformed or signal-terminated output is an unknown outcome and stops the writer;
+a valid unclassified record uses backoff and stops after three consecutive failures.
+Success or a classified provider failure resets that streak, not other local errors.
+Known pre-spawn rejections may back off; ambiguous starts and CAS outcomes stop.
+
+The deployment supervisor's local checkpoint retains counts, backoff and stop
+latches. A surviving in-flight or outcome-unknown checkpoint holds without spawning
+a writer. Complete checkpoint loss loses this local policy state; cold-start remote
+reconciliation is mandatory but does not recreate failure history. A supervisor
+STOP is not a GitHub Manual-rules restoration. The reviewed operator OFF procedure
+and rules restoration are separately required for a durable operational stop.
+
 ## Explicit first activation initialization
 
 Active mode requires a present, operator-initialized `refs/heads/batcher-state`.
