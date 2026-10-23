@@ -145,8 +145,8 @@ export function ThisComputerSetup({
       else if (ready) setPhase("done");
       else if (status.state === "connected") setPhase("working");
       else if (status.state === "not_connected" || status.state === "not_installed") {
-        // It isn't connected after all: say why (a removed computer's opening
-        // line already does), and offer turning it on again.
+        // It isn't connected after all: say why (removal needs no words, as
+        // turning it on registers it again), and offer turning it on again.
         setFailure(
           status.errorCode !== "removed" && (status.error || status.errorCode)
             ? labels.error(status.errorCode ?? null, status.error)
@@ -218,7 +218,8 @@ export function ThisComputerSetup({
     readingBeforeTurnOn.current = status;
     setFailure(null);
     setPhase("working");
-    const next = await computer.connect({ screenControl: true });
+    // Resumes, registers afresh or starts the agent, whichever it needs.
+    const next = await computer.turnOn();
     if (!next || next.state !== "connected") {
       setFailure(
         labels.error(next?.errorCode ?? null, next?.error ?? computer.actionError ?? null),
@@ -237,7 +238,6 @@ export function ThisComputerSetup({
   // Once the app has done its part, only the agent coming online is awaited,
   // which carries on without this dialog.
   const closable = phase !== "working" || (!acting && !status?.busy);
-  const removed = status?.errorCode === "removed" && status.state === "not_connected";
 
   let lead: ReactNode = null;
   let body: ReactNode = null;
@@ -420,9 +420,7 @@ export function ThisComputerSetup({
     footer = null;
   } else {
     title = labels.title;
-    description = removed
-      ? (labels.removed?.(machineName) ?? catalogText("thisComputer.removed", { machineName }))
-      : labels.intro(machineName);
+    description = labels.intro(machineName);
     lead = <ComputerIllustration mark={agentMark} />;
     body = (
       <>
@@ -450,11 +448,7 @@ export function ThisComputerSetup({
           {labels.notNow}
         </button>
         <button type="button" className="og-tc-button og-tc-primary" onClick={() => void turnOn()}>
-          {failure
-            ? labels.tryAgain
-            : removed
-              ? (labels.reconnect ?? catalogText("thisComputer.reconnect"))
-              : labels.turnOn}
+          {failure ? labels.tryAgain : labels.turnOn}
         </button>
       </>
     );

@@ -42,8 +42,11 @@ test("service permission setup never treats a reconnect's missing report as a gr
       acting: false,
       actionError: null,
       canDisconnect: true,
+      pending: null,
       refresh: () => undefined,
       connect: async () => status,
+      turnOn: async () => status,
+      turnOff: noop,
       pause: noop,
       resume: noop,
       disconnect: noop,
@@ -249,7 +252,7 @@ test("turning it on shows one state at a time and follows the computer back when
   const removed: ThisComputerStatus = {
     ...off,
     errorCode: "removed",
-    error: "This computer was removed from this workspace.",
+    error: "This computer is no longer in this workspace.",
   };
   const render = (status: ThisComputerStatus) => {
     const computer: UseThisComputerResult = {
@@ -257,8 +260,11 @@ test("turning it on shows one state at a time and follows the computer back when
       acting: false,
       actionError: null,
       canDisconnect: true,
+      pending: null,
       refresh: () => undefined,
       connect: async () => waiting,
+      turnOn: async () => waiting,
+      turnOff: noop,
       pause: noop,
       resume: noop,
       disconnect: noop,
@@ -284,30 +290,109 @@ test("turning it on shows one state at a time and follows the computer back when
     await actRun(() => turnOn!.click());
     await flush();
     await view.rerender(render(waiting));
-    expect(text()).toContain("Connecting studio…");
+    expect(text()).toContain("Turning on studio…");
     expect(text()).toContain("Waiting for the Opengeni agent on this computer to come online.");
     expect(text()).not.toContain("You're all set");
 
     await view.rerender(render(ready));
     expect(text()).toContain("You're all set");
     expect(text()).not.toContain("Waiting for");
-    expect(text()).not.toContain("Connecting");
+    expect(text()).not.toContain("Turning on");
 
     // The agent stopped reporting: not all set any more.
     await view.rerender(render(waiting));
-    expect(text()).toContain("Connecting studio…");
+    expect(text()).toContain("Turning on studio…");
     expect(text()).not.toContain("You're all set");
 
-    // Removed elsewhere meanwhile: back to the start, with one way on.
+    // Removed elsewhere meanwhile: back to the start, as if never set up.
     await view.rerender(render(removed));
-    expect(text()).toContain("studio was removed from this workspace.");
+    expect(text()).not.toContain("removed");
     expect(text()).not.toContain("You're all set");
     expect(text()).not.toContain("Waiting for");
     const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")].map(
       (button) => button.textContent,
     );
-    expect(buttons).toContain("Reconnect");
+    expect(buttons).toContain("Turn on");
+    expect(buttons).not.toContain("Reconnect");
   } finally {
     await view.unmount();
   }
+});
+
+test("turning computer use on does what it needs: resume, register afresh, or nothing", async () => {
+  const run = async (
+    readings: ThisComputerStatus[],
+  ): Promise<{ calls: string[]; result: ThisComputerStatus | null }> => {
+    const calls: string[] = [];
+    let index = 0;
+    const read = () => ({ ...readings[Math.min(index, readings.length - 1)]! });
+    const host: ThisComputerHost = {
+      platform: "macos",
+      productName: "App",
+      status: async () => read(),
+      connect: async (_workspace, options) => {
+        calls.push(`connect:${options.screenControl}`);
+        index = readings.length - 1;
+        return read();
+      },
+      pause: async () => {
+        calls.push("pause");
+      },
+      resume: async () => {
+        calls.push("resume");
+        index += 1;
+      },
+      onChange: () => () => undefined,
+    };
+    const hook = await renderHook(() => useThisComputer(host, "workspace"), undefined);
+    await flush();
+    let result: ThisComputerStatus | null = null;
+    await actRun(async () => {
+      result = await hook.result.current.turnOn();
+    });
+    await flush();
+    expect(hook.result.current.pending).toBeNull();
+    await hook.unmount();
+    return { calls, result };
+  };
+  const paused: ThisComputerStatus = { ...connected, state: "paused" };
+  const off: ThisComputerStatus = { ...connected, state: "not_connected" };
+  const removed: ThisComputerStatus = {
+    ...off,
+    errorCode: "removed",
+    error: "This computer is no longer in this workspace.",
+  };
+
+  // Off is paused: resuming keeps the registration.
+  expect((await run([paused, connected])).calls).toEqual(["resume"]);
+  // Never set up, or removed on the server: a fresh registration.
+  expect((await run([off, connected])).calls).toEqual(["connect:true"]);
+  expect((await run([removed, connected])).calls).toEqual(["connect:true"]);
+  // Paused, and the registration turned out to be gone: resume, then register.
+  expect((await run([paused, removed, connected])).calls).toEqual(["resume", "connect:true"]);
+  // Already on: nothing to do.
+  expect((await run([connected])).calls).toEqual([]);
+  // On but failing: start it again.
+  const failing = { ...connected, reconnecting: true, errorCode: "offline" as const, error: "x" };
+  expect((await run([failing, connected])).calls).toEqual(["resume"]);
+});
+
+test("turning computer use off pauses it and shows off at once", async () => {
+  const { host } = fakeHost([connected]);
+  let finish!: () => void;
+  host.pause = () => new Promise<void>((resolve) => (finish = resolve));
+  const hook = await renderHook(() => useThisComputer(host, "workspace"), undefined);
+  await flush();
+  let done!: Promise<void>;
+  await actRun(() => {
+    done = hook.result.current.turnOff();
+  });
+  expect(hook.result.current.pending).toBe("off");
+  expect(hook.result.current.acting).toBe(true);
+  await actRun(async () => {
+    finish();
+    await done;
+  });
+  expect(hook.result.current.pending).toBeNull();
+  await hook.unmount();
 });

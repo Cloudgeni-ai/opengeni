@@ -584,7 +584,11 @@ export class ThisComputer {
       return { ...base, state: "unavailable" };
     }
     if (!existsSync(this.hostedPath)) return { ...base, state: "not_installed" };
-    if (this.serviceBacked && !this.state.adopted) return { ...base, state: "not_connected" };
+    if (this.serviceBacked && !this.state.adopted) {
+      if (!accountId || !(await this.adoptExisting(accountId, baseUrl, workspaceId))) {
+        return { ...base, state: "not_connected" };
+      }
+    }
     const connections = await this.connections();
     const connection = this.connectionIn(connections, baseUrl, workspaceId);
     if (!connection) {
@@ -891,6 +895,34 @@ export class ThisComputer {
   /** Connections whose enrollment the server still lists (as far as it's known). */
   private live(connections: readonly AgentConnection[]): AgentConnection[] {
     return connections.filter((connection) => !this.removed.has(connection.agentId));
+  }
+
+  /**
+   * An agent set up before this app, e.g. from the web app's install command,
+   * that is already registered to this workspace: the app takes it over as
+   * is, so computer use shows on with nothing to do, and the app's switch then
+   * pauses and resumes that same agent. Only once the server lists the
+   * registration; its installation, service and permissions stay untouched.
+   */
+  private async adoptExisting(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+  ): Promise<boolean> {
+    if (this.state.turnedOff.includes(useKey(baseUrl, workspaceId))) return false;
+    let own: AgentConnection | null;
+    try {
+      own = connectionFor(await this.connections(), baseUrl, workspaceId);
+    } catch {
+      return false;
+    }
+    if (!own) return false;
+    const reading = await this.reportedMachine(accountId, baseUrl, workspaceId, own);
+    if (reading?.kind !== "listed") return false;
+    this.saveState({ adopted: true, management: "service" });
+    // Agents may already be allowed; this only fills in what's missing.
+    void this.deps.allowAgents(accountId, workspaceId, own.agentId).catch(() => undefined);
+    return true;
   }
 
   /** Every workspace that uses a connection, by server and workspace. */

@@ -1,11 +1,11 @@
 // A stand-in for the desktop app's preload bridge, installed before any app
-// module reads it. Only "Use this computer" is offered; its status follows
-// `?scene=`, and turning it on walks through what the real host reports.
+// module reads it. Only computer use on this computer is offered; its status
+// follows `?scene=`, and the switch walks through what the real host reports.
 import { DESKTOP_BRIDGE_GLOBAL, DESKTOP_BRIDGE_VERSION } from "@opengeni/sdk/desktop-bridge";
 import type { ThisComputerStatus } from "@opengeni/sdk/this-computer";
 
 export const params = new URLSearchParams(window.location.search);
-export const scene = params.get("scene") ?? "removed";
+export const scene = params.get("scene") ?? "off";
 const machineName = "Bendik sin MacBook Pro";
 const granted = [
   { id: "screenRecording" as const, granted: true },
@@ -19,15 +19,41 @@ const base = {
   management: "service" as const,
   permissionAppName: "Opengeni Agent",
 };
+const on: ThisComputerStatus = {
+  ...base,
+  state: "connected",
+  permissions: granted,
+  enrollmentId: "a2",
+};
 const SCENES: Record<string, ThisComputerStatus> = {
+  // Never set up, turned off (paused), or removed on the server.
+  off: { ...base, state: "not_connected" },
+  paused: { ...base, state: "paused", enrollmentId: "a1" },
   removed: {
     ...base,
     state: "not_connected",
     errorCode: "removed",
-    error:
-      "This computer was removed from this workspace. Reconnect it to let agents use it again.",
+    error: "This computer is no longer in this workspace.",
   },
-  reconnecting: { ...base, state: "connected", reconnecting: true, enrollmentId: "a2" },
+  turning: { ...base, state: "connected", reconnecting: true, enrollmentId: "a2" },
+  on,
+  // An agent set up earlier from the web app's install command, taken over as is.
+  adopted: { ...on, enrollmentId: "web-installed" },
+  permissions: {
+    ...on,
+    permissions: [
+      { id: "screenRecording", granted: true },
+      { id: "accessibility", granted: false },
+      { id: "inputMonitoring", granted: false },
+    ],
+  },
+  signed_out: {
+    ...base,
+    state: "connected",
+    reconnecting: true,
+    errorCode: "signed_out",
+    error: "Sign in again to check this computer's connection.",
+  },
   offline: {
     ...base,
     state: "connected",
@@ -36,10 +62,15 @@ const SCENES: Record<string, ThisComputerStatus> = {
     error:
       "Couldn't reach the server to check this computer's connection. Check your connection and try again.",
   },
-  connected: { ...base, state: "connected", permissions: granted, enrollmentId: "a2" },
-  off: { ...base, state: "not_connected" },
+  server_error: {
+    ...base,
+    state: "connected",
+    reconnecting: true,
+    errorCode: "unknown",
+    error: "Couldn't check this computer's connection: API 503: Service Unavailable",
+  },
 };
-let status: ThisComputerStatus = SCENES[scene] ?? SCENES.removed!;
+let status: ThisComputerStatus = SCENES[scene] ?? SCENES.off!;
 const listeners = new Set<() => void>();
 const changed = () => listeners.forEach((listener) => listener());
 /** Moves the computer on, e.g. the agent coming online. */
@@ -47,6 +78,7 @@ function setStatus(next: ThisComputerStatus) {
   status = next;
   changed();
 }
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 (window as unknown as { previewSetScene(name: string): void }).previewSetScene = (name) =>
   setStatus(SCENES[name]!);
 
@@ -58,17 +90,30 @@ if (params.get("environment") !== "web") {
       platform: "macos",
       productName: "Opengeni",
       capabilities: ["thisComputer"],
+      accounts: {
+        list: async () => ({ accounts: [], activeId: null }),
+        switchTo: async () => undefined,
+        add: async () => undefined,
+        signOut: async () => undefined,
+        setWorkspace: () => undefined,
+        restoreWebSession: async () => false,
+        onChange: () => () => undefined,
+      },
       thisComputer: {
         status: async () => status,
+        // A fresh registration, then the agent comes online.
         connect: async () => {
-          setStatus({ ...base, state: status.state, busy: true });
-          await new Promise((resolve) => setTimeout(resolve, 400));
-          // A fresh enrollment: connected, waiting for the agent to come online.
-          setStatus(SCENES.reconnecting!);
+          setStatus({ ...base, state: "not_connected", busy: true });
+          await wait(1_500);
+          setStatus(SCENES.turning!);
+          setTimeout(() => setStatus(on), 1_500);
           return status;
         },
-        pause: async () => setStatus({ ...base, state: "paused" }),
-        resume: async () => setStatus(SCENES.connected!),
+        pause: async () => setStatus(SCENES.paused!),
+        resume: async () => {
+          await wait(800);
+          setStatus(on);
+        },
         disconnect: async () => setStatus(SCENES.off!),
         requestPermission: async () => undefined,
         onChange: (listener: () => void) => {

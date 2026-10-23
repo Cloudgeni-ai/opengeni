@@ -1564,10 +1564,10 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
-- inside the desktop app, the same dialog is **Connect a machine**: it shows
-  this computer's own state (connected, connecting, paused, removed or off) with
-  one action, and never offers a download or **Open app and connect** for the
-  computer the app runs on. **Connect another computer or server** holds the
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, or a problem with one fix), and never offers a download or **Open app
+  and connect** for it. **Connect another computer or server** holds the
   command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by

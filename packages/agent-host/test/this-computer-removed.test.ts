@@ -30,10 +30,11 @@ type Reading = { online: boolean } | null | Error | { status: number; message: s
  * `service`: an existing standalone agent with its own background service
  * (macOS); otherwise the app's own agent (Linux).
  */
-function computer(options: { service: boolean }) {
+function computer(options: { service: boolean; adopted?: boolean }) {
   const home = mkdtempSync(join(tmpdir(), "og-removed-"));
   const list = join(home, "connections.txt");
   const calls = join(home, "calls");
+  const paused = join(home, "paused");
   writeFileSync(list, `  c1  ${SERVER}  workspace=w1  agent=a1\n`);
   let binary: string;
   if (options.service) {
@@ -50,8 +51,9 @@ function computer(options: { service: boolean }) {
       `echo "$*" >> "${calls}"`,
       'case "$*" in',
       `  connections) cat "${list}" ;;`,
-      `  'service status --json') echo '{"schemaVersion":1,"installed":true,"enabled":true,"running":true,"binaryPath":null}' ;;`,
-      "  'service start'|'service stop') ;;",
+      `  'service status --json') if [ -f "${paused}" ]; then echo '{"schemaVersion":1,"installed":true,"enabled":false,"running":false,"binaryPath":null}'; else echo '{"schemaVersion":1,"installed":true,"enabled":true,"running":true,"binaryPath":null}'; fi ;;`,
+      `  'service stop') touch "${paused}" ;;`,
+      `  'service start') rm -f "${paused}" ;;`,
       "  --version) echo 'opengeni-agent 0.1.109' ;;",
       `  *'connect --non-interactive'*) echo "token=$OPENGENI_ENROLL_TOKEN" >> "${calls}"; echo "  c1  ${SERVER}  workspace=w1  agent=a2" > "${list}" ;;`,
       "  *run) sleep 30 ;;",
@@ -61,10 +63,13 @@ function computer(options: { service: boolean }) {
     ].join("\n"),
   );
   chmodSync(binary, 0o755);
-  writeFileSync(
-    join(home, "this-computer.json"),
-    JSON.stringify({ adopted: true, management: options.service ? "service" : "app" }),
-  );
+  // Not adopted: an agent set up before the app, e.g. from the web app.
+  if (options.adopted !== false) {
+    writeFileSync(
+      join(home, "this-computer.json"),
+      JSON.stringify({ adopted: true, management: options.service ? "service" : "app" }),
+    );
+  }
   const readings: Record<string, Reading> = { a1: { online: true } };
   const minted: string[] = [];
   const allowed: string[] = [];
@@ -112,6 +117,7 @@ function computer(options: { service: boolean }) {
     rmSync(home, { recursive: true, force: true });
   });
   return {
+    home,
     readings,
     minted,
     allowed,
@@ -171,6 +177,57 @@ describe.skipIf(process.platform === "win32")("a computer removed on the server"
       expect(c.allowed).toContain("a2");
     });
   }
+
+  for (const service of [true, false]) {
+    const kind = service ? "an existing agent service" : "the app's own agent";
+    test(`with ${kind}: turned off, then removed on the server: turning on registers afresh`, async () => {
+      const c = computer({ service });
+      const app = c.create();
+      await app.pause();
+      expect((await app.status(SERVER, "w1", "me")).state).toBe("paused");
+      c.readings.a1 = null;
+      app.invalidate();
+      // Removal outranks paused: there is nothing left to resume.
+      const removed = await app.status(SERVER, "w1", "me");
+      expect(removed.state).toBe("not_connected");
+      expect(removed.errorCode).toBe("removed");
+      const next = await app.connect("me", SERVER, "w1", { screenControl: true });
+      expect(c.minted).toEqual(["w1"]);
+      expect(next.state).toBe("connected");
+    });
+  }
+
+  test("an agent set up from the web app is adopted as on, and the switch controls it", async () => {
+    const c = computer({ service: true, adopted: false });
+    const app = c.create();
+    const status = await app.status(SERVER, "w1", "me");
+    expect(status.state).toBe("connected");
+    expect(status.management).toBe("service");
+    expect(status.reconnecting).toBe(false);
+    expect(status.error).toBeNull();
+    const saved = JSON.parse(readFileSync(join(c.home, "this-computer.json"), "utf8"));
+    expect(saved.adopted).toBe(true);
+    // Its existing registration is used: nothing new is registered or downloaded.
+    expect(c.minted).toEqual([]);
+    await Promise.resolve();
+    expect(c.allowed).toEqual(["a1"]);
+    await app.pause();
+    expect((await app.status(SERVER, "w1", "me")).state).toBe("paused");
+    await app.resume();
+    expect((await app.status(SERVER, "w1", "me")).state).toBe("connected");
+    // A relaunched app still knows it.
+    expect((await c.create().status(SERVER, "w1", "me")).state).toBe("connected");
+  });
+
+  test("an agent registered elsewhere, or removed, is not adopted", async () => {
+    const c = computer({ service: true, adopted: false });
+    c.readings.a1 = null;
+    const app = c.create();
+    expect((await app.status(SERVER, "w1", "me")).state).toBe("not_connected");
+    expect((await app.status(SERVER, "w2", "me")).state).toBe("not_connected");
+    expect(existsSync(join(c.home, "this-computer.json"))).toBe(false);
+    expect(c.commands()).not.toContain("service stop");
+  });
 
   test("a listed machine that isn't online yet is connecting, without an error", async () => {
     const c = computer({ service: true });

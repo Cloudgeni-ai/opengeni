@@ -14,11 +14,22 @@ export interface UseThisComputerResult {
   actionError: string | null;
   /** The app can turn this computer off for the workspace. */
   canDisconnect: boolean;
+  /** Computer use is being turned on ("on") or off ("off") from these screens. */
+  pending: "on" | "off" | null;
   refresh(): void;
   connect(options: { screenControl: boolean }): Promise<ThisComputerStatus | null>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   disconnect(): Promise<void>;
+  /**
+   * Turns computer use on, doing whatever it takes: resumes a paused agent,
+   * registers this computer (again) when it never was or its registration is
+   * gone (e.g. removed from Machines), and starts the agent. Resolves with the
+   * new status; permissions still missing are the caller's next step.
+   */
+  turnOn(): Promise<ThisComputerStatus | null>;
+  /** Turns computer use off: pauses the agent, keeping its registration so on is instant. */
+  turnOff(): Promise<void>;
   requestPermission(id: ThisComputerPermissionId): Promise<void>;
 }
 
@@ -41,6 +52,7 @@ export function useThisComputer(
   const [status, setStatus] = useState<ThisComputerStatus | null>(null);
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pending, setPending] = useState<"on" | "off" | null>(null);
   const live = useRef(true);
   const generation = useRef(0);
   const actionInFlight = useRef(false);
@@ -142,6 +154,36 @@ export function useThisComputer(
   const disconnect = useCallback(async () => {
     if (host?.disconnect) await act(() => host.disconnect!(workspaceId));
   }, [act, host, workspaceId]);
+  const turnOn = useCallback(async () => {
+    if (!host || actionInFlight.current) return null;
+    setPending("on");
+    try {
+      const next = await act(async () => {
+        let current = await host.status(workspaceId);
+        // Off is paused, and a connection that failed is started again.
+        if (current.state === "paused" || (current.state === "connected" && current.error)) {
+          await host.resume();
+          current = await host.status(workspaceId);
+        }
+        if (current.state !== "not_connected" && current.state !== "not_installed") return current;
+        // Never set up, or its registration is gone: register this computer afresh.
+        return await host.connect(workspaceId, { screenControl: true });
+      });
+      if (next && live.current) setStatus((current) => sameStatus(current, next));
+      return next;
+    } finally {
+      if (live.current) setPending(null);
+    }
+  }, [act, host, workspaceId]);
+  const turnOff = useCallback(async () => {
+    if (!host || actionInFlight.current) return;
+    setPending("off");
+    try {
+      await act(() => host.pause());
+    } finally {
+      if (live.current) setPending(null);
+    }
+  }, [act, host]);
   const requestPermission = useCallback(
     async (id: ThisComputerPermissionId) => {
       if (!host?.requestPermission) return;
@@ -160,11 +202,14 @@ export function useThisComputer(
       acting,
       actionError,
       canDisconnect,
+      pending,
       refresh,
       connect,
       pause,
       resume,
       disconnect,
+      turnOn,
+      turnOff,
       requestPermission,
     }),
     [
@@ -172,11 +217,14 @@ export function useThisComputer(
       acting,
       actionError,
       canDisconnect,
+      pending,
       refresh,
       connect,
       pause,
       resume,
       disconnect,
+      turnOn,
+      turnOff,
       requestPermission,
     ],
   );

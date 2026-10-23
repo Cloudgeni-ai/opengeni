@@ -163,22 +163,49 @@ release is required for this presentation and desktop-host change.
 
 Revised 2026-10-20. New installs remain app-hosted. A working standalone
 installation is service-backed instead: changing its responsible process would
-discard the usefulness of its existing macOS grants. Launch and status reads
-are non-mutating; only explicit signed-in setup enables desktop management.
+discard the usefulness of its existing macOS grants. Launch never changes it.
+A status read takes it over only when it is already registered to the open
+workspace and the server lists that registration (for example, set up earlier
+from the web app's install command): the app records it as its own, asks the
+server to allow the person's agents if that is still missing, and shows
+computer use on. Its service, files and grants are not touched; the switch then
+pauses and resumes that same service.
+
+In the app this is **Computer use**: one switch (`ComputerUseRow` in
+`packages/react/src/app/components/desktop/computer-use.tsx`, state from
+`useComputerUse`/`computerUseState` in `@opengeni/react/this-computer`). The app
+never asks the person to connect, disconnect or reconnect the computer it runs
+on. The switch shows one of four states:
+
+| State | Switch | What shows |
+| --- | --- | --- |
+| Off | off | "Let agents use {computer}." The same whether never set up, turned off, or removed on the server. |
+| Turning on | on | "Turning on…", no buttons. |
+| On | on | "Agents can use {computer}" with a green dot. |
+| Problem | on | The problem and exactly one fix: **Allow in System Settings** (permissions), **Sign in** (signed out), or **Try again** (server unreachable, or the server's or agent's own error). |
+
+Off is pause: it persists across restarts and log-ins and keeps the
+installation and registration, so turning on is instant. Turning on does what
+is needed without asking: resumes a paused agent, registers this computer afresh
+when it never was or its registration is gone, starts the agent, and opens the
+permission steps only when something is still missing. Removing the computer
+from the workspace stays on its entry in the Machines list. The sidebar shows a
+small notice only while computer use turns on or has a problem, with the same
+one fix.
 
 The server decides whether the local connection is still valid. Status reads
 the account's Machines view (`readMachine`): a machine the server no longer
-lists was removed there, so the screens show it as removed with one
-**Reconnect** action, which mints a fresh token and runs `connect
---non-interactive` again (the agent replaces that deployment/workspace
-connection in place and a running service reloads it). A failed read keeps its
-own meaning (offline, signed out, or the server's error) and is never shown as
-a network failure when the server answered. A just-made enrollment the server
-doesn't list yet is still connecting, not removed. The setup dialog shows one
-state at a time and follows the computer's own status, so "You're all set"
-only stands while it is ready. Inside the app, **Connect a machine** shows this
-computer's state and one action instead of downloads and the app hand-off;
-other computers and servers still connect with a command or a code.
+lists was removed there, so it shows as off, and turning it on mints a fresh
+token and runs `connect --non-interactive` again (the agent replaces that
+deployment/workspace connection in place and a running service reloads it). A
+failed read keeps its own meaning (offline, signed out, or the server's error)
+and is never shown as a network failure when the server answered. A just-made
+enrollment the server doesn't list yet is still turning on, not removed. The
+setup dialog shows one state at a time and follows the computer's own status, so
+"You're all set" only stands while it is ready. Inside the app, **Connect a
+machine** shows the same computer-use switch for this computer instead of
+downloads and the app hand-off; other computers and servers still connect with a
+command or a code.
 
 ### What the agent needs
 

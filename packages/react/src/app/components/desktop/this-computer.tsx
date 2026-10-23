@@ -1,14 +1,12 @@
-// "Use this computer" inside the Opengeni desktop app: the app runs the
-// connected-machine agent and the web app shows the shared screens from
+// "Computer use" inside the Opengeni desktop app: the app runs the
+// connected-machine agent, and the web app shows one switch for it (see
+// `./computer-use`) plus the shared permission steps from
 // `@opengeni/react/this-computer`. Outside the desktop app (or where the
 // deployment doesn't offer connected machines) everything here renders nothing.
 import {
-  ThisComputerOffer,
-  ThisComputerPanel,
   ThisComputerSetup,
   defaultThisComputerLabels,
   useThisComputer,
-  useThisComputerOfferDismissed,
   useThisComputerSetupOpen,
   type ThisComputerHost,
   type ThisComputerLabels,
@@ -18,8 +16,14 @@ import {
 import "../../../../styles/this-computer.css";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 
+import { Section } from "../../../ui/section";
 import { useAppContext } from "../../app-context";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
+import {
+  useComputerUse,
+  type ComputerUseControl,
+} from "../../../components/this-computer/computer-use";
+import { ComputerUseNotice, ComputerUseRow, type ComputerUseOptions } from "./computer-use";
 
 export interface DesktopThisComputer {
   workspaceId: string;
@@ -29,6 +33,8 @@ export interface DesktopThisComputer {
   labels: ThisComputerLabels;
   /** Opens the setup steps: turning it on, or finishing the permissions. */
   openSetup(): void;
+  /** Signs this account in again, when the app has to; null where it can't. */
+  signIn: (() => void) | null;
 }
 
 const Context = createContext<DesktopThisComputer | null>(null);
@@ -62,6 +68,11 @@ function bridgeHost(): ThisComputerHost | null {
 
 const host = typeof window === "undefined" ? null : bridgeHost();
 
+/** The app's own sign-in, which renews this account's credential. */
+const signIn = desktopBridge?.accounts?.add
+  ? () => void desktopBridge!.accounts.add().catch(() => undefined)
+  : null;
+
 /** Mounted once per workspace shell, around the rail and the pages. */
 export function DesktopThisComputerProvider({
   workspaceId,
@@ -86,6 +97,7 @@ export function DesktopThisComputerProvider({
             productName: offered.productName,
             labels,
             openSetup: () => setOpen(true),
+            signIn,
           }
         : null,
     [computer, labels, offered, setOpen, workspaceId],
@@ -108,45 +120,55 @@ export function DesktopThisComputerProvider({
   );
 }
 
-/** Above the account row: the offer, or what's left to do; nothing once it's ready. */
-export function DesktopThisComputerOffer({ className }: { className?: string | undefined }) {
+/**
+ * The computer-use switch's state and actions for this computer, for any page
+ * in the desktop app (e.g. a permissions page around the switch); null
+ * outside the desktop app.
+ */
+export function useDesktopComputerUse(
+  options: ComputerUseOptions = {},
+): (ComputerUseControl & { machineName: string }) | null {
+  const desktop = useDesktopThisComputer();
+  const control = useComputerUse(desktop?.computer ?? null, {
+    onAllowPermissions: options.onAllowPermissions ?? desktop?.openSetup ?? noop,
+    onSignIn: desktop?.signIn ?? undefined,
+  });
+  if (!desktop || control.state.kind === "hidden") return null;
+  return { ...control, machineName: desktop.computer.status?.machineName ?? "" };
+}
+
+function noop() {}
+
+/** Above the account row, only while computer use turns on or needs something. */
+export function DesktopThisComputerOffer({
+  className,
+  ...options
+}: ComputerUseOptions & { className?: string | undefined }) {
   const desktop = useDesktopThisComputer();
   if (!desktop) return null;
-  return <DismissibleOffer desktop={desktop} className={className} />;
+  return <ComputerUseNotice desktop={desktop} className={className} {...options} />;
 }
 
-function DismissibleOffer({
-  desktop,
+/** The computer-use switch as a settings row, e.g. on a permissions page or in a dialog. */
+export function DesktopComputerUseRow({
   className,
-}: {
-  desktop: DesktopThisComputer;
-  className?: string | undefined;
-}) {
-  const [dismissed, dismiss] = useThisComputerOfferDismissed(desktop.workspaceId);
-  return (
-    <ThisComputerOffer
-      computer={desktop.computer}
-      labels={desktop.labels}
-      onSetup={desktop.openSetup}
-      dismissed={dismissed}
-      onDismiss={dismiss}
-      className={className}
-    />
-  );
+  ...options
+}: ComputerUseOptions & { className?: string | undefined }) {
+  const desktop = useDesktopThisComputer();
+  if (!desktop) return null;
+  return <ComputerUseRow desktop={desktop} className={className} {...options} />;
 }
 
-/** Turning it on, pausing, resuming and turning it off, e.g. on the Machines page. */
+/** Computer use on the Machines page: the switch in its own card. */
 export function DesktopThisComputerPanel({ className }: { className?: string | undefined }) {
   const desktop = useDesktopThisComputer();
-  if (!desktop) return null;
+  if (!desktop || !desktop.computer.status || desktop.computer.status.state === "unavailable") {
+    return null;
+  }
   return (
-    <ThisComputerPanel
-      computer={desktop.computer}
-      platform={desktop.platform}
-      labels={desktop.labels}
-      onSetup={desktop.openSetup}
-      className={className}
-    />
+    <Section variant="group" className={className}>
+      <ComputerUseRow desktop={desktop} />
+    </Section>
   );
 }
 

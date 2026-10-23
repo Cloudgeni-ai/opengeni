@@ -257,10 +257,10 @@ async function click(element: HTMLElement | null) {
 }
 
 describe("Connected Machine conversation card", () => {
-  test("desktop connects in one click and opens setup only for outstanding system permissions", async () => {
+  test("desktop turns computer use on in one click and opens setup only for missing permissions", async () => {
     const { defaultThisComputerLabels } = await import("../../../this-computer");
     const openSetup = mock(() => {});
-    const connect = mock(async (_options: { screenControl: boolean }) => ({
+    const turnOn = mock(async () => ({
       state: "connected" as const,
       busy: false,
       error: null,
@@ -272,12 +272,16 @@ describe("Connected Machine conversation card", () => {
       platform: "linux",
       labels: defaultThisComputerLabels(),
       openSetup,
+      signIn: null,
       computer: {
         status: { state: "not_installed", busy: false, error: null, machineName: "This laptop" },
         acting: false,
         actionError: null,
         canDisconnect: true,
-        connect,
+        pending: null,
+        connect: async () => null,
+        turnOn,
+        turnOff: async () => {},
         refresh: () => {},
         pause: async () => {},
         resume: async () => {},
@@ -288,11 +292,10 @@ describe("Connected Machine conversation card", () => {
     const h = await render();
     try {
       await click(h.button("Use this computer"));
-      expect(connect).toHaveBeenCalledTimes(1);
-      expect(connect).toHaveBeenCalledWith({ screenControl: true });
+      expect(turnOn).toHaveBeenCalledTimes(1);
       expect(openSetup).not.toHaveBeenCalled();
       expect(mintEnrollToken).not.toHaveBeenCalled();
-      desktop.computer.status = {
+      desktop!.computer.status = {
         state: "connected",
         busy: false,
         error: null,
@@ -302,7 +305,7 @@ describe("Connected Machine conversation card", () => {
       await h.rerender();
       await click(h.button("Use this computer"));
       expect(openSetup).toHaveBeenCalledTimes(1);
-      expect(connect).toHaveBeenCalledTimes(1);
+      expect(turnOn).toHaveBeenCalledTimes(1);
     } finally {
       await h.close();
     }

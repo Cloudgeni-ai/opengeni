@@ -512,19 +512,17 @@ describe("Connect a machine dialog", () => {
 const { defaultThisComputerLabels } = await import("../../../this-computer");
 describe("Connect a machine inside the desktop app", () => {
   const labels = defaultThisComputerLabels();
-  function inDesktop(
-    status: Record<string, unknown> | null,
-    options: { connect?: () => unknown } = {},
-  ) {
+  function inDesktop(status: Record<string, unknown> | null) {
     const openSetup = mock(() => {});
-    const connect = mock(async () => options.connect?.() ?? null);
-    const resume = mock(async () => {});
+    const turnOn = mock(async () => null);
+    const turnOff = mock(async () => {});
     desktop = {
       workspaceId: "workspace",
       platform: "macos",
       productName: "Opengeni",
       labels,
       openSetup,
+      signIn: null,
       computer: {
         status: status && {
           busy: false,
@@ -536,69 +534,125 @@ describe("Connect a machine inside the desktop app", () => {
         acting: false,
         actionError: null,
         canDisconnect: true,
+        pending: null,
         refresh: () => {},
-        connect,
+        connect: async () => null,
         pause: async () => {},
-        resume,
+        resume: async () => {},
         disconnect: async () => {},
+        turnOn,
+        turnOff,
         requestPermission: async () => {},
       },
     };
-    return { openSetup, connect, resume };
+    return { openSetup, turnOn, turnOff };
   }
+  const toggle = (h: Awaited<ReturnType<typeof render>>) =>
+    h.dialog()!.querySelector<HTMLButtonElement>('[role="switch"]');
 
   test("never offers a download or the app hand-off for the computer it runs on", async () => {
-    const { openSetup } = inDesktop({ state: "not_connected" });
+    const { turnOn, openSetup } = inDesktop({ state: "not_connected" });
     const h = await render({ advanced: false });
     try {
       expect(h.text()).toContain("Connect a machine");
-      expect(h.text()).toContain("Use this computer");
+      expect(h.text()).toContain("Computer use");
+      expect(h.text()).toContain("Let agents use Kari's Mac.");
       expect(h.text()).not.toContain("Download for Mac");
       expect(h.text()).not.toContain("Open app and connect");
+      expect(h.text()).not.toMatch(/reconnect/i);
       expect(h.dialog()!.querySelectorAll("a")).toHaveLength(0);
       expect(mintEnrollToken).not.toHaveBeenCalled();
-      // One action for this computer: its own setup steps, in place of this dialog.
-      await click(h.button("Turn on"));
-      expect(openSetup).toHaveBeenCalledTimes(1);
-      expect(h.onOpenChange).toHaveBeenCalledWith(false);
+      // The same switch as on Machines: on, right here.
+      expect(toggle(h)?.getAttribute("aria-checked")).toBe("false");
+      await click(toggle(h));
+      expect(turnOn).toHaveBeenCalledTimes(1);
+      expect(openSetup).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
   });
 
-  test("says when this computer is already connected, and other machines still connect with a command", async () => {
-    inDesktop({ state: "connected" });
+  test("says when computer use is on, and other machines still connect with a command", async () => {
+    const { turnOff } = inDesktop({ state: "connected" });
     const h = await render({ advanced: false });
     try {
       expect(h.text()).toContain("Agents can use Kari's Mac");
-      expect(h.button("Turn on")).toBeNull();
+      expect(toggle(h)?.getAttribute("aria-checked")).toBe("true");
       const other = [...h.dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
         button.textContent?.startsWith("Connect another computer or server"),
       );
       await click(other!);
       expect(h.dialog()?.querySelector("[data-connect-machine-setup]")).not.toBeNull();
-      expect(h.text()).not.toContain("Use this computer");
+      expect(h.text()).not.toContain("Computer use");
       await h.flush();
       expect(h.command()).toContain("oget_preview1.sig");
+      expect(turnOff).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
   });
 
-  test("a computer removed on the server reconnects in one step, without a network error", async () => {
-    const { connect, openSetup } = inDesktop({
+  test("a computer removed on the server is off like any other, and turns on in one step", async () => {
+    const { turnOn } = inDesktop({
       state: "not_connected",
       errorCode: "removed",
-      error: "This computer was removed from this workspace.",
+      error: "This computer is no longer in this workspace.",
     });
     const h = await render({ advanced: false });
     try {
-      expect(h.text()).toContain("Kari's Mac was removed from this workspace.");
+      expect(h.text()).toContain("Let agents use Kari's Mac.");
+      expect(h.text()).not.toContain("removed");
+      expect(h.text()).not.toContain("no longer");
       expect(h.text()).not.toContain("Couldn't reach");
-      expect(h.dialog()!.querySelector('[role="alert"]')).toBeNull();
-      await click(h.button("Reconnect"));
-      expect(connect).toHaveBeenCalledWith({ screenControl: true });
-      expect(openSetup).not.toHaveBeenCalled();
+      expect(toggle(h)?.getAttribute("aria-checked")).toBe("false");
+      await click(toggle(h));
+      expect(turnOn).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a problem shows with the switch on and exactly one fix", async () => {
+    const permissions = inDesktop({
+      state: "connected",
+      permissions: [{ id: "accessibility", granted: false }],
+    });
+    let h = await render({ advanced: false });
+    try {
+      expect(toggle(h)?.getAttribute("aria-checked")).toBe("true");
+      expect(h.text()).toContain("Agents need your permission");
+      await click(h.button("Allow in System Settings"));
+      expect(permissions.openSetup).toHaveBeenCalledTimes(1);
+      expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      await h.close();
+    }
+    const offline = inDesktop({
+      state: "connected",
+      reconnecting: true,
+      errorCode: "offline",
+      error: "fetch failed",
+    });
+    h = await render({ advanced: false });
+    try {
+      expect(h.text()).toContain("Couldn't reach the server");
+      await click(h.button("Try again"));
+      expect(offline.turnOn).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.close();
+    }
+    inDesktop({
+      state: "connected",
+      reconnecting: true,
+      errorCode: "unknown",
+      error: "Couldn't check this computer's connection: API 503",
+    });
+    h = await render({ advanced: false });
+    try {
+      // The server answered: its own words, never a network message.
+      expect(h.text()).toContain("API 503");
+      expect(h.text()).not.toContain("Couldn't reach");
+      expect(h.button("Try again")).not.toBeNull();
     } finally {
       await h.close();
     }
@@ -608,7 +662,7 @@ describe("Connect a machine inside the desktop app", () => {
     inDesktop({ state: "unavailable" });
     const h = await render({ advanced: false });
     try {
-      expect(h.text()).not.toContain("Use this computer");
+      expect(h.text()).not.toContain("Computer use");
       expect(h.text()).not.toContain("Download for Mac");
       expect(h.dialog()?.querySelector("[data-connect-machine-setup]")).not.toBeNull();
     } finally {

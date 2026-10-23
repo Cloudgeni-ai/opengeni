@@ -76,13 +76,6 @@ export interface ThisComputerLabels {
   /** Connected, while the app starts its agent again. */
   reconnecting(machineName: string): string;
   paused(machineName: string): string;
-  /**
-   * It was connected, then removed on the server (e.g. from Machines), so it
-   * needs connecting again. Optional; the catalog's words otherwise.
-   */
-  removed?(machineName: string): string;
-  /** Connecting a removed computer again. Optional; the catalog's word otherwise. */
-  reconnect?: string;
   resume: string;
   pause: string;
   turnOff: string;
@@ -195,8 +188,6 @@ export function defaultThisComputerLabels(
     ready: (machineName) => t("thisComputer.ready", { machineName }),
     reconnecting: (machineName) => t("thisComputer.reconnecting", { machineName }),
     paused: (machineName) => t("thisComputer.paused", { machineName }),
-    removed: (machineName) => t("thisComputer.removed", { machineName }),
-    reconnect: t("thisComputer.reconnect"),
     resume: t("thisComputer.resume"),
     pause: t("thisComputer.pause"),
     turnOff: t("thisComputer.turnOff"),

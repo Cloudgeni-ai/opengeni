@@ -1,5 +1,4 @@
 import {
-  thisComputerNeedsPermissions,
   thisComputerReady,
   type ThisComputerPlatform,
   type ThisComputerStatus,
@@ -13,9 +12,8 @@ import type { UseThisComputerResult } from "./use-this-computer";
 /** What the status pieces show for a computer, in order of what matters. */
 export type ThisComputerView =
   | "hidden"
+  /** Not on: never set up, turned off, or removed on the server (e.g. from Machines). */
   | "off"
-  /** It was connected, then removed on the server (e.g. from Machines). */
-  | "removed"
   | "setting_up"
   | "finish_setup"
   | "ready"
@@ -30,13 +28,12 @@ export function thisComputerView(status: ThisComputerStatus | null): ThisCompute
     if (!thisComputerReady(status)) return "finish_setup";
     return status.reconnecting ? "reconnecting" : "ready";
   }
-  if (status.busy) return "setting_up";
-  return status.errorCode === "removed" ? "removed" : "off";
+  return status.busy ? "setting_up" : "off";
 }
 
 /**
- * The error to show beside a view, or null. A removed computer's line already
- * says so, so its standing reason isn't repeated as an error.
+ * The error to show beside a view, or null. Removal on the server isn't one:
+ * the computer is simply off, and turning it on registers it again.
  */
 export function thisComputerError(
   computer: Pick<UseThisComputerResult, "status" | "actionError">,
@@ -49,15 +46,6 @@ export function thisComputerError(
   return actionError !== null || status?.error
     ? labels.error(status?.errorCode ?? null, status?.error || actionError || null)
     : null;
-}
-
-/** "… was removed from this workspace", from the labels or the catalog. */
-export function thisComputerRemovedLine(
-  labels: ThisComputerLabels,
-  machineName: string,
-  text: ReturnType<typeof useOpenGeniText>,
-): string {
-  return labels.removed?.(machineName) ?? text("thisComputer.removed", { machineName });
 }
 
 function percent(status: ThisComputerStatus | null): string {
@@ -73,20 +61,6 @@ function settingUpLine(status: ThisComputerStatus | null, labels: ThisComputerLa
   return status?.management === "service"
     ? labels.reconnecting(machineName)
     : `${labels.settingUp(machineName)}${percent(status)}`;
-}
-
-/**
- * Connects a removed computer again in one step: the person already chose to
- * use it, so there is nothing to explain first. The setup steps open only
- * when a permission still needs the person.
- */
-export function reconnect(
-  computer: Pick<UseThisComputerResult, "connect">,
-  onSetup: () => void,
-): void {
-  void computer.connect({ screenControl: true }).then((next) => {
-    if (thisComputerNeedsPermissions(next)) onSetup();
-  });
 }
 
 function storageKey(workspaceId: string) {
@@ -163,41 +137,6 @@ export function ThisComputerOffer({
               ? labels.reconnecting(machineName)
               : settingUpLine(status, labels)}
         </span>
-      </div>
-    );
-  }
-  if (view === "removed" && !dismissed) {
-    return (
-      <div className={classes} data-view={view} data-card="">
-        <div className="og-tc-offer-head">
-          <span className="og-tc-offer-mark">{mark}</span>
-          <div>
-            <p className="og-tc-offer-title">{labels.title}</p>
-            <p className="og-tc-offer-text">
-              {thisComputerRemovedLine(labels, machineName, catalogText)}
-            </p>
-          </div>
-          {onDismiss ? (
-            <button
-              type="button"
-              className="og-tc-offer-dismiss"
-              aria-label={labels.notNow}
-              onClick={onDismiss}
-            >
-              <XIcon aria-hidden />
-            </button>
-          ) : null}
-        </div>
-        <div className="og-tc-offer-actions">
-          <button
-            type="button"
-            className="og-tc-button og-tc-primary og-tc-small"
-            disabled={computer.acting}
-            onClick={() => reconnect(computer, onSetup)}
-          >
-            {labels.reconnect ?? catalogText("thisComputer.reconnect")}
-          </button>
-        </div>
       </div>
     );
   }
@@ -349,19 +288,6 @@ export function ThisComputerPanel({
     case "setting_up":
       line = settingUpLine(status, labels);
       actions = <span className="og-tc-spinner" aria-hidden />;
-      break;
-    case "removed":
-      line = thisComputerRemovedLine(labels, machineName, catalogText);
-      actions = (
-        <button
-          type="button"
-          className="og-tc-button og-tc-primary og-tc-small"
-          disabled={computer.acting}
-          onClick={() => reconnect(computer, onSetup)}
-        >
-          {labels.reconnect ?? catalogText("thisComputer.reconnect")}
-        </button>
-      );
       break;
     default:
       line = labels.offer(machineName);
