@@ -159,6 +159,9 @@ function upstreamServer() {
         credential: { kind: "api_key" },
       });
     }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}`) {
+      return Response.json({ id: WORKSPACE_ID, name: "Product" });
+    }
     if (path === "/v1/workspaces") {
       return Response.json([
         { id: WORKSPACE_ID, name: "Product" },
@@ -1542,6 +1545,40 @@ describe("createSessionProxyHandler pass-through", () => {
       id: string;
     }>;
     expect(workspaces.map((workspace) => workspace.id)).toEqual([WORKSPACE_ID]);
+  });
+
+  test("lists only the resolved workspace, read as the user, and none it cannot read", async () => {
+    const { handler, upstream } = setup();
+    expect(await (await send(handler, `${mount}/workspaces`)).json()).toEqual([
+      { id: WORKSPACE_ID, name: "Product" },
+    ]);
+    const read = upstream.requests.at(-1)!;
+    expect(read.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}`);
+    expect(read.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    expect(upstream.requests.some((request) => request.url.pathname === "/v1/workspaces")).toBe(
+      false,
+    );
+
+    const refusing = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (new URL(request.url).pathname === `/v1/workspaces/${WORKSPACE_ID}`) {
+          return Response.json(
+            { error: { code: "not_found", message: "Workspace not found." } },
+            { status: 404 },
+          );
+        }
+        return await upstream.fetch(request);
+      },
+    });
+    const outsider = createSessionProxyHandler(refusing, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const empty = await send(outsider, `${mount}/workspaces`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toEqual([]);
   });
 
   test("bootstraps an external actor, whose access inventory is empty, from its effective grant", async () => {
