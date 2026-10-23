@@ -1,15 +1,15 @@
 /**
  * Schedules: one flat list of every schedule in the workspace. Active ones by
- * next run, then the ones that won't fire (paused ones get an inline Resume).
- * A row opens the schedule's own page; New schedule opens the form page.
+ * next run, then the ones that won't fire. Each row's switch pauses or resumes
+ * it in one click. A row opens the schedule's own page; New schedule opens the
+ * form page.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
   CalendarClockIcon,
   GitPullRequestIcon,
   LockIcon,
-  PlayIcon,
   PlusIcon,
   SunriseIcon,
   TrendingUpIcon,
@@ -27,6 +27,7 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
@@ -58,6 +59,7 @@ import {
   OwnerValue,
   ScheduleMenuItems,
   ScheduleTile,
+  canSwitchSchedule,
   hasMenuItems,
   inAppClick,
   schedulePath,
@@ -122,8 +124,8 @@ const TEMPLATE_ICONS: Record<string, ReactNode> = {
 };
 
 /**
- * True on phone widths. Rows keep one height there, so the paused row's
- * Resume stays in its ⋯ menu instead of dropping onto a line of its own.
+ * True on phone widths. The list drops its fact columns there, so the switch
+ * sits by the ⋯ menu and every row keeps one height.
  */
 function useNarrow(): boolean {
   const query = "(max-width: 639px)";
@@ -164,6 +166,14 @@ export function SchedulesListPage({
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [clock, setClock] = useState(() => new Date());
   const [filteredChat, setFilteredChat] = useState<{ id: string; title: string } | null>(null);
+  // Switched rows show their new state before the server answers.
+  const [switching, setSwitching] = useState<Record<string, ScheduledTask["status"]>>({});
+  // After a switch the rows keep their order, so a row never moves away from
+  // the pointer that just toggled it. Cleared when the set of schedules changes.
+  const [heldOrder, setHeldOrder] = useState<readonly string[] | null>(null);
+  // Bumped by every switch: a refresh that started before one can't paint
+  // the old status over it. Each switch refreshes again when it settles.
+  const switchSeq = useRef(0);
   const viewState = listViewState({ loading, error: loadError, count: list.tasks.length });
 
   useEffect(() => {
@@ -192,6 +202,7 @@ export function SchedulesListPage({
   const refresh = useCallback(
     async (background = false) => {
       if (!background) setLoading(true);
+      const seq = switchSeq.current;
       try {
         const [next, attention] = await Promise.all([
           targetSessionId
@@ -218,6 +229,7 @@ export function SchedulesListPage({
             }
           },
         );
+        if (seq !== switchSeq.current) return;
         setList({
           tasks: next,
           lastRuns: Object.fromEntries(
@@ -276,7 +288,29 @@ export function SchedulesListPage({
 
   // The order is fixed by the snapshot's clock, not the minute tick, so rows
   // don't move while someone is pointing at them.
-  const sorted = useMemo(() => sortSchedulesForList(list.tasks, new Date()), [list]);
+  const sorted = useMemo(
+    () => holdOrder(sortSchedulesForList(list.tasks, new Date()), heldOrder),
+    [list, heldOrder],
+  );
+
+  const switchSchedule = async (task: ScheduledTask, on: boolean) => {
+    const status: ScheduledTask["status"] = on ? "active" : "paused";
+    switchSeq.current += 1;
+    setHeldOrder(sorted.map((item) => item.id));
+    setSwitching((current) => ({ ...current, [task.id]: status }));
+    const updated = await actions.setPaused(task, !on);
+    if (updated) {
+      setList((current) => ({
+        ...current,
+        tasks: current.tasks.map((item) =>
+          item.id === task.id ? { ...item, status: updated.status ?? status } : item,
+        ),
+      }));
+    }
+    // On failure dropping the override is the rollback.
+    setSwitching(({ [task.id]: _settled, ...rest }) => rest);
+    if (updated) void refresh(true);
+  };
   const shared = sorted.some((task) => !ownsSchedule(task, access.viewerSubjectId));
   const narrow = useNarrow();
   const columns = narrow
@@ -377,16 +411,18 @@ export function SchedulesListPage({
           />
         ) : (
           <RowList label="Schedules" columns={columns} flush>
-            {sorted.map((task) => {
+            {sorted.map((listed) => {
+              const pending = switching[listed.id];
+              const task = pending ? { ...listed, status: pending } : listed;
               const perms = schedulePermissions(task, access);
-              const paused = task.status === "paused";
-              const busy = actions.busyTaskId === task.id;
+              const switchable = canSwitchSchedule(listed, access);
+              const busy = actions.busyTaskId === task.id || pending !== undefined;
               const href = schedulePath(workspaceId, task.id);
               return (
                 <ListRow
                   key={task.id}
                   leading={<ScheduleTile task={task} />}
-                  // Titles stay in fg; a paused schedule says so in its tile and Next run.
+                  // Titles stay in fg; a paused schedule says so in its switch and Next run.
                   title={task.name}
                   titleAddon={
                     task.visibility === "private" ? (
@@ -423,19 +459,14 @@ export function SchedulesListPage({
                       : {}),
                   }}
                   control={
-                    paused && perms.canPauseOrDelete && !narrow ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="xs"
-                        disabled={busy}
-                        onClick={() => void actions.resume(task)}
-                        aria-label={`Resume ${task.name}`}
-                        className="h-7 rounded-[10px] px-2 pointer-coarse:h-11"
-                      >
-                        <PlayIcon aria-hidden="true" />
-                        Resume
-                      </Button>
+                    switchable ? (
+                      <Switch
+                        checked={task.status !== "paused"}
+                        pending={pending !== undefined}
+                        disabled={actions.busyTaskId === task.id}
+                        onCheckedChange={(on) => void switchSchedule(listed, on)}
+                        aria-label={task.name}
+                      />
                     ) : null
                   }
                   menu={
@@ -444,6 +475,7 @@ export function SchedulesListPage({
                         task={task}
                         access={access}
                         busy={busy}
+                        pauseItem={!switchable}
                         onRunNow={() => void actions.runNow(task)}
                         onPause={() => void actions.pause(task)}
                         onResume={() => void actions.resume(task)}
@@ -469,6 +501,17 @@ export function SchedulesListPage({
       {ask.dialog}
     </>
   );
+}
+
+/**
+ * `fresh` in the order of `held` while both list the same schedules, so a
+ * switched row stays where it is; otherwise `fresh` as sorted.
+ */
+export function holdOrder(fresh: ScheduledTask[], held: readonly string[] | null): ScheduledTask[] {
+  if (!held || held.length !== fresh.length) return fresh;
+  const byId = new Map(fresh.map((task) => [task.id, task]));
+  const ordered = held.map((id) => byId.get(id));
+  return ordered.every((task) => task !== undefined) ? (ordered as ScheduledTask[]) : fresh;
 }
 
 /**
