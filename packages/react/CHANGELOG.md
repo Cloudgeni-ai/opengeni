@@ -1,5 +1,16 @@
 # @opengeni/react
 
+## 5.2.1
+
+### Patch Changes
+
+- b3a641c: With the `chatList` feature off, the new-chat page no longer shows the project picker or the workspace's recent chats, so an embed that shows a single chat does not list the others.
+- c4d18a1: The app no longer reads the workspace GitHub status for a member whose grant lacks `github:use`; it shows no GitHub state instead of a failed 403 request.
+- Updated dependencies [2d6484c]
+  - @opengeni/sdk@5.2.0
+  - @opengeni/connect@5.2.0
+  - @opengeni/contracts@5.2.0
+
 ## 5.1.2
 
 ### Minor Changes

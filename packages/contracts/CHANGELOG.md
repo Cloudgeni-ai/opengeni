@@ -1,5 +1,7 @@
 # @opengeni/contracts
 
+## 5.2.1
+
 ## 5.1.2
 
 ## 5.0.2
