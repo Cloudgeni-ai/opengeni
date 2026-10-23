@@ -78,6 +78,7 @@ import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./p
 import { SystemAudioCaptures } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
+import { refuseAllPermissions } from "./web-permissions";
 import { MainWindow, openExternalSafely } from "./window";
 import { completeComputerLink, computerLinkAccount } from "./computer-link";
 
@@ -389,6 +390,8 @@ export class DesktopShell {
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
+      // The app's own local pages run in the default session and need no permissions.
+      refuseAllPermissions(session.defaultSession);
       serveLocalPages(dirname(config.welcomePagePath));
       desktop = new DesktopShell(config);
       desktop.start();

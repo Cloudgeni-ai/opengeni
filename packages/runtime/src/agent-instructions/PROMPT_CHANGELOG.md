@@ -1,5 +1,23 @@
 # Modular prompt changelog
 
+macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
+the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
+Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
+asks the owner about each one (Files and Folders, Photos, Apple Music and the
+media library, Contacts, Calendars and other apps' data) in the app's name.
+People saw that cascade and took the app for asking far more than it needs.
+The module now says to open those folders only when the task needs them. Code
+search also skips them on its own until the owner has answered macOS about
+Desktop, Documents and Downloads in the app's setup, then only Library, Music,
+Pictures, Movies and the Trash (see `MAC_HOME_PRIVACY_GUARDED_DIRS` in
+`sandbox/channel-a.ts`). Only the modular
+composition has a Connected Machine module; legacy bytes are unchanged.
+
+```diff
++ On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
++ Open them only when the task needs them, and never scan the whole home folder recursively.
+```
+
 An answer the agent gives in a turn that ends on `wait_for_input` now goes in
 the call's new `reply` argument, which the person sees exactly as written. The
 Progress updates guidance no longer allows posting a status right before
@@ -293,22 +311,6 @@ text named it only inside link examples).
 ```diff
 + This session runs on a Connected Machine, a computer its owner connected to this workspace.
 + You work directly on its real filesystem, so treat existing files and processes as the owner's.
-```
-
-macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
-the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
-Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
-asks the owner about each one (Files and Folders, Photos, Apple Music and the
-media library, Contacts, Calendars and other apps' data) in the app's name.
-People saw that cascade and took the app for asking far more than it needs.
-The module now says to open those folders only when the task needs them. Code
-search and repository discovery skip them on their own (see
-`MAC_HOME_PRIVACY_GUARDED_DIRS` in `sandbox/channel-a.ts`). Only the modular
-composition has a Connected Machine module; legacy bytes are unchanged.
-
-```diff
-+ On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
-+ Open them only when the task needs them, and never scan the whole home folder recursively.
 ```
 
 Goal completion. In the first modular-none eval runs, two of nine goal runs

@@ -12,16 +12,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   ChannelAUnavailableError,
   ChannelAValidationError,
+  MAC_HOME_FILES_DIRS,
   MAC_HOME_PRIVACY_GUARDED_DIRS,
   SandboxChannelAService,
   validateCodeSearchRipgrepArgs,
   type ChannelASession,
 } from "../src/sandbox";
+import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -654,9 +656,15 @@ describe("code search from a Mac's home folder", () => {
     return dir;
   }
 
-  async function search(root: string, system: string, home: string, paths: string[]) {
+  async function search(
+    root: string,
+    system: string,
+    home: string,
+    paths: string[],
+    env: Record<string, string> = {},
+  ) {
     const svc = new SandboxChannelAService({
-      session: hostShellSession(root, [], fakeUname(system), { HOME: home }),
+      session: hostShellSession(root, [], fakeUname(system), { HOME: home, ...env }),
     });
     const result = await svc.codeSearchRipgrep(
       ["--null", "--with-filename", "--no-heading", "-e", "approvalPolicy", "--", ...paths],
@@ -678,6 +686,31 @@ describe("code search from a Mac's home folder", () => {
       "src/nested/other.ts",
     ]);
   });
+
+  test.skipIf(!hasRipgrep)(
+    "includes Desktop, Documents and Downloads once the owner answered macOS about them",
+    async () => {
+      const root = homeFixture();
+      const answered = join(mkdtempSync(join(tmpdir(), "code-search-answered-")), "answered");
+      roots.push(dirname(answered));
+      const env = { [MAC_FILES_ANSWERED_ENV]: answered };
+      // Named but not there yet: still asked about by nobody, so still skipped.
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual([
+        "src/Library/lib.ts",
+        "src/approval.ts",
+        "src/nested/other.ts",
+      ]);
+      writeFileSync(answered, "");
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(
+        [
+          ...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/inner/note.ts`),
+          "src/Library/lib.ts",
+          "src/approval.ts",
+          "src/nested/other.ts",
+        ].sort(),
+      );
+    },
+  );
 
   test.skipIf(!hasRipgrep)("still searches a guarded folder the engine names", async () => {
     const root = homeFixture();
@@ -713,7 +746,9 @@ describe("code search from a Mac's home folder", () => {
     });
     await svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 });
     expect(calls[0]).toContain("Darwin");
-    for (const dir of MAC_HOME_PRIVACY_GUARDED_DIRS) expect(calls[0]).toContain(`!/${dir}`);
+    expect(calls[0]).toContain('-g "!/$mac_home_dir"');
+    expect(calls[0]).toContain(MAC_FILES_ANSWERED_ENV);
+    for (const dir of MAC_HOME_PRIVACY_GUARDED_DIRS) expect(calls[0]).toContain(`'${dir}'`);
   });
 });
 

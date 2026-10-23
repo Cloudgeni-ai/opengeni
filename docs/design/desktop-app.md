@@ -179,12 +179,17 @@ are non-mutating; only explicit signed-in setup enables desktop management.
 - Nothing else from macOS's privacy list. Because the hosted agent and every
   shell it starts run as the app, any read of a guarded folder in the home
   folder (Desktop, Documents, Downloads, Library, Music, Pictures, Movies, the
-  Trash) asks the person in the app's name. Automatic walks from a Mac's home
-  folder (code search, repository discovery) skip those folders unless a path
-  names them, and the agent instructions say not to scan them unasked. The
-  app declares only the microphone usage description and the `audio-input`
-  entitlement (dictation and voice chats); the window refuses the camera,
-  screen sharing, Bluetooth, USB, serial and HID devices and location
+  Trash) asks the person in the app's name. Code search from a Mac's home
+  folder skips those folders unless a path names them; Desktop, Documents and
+  Downloads come back once the person has answered macOS about them in setup
+  (the app passes `OPENGENI_MAC_FILES_ANSWERED`, a file that then exists).
+  Repository discovery does the same, though turn-end capture, its only
+  caller, doesn't run on Connected Machines today. The agent instructions say
+  not to scan those folders unasked. The app declares only the microphone
+  usage description and the `audio-input` entitlement (dictation and voice
+  chats); account windows refuse the camera, screen sharing, Bluetooth, USB,
+  serial and HID devices and location, and the app's own local pages in the
+  default session get no permissions
   (`packages/desktop/src/main/web-permissions.ts`,
   `apps/desktop/test/mac-privacy.test.ts`).
 - On Windows, the person's interactive desktop session, where CUA sees and

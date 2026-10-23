@@ -7,7 +7,9 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
+import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
 import {
+  MAC_HOME_FILES_DIRS,
   MAC_HOME_PRIVACY_GUARDED_DIRS,
   SandboxChannelAService,
   type ChannelASession,
@@ -25,7 +27,12 @@ function tempDir(prefix: string): string {
 }
 
 /** Runs the exact generated command in a host shell whose `uname` reports `system`. */
-function hostShellSession(root: string, system: string, home: string): ChannelASession {
+function hostShellSession(
+  root: string,
+  system: string,
+  home: string,
+  env: Record<string, string> = {},
+): ChannelASession {
   const bin = tempDir("mac-home-bin-");
   writeFileSync(join(bin, "uname"), `#!/bin/sh\necho ${system}\n`);
   chmodSync(join(bin, "uname"), 0o755);
@@ -33,7 +40,7 @@ function hostShellSession(root: string, system: string, home: string): ChannelAS
     exec: async (args) => {
       const proc = Bun.spawn(["/bin/sh", "-c", args.cmd], {
         cwd: resolve(root, args.workdir ?? "."),
-        env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, HOME: home },
+        env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, HOME: home, ...env },
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -64,6 +71,20 @@ describe("repository discovery from a Mac's home folder", () => {
     const svc = new SandboxChannelAService({ session: hostShellSession(root, "Darwin", root) });
     expect(await svc.detectReposDetailed()).toEqual({
       repos: ["code/Library", "code/app"],
+      complete: true,
+      degradedReason: null,
+    });
+  });
+
+  test("enters Desktop, Documents and Downloads once the owner answered macOS about them", async () => {
+    const root = homeWithRepositories();
+    const answered = join(tempDir("mac-home-answered-"), "answered");
+    writeFileSync(answered, "");
+    const svc = new SandboxChannelAService({
+      session: hostShellSession(root, "Darwin", root, { [MAC_FILES_ANSWERED_ENV]: answered }),
+    });
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: [...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/project`), "code/Library", "code/app"],
       complete: true,
       degradedReason: null,
     });

@@ -9,6 +9,15 @@ import type { UserResourceAuthoritySummary } from "./types";
 export type ThisComputerPlatform = "macos" | "windows" | "linux";
 
 /**
+ * Set by the desktop app on the agent it runs on a Mac: a file that exists
+ * once the person has answered macOS about the Desktop, Documents and
+ * Downloads folders in the app's setup. Until then, the agent's automatic
+ * whole-folder walks from the home folder leave those folders out, so they
+ * never put macOS's question up unasked.
+ */
+export const MAC_FILES_ANSWERED_ENV = "OPENGENI_MAC_FILES_ANSWERED";
+
+/**
  * Where this computer stands for one workspace.
  *
  * - `unavailable`: the app can't connect computers on this platform.

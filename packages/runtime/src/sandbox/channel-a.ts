@@ -64,6 +64,7 @@ import type {
   TerminalExecResponse,
 } from "@opengeni/contracts";
 import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
+import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
 import type { ProviderCommandSession } from "./provider-command-session";
 import type { RemoteOperationObservation } from "./op-correlation";
 import {
@@ -480,30 +481,40 @@ export const MAC_HOME_PRIVACY_GUARDED_DIRS: readonly string[] = [
 ];
 
 /**
+ * The guarded folders the desktop app's own setup asks macOS about ("Desktop,
+ * Documents and Downloads"). Once the owner has answered, reading them shows
+ * no prompt, so whole-workspace walks include them again. The app's hosted
+ * agent then has `MAC_FILES_ANSWERED_ENV` naming a file that exists.
+ */
+export const MAC_HOME_FILES_DIRS: readonly string[] = ["Desktop", "Documents", "Downloads"];
+
+/** The guarded folders no setup step asks about, skipped always. */
+const MAC_HOME_ALWAYS_SKIPPED = MAC_HOME_PRIVACY_GUARDED_DIRS.filter(
+  (dir) => !MAC_HOME_FILES_DIRS.includes(dir),
+);
+
+/**
  * Bash that sets `mac_home_guarded=1` when the command runs from a macOS home
  * folder: the user's `$HOME`, or a direct child of `/Users`. It reads only
  * `uname` and the working directory's own path, so it never touches a guarded
- * folder itself, and is `0` on every other box.
+ * folder itself, and is `0` on every other box. `mac_home_skip` then lists the
+ * guarded folders to leave out: all of them, less Desktop, Documents and
+ * Downloads once the owner has answered macOS about those in the app's setup.
  */
 const MAC_HOME_GUARD_DETECT = [
   "mac_home_guarded=0",
+  "mac_home_skip=()",
   'if [ "$(uname -s 2>/dev/null)" = Darwin ]; then',
   "mac_home_here=$(pwd -P 2>/dev/null)",
   'mac_home_user=$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P)',
   'if [ -n "$mac_home_here" ] && [ "$mac_home_here" = "$mac_home_user" ]; then mac_home_guarded=1; fi',
   'case "$mac_home_here" in /Users/*/*) ;; /Users/?*) mac_home_guarded=1 ;; esac',
   "fi",
+  'if [ "$mac_home_guarded" = 1 ]; then',
+  `mac_home_skip=(${MAC_HOME_ALWAYS_SKIPPED.map(shellQuote).join(" ")})`,
+  `if [ -z "\${${MAC_FILES_ANSWERED_ENV}:-}" ] || [ ! -e "\$${MAC_FILES_ANSWERED_ENV}" ]; then mac_home_skip+=(${MAC_HOME_FILES_DIRS.map(shellQuote).join(" ")}); fi`,
+  "fi",
 ].join("\n");
-
-/** ripgrep globs, anchored at the search's working directory, for the guarded folders. */
-const CODE_SEARCH_MAC_HOME_EXCLUDES: readonly string[] = MAC_HOME_PRIVACY_GUARDED_DIRS.flatMap(
-  (dir) => ["-g", `!/${dir}`],
-);
-
-/** `find` primaries (from `.`) that prune the guarded folders. */
-const REPOSITORY_DISCOVERY_MAC_HOME_PRUNE = `\\( ${MAC_HOME_PRIVACY_GUARDED_DIRS.map(
-  (dir) => `-path ${shellQuote(`./${dir}`)}`,
-).join(" -o ")} \\) -prune`;
 
 /** Whether a relative path names a credential directory (or something inside one), in any case. */
 function isCodeSearchCredentialPath(path: string): boolean {
@@ -558,6 +569,9 @@ const CODE_SEARCH_RG_VALUE_FLAGS: ReadonlyMap<string, (value: string) => boolean
  * program (`--pre`, `-z`) or read other files, and paths that leave the
  * workspace, are rejected before a command is built. `--no-config` stops a
  * `RIPGREP_CONFIG_PATH` on the box from adding flags.
+ * From a Mac's home folder the search command adds globs for the folders
+ * macOS guards after these (see `MAC_HOME_GUARD_DETECT`), so they win over a
+ * `-g` naming one of those folders; only a path naming it is searched.
  */
 export function validateCodeSearchRipgrepArgs(
   args: readonly string[],
@@ -3009,7 +3023,8 @@ export class SandboxChannelAService {
         "trap abort HUP INT TERM",
         MAC_HOME_GUARD_DETECT,
         "mac_home_prune=()",
-        `if [ "$mac_home_guarded" = 1 ]; then mac_home_prune=(-o ${REPOSITORY_DISCOVERY_MAC_HOME_PRUNE}); fi`,
+        // `find` primaries (from `.`) that prune each skipped folder.
+        'for mac_home_dir in ${mac_home_skip[@]+"${mac_home_skip[@]}"}; do mac_home_prune+=(-o -path "./$mac_home_dir" -prune); done',
         `${discovery} > "$results_file" &`,
         "discovery_pid=$!",
         '(sleeper_pid=; stop_watchdog() { if [ -n "$sleeper_pid" ]; then kill "$sleeper_pid" 2>/dev/null || true; wait "$sleeper_pid" 2>/dev/null || true; fi; exit 0; }; trap stop_watchdog HUP INT TERM; sleep 15 & sleeper_pid=$!; wait "$sleeper_pid"; sleeper_pid=; if kill -TERM "$discovery_pid" 2>/dev/null; then : > "$timeout_file"; fi) </dev/null >/dev/null 2>&1 &',
@@ -3130,7 +3145,10 @@ export class SandboxChannelAService {
       // engine names them (see MAC_HOME_PRIVACY_GUARDED_DIRS).
       MAC_HOME_GUARD_DETECT,
       "mac_home_excludes=()",
-      `if [ "$mac_home_guarded" = 1 ]; then mac_home_excludes=(${CODE_SEARCH_MAC_HOME_EXCLUDES.map(shellQuote).join(" ")}); fi`,
+      // ripgrep globs, anchored at the search's working directory. They come
+      // after the engine's own globs, so they win over a glob naming one of
+      // these folders; only a path naming it is searched.
+      'for mac_home_dir in ${mac_home_skip[@]+"${mac_home_skip[@]}"}; do mac_home_excludes+=(-g "!/$mac_home_dir"); done',
       // Job control gives the pipeline its own process group, so the watchdog
       // and cleanup stop ripgrep itself rather than only the subshell. Output is
       // compressed once, straight into the kept file: providers retain only

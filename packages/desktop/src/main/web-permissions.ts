@@ -47,3 +47,27 @@ export function grantsPermissionCheck(
   if (!trusted || !CHECKABLE.has(permission)) return false;
   return permission !== "media" || details.mediaType !== "video";
 }
+
+/** The permission handlers of an Electron session. */
+export interface PermissionHandlers {
+  setPermissionRequestHandler(
+    handler: (
+      webContents: unknown,
+      permission: string,
+      callback: (granted: boolean) => void,
+    ) => void,
+  ): void;
+  setPermissionCheckHandler(handler: () => boolean): void;
+  setDevicePermissionHandler(handler: () => boolean): void;
+}
+
+/**
+ * Refuses every permission in a session whose pages need none: the default
+ * session, where the app's own local pages (the welcome view, the permission
+ * guide) run. Electron grants everything there unless told otherwise.
+ */
+export function refuseAllPermissions(session: PermissionHandlers): void {
+  session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.setPermissionCheckHandler(() => false);
+  session.setDevicePermissionHandler(() => false);
+}

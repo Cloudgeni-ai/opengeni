@@ -23,7 +23,11 @@ import type {
   ThisComputerPermissionId,
   ThisComputerStatus,
 } from "@opengeni/sdk/this-computer";
-import { macSystemNames, type MacSystemNameCatalog } from "@opengeni/sdk/this-computer";
+import {
+  MAC_FILES_ANSWERED_ENV,
+  macSystemNames,
+  type MacSystemNameCatalog,
+} from "@opengeni/sdk/this-computer";
 import { normalizeServerUrl } from "@opengeni/sdk/app-links";
 import {
   connectionFor,
@@ -316,12 +320,23 @@ export class ThisComputer {
   private guiding: ThisComputerPermissionId | null = null;
   /** Environment every agent command gets: the host marker and, when set, its own config. */
   private readonly agentEnv: Record<string, string>;
+  /**
+   * On a Mac, a file that exists once the person has answered macOS about the
+   * Desktop, Documents and Downloads folders in setup. The agent's commands
+   * get its path (`MAC_FILES_ANSWERED_ENV`) and leave those folders out of
+   * whole-folder walks until it exists, as reading them before would put
+   * macOS's question up unasked.
+   */
+  private readonly filesAnsweredPath: string | null;
 
   constructor(private readonly deps: ThisComputerDeps) {
     this.installedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
     const extensionIds = browserExtensionIdsEnv(deps.browserExtensionIds);
+    this.filesAnsweredPath =
+      deps.platform === "darwin" ? join(deps.dataDir, "mac-files-answered") : null;
     this.agentEnv = {
       ...(deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {}),
+      ...(this.filesAnsweredPath ? { [MAC_FILES_ANSWERED_ENV]: this.filesAnsweredPath } : {}),
       ...(deps.browserExtension === false
         ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" }
         : extensionIds
@@ -330,6 +345,8 @@ export class ThisComputer {
     };
     this.statePath = join(deps.dataDir, "this-computer.json");
     this.state = this.loadState();
+    // Asked in an earlier version of the app, before the file existed.
+    if (this.state.requested.includes("files")) this.markFilesAnswered();
     this.agent = new HostedAgent({
       spawn: (apiUrl) => this.spawnAgent(apiUrl),
       terminate: (child) => this.terminate(child),
@@ -912,6 +929,8 @@ export class ThisComputer {
       for (const folder of GUARDED_FOLDERS) {
         if (!(await this.opensFolder(join(this.deps.home, folder), null))) allowed = false;
       }
+      // Each folder is answered now, allowed or not, so reading it asks nothing.
+      this.markFilesAnswered();
       if (!allowed) {
         this.watchForGrants();
         this.guide("files");
@@ -1371,6 +1390,17 @@ export class ThisComputer {
     } catch {
       // Kept in memory; the next launch asks again.
       return false;
+    }
+  }
+
+  /** Records that the guarded folders were asked about (see `filesAnsweredPath`). */
+  private markFilesAnswered(): void {
+    if (!this.filesAnsweredPath || existsSync(this.filesAnsweredPath)) return;
+    try {
+      mkdirSync(this.deps.dataDir, { recursive: true });
+      writeFileSync(this.filesAnsweredPath, "", { mode: 0o600 });
+    } catch {
+      // The folders stay out of whole-folder walks; nothing else changes.
     }
   }
 

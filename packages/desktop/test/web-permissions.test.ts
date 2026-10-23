@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { grantsPermissionCheck, grantsPermissionRequest } from "../src/main/web-permissions";
+import {
+  grantsPermissionCheck,
+  grantsPermissionRequest,
+  refuseAllPermissions,
+} from "../src/main/web-permissions";
 
 describe("what the account's page may ask for", () => {
   test("the microphone, for dictation and voice chats", () => {
@@ -71,5 +75,27 @@ describe("what the account's page is told it has", () => {
 
   test("another origin is told nothing", () => {
     expect(grantsPermissionCheck(false, "media", { mediaType: "audio" })).toBe(false);
+  });
+});
+
+describe("the app's own local pages", () => {
+  test("are refused every permission", () => {
+    const handlers: {
+      request?: (webContents: unknown, permission: string, callback: (g: boolean) => void) => void;
+      check?: () => boolean;
+      device?: () => boolean;
+    } = {};
+    refuseAllPermissions({
+      setPermissionRequestHandler: (handler) => (handlers.request = handler),
+      setPermissionCheckHandler: (handler) => (handlers.check = handler),
+      setDevicePermissionHandler: (handler) => (handlers.device = handler),
+    });
+    const granted: boolean[] = [];
+    for (const permission of ["media", "clipboard-read", "geolocation", "notifications"]) {
+      handlers.request!(null, permission, (value) => granted.push(value));
+    }
+    expect(granted).toEqual([false, false, false, false]);
+    expect(handlers.check!()).toBe(false);
+    expect(handlers.device!()).toBe(false);
   });
 });

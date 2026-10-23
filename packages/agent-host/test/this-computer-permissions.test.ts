@@ -117,4 +117,30 @@ describe("checking the folders macOS guards", () => {
       }
     },
   );
+
+  test.skipIf(!existsSync("/bin/ls"))(
+    "lets the agent read them only once they were asked about",
+    async () => {
+      const { dir, computer, done } = await fakeComputer();
+      const env = (computer as unknown as { agentEnv: Record<string, string> }).agentEnv;
+      try {
+        const answered = env.OPENGENI_MAC_FILES_ANSWERED;
+        expect(answered).toBe(join(dir, "mac-files-answered"));
+        expect(existsSync(answered!)).toBe(false);
+        await computer.requestPermission("files");
+        expect(existsSync(answered!)).toBe(true);
+      } finally {
+        await done();
+      }
+    },
+  );
+
+  test("counts an answer given before the app recorded it", async () => {
+    const { dir, done } = await fakeComputer({ requested: ["files"] });
+    try {
+      expect(existsSync(join(dir, "mac-files-answered"))).toBe(true);
+    } finally {
+      await done();
+    }
+  });
 });
