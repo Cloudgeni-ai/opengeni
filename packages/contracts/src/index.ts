@@ -119,6 +119,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { WorkspaceRecordingSettings } from "./recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
@@ -2582,6 +2583,7 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 ] as const;
 
 export * from "./transcription-recordings";
+export * from "./recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>
@@ -3203,6 +3205,8 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // The workspace's default realtime voice model; null or absent follows
       // the organization. Read leniently.
       realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
+      // Meeting recording defaults. Read leniently.
+      recordings: WorkspaceRecordingSettings.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3405,6 +3409,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
       // Default realtime voice model; null follows the organization again.
       realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
+      // Meeting recording defaults, replaced as a whole.
+      recordings: WorkspaceRecordingSettings.optional(),
     })
     .passthrough(),
 );

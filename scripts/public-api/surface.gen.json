@@ -28912,6 +28912,7 @@
         "$.realtimeDefaultModel": "ref(SessionRealtimeModel)? null",
         "$.realtimeVoice": "object?",
         "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
+        "$.recordings": "ref(WorkspaceRecordingSettings)?",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
@@ -30823,6 +30824,18 @@
         "$.models[]": "ref(WorkspaceRealtimeModelCatalogItem)"
       }
     },
+    "WorkspaceRecordingSettings": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.transcription": "object?",
+        "$.transcription.model": "string!",
+        "$.transcription.providerId": "string!"
+      }
+    },
     "WorkspaceSessionDefaults": {
       "io": [
         "input",
@@ -31229,7 +31242,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"session.humanInput.requested\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\"]"
+        "$": "enum=[\"\\\"recording.deleted\\\"\",\"\\\"recording.finished\\\"\",\"\\\"recording.speakers.updated\\\"\",\"\\\"recording.started\\\"\",\"\\\"recording.transcript.current_changed\\\"\",\"\\\"recording.transcript.failed\\\"\",\"\\\"recording.transcript.ready\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\"]"
       }
     }
   },

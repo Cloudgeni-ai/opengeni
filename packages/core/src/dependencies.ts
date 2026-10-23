@@ -112,6 +112,19 @@ export type SessionWorkflowClient = {
     objectKeys: string[];
     deleteAfter: Date;
   }) => Promise<void>;
+  /**
+   * Start a recording's transcript or deletion workflow. Starting one that is
+   * already running does nothing. Optional for embedded clients; the worker's
+   * recovery sweep starts any it misses.
+   */
+  startRecordingWorkflow?: (input: {
+    kind: "transcript" | "deletion";
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 

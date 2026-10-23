@@ -1779,6 +1779,15 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0930 meeting recordings: FORCE RLS; eight full-DML tables and an
+          // append-only event log.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 9
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 8
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1827,7 +1836,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
         1 + // 0909 session message search texts: read and insert, FORCE-RLS.
-        8; // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+        8 + // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
+        9; // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
       expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
