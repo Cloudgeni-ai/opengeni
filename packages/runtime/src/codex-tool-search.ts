@@ -68,12 +68,14 @@ export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
 
 /**
  * First-party tools the harness itself relies on: goal lifecycle, background
- * command polling, and the session-level wait, plus excel_run, the only way to
- * reach a workbook the person has open in Excel, and sandbox_file_publish, the
+ * command polling, and the session-level wait, plus sandbox_file_publish, the
  * last step of every task that hands the person a file. Hiding any of them
  * behind search spends a model round trip to rediscover the same schema (for
- * Excel, one of every four requests in a typical add-in chat; for a document
- * or spreadsheet the person asked for, one of every six). This is an exact
+ * a document or spreadsheet the person asked for, one of every six requests).
+ * Tools that only some chats can use stay behind search: excel_run, loaded up
+ * front in every chat, made agents in chats with no workbook read "here" as
+ * an open workbook and probe Excel; an add-in message names the tool, so the
+ * agent loads it by exact name when a workbook is there. This is an exact
  * per-tool exception, never the whole `opengeni` catalog, and it never widens
  * authority: only a tool the attempt's prepared server actually listed
  * (selection and permissions already applied) can be visible.
@@ -87,7 +89,6 @@ export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
   "command_read",
   "command_wait",
   "wait_for_input",
-  "excel_run",
   "sandbox_file_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
