@@ -43,6 +43,40 @@ Chunk start times are milliseconds from the recording's start. A new capture
 session on the same track (after a reload, say) simply continues the chunk
 numbering; the worker places each session at its own start time.
 
+## Embedding
+
+Products do not need to implement the capture contract by hand.
+
+`@opengeni/sdk/recordings` is the headless layer for any JavaScript host:
+
+- `OpenGeniRecordingsClient` wraps every recordings route:
+  `new OpenGeniRecordingsClient(client).listRecordings(workspaceId)`.
+- `RecordingUploader` stores each chunk in a local `RecordingChunkStore`
+  before anything else, uploads it straight to storage, confirms it, and
+  finalizes once capture stops. It retries through network loss with backoff,
+  re-reserves expired or refused URLs, and `resume()` finishes recordings an
+  earlier page or app run left behind. A cross-tab Web Lock keeps it from
+  finishing a recording another tab is still capturing.
+- `createIndexedDbRecordingChunkStore()` is the browser store (it asks the
+  browser to persist it); `createMemoryRecordingChunkStore()` is for tests.
+  Other hosts implement the small `RecordingChunkStore` interface over their
+  own storage, for example a React Native file system.
+- `createBrowserRecorder()` captures the microphone and, where the browser
+  can share it (Chromium on desktop), a tab's or the system's audio, each as
+  its own track, with `MediaRecorder` chunks every 5 seconds, input levels for
+  a meter, pause and resume, a screen wake lock on phones and an extra flush
+  when the page is hidden.
+
+`@opengeni/react/recordings` builds on it with hooks: `useRecorder` (capture
+plus background upload; recovers leftovers on mount), `useRecordings` (list
+with paging; polls while any is processing), `useRecording` (one recording
+and its versions, with rename, share, re-run, switch version and delete),
+`useTranscript` (every segment of a version, with speaker naming, moving a
+segment to another speaker and text edits), `useRecordingPeople` and
+`useRecordingModels`. The hooks use the provider's SDK client, or an explicit
+`recordings` client such as a host proxy that implements only the methods the
+mounted hooks call.
+
 ## Processing
 
 All processing runs in the background worker. It joins each track's chunks

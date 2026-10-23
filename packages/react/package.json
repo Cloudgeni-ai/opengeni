@@ -136,6 +136,10 @@
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"
     },
+    "./recordings": {
+      "types": "./src/recordings.ts",
+      "default": "./src/recordings.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
