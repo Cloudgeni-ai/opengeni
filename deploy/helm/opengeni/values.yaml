@@ -1476,6 +1476,11 @@ computeControl:
   # control-worker and turn-worker pods trust ca.crt (NODE_EXTRA_CA_CERTS)
   # and OPENGENI_COMPUTE_API_URL is https://<apiTls.host>:<apiPort>.
   apiTls:
+    # Optional public CA bundles in same-namespace ConfigMaps (name/key).
+    # Composed with compute ca.crt once at pod initialization, using the same
+    # workload image. Empty preserves the existing compute-only trust path.
+    # Source CA changes require a normal pod rollout; no live reload is implied.
+    additionalCaConfigMaps: []
     secretName: ""
     # Default: the API Service's cluster name, <name>.<namespace>.svc.
     host: ""
