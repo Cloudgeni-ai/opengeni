@@ -3001,7 +3001,9 @@ cancellation. Landing requires the exact tested tip, a fast-forward base fence a
 a final head/readiness reread; late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
 Candidate plan/source/selected-unit/ready success may land on red or unknown
-full-main CI. Failed cohorts split sequentially; failed singletons are durably
+full-main CI. A two-hour latency breaker retains raw measurements and deducts only
+bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
+trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
 parked without attribution, while unrelated ready heads proceed. Parking survives
 main advancement and readiness churn for the same PR head; new heads can re-enter.
 Comparable base evidence and trusted same-way failure fingerprints are not yet

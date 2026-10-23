@@ -546,10 +546,15 @@ unmeasured stages remain null. Active writes checkpoint samples and missing-run
 state in the durable Git ledger. Shadow-ci includes them in its next publication;
 strict read-only shadow only retains local evidence and never writes remote state.
 
-Telemetry reports the nearest-rank rolling 24-hour p95 from each exact
+Telemetry reports the nearest-rank rolling two-hour p95 from each exact
 head/ready-event's **first measured provider CI start**, deduplicating reruns and
 bisection candidates. More than 1,800 seconds emits a stop signal and holds new
-batch work/landing; reconciliation and observation continue. stage.json reports
+batch work, but an already-published trusted-green candidate can drain through
+all ordinary landing guards. Capacity-induced latency must not deadlock a tested
+candidate. Red/unknown results, new publication and retries remain held;
+reconciliation and observation continue. The window is based on the first CI
+start; an aged-out sample is unknown, not newly healthy. Historical stage data is
+retained, not reset. stage.json reports raw and capacity-adjusted p95, windowSeconds,
 sample count, coverageSince and completeWindow alongside the signal. This is a
 sample of heads that reached CI, not a latency claim for unknown/unstarted work
 or a completeness claim about all historical PRs. Small/partial samples are
@@ -557,6 +562,18 @@ explicit; missing history is unknown, never reset to healthy. Restart reloads th
 retained journal or Git samples; cache loss cannot fabricate historical timings.
 Observation gaps reset coverageSince rather than turning elapsed downtime into
 a complete window; retained real latency samples can still trigger the stop signal.
+Only bounded observed main-capacity holds are deducted. Both consecutive complete
+observations must show main demand alone preventing admission, the same main run
+and capacity configuration, and the same ready binding; the gap may not exceed
+five minutes. The normal planner must also select that head for publication with
+only the main-capacity gate removed; occupied batch slots, conflicts or other
+admission holds do not earn credit. The intervals describe controller backpressure, not provider queue
+time or proof of uninterrupted provider activity. Overlaps are unioned and clipped
+to readiness through the first CI start. Unknown scans, changed bindings, other-work
+capacity, and long observation gaps receive no credit. Credits persist with stage
+samples; old samples without credits remain raw. There is no historical backfill
+or hand-edited ledger recovery. The current slow sample therefore remains a hold
+until it leaves the recent window unless genuine recorded credits already exist.
 Use separate writable output directories for replicas; remote Git, not the local
 journal, fences their mutations. External historical reruns can be observed after
 the 15-minute cache window plus a rotating scan cycle (ceil(historical refs / 8)

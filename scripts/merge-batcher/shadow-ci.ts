@@ -77,7 +77,9 @@ export class ShadowCiController {
       return result;
     };
     if (o.telemetry?.status === "stop")
-      return wait("stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes");
+      return wait(
+        "stop signal: recent 2h sampled capacity-adjusted p95 ready-to-CI exceeds 30 minutes",
+      );
     if (
       o.candidates.some(
         (c) => !c.runs.length && o.missingRuns?.[c.manifest.batchId]?.status === "abandoned",
