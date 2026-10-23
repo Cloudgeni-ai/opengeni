@@ -672,7 +672,8 @@ async function openKeyboardFocus(visibleCount: number) {
     return date.getTime();
   });
   await page.clock.setFixedTime(noon);
-  await page.goto(`${url}?scenario=keyboard-focus`);
+  // Control hints isolate keyboard disclosure from the unrelated 15-second fallback poll.
+  await page.goto(`${url}?scenario=keyboard-focus&hints=1`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {
     await showMore("Today").click();
