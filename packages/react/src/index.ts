@@ -186,9 +186,19 @@ export type {
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
+  QueueRecallResult,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  latestRecallableQueuedTurn,
+  shouldRecallQueuedOnKey,
+  useQueuedPromptRecall,
+} from "./hooks/use-queued-prompt-recall";
+export type {
+  ComposerQueuedRecall,
+  QueuedPromptRecallOutcome,
+} from "./hooks/use-queued-prompt-recall";
 export {
   useLastStartedTurnPolicy,
   isLastStartedTurnPolicyEvent,

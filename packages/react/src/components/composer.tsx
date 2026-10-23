@@ -44,6 +44,10 @@ import type { ComposerState } from "../hooks/use-composer";
 import { shouldSteerOnKey, shouldSubmitOnKey } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import {
+  shouldRecallQueuedOnKey,
+  type ComposerQueuedRecall,
+} from "../hooks/use-queued-prompt-recall";
+import {
   useSlashCommands,
   type ConfirmState,
   type SlashCommandContext,
@@ -170,6 +174,8 @@ export type UseChatComposerControllerOptions = {
   runControl?: ComposerRunControl | undefined;
   /** A response is in progress; shows the Stop control under `runControl="stop"`. */
   running?: boolean | undefined;
+  /** Up in an empty composer pulls the latest waiting prompt back for editing. */
+  queuedRecall?: ComposerQueuedRecall | undefined;
 };
 
 /**
@@ -278,6 +284,7 @@ export function useChatComposerController({
   messages: messageOverrides,
   runControl = "pause",
   running = false,
+  queuedRecall,
 }: UseChatComposerControllerOptions) {
   const t = useOpenGeniText();
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
@@ -560,14 +567,82 @@ export function useChatComposerController({
     ],
   );
 
+  const recallingRef = useRef(false);
+  const caretToEndRef = useRef(false);
+  const placeCaretAtEnd = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, []);
+  useLayoutEffect(() => {
+    if (!caretToEndRef.current) return;
+    caretToEndRef.current = false;
+    placeCaretAtEnd();
+  }, [placeCaretAtEnd, visibleValue]);
+  const recallQueued = useCallback(async () => {
+    if (!queuedRecall || recallingRef.current) return;
+    recallingRef.current = true;
+    try {
+      const outcome = await queuedRecall.recall();
+      if (!mountedRef.current) return;
+      if (outcome === "recalled") {
+        caretToEndRef.current = true;
+        // The value may already be rendered (or be empty for a files-only
+        // prompt); settle the caret next frame either way.
+        window.requestAnimationFrame(() => {
+          if (!caretToEndRef.current) return;
+          caretToEndRef.current = false;
+          placeCaretAtEnd();
+        });
+      } else if (outcome === "already_sent") {
+        setNotice({ tone: "ok", message: messages.queuedPromptAlreadySent });
+      }
+    } catch {
+      // Recall is a convenience; the queue surface reports real failures.
+    } finally {
+      recallingRef.current = false;
+    }
+  }, [messages.queuedPromptAlreadySent, placeCaretAtEnd, queuedRecall]);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (paletteEnabled && paletteMounted && palette.onKeyDown(event)) return;
+      if (
+        queuedRecall?.available &&
+        !disabled &&
+        shouldRecallQueuedOnKey(event, {
+          value: event.currentTarget.value,
+          selectionStart: event.currentTarget.selectionStart,
+          selectionEnd: event.currentTarget.selectionEnd,
+          hasOtherContent:
+            (delivery.annotations?.length ?? 0) > 0 ||
+            (draft?.restoredResources.length ?? 0) > 0 ||
+            (attachments?.attachments.length ?? 0) > 0,
+          popupOpen: paletteMounted,
+        })
+      ) {
+        event.preventDefault();
+        void recallQueued();
+        return;
+      }
       if (!shouldSubmitOnKey(event)) return;
       event.preventDefault();
       void submit(shouldSteerOnKey(event) ? "steer" : "queue");
     },
-    [palette, paletteEnabled, paletteMounted, submit],
+    [
+      attachments,
+      delivery.annotations,
+      disabled,
+      draft?.restoredResources,
+      palette,
+      paletteEnabled,
+      paletteMounted,
+      queuedRecall,
+      recallQueued,
+      submit,
+    ],
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {

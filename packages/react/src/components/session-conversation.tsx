@@ -25,6 +25,7 @@ import {
   type UseSessionConversationOptions,
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
+import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -405,6 +406,11 @@ function ConversationView({
     feed.connectionState,
     feed.initialLoading,
   );
+  const queuedRecall = useQueuedPromptRecall({
+    queue,
+    composer,
+    enabled: sessionId !== null && !terminal,
+  });
   const formatError = useErrorMessage();
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
@@ -686,6 +692,7 @@ function ConversationView({
                         ...chromeProps,
                         queue,
                         composer,
+                        queuedRecall,
                         sessionStatus: status,
                         onOpenSession,
                         onComposerFocus: () =>
@@ -754,6 +761,7 @@ function ConversationView({
                   detail.session?.effectiveControl
                 }
                 queuedAheadCount={queue.queue.length}
+                queuedRecall={composerProps?.queuedRecall ?? queuedRecall}
               />
             </div>
           </>
