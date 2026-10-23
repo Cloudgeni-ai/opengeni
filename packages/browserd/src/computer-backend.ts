@@ -31,6 +31,8 @@ export type ComputerBackendObservation = {
   nodeCount: number;
   /** The platform stopped reading the tree early; listed nodes are real. */
   incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+  /** No elements were read because native CUA tools own this session's reads. */
+  readByNativeTools?: true | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
 };

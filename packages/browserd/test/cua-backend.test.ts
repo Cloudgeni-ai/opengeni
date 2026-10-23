@@ -280,6 +280,11 @@ describe("CUA desktop boundary", () => {
         arguments: {},
       };
       expect((await backend.callNative(native)).outcome).toBe("completed");
+      // Native tools now own element reads: an ordinary observation lists none
+      // and says why, instead of looking like an empty window.
+      const nativeOwned = await backend.observe(target.id);
+      expect(nativeOwned.roots).toEqual([]);
+      expect(nativeOwned.readByNativeTools).toBe(true);
       const nativeSession = fixture.calls.find((call) => call.name === "get_cursor_position")!.args
         .session as string;
       expired.add(nativeSession);
