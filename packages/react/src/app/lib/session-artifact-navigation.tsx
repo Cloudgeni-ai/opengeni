@@ -1,4 +1,7 @@
 import { openGeniConsolePath, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import { useCallback } from "react";
+import type { OpenGeniLinkResolver } from "../../components/open-geni-links";
+import { useNavigate } from "./navigation";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
 
@@ -39,4 +42,31 @@ export function consoleLinkResolver(target: OpenGeniLinkTarget): { href: string 
   if (target.kind === "sandbox-file" || target.workspaceId === null) return null;
   const href = openGeniConsolePath(target, target.workspaceId);
   return href ? { href } : null;
+}
+
+/**
+ * Agent `session:<id>` references to chats in this workspace. The link points
+ * at the chat's console route, so ⌘/Ctrl-click and the context menu treat it
+ * as an ordinary page (a new tab, or the browser from the desktop app), and a
+ * plain click opens the chat here without reloading the app.
+ */
+export function useSessionReferenceResolver(workspaceId: string): OpenGeniLinkResolver {
+  const navigate = useNavigate();
+  return useCallback(
+    (target: OpenGeniLinkTarget) => {
+      if (target.kind !== "session") return null;
+      const workspace = target.workspaceId ?? workspaceId;
+      const href = openGeniConsolePath(target, workspace);
+      if (!href) return null;
+      return {
+        href,
+        open: () =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId: workspace, sessionId: target.sessionId },
+          }),
+      };
+    },
+    [navigate, workspaceId],
+  );
 }
