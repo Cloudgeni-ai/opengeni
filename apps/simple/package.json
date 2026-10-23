@@ -14,6 +14,7 @@
     "mock-model": "bun scripts/mock-model.ts"
   },
   "dependencies": {
+    "@opengeni/agent-host": "workspace:*",
     "@opengeni/connect": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/react": "workspace:*",
@@ -27,9 +28,11 @@
     "vite": "^8.0.9"
   },
   "devDependencies": {
+    "@opengeni/desktop": "workspace:*",
     "@types/bun": "^1.4.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "electron": "44.7.2",
     "typescript": "7.0.2"
   }
 }

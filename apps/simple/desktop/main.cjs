@@ -2,6 +2,10 @@
 // app flow, then runs the app's own server locally with that person's token
 // and shows it in a window. The token is kept with Electron safeStorage (the
 // macOS keychain) and handed to the server on stdin only.
+//
+// "This computer" (letting the person's agents use this Mac) lives in
+// computer.ts and the window's bridge in preload.ts; desktop/bundle.ts bundles
+// both into desktop/out, which build.sh and dev.sh run first.
 const {
   app,
   BrowserWindow,
@@ -9,6 +13,7 @@ const {
   dialog,
   nativeTheme,
   net,
+  powerMonitor,
   safeStorage,
   shell,
 } = require("electron");
@@ -19,6 +24,10 @@ const { createServer } = require("node:net");
 const { hostname } = require("node:os");
 const { dirname, join } = require("node:path");
 
+const { createSimpleComputer, openedAtLogin } = require("./out/computer.cjs");
+
+const APP_ID = "ai.opengeni.simple";
+const PRODUCT_NAME = "Opengeni Simple";
 const SERVERS = [
   { label: "Staging", url: "https://staging.app.opengeni.ai" },
   { label: "Production", url: "https://app.opengeni.ai" },
@@ -26,7 +35,7 @@ const SERVERS = [
 // The only callback scheme the server accepts.
 const REDIRECT_URI = "opengeni://auth/callback";
 
-app.setName("Opengeni Simple");
+app.setName(PRODUCT_NAME);
 
 const userData = app.getPath("userData");
 const configPath = join(userData, "config.json");
@@ -34,6 +43,13 @@ let serverUrl = null;
 let server = null;
 let mainWindow = null;
 let quitting = false;
+/** The signed-in server's token while its app is open; null once signed out. */
+let activeToken = null;
+/** This Mac for the person's agents, from computer.ts; set once the app is ready. */
+let computer = null;
+/** Quitting was confirmed (or needs no question); the agent is stopping. */
+let quitConfirmed = false;
+let confirmingQuit = false;
 
 function normalizeServerUrl(raw) {
   try {
@@ -365,47 +381,131 @@ function stopServer() {
   server = null;
 }
 
-function showApp(origin) {
+function openExternalSafely(url) {
+  if (/^https?:/u.test(url)) void shell.openExternal(url);
+}
+
+function isBlank(url) {
+  return url === "" || url === "about:blank";
+}
+
+function sameOrigin(url, origin) {
+  try {
+    return new URL(url).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Connect flows (e.g. "Continue to Gmail") reserve a blank window during the
+ * click, cut it off from the page (`opener = null`), point it at the provider
+ * once the server answers, and then poll the server until the connection is
+ * done; the window itself is never the completion signal. Provider sign-in
+ * belongs in the person's own browser, where they are already signed in and
+ * where providers such as Google allow it (they refuse embedded app windows).
+ * So the blank window is accepted as a hidden placeholder and its first real
+ * destination decides: this app's own pages show in an app window, anything
+ * else opens in the browser and the placeholder closes. Every other link
+ * (downloads, docs) opens in the browser directly.
+ */
+function routeWindowOpen(contents, origin) {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isBlank(url)) {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          show: false,
+          width: 520,
+          height: 720,
+          title: PRODUCT_NAME,
+          backgroundColor: nativeTheme.shouldUseDarkColors ? "#121113" : "#ffffff",
+        },
+      };
+    }
+    openExternalSafely(url);
+    return { action: "deny" };
+  });
+  contents.on("did-create-window", (popup) => {
+    const route = (event, url) => {
+      if (isBlank(url)) return;
+      if (sameOrigin(url, origin)) {
+        if (!popup.isVisible()) popup.show();
+        return;
+      }
+      event.preventDefault();
+      openExternalSafely(url);
+      if (!popup.isVisible()) popup.destroy();
+    };
+    popup.webContents.on("will-navigate", route);
+    popup.webContents.on("will-redirect", route);
+    popup.webContents.setWindowOpenHandler(({ url }) => {
+      openExternalSafely(url);
+      return { action: "deny" };
+    });
+    // A placeholder the page never used goes with the page.
+    const closeUnused = () => {
+      if (!popup.isDestroyed() && !popup.isVisible()) popup.destroy();
+    };
+    contents.once("destroyed", closeUnused);
+    popup.once("closed", () => contents.removeListener("destroyed", closeUnused));
+  });
+}
+
+function showApp(origin, { hidden = false } = {}) {
   if (!mainWindow) {
     mainWindow = new BrowserWindow({
       width: 1200,
       height: 820,
       minWidth: 720,
       minHeight: 520,
-      title: "Opengeni Simple",
+      show: !hidden,
+      title: PRODUCT_NAME,
       backgroundColor: "#ffffff",
       titleBarStyle: "default",
-      webPreferences: { contextIsolation: true, sandbox: true },
+      webPreferences: {
+        contextIsolation: true,
+        sandbox: true,
+        preload: join(__dirname, "out", "preload.cjs"),
+        // The preload exposes the bridge only on this origin.
+        additionalArguments: [
+          `--opengeni-simple-origin=${origin}`,
+          `--opengeni-simple-product=${PRODUCT_NAME}`,
+        ],
+      },
     });
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-      if (/^https?:/u.test(url)) void shell.openExternal(url);
-      return { action: "deny" };
-    });
+    routeWindowOpen(mainWindow.webContents, origin);
     mainWindow.webContents.on("will-navigate", (event, url) => {
-      if (!url.startsWith(origin)) {
+      if (!sameOrigin(url, origin)) {
         event.preventDefault();
-        if (/^https?:/u.test(url)) void shell.openExternal(url);
+        openExternalSafely(url);
       }
     });
   }
   void mainWindow.loadURL(origin);
-  mainWindow.show();
+  if (!hidden) mainWindow.show();
 }
 
-/** Signed in: run the local server against this Opengeni and show the app. */
-async function openWorkspace(url, token) {
+/**
+ * Signed in: run the local server against this Opengeni and show the app.
+ * `hidden` when opened at login: the app runs, without a window, so this
+ * computer stays available to agents.
+ */
+async function openWorkspace(url, token, { hidden = false } = {}) {
   render({ view: "starting", server: url, error: null });
   serverUrl = url;
+  activeToken = token;
   saveServerUrl(url);
   buildMenu();
   stopServer();
   mainWindow?.destroy();
   mainWindow = null;
-  showApp(await startServer(token));
+  showApp(await startServer(token), { hidden });
   closeWelcome();
+  computer?.reset();
 }
 
 async function launch() {
@@ -414,7 +514,8 @@ async function launch() {
   );
   buildMenu();
   const token = serverUrl ? readToken(serverUrl) : null;
-  if (token && (await tokenStillValid(serverUrl, token))) return openWorkspace(serverUrl, token);
+  if (token && (await tokenStillValid(serverUrl, token)))
+    return openWorkspace(serverUrl, token, { hidden: openedAtLogin() });
   showWelcome();
 }
 
@@ -433,6 +534,10 @@ async function signOut() {
       () => {},
     );
   if (serverUrl) rmSync(tokenPathFor(serverUrl), { force: true });
+  // Agents keep this computer (its agent has its own credentials); the app
+  // just stops managing it as this person until they sign in again.
+  activeToken = null;
+  computer?.reset();
   showWelcome();
   stopServer();
   mainWindow?.destroy();
@@ -485,15 +590,75 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on("second-instance", () => reveal());
   app.whenReady().then(() => {
+    computer = createSimpleComputer({
+      appId: APP_ID,
+      productName: PRODUCT_NAME,
+      account: () => (serverUrl && activeToken ? { serverUrl, token: activeToken } : null),
+      appWindow: () =>
+        mainWindow && server ? { contents: mainWindow.webContents, origin: server.origin } : null,
+      reveal: () => reveal(),
+      log: note,
+    });
+    // The agent has its own credentials, so it starts whether or not this
+    // person's sign-in is still good.
+    void computer.boot().catch((caught) => note(`this computer: ${String(caught)}`));
     void launch();
+    // Nobody is there to answer when the system logs out, restarts or stops
+    // the app: quit without asking, so the app never holds that up.
+    const quitUnasked = () => {
+      quitConfirmed = true;
+      app.quit();
+    };
+    powerMonitor.on("shutdown", quitUnasked);
+    process.once("SIGTERM", quitUnasked);
+    process.once("SIGINT", quitUnasked);
   });
   app.on("activate", () => reveal());
   app.on("window-all-closed", () => {
-    // Stay running in the dock like a normal Mac app; the server keeps avatars painting.
+    // Stay running in the dock like a normal Mac app: the server keeps avatars
+    // painting, and agents keep this computer while it is connected.
   });
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
+    if (!quitConfirmed) {
+      event.preventDefault();
+      void confirmQuit();
+      return;
+    }
     quitting = true;
     cancelSignIn();
     stopServer();
   });
+  // However the app ends, its agent doesn't outlive it.
+  app.on("will-quit", () => computer?.shutdownNow());
+}
+
+/**
+ * Quitting stops the agent, so agents lose this computer until the app opens
+ * again. While it serves them, ask first; closing the window keeps it available.
+ */
+async function confirmQuit() {
+  if (confirmingQuit) return;
+  confirmingQuit = true;
+  try {
+    if (computer && (await computer.quitNeedsQuestion())) {
+      const options = {
+        type: "question",
+        buttons: ["Quit", "Cancel"],
+        defaultId: 0,
+        cancelId: 1,
+        message: `Quit ${PRODUCT_NAME}?`,
+        detail:
+          "Agents can't use this computer until you open the app again. To keep it available, close the window instead.",
+      };
+      const { response } = mainWindow
+        ? await dialog.showMessageBox(mainWindow, options)
+        : await dialog.showMessageBox(options);
+      if (response !== 0) return;
+    }
+    quitConfirmed = true;
+    await computer?.shutdown().catch(() => undefined);
+    app.quit();
+  } finally {
+    confirmingQuit = false;
+  }
 }
