@@ -428,6 +428,33 @@ describe("AttachedChromeCdpConnection", () => {
     expect(bridge.commands).toContainEqual({ type: "debugger.detach", tabId: "7" });
     expect(bridge.closed).toBe(true);
   });
+
+  test("polls slowly while unused and resumes fast polling on the next command", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+
+    // Fast while recently used.
+    await Bun.sleep(500);
+    expect(bridge.pollCount).toBeGreaterThan(4);
+
+    // After the quiet spell, at most about one poll a second.
+    await Bun.sleep(2_000);
+    const idleStart = bridge.pollCount;
+    await Bun.sleep(1_100);
+    expect(bridge.pollCount - idleStart).toBeLessThanOrEqual(2);
+
+    // A command wakes the idle wait at once and polling is fast again.
+    const beforeCommand = bridge.pollCount;
+    await connection.send("Target.getTargets");
+    await Bun.sleep(300);
+    expect(bridge.pollCount - beforeCommand).toBeGreaterThan(3);
+
+    await connection.shutdown();
+  }, 10_000);
 });
 
 for (const lost of [false, true]) {
