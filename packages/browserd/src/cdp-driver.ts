@@ -7482,8 +7482,8 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   // match both, so a re-render that shifted other data into the target's
   // place (the next item's button, a row now showing another invoice) does
   // not pass for it.
-  const markup = (node) => String(node.outerHTML || "").slice(0, 8192);
-  const text = (node) => String(node.textContent || "").slice(0, 8192);
+  const markup = (node) => String(node.outerHTML || "");
+  const text = (node) => String(node.textContent || "");
   const original = markup(element);
   const parent = element.parentElement;
   const parentText = parent ? text(parent) : "";

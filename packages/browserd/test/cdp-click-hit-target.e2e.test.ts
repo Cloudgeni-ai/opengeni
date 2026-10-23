@@ -228,6 +228,18 @@ e2e(
     } finally {
       await invoices.close();
     }
+    // The same far into a long list, past where a capped text comparison
+    // would look.
+    const long = await openFixture(
+      '<!doctype html><title>Long list</title><style>body{margin:0}button{display:block;width:120px;height:20px}</style><div id="list"></div><script>for(let i=0;i<1500;i++){const b=document.createElement("button");b.textContent="Delete";b.dataset.id=String(i);list.append(b)}globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.dataset.id)});const target=list.children[1450];target.addEventListener("pointerover",()=>{target.remove()});for(const b of list.children)b.removeAttribute("data-id");</script>',
+    );
+    try {
+      const refused = await long.click(long.initial, "Delete", "click", "#list > :nth-child(1451)");
+      expect(refused.state).not.toBe("completed");
+      expect(await long.evaluate("deleted")).toEqual([]);
+    } finally {
+      await long.close();
+    }
   },
   60_000,
 );
