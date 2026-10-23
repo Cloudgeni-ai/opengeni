@@ -273,7 +273,12 @@ export function appActions(): readonly AppAction[] {
     },
     {
       id: "chat.archive",
-      title: (_env, chat) => (chat?.archived ? "Restore" : "Archive"),
+      title: (env, chat) =>
+        chat && env.ops.archiveLabel
+          ? env.ops.archiveLabel(chat)
+          : chat?.archived
+            ? "Restore"
+            : "Archive",
       group: "chat",
       icon: ArchiveIcon,
       iconFor: (chat) => (chat?.archived ? ArchiveRestoreIcon : ArchiveIcon),

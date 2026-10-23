@@ -2242,6 +2242,9 @@ export type UpdateSessionRetentionRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  clientEventId?: string;
+  mode?: "pause_and_archive" | "hide_for_me";
+  confirmPause?: boolean;
   expectedVersion?: number;
 };
 

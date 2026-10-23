@@ -28475,7 +28475,10 @@
       "shape": {
         "$": "object",
         "$.archived": "boolean!",
-        "$.expectedVersion": "integer?"
+        "$.clientEventId": "string?",
+        "$.confirmPause": "boolean?",
+        "$.expectedVersion": "integer?",
+        "$.mode": "enum?=[\"\\\"hide_for_me\\\"\",\"\\\"pause_and_archive\\\"\"]"
       }
     },
     "UpdateSessionAttentionRequest": {

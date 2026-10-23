@@ -1744,6 +1744,19 @@ describe("createSessionProxyHandler", () => {
     expect((await rejection(off.browser.listSessionPage(WORKSPACE_ID))).status).toBe(404);
   });
 
+  test("personal archive proxy cannot acquire shared Pause from browser payloads", async () => {
+    const { browser, upstream } = setup();
+    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, {
+      archived: true,
+      mode: "pause_and_archive",
+      confirmPause: true,
+      clientEventId: "untrusted-pause",
+    });
+    expect(upstream.requests[0]!.body).toEqual({ archived: true, mode: "hide_for_me" });
+    await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, { archived: false });
+    expect(upstream.requests[1]!.body).toEqual({ archived: false, mode: "hide_for_me" });
+  });
+
   test("archives and restores the user's chat unless disabled", async () => {
     const { upstream, browser } = setup();
     await browser.updateSessionArchive(WORKSPACE_ID, SESSION_ID, {
@@ -1751,7 +1764,11 @@ describe("createSessionProxyHandler", () => {
       expectedVersion: 2,
     });
     expect(upstream.requests[0]!.method).toBe("PUT");
-    expect(upstream.requests[0]!.body).toEqual({ archived: true, expectedVersion: 2 });
+    expect(upstream.requests[0]!.body).toEqual({
+      archived: true,
+      expectedVersion: 2,
+      mode: "hide_for_me",
+    });
     const off = setup({ archive: false });
     expect(
       (

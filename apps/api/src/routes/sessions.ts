@@ -1,3 +1,4 @@
+import { readSessionResponsePair } from "./session-response-reads";
 import {
   legacyVariableSetFields,
   rejectLegacyVariableSetFields,
@@ -209,10 +210,10 @@ import {
   setSessionChannel,
   ChannelNotFoundError,
   setSessionAttention,
-  setSessionArchive,
   setSessionPin,
   SessionAttentionVersionConflictError,
   SessionArchiveVersionConflictError,
+  SessionArchiveConfirmationRequiredError,
   SessionPinVersionConflictError,
   SessionPinAccessError,
   SessionListAccessError,
@@ -350,6 +351,7 @@ import {
   acceptSessionUserMessage,
   validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
+  archiveHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequest,
   deleteHumanQueuePrompt,
@@ -810,23 +812,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
       if (kept.status === "updated") session = { ...session, retention: kept.retention };
     }
-    // Echo a requested usage limit so clients can tell this server applied it
-    // (older servers strip the unknown field and would run unlimited).
-    if ((payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined) {
-      const usageLimit = await sessionUsageLimitForRead(db, session, {
-        subjectId: grant.subjectId,
-      });
-      if (usageLimit) session = { ...session, usageLimit };
-    }
-    // Creation has committed by this point. Keep response projection outside
-    // the create-rejection boundary so a post-commit policy read cannot be
-    // misreported as though the session itself was rejected.
-    return c.json(
-      await measureSessionCreatePhase(deps.observability, "response_projection", () =>
-        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
-      ),
-      202,
+    // Creation committed. Independent response reads may overlap on a pool;
+    // keep policy failures outside the create-rejection boundary.
+    const [response, usageLimit] = await readSessionResponsePair(
+      db,
+      () =>
+        measureSessionCreatePhase(deps.observability, "response_projection", () =>
+          withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+        ),
+      () =>
+        (payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined
+          ? sessionUsageLimitForRead(db, session, { subjectId: grant.subjectId })
+          : Promise.resolve(undefined),
     );
+    return c.json(usageLimit ? { ...response, usageLimit } : response, 202);
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -1352,23 +1351,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // Independent reads of the already-authorized session: the effective
     // policy context depends only on the session row, not on the activity or
     // schedule annotations, so all three are read concurrently.
-    const [activity, scheduleTargets, policy] = await Promise.all([
-      backgroundCommandActivityForSessions(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionIds: [sessionId],
-      }),
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? sessionScheduleTargets(db, workspaceId, [sessionId])
-        : Promise.resolve(NO_SESSION_SCHEDULE_TARGETS),
-      loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
-    ]);
-    // the task's usage projection. A failed read is `unavailable`,
-    // never $0 or unlimited; it does not fail the session read.
-    const usageLimit = await sessionUsageLimitForRead(db, session, {
-      subjectId: grant.subjectId,
-    });
+    const [[activity, scheduleTargets, policy], usageLimit] = await readSessionResponsePair(
+      db,
+      () =>
+        Promise.all([
+          backgroundCommandActivityForSessions(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionIds: [sessionId],
+          }),
+          hasPermission(grant.permissions, "scheduled_tasks:run") &&
+          hasPermission(grant.permissions, "sessions:control")
+            ? sessionScheduleTargets(db, workspaceId, [sessionId])
+            : Promise.resolve(NO_SESSION_SCHEDULE_TARGETS),
+          loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
+        ]),
+      () => sessionUsageLimitForRead(db, session, { subjectId: grant.subjectId }),
+    );
     return c.json(
       sessionResponse(
         {
@@ -2371,8 +2370,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Personal chat organization: archived roots leave the ordinary rail only
   // for this member and remain recoverable through the archived list view.
-  // Archiving a chat you started that still has work also pauses it (see
-  // pauseOwnArchivedWork); archiving anyone else's chat only hides it for you.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2388,22 +2385,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session archive request" });
     }
     try {
-      const archived = await setSessionArchive(db, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        sessionId,
-        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-        ...parsed.data,
-      });
-      if (!archived) throw new HTTPException(404, { message: "session not found" });
-      let session = archived;
-      if (parsed.data.archived) {
-        try {
-          session = await pauseOwnArchivedWork(deps, grant, workspaceId, archived);
-        } catch (error) {
-          return commandConflictResponse(c, error);
-        }
+      const pause = parsed.data.archived && parsed.data.mode !== "hide_for_me";
+      if (pause && !hasPermission(grant.permissions, "sessions:control")) {
+        throw new HTTPException(403, {
+          message:
+            "Pausing a chat requires sessions:control. Use Hide for me to change only personal visibility.",
+        });
       }
+      const session = await archiveHumanSessionWorkstream(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          sessionId,
+          authorizationSurface: "http",
+        },
+        {
+          ...parsed.data,
+          pause,
+          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+        },
+      );
+      if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
         await withEffectivePolicy(
           deps,
@@ -2422,7 +2426,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           409,
         );
       }
-      throw error;
+      return commandConflictResponse(c, error);
     }
   });
 
@@ -6709,53 +6713,10 @@ function zodErrorFields(error: ZodError): string {
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
-/** Statuses in which a chat still has work that would keep running after it is archived. */
-const ARCHIVE_LIVE_WORK_STATUSES: ReadonlySet<string> = new Set([
-  "queued",
-  "running",
-  "requires_action",
-  "recovering",
-  "waiting_capacity",
-]);
-
-/**
- * Archiving a chat you started means you are done with it, so work it still
- * has (a running or queued turn, a pending wait, an active goal) must not keep
- * running out of sight. It is paused exactly like the Pause control: reversible
- * with Resume, and a paused chat dispatches no goal continuations either. A
- * chat someone else started is never paused: archiving only hides it for you.
- * Settled chats are left alone so a later message to them still just runs.
- */
-async function pauseOwnArchivedWork(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  workspaceId: string,
-  session: Session,
-): Promise<Session> {
-  if (session.createdBy.kind !== "subject" || session.createdBy.subjectId !== grant.subjectId)
-    return session;
-  if (!hasPermission(grant.permissions, "sessions:control")) return session;
-  if (session.effectiveControl.directState === "paused") return session;
-  const liveWork =
-    ARCHIVE_LIVE_WORK_STATUSES.has(session.status) ||
-    session.activeTurnId !== null ||
-    Boolean(session.inputWait) ||
-    (await getSessionGoal(deps.db, workspaceId, session.id))?.status === "active";
-  if (!liveWork) return session;
-  const paused = await controlHumanSessionWorkstream(
-    deps,
-    { accountId: grant.accountId, workspaceId, sessionId: session.id, subjectId: grant.subjectId },
-    {
-      action: "pause",
-      reason: "Archived",
-      // One pause per archive: a retried archive replays it instead of pausing twice.
-      clientEventId: `archive-pause:${session.id}:${session.archiveVersion}`,
-    },
-  );
-  return { ...session, effectiveControl: paused.effectiveControl };
-}
-
 function commandConflictResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionArchiveConfirmationRequiredError) {
+    return c.json({ code: error.code, message: error.message }, 409);
+  }
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

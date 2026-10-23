@@ -35357,40 +35357,142 @@ export async function setSessionArchive(
     sessionId: string;
     archived: boolean;
     expectedVersion?: number | undefined;
+    /** Trusted composition hook, inside the personal-state fence and before hiding. */
+    beforeArchive?:
+      | ((tx: SessionActivityDatabase, archiveVersion: number) => Promise<boolean | void>)
+      | undefined;
     /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
     personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
-  return await withWorkspaceSubjectRls(
+  return await withWorkspaceSubjectSessionActivityRls(
     db,
     input.workspaceId,
     input.subjectId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        await requireSessionPersonalStateWriteAuthority(tx, input);
+    async (tx) => {
+      await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
+      await requireSessionPersonalStateWriteAuthority(tx, input);
 
-        const [storedSession] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              isNull(schema.sessions.parentSessionId),
-            ),
-          )
-          .limit(1);
-        if (!storedSession) return null;
-        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
-          storedSession,
-        ]);
-        if (!session)
-          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
+      const [storedSession] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!storedSession) return null;
+      const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+        storedSession,
+      ]);
+      if (!session) throw new Error(`Session event cursor missing for session ${input.sessionId}`);
 
-        const [existing] = await tx
-          .select()
-          .from(schema.sessionPins)
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionPins)
+        .where(
+          and(
+            eq(schema.sessionPins.workspaceId, input.workspaceId),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+            eq(schema.sessionPins.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      const current = mapSessionArchive(existing);
+      if (current.archived === input.archived) {
+        if (input.archived && input.beforeArchive) {
+          const replay = await input.beforeArchive(tx, current.archiveVersion);
+          // An identical receipt may replay the original pre-transition CAS.
+          // A fresh pause intent must not bypass a stale archive precondition.
+          if (
+            input.expectedVersion !== undefined &&
+            input.expectedVersion !== current.archiveVersion &&
+            !replay
+          ) {
+            throw new SessionArchiveVersionConflictError(current);
+          }
+        }
+        return await mapSessionWithControl(
+          tx as unknown as Database,
+          session,
+          [],
+          mapSessionPin(existing),
+          mapSessionAttention(session, existing),
+          current,
+        );
+      }
+      if (input.expectedVersion !== undefined && input.expectedVersion !== current.archiveVersion) {
+        throw new SessionArchiveVersionConflictError(current);
+      }
+
+      if (input.archived && input.beforeArchive) {
+        await input.beforeArchive(tx, current.archiveVersion + 1);
+      }
+
+      let state = existing ?? null;
+      if (!existing) {
+        const [inserted] = await tx
+          .insert(schema.sessionPins)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            sessionId: input.sessionId,
+            pinned: false,
+            pinnedAt: null,
+            version: 0,
+            activelyWorking: false,
+            archived: true,
+            archivedAt: new Date(),
+            attentionVersion: 0,
+            archiveVersion: 1,
+          })
+          // A turn claim may have created this subject's row for the same
+          // session between the read above and here, to acknowledge a consumed
+          // child lifecycle notice. That row is archive-neutral and pin-neutral
+          // (the absent-row projection), so this is the same false -> true
+          // archive transition; its attention fence and version stay untouched.
+          .onConflictDoUpdate({
+            target: [
+              schema.sessionPins.subjectId,
+              schema.sessionPins.workspaceId,
+              schema.sessionPins.sessionId,
+            ],
+            set: {
+              archived: true,
+              archivedAt: new Date(),
+              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+              pinned: false,
+              pinnedAt: null,
+              activelyWorking: false,
+            },
+          })
+          .returning();
+        state = inserted ?? null;
+      } else {
+        const [updated] = await tx
+          .update(schema.sessionPins)
+          .set({
+            archived: input.archived,
+            archivedAt: input.archived ? new Date() : null,
+            archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+            ...(input.archived
+              ? {
+                  pinned: false,
+                  pinnedAt: null,
+                  activelyWorking: false,
+                  version: existing.pinned
+                    ? sql`${schema.sessionPins.version} + 1`
+                    : sql`${schema.sessionPins.version}`,
+                  attentionVersion: existing.activelyWorking
+                    ? sql`${schema.sessionPins.attentionVersion} + 1`
+                    : sql`${schema.sessionPins.attentionVersion}`,
+                }
+              : {}),
+          })
           .where(
             and(
               eq(schema.sessionPins.workspaceId, input.workspaceId),
@@ -35398,108 +35500,21 @@ export async function setSessionArchive(
               eq(schema.sessionPins.sessionId, input.sessionId),
             ),
           )
-          .limit(1);
-        const current = mapSessionArchive(existing);
-        if (current.archived === input.archived) {
-          return await mapSessionWithControl(
-            tx as unknown as Database,
-            session,
-            [],
-            mapSessionPin(existing),
-            mapSessionAttention(session, existing),
-            current,
-          );
-        }
-        if (
-          input.expectedVersion !== undefined &&
-          input.expectedVersion !== current.archiveVersion
-        ) {
-          throw new SessionArchiveVersionConflictError(current);
-        }
-
-        let state = existing ?? null;
-        if (!existing) {
-          const [inserted] = await tx
-            .insert(schema.sessionPins)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: input.subjectId,
-              sessionId: input.sessionId,
-              pinned: false,
-              pinnedAt: null,
-              version: 0,
-              activelyWorking: false,
-              archived: true,
-              archivedAt: new Date(),
-              attentionVersion: 0,
-              archiveVersion: 1,
-            })
-            // A turn claim may have created this subject's row for the same
-            // session between the read above and here, to acknowledge a consumed
-            // child lifecycle notice. That row is archive-neutral and pin-neutral
-            // (the absent-row projection), so this is the same false -> true
-            // archive transition; its attention fence and version stay untouched.
-            .onConflictDoUpdate({
-              target: [
-                schema.sessionPins.subjectId,
-                schema.sessionPins.workspaceId,
-                schema.sessionPins.sessionId,
-              ],
-              set: {
-                archived: true,
-                archivedAt: new Date(),
-                archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-                pinned: false,
-                pinnedAt: null,
-                activelyWorking: false,
-              },
-            })
-            .returning();
-          state = inserted ?? null;
-        } else {
-          const [updated] = await tx
-            .update(schema.sessionPins)
-            .set({
-              archived: input.archived,
-              archivedAt: input.archived ? new Date() : null,
-              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-              ...(input.archived
-                ? {
-                    pinned: false,
-                    pinnedAt: null,
-                    activelyWorking: false,
-                    version: existing.pinned
-                      ? sql`${schema.sessionPins.version} + 1`
-                      : sql`${schema.sessionPins.version}`,
-                    attentionVersion: existing.activelyWorking
-                      ? sql`${schema.sessionPins.attentionVersion} + 1`
-                      : sql`${schema.sessionPins.attentionVersion}`,
-                  }
-                : {}),
-            })
-            .where(
-              and(
-                eq(schema.sessionPins.workspaceId, input.workspaceId),
-                eq(schema.sessionPins.subjectId, input.subjectId),
-                eq(schema.sessionPins.sessionId, input.sessionId),
-              ),
-            )
-            .returning();
-          state = updated ?? null;
-        }
-        const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
-          session.id,
-        ]);
-        return await mapSessionWithControl(
-          tx as unknown as Database,
-          session,
-          mcpServers.get(session.id) ?? [],
-          mapSessionPin(state),
-          mapSessionAttention(session, state),
-          mapSessionArchive(state),
-        );
-      }),
+          .returning();
+        state = updated ?? null;
+      }
+      const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+        session.id,
+      ]);
+      return await mapSessionWithControl(
+        tx as unknown as Database,
+        session,
+        mcpServers.get(session.id) ?? [],
+        mapSessionPin(state),
+        mapSessionAttention(session, state),
+        mapSessionArchive(state),
+      );
+    },
   );
 }
 

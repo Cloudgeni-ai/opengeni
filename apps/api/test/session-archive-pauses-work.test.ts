@@ -8,6 +8,8 @@ import {
   createDb,
   createSession,
   createSessionGoal,
+  setSessionArchive,
+  mutateSessionControlInTransaction,
   createWorkspace,
   initializeSessionStartAtomically,
   migrate,
@@ -129,13 +131,14 @@ async function archive(
   chat: { workspaceId: string; sessionId: string },
   authorization: string,
   archived = true,
+  options: Record<string, unknown> = { confirmPause: true },
 ) {
   const response = await app.request(
     `http://x/v1/workspaces/${chat.workspaceId}/sessions/${chat.sessionId}/archive`,
     {
       method: "PUT",
       headers: { authorization, "content-type": "application/json" },
-      body: JSON.stringify({ archived }),
+      body: JSON.stringify({ archived, ...options }),
     },
   );
   expect(response.status).toBe(200);
@@ -228,28 +231,30 @@ describe("archiving a chat", () => {
     expect(await pauseEvents(chat.sessionId)).toBe(1);
   });
 
-  test("archiving a chat someone else started only hides it for you", async () => {
+  test("archiving a shared chat pauses it for everyone, even when a colleague started it", async () => {
     if (!available) return;
     const chat = await freshChat();
     const archived = await archive(chat, await bearer(chat, COLLEAGUE));
     expect(archived.archived).toBe(true);
-    expect(archived.effectiveControl.directState).toBe("active");
-    expect(await directState(chat.sessionId)).toBe("active");
-    expect(await pauseEvents(chat.sessionId)).toBe(0);
+    expect(archived.effectiveControl.directState).toBe("paused");
+    expect(await directState(chat.sessionId)).toBe("paused");
+    expect(await pauseEvents(chat.sessionId)).toBe(1);
   });
 
   test("without permission to control chats, archiving only hides it", async () => {
     if (!available) return;
     const chat = await freshChat();
-    await archive(chat, await bearer(chat, OWNER, ["sessions:read"]));
+    await archive(chat, await bearer(chat, OWNER, ["sessions:read"]), true, {
+      mode: "hide_for_me",
+    });
     expect(await directState(chat.sessionId)).toBe("active");
   });
 
-  test("a settled chat is not paused, but an idle chat with an active goal is", async () => {
+  test("idle chats pause too, including active goals", async () => {
     if (!available) return;
     const settled = await freshChat("idle");
     await archive(settled, await bearer(settled, OWNER));
-    expect(await directState(settled.sessionId)).toBe("active");
+    expect(await directState(settled.sessionId)).toBe("paused");
 
     const pursuing = await freshChat("idle");
     await createSessionGoal(db, {
@@ -262,4 +267,201 @@ describe("archiving a chat", () => {
     await archive(pursuing, await bearer(pursuing, OWNER));
     expect(await directState(pursuing.sessionId)).toBe("paused");
   });
+  const rawArchive = async (
+    chat: { workspaceId: string; sessionId: string },
+    authorization: string,
+    body: Record<string, unknown>,
+  ) =>
+    await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions/${chat.sessionId}/archive`,
+      {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  const archivedFor = async (chat: { workspaceId: string; sessionId: string }, subject = OWNER) => {
+    const [row] = await admin<
+      { archived: boolean }[]
+    >`select archived from session_pins where workspace_id = ${chat.workspaceId} and session_id = ${chat.sessionId} and subject_id = ${subject}`;
+    return row?.archived ?? false;
+  };
+
+  test("active work requires confirmation and a rejected request does not hide or pause", async () => {
+    const chat = await freshChat();
+    const response = await rawArchive(chat, await bearer(chat, OWNER), { archived: true });
+    expect(response.status).toBe(409);
+    expect((await response.json()).code).toBe("session_archive_confirmation_required");
+    expect(await archivedFor(chat)).toBe(false);
+    expect(await directState(chat.sessionId)).toBe("active");
+    expect(await pauseEvents(chat.sessionId)).toBe(0);
+    expect(postCommitTasks.length).toBe(0);
+  });
+
+  test("an idle chat pauses without confirmation", async () => {
+    const chat = await freshChat("idle");
+    await archive(chat, await bearer(chat, OWNER), true, {});
+    expect(await directState(chat.sessionId)).toBe("paused");
+  });
+
+  test("read-only default archive is denied, explicit hide changes no shared control", async () => {
+    const chat = await freshChat();
+    const authorization = await bearer(chat, COLLEAGUE, ["sessions:read"]);
+    expect(
+      (await rawArchive(chat, authorization, { archived: true, confirmPause: true })).status,
+    ).toBe(403);
+    expect(await archivedFor(chat, COLLEAGUE)).toBe(false);
+    await archive(chat, authorization, true, { mode: "hide_for_me" });
+    expect(await directState(chat.sessionId)).toBe("active");
+    expect(await archivedFor(chat)).toBe(false);
+  });
+
+  test("hide can upgrade to Pause, and exact intent retry cannot re-pause after Resume", async () => {
+    const chat = await freshChat();
+    const authorization = await bearer(chat, OWNER);
+    await archive(chat, authorization, true, { mode: "hide_for_me" });
+    const intent = {
+      clientEventId: crypto.randomUUID(),
+      mode: "pause_and_archive",
+      confirmPause: true,
+    };
+    await archive(chat, authorization, true, intent);
+    expect(await directState(chat.sessionId)).toBe("paused");
+    const response = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions/${chat.sessionId}/control`,
+      {
+        method: "POST",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({ action: "resume", clientEventId: crypto.randomUUID() }),
+      },
+    );
+    expect(response.status).toBe(200);
+    await flushPostCommitTasks();
+    await archive(chat, authorization, true, intent);
+    expect(await directState(chat.sessionId)).toBe("active");
+    expect(
+      (
+        await rawArchive(chat, authorization, {
+          archived: true,
+          ...intent,
+          clientEventId: crypto.randomUUID(),
+          expectedVersion: 0,
+        })
+      ).status,
+    ).toBe(409);
+    expect(await directState(chat.sessionId)).toBe("active");
+    await archive(chat, authorization, true, { ...intent, clientEventId: crypto.randomUUID() });
+    expect(await directState(chat.sessionId)).toBe("paused");
+  });
+
+  test("stale archive revision cannot pause or hide", async () => {
+    const chat = await freshChat("idle");
+    expect(
+      (await rawArchive(chat, await bearer(chat, OWNER), { archived: true, expectedVersion: 99 }))
+        .status,
+    ).toBe(409);
+    expect(await archivedFor(chat)).toBe(false);
+    expect(await directState(chat.sessionId)).toBe("active");
+  });
+
+  test("failure after native Pause rolls back both Pause and personal archive", async () => {
+    const chat = await freshChat("idle");
+    await expect(
+      setSessionArchive(db, {
+        ...chat,
+        subjectId: OWNER,
+        archived: true,
+        beforeArchive: async (tx) => {
+          await mutateSessionControlInTransaction(tx, {
+            ...chat,
+            actor: { type: "human", subjectId: OWNER },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          });
+          throw new Error("injected archive failure");
+        },
+      }),
+    ).rejects.toThrow("injected archive failure");
+    expect(await directState(chat.sessionId)).toBe("active");
+    expect(await archivedFor(chat)).toBe(false);
+    expect(await pauseEvents(chat.sessionId)).toBe(0);
+  });
+
+  test("concurrent retries commit one Pause and one personal archive revision", async () => {
+    const chat = await freshChat("idle");
+    const authorization = await bearer(chat, OWNER);
+    const body = { archived: true, expectedVersion: 0, clientEventId: crypto.randomUUID() };
+    const responses = await Promise.all([
+      rawArchive(chat, authorization, body),
+      rawArchive(chat, authorization, body),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    await flushPostCommitTasks();
+    expect(await pauseEvents(chat.sessionId)).toBe(1);
+    const [row] = await admin<
+      { archive_version: number }[]
+    >`select archive_version from session_pins where session_id = ${chat.sessionId} and subject_id = ${OWNER}`;
+    expect(row?.archive_version).toBe(1);
+  });
+
+  test("a resumed descendant of a paused parent still requires archive confirmation", async () => {
+    const chat = await freshChat("idle");
+    const child = await createSession(db, {
+      accountId: chat.accountId,
+      workspaceId: chat.workspaceId,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      parentSessionId: chat.sessionId,
+      createdBy: { kind: "subject", subjectId: OWNER },
+    });
+    const authorization = await bearer(chat, OWNER);
+    const control = async (id: string, action: "pause" | "resume") => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${chat.workspaceId}/sessions/${id}/control`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({ action, clientEventId: crypto.randomUUID() }),
+        },
+      );
+      expect(response.status).toBe(200);
+      await flushPostCommitTasks();
+    };
+    await control(chat.sessionId, "pause");
+    await control(child.id, "resume");
+    await initializeSessionStartAtomically(db, {
+      accountId: chat.accountId,
+      workspaceId: chat.workspaceId,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      latencyModeFallback: "standard",
+    });
+    expect(await directState(chat.sessionId)).toBe("paused");
+    const response = await rawArchive(chat, authorization, { archived: true });
+    expect(response.status).toBe(409);
+    expect(await archivedFor(chat)).toBe(false);
+    await archive(chat, authorization);
+    expect(await archivedFor(chat)).toBe(true);
+  });
+
+  for (const initialState of ["running", "stopping"])
+    test(`a ${initialState} background command in an idle chat requires confirmation and is cancelled by Pause`, async () => {
+      const chat = await freshChat("idle");
+      await admin`insert into session_background_commands (account_id, workspace_id, session_id, provider, state, control_workspace_id, enrollment_id, connection_instance_id, op_id, cancel_requested_at, cancel_requested_by)
+      values (${chat.accountId}, ${chat.workspaceId}, ${chat.sessionId}, 'connected_machine', ${initialState}, ${chat.workspaceId}, ${crypto.randomUUID()}, 'archive-fixture', ${crypto.randomUUID()}, ${initialState === "stopping" ? new Date() : null}, ${initialState === "stopping" ? OWNER : null})`;
+      const authorization = await bearer(chat, OWNER);
+      expect((await rawArchive(chat, authorization, { archived: true })).status).toBe(409);
+      expect(await archivedFor(chat)).toBe(false);
+      await archive(chat, authorization);
+      const [command] = await admin<
+        { state: string; cancel_requested_at: Date | null }[]
+      >`select state, cancel_requested_at from session_background_commands where session_id = ${chat.sessionId}`;
+      expect(command?.state).toBe("stopping");
+      expect(command?.cancel_requested_at).not.toBeNull();
+    });
 });
