@@ -1697,6 +1697,9 @@
 :where(.og-root).max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\] {
     max-height: min(32rem, var(--radix-popover-content-available-height));
   }
+:where(.og-root).max-h-\[min\(36rem\,55dvh\)\],:where(.og-root) .max-h-\[min\(36rem\,55dvh\)\] {
+    max-height: min(36rem, 55dvh);
+  }
 :where(.og-root).max-h-\[min\(480px\,70dvh\)\],:where(.og-root) .max-h-\[min\(480px\,70dvh\)\] {
     max-height: min(480px, 70dvh);
   }
@@ -4052,6 +4055,12 @@
   }
 :where(.og-root).bg-status-waiting,:where(.og-root) .bg-status-waiting {
     background-color: var(--color-status-waiting);
+  }
+:where(.og-root).bg-status-waiting\/5,:where(.og-root) .bg-status-waiting\/5 {
+    background-color: var(--color-status-waiting);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-status-waiting) 5%, transparent);
+    }
   }
 :where(.og-root).bg-status-waiting\/10,:where(.og-root) .bg-status-waiting\/10 {
     background-color: var(--color-status-waiting);

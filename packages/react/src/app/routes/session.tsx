@@ -33,6 +33,11 @@ import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
+import { waitingDescendants } from "../lib/descendant-requests";
+import {
+  useDescendantRequestsRefresh,
+  useLineagePollInterval,
+} from "../lib/use-descendant-requests-refresh";
 import { useStreamHealthTelemetry } from "../lib/stream-health";
 import { markIntegrationConnectRedirect } from "../lib/integration-connect-redirect";
 import { noteTurnFailureAction } from "../lib/turn-failure-actions";
@@ -288,6 +293,7 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
     default: module.SessionSkillReviews,
@@ -1171,15 +1177,28 @@ export function SessionRoute({
     [providerLogos],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
-  // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
-  // "running" count doesn't go stale on CHILD-side status changes that emit no
-  // event on this parent's feed. Must sit above the loading/error early-returns
-  // — it's a hook, so it has to run unconditionally on every render.
+  // refresh it instantly on spawn/worker-completion, list hints on child-side
+  // status changes, and a poll (faster when hints are unavailable) ensures the
+  // pill's "running" count doesn't go stale on CHILD-side status changes that
+  // emit no event on this parent's feed. Must sit above the loading/error
+  // early-returns — it's a hook, so it has to run unconditionally on every render.
+  const lineagePollIntervalMs = useLineagePollInterval(workspaceId);
   const lineage = useSessionLineage(sessionId, {
     events,
-    pollIntervalMs: 30_000,
+    pollIntervalMs: lineagePollIntervalMs,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  // Sub-sessions waiting on the person surface on this page: list hints and
+  // this agent answering one re-read the tree at once.
+  const descendantRefreshSignal = useDescendantRequestsRefresh({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    events,
+    nodes: agentNodes,
+    sessionRunning: session?.status === "running",
+    refreshLineage: lineage.refresh,
+  });
   // The same lineage read names the agents the timeline spawns, messages, and
   // hears from (parent and descendants), following renames.
   const lineageTitles = useMemo(() => {
@@ -1325,6 +1344,8 @@ export function SessionRoute({
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
+      descendantRefreshSignal={descendantRefreshSignal}
+      onDescendantResolved={() => void lineage.refresh()}
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
@@ -1340,6 +1361,13 @@ export function SessionRoute({
         void navigate({
           to: "/workspaces/$workspaceId/sessions/$sessionId",
           params: { workspaceId, sessionId: nextSessionId },
+        })
+      }
+      onOpenSessionAt={(nextSessionId, at) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId: nextSessionId },
+          search: at !== null ? { at } : {},
         })
       }
       onMemoryClick={(memoryId) =>
@@ -1940,6 +1968,10 @@ function SessionChatPane(props: {
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
+  /** Bumped when a sub-session in this tree changed; open request cards re-read. */
+  descendantRefreshSignal: number;
+  /** A sub-session's request was settled from this page: re-read the tree. */
+  onDescendantResolved: () => void;
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: OlderHistoryLoader;
@@ -1952,6 +1984,8 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
+  /** Open a sub-session at one moment of its timeline (where it asked), when known. */
+  onOpenSessionAt: (sessionId: string, at: number | null) => void;
   /** Current titles for the agents this session spawns, messages, and hears from. */
   resolveSessionTitle: (sessionId: string) => string | null;
   /** Deep-link a timeline memory step to its first-class workspace Memory record. */
@@ -2198,6 +2232,10 @@ function SessionChatPane(props: {
     terminal,
   ]);
   const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
+  const waitingSubSessions = useMemo(
+    () => waitingDescendants(props.agentNodes),
+    [props.agentNodes],
+  );
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -3752,6 +3790,24 @@ function SessionChatPane(props: {
                   })
                 }
               />
+              {waitingSubSessions.length > 0 ? (
+                <Suspense fallback={null}>
+                  <DescendantRequests
+                    client={context.client}
+                    workspaceId={props.session.workspaceId}
+                    parentSessionId={props.session.id}
+                    waiting={waitingSubSessions}
+                    onOpenSession={props.onOpenSessionAt}
+                    onResolved={props.onDescendantResolved}
+                    refreshSignal={props.descendantRefreshSignal}
+                    loadSkillReview={loadSkillReview}
+                    allowedSaveTo={secretSaveTargets(
+                      context.accessContext,
+                      props.session.workspaceId,
+                    )}
+                  />
+                </Suspense>
+              ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
                 onOpenSession={props.onOpenSession}
