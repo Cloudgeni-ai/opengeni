@@ -43,20 +43,24 @@ function schedule(id: string, name: string, status: ScheduledTask["status"]): Sc
 }
 
 let server: ScheduledTask[] = [];
-let pending: ReturnType<typeof deferred<ScheduledTask>> | null = null;
-const pauseScheduledTask = mock(async (_workspace: string, id: string) => {
-  pending = deferred<ScheduledTask>();
-  const result = await pending.promise;
-  server = server.map((task) => (task.id === id ? { ...task, status: "paused" } : task));
-  return result;
+/** One open save per schedule; the test settles it. */
+const saves = new Map<string, ReturnType<typeof deferred<void>>>();
+/** While set, list reads take their snapshot at once and answer when it resolves. */
+let listGate: ReturnType<typeof deferred<void>> | null = null;
+async function save(id: string, status: ScheduledTask["status"]) {
+  const gate = deferred<void>();
+  saves.set(id, gate);
+  await gate.promise;
+  server = server.map((task) => (task.id === id ? { ...task, status } : task));
+  return { ...server.find((task) => task.id === id)! };
+}
+const pauseScheduledTask = mock((_workspace: string, id: string) => save(id, "paused"));
+const resumeScheduledTask = mock((_workspace: string, id: string) => save(id, "active"));
+const listScheduledTasks = mock(async () => {
+  const snapshot = server.map((task) => ({ ...task }));
+  if (listGate) await listGate.promise;
+  return snapshot;
 });
-const resumeScheduledTask = mock(async (_workspace: string, id: string) => {
-  pending = deferred<ScheduledTask>();
-  const result = await pending.promise;
-  server = server.map((task) => (task.id === id ? { ...task, status: "active" } : task));
-  return result;
-});
-const listScheduledTasks = mock(async () => server.map((task) => ({ ...task })));
 const client = {
   listScheduledTasks,
   listScheduledTaskAccessAttention: async () => [],
@@ -90,6 +94,9 @@ mock.module("./create-with-opengeni", () => ({
   useCreateWithOpenGeni: () => ({ open: () => undefined, dialog: null }),
 }));
 const { SchedulesListPage, holdOrder } = await import("./schedules-list-page");
+const { ScheduleMenuItems, canSwitchSchedule } = await import("./schedule-parts");
+const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
+  await import("@opengeni/react/ui/dropdown-menu");
 
 afterAll(() => {
   mock.restore();
@@ -103,7 +110,8 @@ beforeEach(() => {
   listScheduledTasks.mockClear();
   toastError.mockClear();
   toastSuccess.mockClear();
-  pending = null;
+  saves.clear();
+  listGate = null;
   server = [
     schedule("a", "Morning brief", "active"),
     schedule("b", "Weekly dependency PR", "active"),
@@ -172,7 +180,7 @@ test("one click pauses: the switch and Next run change before the server answers
   await act(async () => control.click());
   expect(pauseScheduledTask).toHaveBeenCalledTimes(1);
 
-  await act(async () => pending!.resolve({ ...server[0]!, status: "paused" }));
+  await act(async () => saves.get("a")!.resolve());
   await flush();
   const settled = switchFor(container, "Morning brief");
   expect(settled.getAttribute("aria-checked")).toBe("false");
@@ -191,7 +199,7 @@ test("a failed resume puts the switch back and says what failed", async () => {
   expect(control.getAttribute("aria-checked")).toBe("true");
   expect(rowText(control)).not.toContain("Paused");
 
-  await act(async () => pending!.reject(new Error("Example failure")));
+  await act(async () => saves.get("c")!.reject(new Error("Example failure")));
   await flush();
   const settled = switchFor(container, "Cost check");
   expect(settled.getAttribute("aria-checked")).toBe("false");
@@ -207,11 +215,29 @@ test("rows keep their place after a switch, even once the list reloads", async (
 
   // Resuming would sort Cost check among the active ones; it stays put.
   await act(async () => switchFor(container, "Cost check").click());
-  await act(async () => pending!.resolve({ ...server[2]!, status: "active" }));
+  await act(async () => saves.get("c")!.resolve());
   await flush();
   expect(listScheduledTasks.mock.calls.length).toBeGreaterThan(1);
   expect(switchFor(container, "Cost check").getAttribute("aria-checked")).toBe("true");
   expect(rowTitles(container)).toEqual(before);
+});
+
+test("the list sorts again once the pointer leaves it", async () => {
+  const container = await renderList();
+  await act(async () => switchFor(container, "Cost check").click());
+  await act(async () => saves.get("c")!.resolve());
+  await flush();
+  expect(rowTitles(container).at(-1)).toBe("Cost check");
+
+  const row = switchFor(container, "Cost check").closest("li")!;
+  await act(async () => {
+    row.dispatchEvent(
+      new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }),
+    );
+  });
+  await flush();
+  // Cost check runs again, so it now sorts by name among the active ones.
+  expect(rowTitles(container)).toEqual(["Cost check", "Morning brief", "Weekly dependency PR"]);
 });
 
 test("holdOrder keeps the held order only for the same schedules", () => {
@@ -220,4 +246,142 @@ test("holdOrder keeps the held order only for the same schedules", () => {
   expect(holdOrder([a!, b!], ["c", "a"]).map((task) => task.id)).toEqual(["a", "b"]);
   expect(holdOrder([a!, b!, c!], ["a", "b"]).map((task) => task.id)).toEqual(["a", "b", "c"]);
   expect(holdOrder([a!, b!], null).map((task) => task.id)).toEqual(["a", "b"]);
+});
+
+test("a refresh that overlaps a save never paints an older state over it", async () => {
+  const container = await renderList();
+  await act(async () => switchFor(container, "Morning brief").click());
+  await act(async () => switchFor(container, "Weekly dependency PR").click());
+
+  // A's save lands; its refresh reads the server while B is still on, and
+  // answers slowly.
+  const slow = deferred<void>();
+  listGate = slow;
+  await act(async () => saves.get("a")!.resolve());
+  await flush();
+  listGate = null;
+  // B's save lands and its own refresh answers at once.
+  await act(async () => saves.get("b")!.resolve());
+  await flush();
+  expect(switchFor(container, "Weekly dependency PR").getAttribute("aria-checked")).toBe("false");
+
+  // A's stale answer arrives last; B stays off.
+  await act(async () => slow.resolve());
+  await flush();
+  expect(switchFor(container, "Weekly dependency PR").getAttribute("aria-checked")).toBe("false");
+  expect(switchFor(container, "Morning brief").getAttribute("aria-checked")).toBe("false");
+});
+
+test("two rows can switch at once and each settles on its own", async () => {
+  const container = await renderList();
+  await act(async () => switchFor(container, "Morning brief").click());
+  await act(async () => switchFor(container, "Cost check").click());
+  expect(pauseScheduledTask).toHaveBeenCalledTimes(1);
+  expect(resumeScheduledTask).toHaveBeenCalledTimes(1);
+
+  await act(async () => saves.get("c")!.reject(new Error("Example failure")));
+  await flush();
+  expect(switchFor(container, "Cost check").getAttribute("aria-checked")).toBe("false");
+  expect(switchFor(container, "Morning brief").getAttribute("aria-busy")).toBe("true");
+  expect(switchFor(container, "Morning brief").getAttribute("aria-checked")).toBe("false");
+
+  await act(async () => saves.get("a")!.resolve());
+  await flush();
+  expect(switchFor(container, "Morning brief").getAttribute("aria-checked")).toBe("false");
+  expect(switchFor(container, "Morning brief").hasAttribute("aria-busy")).toBe(false);
+});
+
+const manager = {
+  viewerSubjectId: viewer,
+  canManage: true,
+  canRun: true,
+  canReadSessionIds: true,
+  canTargetSessions: true,
+};
+
+function sync(id: string, status: ScheduledTask["status"], control: Record<string, unknown>) {
+  return {
+    ...schedule(id, `Sync ${id}`, status),
+    action: { kind: "knowledge_source_sync" },
+    agentConfig: { prompt: "", resources: [], metadata: {}, knowledgeSource: { id } },
+    metadata: { knowledgeSourceSync: control },
+  } as unknown as ScheduledTask;
+}
+
+test("the switch shows only where it pauses a schedule the viewer can change", () => {
+  expect(canSwitchSchedule(schedule("a", "Mine", "active"), manager)).toBe(true);
+  expect(canSwitchSchedule(schedule("a", "Mine", "paused"), manager)).toBe(true);
+  // Someone else's, or without manage permission.
+  expect(
+    canSwitchSchedule({ ...schedule("a", "Theirs", "active"), ownerSubjectId: "other" }, manager),
+  ).toBe(false);
+  expect(canSwitchSchedule(schedule("a", "Mine", "active"), { ...manager, canManage: false })).toBe(
+    false,
+  );
+  // A sync that would run once on, and ones stopped by their source or connection.
+  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: true }), manager)).toBe(true);
+  expect(canSwitchSchedule(sync("s", "active", { sourceEnabled: false }), manager)).toBe(false);
+  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: false }), manager)).toBe(false);
+  expect(canSwitchSchedule(sync("s", "active", { connectionPaused: true }), manager)).toBe(false);
+  // A retired sync.
+  const retired = {
+    ...sync("r", "active", {}),
+    agentConfig: {
+      prompt: "",
+      resources: [],
+      metadata: {},
+      knowledgeSource: { connection: { providerDomain: "api.atlassian.com" } },
+    },
+  } as unknown as ScheduledTask;
+  expect(canSwitchSchedule(retired, manager)).toBe(false);
+});
+
+test("rows without a switch keep Pause in their menu; switched rows drop it", async () => {
+  async function menuFor(task: ScheduledTask, pauseItem: boolean) {
+    document.body.replaceChildren();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DropdownMenu open>
+          <DropdownMenuTrigger>Menu</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <ScheduleMenuItems
+              task={task}
+              access={manager}
+              busy={false}
+              pauseItem={pauseItem}
+              onRunNow={() => undefined}
+              onPause={() => undefined}
+              onResume={() => undefined}
+              onEdit={() => undefined}
+              onDuplicate={() => undefined}
+              onDelete={() => undefined}
+            />
+          </DropdownMenuContent>
+        </DropdownMenu>,
+      );
+    });
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map((item) =>
+      item.textContent?.trim(),
+    );
+    await act(async () => root.unmount());
+    return items;
+  }
+  const mine = schedule("a", "Mine", "active");
+  expect(await menuFor(mine, !canSwitchSchedule(mine, manager))).toEqual([
+    "Run now",
+    "Edit",
+    "Duplicate",
+    "Delete",
+  ]);
+  const stopped = sync("s", "active", { sourceEnabled: false });
+  expect(await menuFor(stopped, !canSwitchSchedule(stopped, manager))).toContain("Pause");
+});
+
+test("a list of others' schedules shows no switches", async () => {
+  server = server.map((task) => ({ ...task, ownerSubjectId: "other" }));
+  const container = await renderList();
+  expect(container.querySelectorAll('[role="switch"]')).toHaveLength(0);
 });

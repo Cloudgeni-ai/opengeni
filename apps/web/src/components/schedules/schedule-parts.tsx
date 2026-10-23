@@ -154,15 +154,14 @@ export function ScheduleTile({ task }: { task: ScheduledTask }) {
 
 /**
  * Whether the list row shows the on/off switch: the viewer can pause it, and
- * pausing is what keeps it from running. A sync stopped by its source or
- * connection keeps Pause in the menu, so the switch never reads On while
- * nothing runs.
+ * turning it on would make it run. A retired sync, or one stopped by its
+ * source or connection (paused or not), keeps Pause in the menu instead, so
+ * the switch never reads On while nothing runs and never vanishes under focus.
  */
 export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
-  const state = scheduledTaskStateLabel(task);
   return (
     schedulePermissions(task, access).canPauseOrDelete &&
-    (state.reason === "active" || state.reason === "user_paused")
+    scheduledTaskStateLabel({ ...task, status: "active" }).reason === "active"
   );
 }
 

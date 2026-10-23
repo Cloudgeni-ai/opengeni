@@ -169,10 +169,13 @@ export function SchedulesListPage({
   // Switched rows show their new state before the server answers.
   const [switching, setSwitching] = useState<Record<string, ScheduledTask["status"]>>({});
   // After a switch the rows keep their order, so a row never moves away from
-  // the pointer that just toggled it. Cleared when the set of schedules changes.
+  // the pointer that just toggled it. Released when the pointer and focus
+  // leave the list, or when the set of schedules changes.
   const [heldOrder, setHeldOrder] = useState<readonly string[] | null>(null);
-  // Bumped by every switch: a refresh that started before one can't paint
-  // the old status over it. Each switch refreshes again when it settles.
+  const listRef = useRef<HTMLDivElement>(null);
+  // Bumped when a switch starts and when it settles: a refresh that overlaps
+  // either can't paint an old status over it. Each switch refreshes again
+  // when it settles.
   const switchSeq = useRef(0);
   const viewState = listViewState({ loading, error: loadError, count: list.tasks.length });
 
@@ -230,6 +233,7 @@ export function SchedulesListPage({
           },
         );
         if (seq !== switchSeq.current) return;
+        setHeldOrder((held) => (held && sameIds(held, next) ? held : null));
         setList({
           tasks: next,
           lastRuns: Object.fromEntries(
@@ -299,17 +303,28 @@ export function SchedulesListPage({
     setHeldOrder(sorted.map((item) => item.id));
     setSwitching((current) => ({ ...current, [task.id]: status }));
     const updated = await actions.setPaused(task, !on);
+    switchSeq.current += 1;
     if (updated) {
       setList((current) => ({
         ...current,
-        tasks: current.tasks.map((item) =>
-          item.id === task.id ? { ...item, status: updated.status ?? status } : item,
-        ),
+        tasks: current.tasks.map((item) => (item.id === task.id ? updated : item)),
       }));
     }
-    // On failure dropping the override is the rollback.
+    // On failure dropping the override is the rollback; the refresh then
+    // shows what the server holds, in case the change went through anyway.
     setSwitching(({ [task.id]: _settled, ...rest }) => rest);
-    if (updated) void refresh(true);
+    void refresh(true);
+  };
+
+  const releaseOrder = () => {
+    const node = listRef.current;
+    if (!node || node.contains(document.activeElement)) return;
+    try {
+      if (node.matches(":hover")) return;
+    } catch {
+      // No hover state to read: release on focus alone.
+    }
+    setHeldOrder(null);
   };
   const shared = sorted.some((task) => !ownsSchedule(task, access.viewerSubjectId));
   const narrow = useNarrow();
@@ -410,88 +425,94 @@ export function SchedulesListPage({
             onTemplate={(template) => go.create({ template })}
           />
         ) : (
-          <RowList label="Schedules" columns={columns} flush>
-            {sorted.map((listed) => {
-              const pending = switching[listed.id];
-              const task = pending ? { ...listed, status: pending } : listed;
-              const perms = schedulePermissions(task, access);
-              const switchable = canSwitchSchedule(listed, access);
-              const busy = actions.busyTaskId === task.id || pending !== undefined;
-              const href = schedulePath(workspaceId, task.id);
-              return (
-                <ListRow
-                  key={task.id}
-                  leading={<ScheduleTile task={task} />}
-                  // Titles stay in fg; a paused schedule says so in its switch and Next run.
-                  title={task.name}
-                  titleAddon={
-                    task.visibility === "private" ? (
-                      <MetaChip icon={<LockIcon />}>Only me</MetaChip>
-                    ) : undefined
-                  }
-                  status={accessBadge({
-                    task,
-                    attention: list.attention[task.id] ?? null,
-                    own: perms.own,
-                    workspaceId,
-                  })}
-                  description={
-                    narrow ? (
-                      <>
-                        {task.status === "active" && task.schedule.type !== "manual"
-                          ? "Next "
-                          : null}
-                        <NextRunValue task={task} now={clock} />
-                      </>
-                    ) : (
-                      scheduleWords(task.schedule, clock).short
-                    )
-                  }
-                  cells={{
-                    next: <NextRunValue task={task} now={clock} />,
-                    last: <LastRunValue state={lastRunState(list.lastRuns, task.id)} />,
-                    ...(shared && !perms.own
-                      ? {
-                          owner: (
-                            <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} />
-                          ),
-                        }
-                      : {}),
-                  }}
-                  control={
-                    switchable ? (
-                      <Switch
-                        checked={task.status !== "paused"}
-                        pending={pending !== undefined}
-                        disabled={actions.busyTaskId === task.id}
-                        onCheckedChange={(on) => void switchSchedule(listed, on)}
-                        aria-label={task.name}
-                      />
-                    ) : null
-                  }
-                  menu={
-                    hasMenuItems(task, access) ? (
-                      <ScheduleMenuItems
-                        task={task}
-                        access={access}
-                        busy={busy}
-                        pauseItem={!switchable}
-                        onRunNow={() => void actions.runNow(task)}
-                        onPause={() => void actions.pause(task)}
-                        onResume={() => void actions.resume(task)}
-                        onEdit={() => go.edit(task.id)}
-                        onDuplicate={() => go.create({ from: task.id })}
-                        onDelete={() => actions.requestDelete(task)}
-                      />
-                    ) : undefined
-                  }
-                  menuLabel={`More actions for ${task.name}`}
-                  href={href}
-                  linkProps={{ onClick: inAppClick(() => go.detail(task.id)) }}
-                />
-              );
-            })}
-          </RowList>
+          <div
+            ref={listRef}
+            onPointerLeave={() => window.setTimeout(releaseOrder)}
+            onBlur={() => window.setTimeout(releaseOrder)}
+          >
+            <RowList label="Schedules" columns={columns} flush>
+              {sorted.map((listed) => {
+                const pending = switching[listed.id];
+                const task = pending ? { ...listed, status: pending } : listed;
+                const perms = schedulePermissions(task, access);
+                const switchable = canSwitchSchedule(listed, access);
+                const busy = actions.busyTaskId === task.id || pending !== undefined;
+                const href = schedulePath(workspaceId, task.id);
+                return (
+                  <ListRow
+                    key={task.id}
+                    leading={<ScheduleTile task={task} />}
+                    // Titles stay in fg; a paused schedule says so in its switch and Next run.
+                    title={task.name}
+                    titleAddon={
+                      task.visibility === "private" ? (
+                        <MetaChip icon={<LockIcon />}>Only me</MetaChip>
+                      ) : undefined
+                    }
+                    status={accessBadge({
+                      task,
+                      attention: list.attention[task.id] ?? null,
+                      own: perms.own,
+                      workspaceId,
+                    })}
+                    description={
+                      narrow ? (
+                        <>
+                          {task.status === "active" && task.schedule.type !== "manual"
+                            ? "Next "
+                            : null}
+                          <NextRunValue task={task} now={clock} />
+                        </>
+                      ) : (
+                        scheduleWords(task.schedule, clock).short
+                      )
+                    }
+                    cells={{
+                      next: <NextRunValue task={task} now={clock} />,
+                      last: <LastRunValue state={lastRunState(list.lastRuns, task.id)} />,
+                      ...(shared && !perms.own
+                        ? {
+                            owner: (
+                              <OwnerValue task={task} viewerSubjectId={access.viewerSubjectId} />
+                            ),
+                          }
+                        : {}),
+                    }}
+                    control={
+                      switchable ? (
+                        <Switch
+                          checked={task.status !== "paused"}
+                          pending={pending !== undefined}
+                          disabled={actions.busyTaskId === task.id}
+                          onCheckedChange={(on) => void switchSchedule(listed, on)}
+                          aria-label={task.name}
+                        />
+                      ) : null
+                    }
+                    menu={
+                      hasMenuItems(task, access) ? (
+                        <ScheduleMenuItems
+                          task={task}
+                          access={access}
+                          busy={busy}
+                          pauseItem={!switchable}
+                          onRunNow={() => void actions.runNow(task)}
+                          onPause={() => void actions.pause(task)}
+                          onResume={() => void actions.resume(task)}
+                          onEdit={() => go.edit(task.id)}
+                          onDuplicate={() => go.create({ from: task.id })}
+                          onDelete={() => actions.requestDelete(task)}
+                        />
+                      ) : undefined
+                    }
+                    menuLabel={`More actions for ${task.name}`}
+                    href={href}
+                    linkProps={{ onClick: inAppClick(() => go.detail(task.id)) }}
+                  />
+                );
+              })}
+            </RowList>
+          </div>
         )}
       </div>
       {isAdmin && !targetSessionId ? (
@@ -512,6 +533,11 @@ export function holdOrder(fresh: ScheduledTask[], held: readonly string[] | null
   const byId = new Map(fresh.map((task) => [task.id, task]));
   const ordered = held.map((id) => byId.get(id));
   return ordered.every((task) => task !== undefined) ? (ordered as ScheduledTask[]) : fresh;
+}
+
+function sameIds(held: readonly string[], tasks: readonly ScheduledTask[]): boolean {
+  const ids = new Set(held);
+  return held.length === tasks.length && tasks.every((task) => ids.has(task.id));
 }
 
 /**
