@@ -12,5 +12,5 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   },
-  "include": ["bundle.ts", "off.ts", "../../scripts/merge-batcher-admin*.test.ts"]
+  "include": ["bundle.ts", "off.ts", "watchdog.ts", "../../scripts/merge-batcher-admin*.test.ts"]
 }
