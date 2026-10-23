@@ -352,11 +352,12 @@ test("Archived filter opens only the archive folder; restore retains the origina
       workspaceId,
       sessionId: "00000000-0000-4000-9000-000000000401",
       archived: false,
-      clientEventId: expect.any(String),
       expectedVersion: 1,
-      // This viewer cannot pause the chat, so the request is personal.
       mode: "hide_for_me",
       confirmPause: false,
+      clientEventId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      ),
       previousChannelId: redesignId,
       returnedChannelId: redesignId,
     },
@@ -671,7 +672,8 @@ async function openKeyboardFocus(visibleCount: number) {
     return date.getTime();
   });
   await page.clock.setFixedTime(noon);
-  await page.goto(`${url}?scenario=keyboard-focus`);
+  // Control hints isolate keyboard disclosure from the unrelated 15-second fallback poll.
+  await page.goto(`${url}?scenario=keyboard-focus&hints=1`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {
     await showMore("Today").click();

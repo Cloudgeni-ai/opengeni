@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import {
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
@@ -177,7 +178,10 @@ function providerFixture() {
         },
       });
     }
-    if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+    if (
+      url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl ||
+      url.href === MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.tokenUrl
+    ) {
       await beforeTokenReply?.();
       const body = requestBody(init?.body);
       tokenRequests.push({
@@ -299,6 +303,99 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
+  test("Teams OAuth and generic Connect honor the exact workspace rollout before consent and callback", async () => {
+    if (!available) throw new Error("Teams rollout acceptance requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const previousEnabled = settings.microsoftTeamsToolsEnabled;
+    const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
+    try {
+      settings.microsoftTeamsToolsEnabled = false;
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      expect(
+        (
+          await start(fixture, workspace, {
+            definitionId: "microsoft-teams",
+            ownership: "workspace",
+          })
+        ).response.status,
+      ).toBe(404);
+      const generic = await testApp(fixture).request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace),
+            "content-type": "application/json",
+            "x-opengeni-access-key": EDGE_ACCESS_KEY,
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({
+            providerId: "microsoft-teams",
+            ownership: "workspace",
+            returnUrl: `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins`,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(generic.status).toBe(404);
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      const enabled = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(enabled.response.status).toBe(200);
+      const url = new URL(enabled.authorizationUrl);
+      expect(url.pathname).toBe("/organizations/oauth2/v2.0/authorize");
+      expect(url.searchParams.get("scope")).toContain("ChatMessage.Send");
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      const settled = await callback(fixture, url.searchParams.get("state")!);
+      expect(settled.status).toBe(302);
+      expect(settled.headers.get("location")).toContain("state_invalid");
+      expect(fixture.tokenRequests).toHaveLength(0);
+      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, null)).toHaveLength(0);
+      // A new, enabled consent completes through the organizational token endpoint
+      // and persists only the Teams workload grant under the normal broker role.
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "teams-fixture-refresh",
+      });
+      const retry = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(retry.response.status).toBe(200);
+      const completed = await callback(
+        fixture,
+        new URL(retry.authorizationUrl).searchParams.get("state")!,
+      );
+      expect(completed.status).toBe(302);
+      expect(
+        new URL(completed.headers.get("location")!).searchParams.get("integration_oauth"),
+      ).toBe("success");
+      const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, null);
+      expect(connections).toHaveLength(1);
+      expect(connections[0]).toMatchObject({
+        subjectId: null,
+        providerDomain: "graph.microsoft.com",
+        kind: "oauth2",
+        status: "active",
+        metadata: {
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          authorizedDefinitionIds: ["microsoft-teams"],
+        },
+      });
+      expect([...connections[0]!.grantedScopes].sort()).toEqual(
+        [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes].sort(),
+      );
+      expect(fixture.tokenRequests).toHaveLength(1);
+    } finally {
+      settings.microsoftTeamsToolsEnabled = previousEnabled;
+      settings.microsoftTeamsAllowedWorkspaceIds = previousWorkspaces;
+    }
+  });
+
   test("external curated OAuth encrypts actor context and refuses key revocation during exchange", async () => {
     if (!available) throw new Error("External OAuth acceptance requires PostgreSQL");
     const workspace = await freshWorkspace();

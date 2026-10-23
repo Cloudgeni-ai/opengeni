@@ -1097,6 +1097,14 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
         OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
         OPENGENI_SLACK_COMMAND: "/opengeni-staging",
+        OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS: "b2a93667-d2ce-4468-8b65-3c773b701ad7",
+        OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS: "00000000-0000-4000-8000-000000000001",
+        OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS:
+          "00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+        OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
+        OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
+        OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -1157,6 +1165,19 @@ describe("deployment contract", () => {
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS=b2a93667-d2ce-4468-8b65-3c773b701ad7",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(

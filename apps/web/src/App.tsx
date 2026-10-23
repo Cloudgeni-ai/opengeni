@@ -147,6 +147,10 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   "IntegrationsReturnRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
+const LazyTeamsConnectRoute = lazyRouteComponent(
+  () => import("@/routes/teams-connect"),
+  "TeamsConnectRoute",
+);
 const LazyConnectAgentRoute = lazyRouteComponent(
   () => import("@/routes/connect-agent"),
   "ConnectAgentRoute",
@@ -328,6 +332,11 @@ const integrationsReturnRoute = createRoute({
 // code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
 // Where an agent's sign-in to the organization MCP server lands: the person
 // picks the organization, what the agent can do and where (/v1/mcp OAuth).
+const teamsConnectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "teams/connect",
+  component: LazyTeamsConnectRoute,
+});
 const connectAgentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "connect-agent",
@@ -897,6 +906,7 @@ const routeTree = rootRoute.addChildren([
   integrationsReturnRoute,
   deviceRoute,
   connectAgentRoute,
+  teamsConnectRoute,
   resetPasswordRoute,
   excelAddinRoute,
   desktopReturnRoute,

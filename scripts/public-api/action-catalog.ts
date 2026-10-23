@@ -41,7 +41,8 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "a provider's browser redirect back to Opengeni",
   },
   {
-    pattern: /^\/v1\/webhooks\/|^\/v1\/integrations\/slack\/(commands|events|interactions)$/,
+    pattern:
+      /^\/v1\/webhooks\/|^\/v1\/integrations\/(slack\/(commands|events|interactions)|teams\/messages)$/,
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
@@ -74,6 +75,12 @@ export function isActionCatalogExempt(path: string): boolean {
  * full access can do as them. Matched against "METHOD /path".
  */
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern:
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+    reason:
+      "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+  },
   {
     pattern:
       /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,

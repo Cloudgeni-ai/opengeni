@@ -9,6 +9,12 @@ import type { Settings } from "@opengeni/config";
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     slackAccessMode: "limited",
+    microsoftTeamsToolsEnabled: false,
+    microsoftTeamsAllowedWorkspaceIds: [],
+    teamsBotEnabled: false,
+    teamsBotAllowedTenantIds: [],
+    teamsBotAllowedChannelIds: [],
+    teamsBotSetupAdminIds: [],
     serviceName: "opengeni",
     officeAddinName: "Opengeni",
     browserExtensionName: "Opengeni Browser",

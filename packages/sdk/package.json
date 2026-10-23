@@ -210,7 +210,11 @@
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./teams": {
+      "types": "./src/teams.ts",
+      "default": "./src/teams.ts"
+    }
   },
   "publishConfig": {
     "access": "public",

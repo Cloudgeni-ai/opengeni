@@ -114,6 +114,8 @@ import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-i
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
 import { useOutlookContactsIntegration } from "@/components/capabilities/use-outlook-contacts-integration";
 import { useOutlookMailIntegration } from "@/components/capabilities/use-outlook-mail-integration";
+import { useTeamsBotIntegration } from "@/components/capabilities/use-teams-bot-integration";
+import { useMicrosoftTeamsIntegration } from "@/components/capabilities/use-microsoft-teams-integration";
 import {
   canManageSlackReactionSummon,
   useSlackIntegration,
@@ -544,6 +546,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // curated definition here is oauth2-only, so a single shared effect (below)
   // handles the OAuth return for all of them.
   useApiIntegrationOAuthCallback({ workspaceId, refresh, onRuntimeChanged });
+  const teamsBot = useTeamsBotIntegration({ workspaceId, refreshRevision: catalogData.revision });
+  const microsoftTeams = useMicrosoftTeamsIntegration({
+    workspaceId,
+    definitions: apiIntegrationDefinitions,
+    instances: apiIntegrationInstances,
+    refresh,
+    onRuntimeChanged,
+    refreshRevision: catalogData.revision,
+  });
   const outlookMail = useOutlookMailIntegration({
     workspaceId,
     definitions: apiIntegrationDefinitions,
@@ -591,6 +602,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     ...(atlassian.hasHistoricalConnection
       ? [{ ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) }]
       : []),
+    ...(teamsBot.visible ? [teamsBot] : []),
+    microsoftTeams,
     outlookMail,
     outlookCalendar,
     outlookContacts,

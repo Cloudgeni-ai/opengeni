@@ -144,6 +144,7 @@ describe("organization MCP action catalog", () => {
     ])
       expect(listed.has(key)).toBe(true);
     expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
+    expect(listed.has("POST /v1/integrations/teams/messages")).toBe(false);
   });
 
   test("marks exactly the actions no agent can do as the person", () => {
@@ -170,6 +171,11 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
         "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+        // Teams setup and account linking require the person's verified browser.
+        "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
       ].sort(),

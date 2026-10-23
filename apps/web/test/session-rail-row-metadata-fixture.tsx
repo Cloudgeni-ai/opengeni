@@ -28,24 +28,28 @@ const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 
 // The header and rows only render inside the app shell, which always provides
 // the app context; their chat actions (copy link, pin) run through it. The
-// fixture runs none of them, so any other read of the context fails loudly.
-// Rows read the viewer's workspace grants to label their archive action
-// (#5711); this viewer can control the chats, so rows offer Archive.
-const appContext = new Proxy(
-  {
-    accessContext: {
-      subjectId: "rail-fixture",
-      workspaceGrants: [{ workspaceId: "workspace", permissions: ["sessions:control"] }],
-      accountGrants: [],
-    },
-  } as unknown as AppContextValue,
-  {
-    get(target, key) {
-      if (key in target) return target[key as keyof AppContextValue];
-      throw new Error(`The session rail fixture's app context has no ${String(key)}`);
-    },
+// fixture supplies the read-only workspace grant used to label archive actions.
+// All unexpected context reads and action calls still fail loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    if (key === "accessContext") {
+      return {
+        subjectId: "rail-preview-user",
+        workspaceGrants: [
+          {
+            accountId: "rail-preview-organization",
+            workspaceId: "workspace",
+            subjectId: "rail-preview-user",
+            permissionMode: "explicit",
+            permissions: ["sessions:control"],
+          },
+        ],
+        accountGrants: [],
+      } satisfies AppContextValue["accessContext"];
+    }
+    throw new Error(`The session rail fixture's app context has no ${String(key)}`);
   },
-);
+});
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
 const longTitle =
   "Now I am testing your workspace rail and this title should use every available pixel";
