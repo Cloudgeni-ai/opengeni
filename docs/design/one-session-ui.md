@@ -81,7 +81,7 @@ person's permissions, exactly as in the web app. A switch only hides.
 
 | Feature (`SessionUiFeatures`) | `app` (web, desktop) | `companion` (Excel and other first-party side panes) | `embed` (customer page) |
 | --- | --- | --- | --- |
-| `chatList` (search, filters, projects, pins, archive, subagent rows) | on | on (a drawer when narrow) | on |
+| `chatList` (search, filters, projects, pins, archive, subagent rows; the new-chat page's project picker and recent chats) | on | on (a drawer when narrow) | on |
 | `dock` (files, terminal, desktop, browser, artifacts, inspector; lazy) | on | on | off |
 | `adminAccess` (workspace-admin access indicator and grant) | on | off | off |
 | `keyboardShortcuts` (⌘K menu, shortcut keys, ⌘/ sheet; `newChatShortcut` is a deprecated alias) | on | off | off |

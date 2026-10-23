@@ -130,7 +130,7 @@ A preset decides which features show and single keys switch them:
 
 | Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
 | --- | --- | --- | --- |
-| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
+| `chatList`: search, filters, projects, pins, archive, subagent rows; on the new-chat page, the project picker and recent chats | on | on | on |
 | `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
 | `adminAccess`: workspace-admin access indicator and grant | on | off | off |
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
