@@ -3022,7 +3022,7 @@ export const englishMessages = {
   "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
-  "sessionList.archive": "Archive",
+  "sessionList.archive": "Hide for me",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
   "sessionList.loadingChats": "Loading chats…",
