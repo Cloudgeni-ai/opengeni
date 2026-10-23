@@ -5,6 +5,7 @@ import { mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { off, verifyStop } from "./off";
+import { verify, type Plan, type RuleSet, type Snapshot } from "./bundle";
 import { type Archive, hydrate } from "./watchdog-journal";
 import { ObjectStore, WatchdogCloud } from "./watchdog-cloud";
 import { WatchdogGitHub, type AppBinding } from "./watchdog-github";
@@ -35,6 +36,7 @@ export type RuntimeConfig = {
   schema: 1;
   binding: Binding;
   jobResource: string;
+  serviceResource: string;
   watchdogImage: string;
   bucket: string;
   prefix: string;
@@ -47,6 +49,20 @@ export type RuntimeConfig = {
   stateApp: AppBinding;
   incidentThread: number;
 };
+export type ProviderEvidence = {
+  observedAt: number;
+  serviceResource: string;
+  /** Authenticated raw Cloud Run resource. Core must validate full identity/config. */
+  service: unknown;
+  policy: "applied" | "manual" | "drift";
+  inventoryDigest: string;
+};
+export type ProviderEvidencePort = {
+  read(): Promise<ProviderEvidence>;
+  /** Real reviewed STOP verifier plus fresh Manual inventory; core additionally
+   * binds its Git incident/activation/effect reconciliation. */
+  verifyStopped(receipt: unknown): Promise<ProviderEvidence>;
+};
 export const digest = (value: string | Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
 export function appPath(path: string): boolean {
@@ -55,6 +71,7 @@ export function appPath(path: string): boolean {
 async function loadBridge(
   config: RuntimeConfig,
   token: () => Promise<string>,
+  evidence: ProviderEvidencePort,
 ): Promise<CoreBridge> {
   if (
     !appPath(await realpath(config.coreModule)) ||
@@ -67,29 +84,32 @@ async function loadBridge(
     createWatchdogBridge?: (
       config: RuntimeConfig,
       token: () => Promise<string>,
+      evidence: ProviderEvidencePort,
     ) => Promise<CoreBridge>;
   };
   if (!module.createWatchdogBridge)
     throw Error("Reviewed core bridge export missing; integration unqualified");
-  return module.createWatchdogBridge(config, token);
+  return module.createWatchdogBridge(config, token, evidence);
 }
 export type ProviderDependencies = {
   loadBridge: typeof loadBridge;
   off: typeof off;
   transport?: typeof fetch;
+  run?: typeof run;
 };
-async function run(args: string[], env: { [name: string]: string | undefined }): Promise<void> {
+async function run(args: string[], env: { [name: string]: string | undefined }): Promise<string> {
   const child = Bun.spawn(args, {
     env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [exit] = await Promise.all([
+  const [exit, output] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
   if (exit !== 0) throw Error("Reviewed OFF readback failed; output suppressed");
+  return output;
 }
 export async function createProvider(
   config: RuntimeConfig,
@@ -99,6 +119,7 @@ export async function createProvider(
   if (
     config.schema !== 1 ||
     !/^projects\/[^/]+\/locations\/[^/]+\/jobs\/[^/]+$/.test(config.jobResource) ||
+    !/^projects\/[^/]+\/locations\/[^/]+\/services\/[^/]+$/.test(config.serviceResource) ||
     !appPath(config.coreModule) ||
     !appPath(config.operatorDirectory) ||
     config.watchdogImage !== config.binding.image ||
@@ -117,21 +138,23 @@ export async function createProvider(
   const store = new ObjectStore(cloud, config.bucket);
   const key = `${config.prefix}/${digest(JSON.stringify(config.binding))}`;
   // The module receives only a token callback for its reviewed state-only CAS.
-  const core = await dependencies.loadBridge(config, () => stateWriter.token());
   let directory: string | null = null;
   const journalObject = `${key}/off-journal.json`;
-  async function materialize(create: boolean): Promise<string> {
-    if (directory) return directory;
+  async function materialize(create: boolean, readOnly = false): Promise<string> {
+    if (directory && !readOnly) return directory;
     const latest = await store.read<Archive>(journalObject);
     let snapshot = latest;
     if (!snapshot) {
-      if (!create)
+      if (!create && !readOnly)
         throw Error("Unfinished OFF has no durable journal; no reconstruction from seed");
       const seed = await store.read<Archive>(config.seedObject, config.seedGeneration);
       if (!seed) throw Error("Pinned original OFF archive unavailable");
-      const generation = await store.cas(journalObject, null, seed.value);
-      if (!generation) throw Error("OFF journal creation CAS lost; no provider write");
-      snapshot = { generation, value: seed.value };
+      if (readOnly) snapshot = seed;
+      else {
+        const generation = await store.cas(journalObject, null, seed.value);
+        if (!generation) throw Error("OFF journal creation CAS lost; no provider write");
+        snapshot = { generation, value: seed.value };
+      }
     }
     const path = await mkdtemp(join(tmpdir(), "batcher-watchdog-"));
     await hydrate(path, snapshot.value);
@@ -154,9 +177,67 @@ export async function createProvider(
       }),
       { mode: 0o600, flag: "wx" },
     );
-    directory = path;
+    if (!readOnly) directory = path;
     return path;
   }
+  async function readEvidence(): Promise<ProviderEvidence> {
+    const service = await cloud.json<unknown>(
+      `https://run.googleapis.com/v2/${config.serviceResource}`,
+    );
+    const admin = await materialize(false, true);
+    const snapshotPath = (
+      await (dependencies.run ?? run)(
+        ["bash", join(import.meta.dir, "stage.sh"), admin, "snapshot"],
+        { GH_TOKEN: await github.token() },
+      )
+    ).trim();
+    if (!resolve(snapshotPath).startsWith(`${admin}/`)) throw Error("Rules snapshot path mismatch");
+    const bytes = await readFile(snapshotPath);
+    const snapshot = JSON.parse(bytes.toString("utf8")) as Snapshot;
+    const plan = JSON.parse(await readFile(join(admin, "plan/plan.json"), "utf8")) as Plan;
+    let policy: ProviderEvidence["policy"] = "drift";
+    try {
+      verify(plan, snapshot, "restored");
+      policy = "manual";
+    } catch {
+      try {
+        const guard = JSON.parse(
+          await readFile(join(admin, "plan/guard-receipt.json"), "utf8"),
+        ) as RuleSet;
+        const namespace = JSON.parse(
+          await readFile(join(admin, "plan/namespace-receipt.json"), "utf8"),
+        ) as RuleSet;
+        verify(plan, snapshot, "applied", { guard, namespace });
+        policy = "applied";
+      } catch {
+        /* Complete authenticated mismatch is drift, never Manual. */
+      }
+    }
+    return {
+      observedAt: Date.now(),
+      serviceResource: config.serviceResource,
+      service,
+      policy,
+      inventoryDigest: digest(bytes),
+    };
+  }
+  const evidence: ProviderEvidencePort = {
+    read: readEvidence,
+    verifyStopped: async (receipt) => {
+      const admin = await materialize(false);
+      const contract = JSON.parse(await readFile(join(admin, "stop-contract.json"), "utf8"));
+      const operator = JSON.parse(
+        await readFile(join(config.operatorDirectory, "deployment-receipt.json"), "utf8"),
+      );
+      const result = receipt as { stop?: Parameters<typeof verifyStop>[0] };
+      if (!result?.stop) throw Error("Real STOP receipt required");
+      verifyStop(result.stop, operator, contract.deployment);
+      const current = await readEvidence();
+      if (current.policy !== "manual") throw Error("Original Manual inventory not proven");
+      return current;
+    },
+  };
+  const core = await dependencies.loadBridge(config, () => stateWriter.token(), evidence);
   async function execution(runId: string): Promise<"running" | "terminal" | "unknown"> {
     if (
       !runId.startsWith(`${config.jobResource}/executions/`) ||

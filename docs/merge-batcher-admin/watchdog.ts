@@ -4,19 +4,36 @@ export type Binding = {
   image: string;
   activation: string;
   planDigest: string;
+  configDigest: string;
+  serviceGeneration: string;
+  revision: string;
+  repository: string;
+  stateRef: string;
+  phaseLimits: { [kind: string]: { timeoutMs: number; marginMs: number } };
 };
 export type Observation = {
   binding: Binding;
   observedAt: number;
   activatedAt: number;
   lastHealthyAt: number | null;
+  heartbeatAt: number | null;
+  /** Fixed durable phase deadline. Heartbeat updates never change this pair.
+   * Caps come from the pinned runtime configuration, not watchdog grace. */
+  phase: null | {
+    id: string;
+    kind: string;
+    startedAt: number;
+    deadlineAt: number;
+    timeoutMs: number;
+    marginMs: number;
+  };
   revision: string;
   stopped: boolean;
   crashLoop: boolean;
   writes: "idle" | "inflight" | "unknown";
   policy: "applied" | "manual" | "drift";
 };
-export type Trigger = "stopped" | "crash-loop" | "stale-health";
+export type Trigger = "stopped" | "crash-loop" | "stale-health" | "phase-deadline";
 export type Record = {
   schema: 1;
   binding: Binding;
@@ -71,7 +88,14 @@ function same(a: Binding, b: Binding): boolean {
     a.deploymentUid === b.deploymentUid &&
     a.image === b.image &&
     a.activation === b.activation &&
-    a.planDigest === b.planDigest
+    a.planDigest === b.planDigest &&
+    a.configDigest === b.configDigest &&
+    a.serviceGeneration === b.serviceGeneration &&
+    a.revision === b.revision &&
+    a.repository === b.repository &&
+    a.stateRef === b.stateRef &&
+    JSON.stringify(Object.entries(a.phaseLimits).sort()) ===
+      JSON.stringify(Object.entries(b.phaseLimits).sort())
   );
 }
 function validBinding(b: Binding): boolean {
@@ -84,7 +108,28 @@ function validBinding(b: Binding): boolean {
     typeof b.image === "string" &&
     /@sha256:[a-f0-9]{64}$/.test(b.image) &&
     typeof b.planDigest === "string" &&
-    /^[a-f0-9]{64}$/.test(b.planDigest)
+    /^[a-f0-9]{64}$/.test(b.planDigest) &&
+    /^[a-f0-9]{64}$/.test(b.configDigest) &&
+    typeof b.serviceGeneration === "string" &&
+    /^\d+$/.test(b.serviceGeneration) &&
+    typeof b.revision === "string" &&
+    b.revision.length > 0 &&
+    b.repository === "Cloudgeni-ai/opengeni" &&
+    typeof b.stateRef === "string" &&
+    b.stateRef.startsWith("refs/heads/") &&
+    b.stateRef.length > 11 &&
+    !!b.phaseLimits &&
+    typeof b.phaseLimits === "object" &&
+    !Array.isArray(b.phaseLimits) &&
+    Object.keys(b.phaseLimits).length > 0 &&
+    Object.values(b.phaseLimits).every(
+      (limit) =>
+        !!limit &&
+        Number.isFinite(limit.timeoutMs) &&
+        limit.timeoutMs > 0 &&
+        Number.isFinite(limit.marginMs) &&
+        limit.marginMs >= 0,
+    )
   );
 }
 export function classify(
@@ -112,14 +157,34 @@ export function classify(
     (o.lastHealthyAt !== null &&
       (!Number.isFinite(o.lastHealthyAt) ||
         o.lastHealthyAt < o.activatedAt ||
-        o.lastHealthyAt > o.observedAt))
+        o.lastHealthyAt > o.observedAt)) ||
+    (o.heartbeatAt !== null &&
+      (!Number.isFinite(o.heartbeatAt) ||
+        o.heartbeatAt < o.activatedAt ||
+        o.heartbeatAt > o.observedAt)) ||
+    (o.phase !== null &&
+      (!o.phase ||
+        !o.phase.id ||
+        !Object.hasOwn(expected.phaseLimits, o.phase.kind) ||
+        o.phase.timeoutMs !== expected.phaseLimits[o.phase.kind]?.timeoutMs ||
+        o.phase.marginMs !== expected.phaseLimits[o.phase.kind]?.marginMs ||
+        !Number.isFinite(o.phase.startedAt) ||
+        o.phase.startedAt < o.activatedAt ||
+        o.phase.startedAt > o.observedAt ||
+        !Number.isFinite(o.phase.timeoutMs) ||
+        o.phase.timeoutMs <= 0 ||
+        !Number.isFinite(o.phase.marginMs) ||
+        o.phase.marginMs < 0 ||
+        o.phase.deadlineAt !== o.phase.startedAt + o.phase.timeoutMs + o.phase.marginMs))
   )
     return "unknown";
   if (o.policy === "drift" || o.writes === "unknown") return "unknown";
   if (o.policy === "manual") return "manual";
   if (o.stopped) return "stopped";
   if (o.crashLoop) return "crash-loop";
-  return now - (o.lastHealthyAt ?? o.activatedAt) >= staleAfterMs ? "stale-health" : "healthy";
+  if (now - (o.heartbeatAt ?? o.activatedAt) >= staleAfterMs) return "stale-health";
+  if (o.phase && now >= o.phase.deadlineAt) return "phase-deadline";
+  return "healthy";
 }
 
 /** One bounded invocation. A lost/unfinished action claim is never timed out and

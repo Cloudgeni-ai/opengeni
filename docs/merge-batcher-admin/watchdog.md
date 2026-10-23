@@ -14,10 +14,12 @@ and explicit rollout-owner go before any resource creation or rules writes.
 ## Detection and restoration
 
 `watchdog.ts` consumes a proposed authenticated durable health observation bound
-to deployment UID/image, activation epoch and saved admin-plan digest. A completed
+to deployment UID/image/config digest/generation/revision, repository/state ref,
+phase caps, activation epoch and saved admin-plan digest. A completed
 healthy cycle is distinct from a successful health poll. STOP, a durable crash
-latch, or no healthy cycle for 900 seconds triggers the reviewed one-command OFF.
-Before the first healthy cycle, age is measured from the durable activation time,
+latch, a heartbeat stale for 900 seconds in any state, or an expired fixed phase
+deadline triggers the reviewed one-command OFF. A trigger is not restoration proof.
+Before the first heartbeat, age is measured from the durable activation time,
 never from the watchdog's first poll. Unknown/malformed health or write outcomes
 hold and alert; they do not establish safe restoration.
 
@@ -73,15 +75,20 @@ not proof that an effect did not happen. Scheduler acknowledgement only proves
 execution submission, not watchdog completion. Provider outages, scheduler
 delay and unavailable permissions have no finite bound promised here.
 
-The accepted runtime-health/v1 contract keeps the completed-cycle deadline at
-900 seconds, not heartbeat or in-cycle activity. It has **not** yet been qualified
-against the implemented producer. A 900-second cycle plus 120-second reconciliation and a
-120-second poll can exceed it; configured cycles and classified provider backoff
-can reach 3600 seconds. Therefore this contract can trigger OFF during a legitimate
-long cycle/backoff; the paired tests and controlled drill must expose this behavior,
-not claim all allowed runtime timing fits beneath the deadline. Do not relabel a poll as
-a completed healthy cycle or silently widen the threshold. This remains an
-integration gate, not an invented producer guarantee.
+Health means liveness: the producer must persist a heartbeat on every loop,
+including CI waits and backoff, with its activity/wait due information. A heartbeat
+stale for 900 seconds triggers in **every** state; there are no 31/76/151-minute
+exemptions. A separate durable phase has a fixed start/deadline and a timeout plus
+small margin from the immutable `binding.phaseLimits`. Fresh heartbeat never
+extends that deadline. Last healthy completion remains truthful diagnostic data,
+not a fabricated timestamp used to keep the controller alive. Exact production
+phase caps must be published with the paired runtime configuration; test fixture
+caps are not deployment policy. Missing/mismatched envelopes hold. This policy
+still requires the actual producer contract and paired qualification.
+
+Only deliberate operator START may reset a settled failure streak. Ordinary
+restart/new generation must not reset it; unknown phase/outcome holds never reset.
+The watchdog has no START or reset operation.
 
 The entrypoint emits exactly one final `batcher_watchdog_completed` event with
 schema `batcher-watchdog/v1`, execution/job/source identity, checked/completed time,
@@ -113,8 +120,13 @@ before running policy. `RuntimeConfig` in `watchdog-provider.ts` defines the
 configuration; it is not generated from ambient credentials or an old activation.
 
 The runtime-owned, source-digest-pinned bridge exports
-`createWatchdogBridge(config, stateToken)` and implements `CoreBridge`:
-`observe`, `claimStop`, `verifyClaim` and `verifyOffReceipt`. `observe.revision`
+`createWatchdogBridge(config, stateToken, providerEvidence)` and implements `CoreBridge`:
+`observe`, `claimStop`, `verifyClaim` and `verifyOffReceipt`. Its third argument is
+`ProviderEvidencePort`: authenticated Cloud Run service data plus complete rules
+classification and a real reviewed STOP-proof verifier. Missing reads throw;
+they are never synthesized as Manual or stopped. The core validates provider
+UID/image/config digest/generation/revision against the immutable binding, plus
+repository/state-ref and incident evidence. `observe.revision`
 is the full stable Git state SHA. `claimStop` must set the actual shared Git fence,
 not return a synthetic token. `verifyOffReceipt` must freshly bind current
 reconciliation to that incident so an old same-image drain proof cannot qualify.
@@ -124,7 +136,8 @@ implementation pin is paired and reviewed, startup must fail rather than use a
 fake bridge. State objects are keyed by the complete activation binding.
 
 The producer must supply a reviewed source pin and authoritative durable read:
-activation/control epoch, activated-at, last completed healthy cycle with proof,
+activation/control epoch, activated-at, heartbeat and fixed phase deadline envelope,
+last completed healthy cycle with proof,
 STOP/crash latch, in-flight/unknown write status, and version/CAS token. Specify
 how it is read when the service is manual0 or unreachable; old logs and ephemeral
 checkpoints are not that contract. The adapter validates a complete current

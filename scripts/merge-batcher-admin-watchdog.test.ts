@@ -18,6 +18,12 @@ const binding: Binding = {
   image: `registry/image@sha256:${"a".repeat(64)}`,
   activation: "activation-1",
   planDigest: "b".repeat(64),
+  configDigest: "c".repeat(64),
+  serviceGeneration: "1",
+  revision: "rev-1",
+  repository: "Cloudgeni-ai/opengeni",
+  stateRef: "refs/heads/batcher-state",
+  phaseLimits: { cycle: { timeoutMs: 900_000, marginMs: 120_000 } },
 };
 function fixture() {
   let now = 2_000_000,
@@ -28,6 +34,8 @@ function fixture() {
     observedAt: now,
     activatedAt: 100_000,
     lastHealthyAt: now,
+    heartbeatAt: now,
+    phase: null,
     revision: "health-1",
     stopped: false,
     crashLoop: false,
@@ -104,6 +112,53 @@ function fixture() {
   };
 }
 describe("portable independent watchdog policy (fake provider, not live OFF qualification)", () => {
+  test("fresh loop heartbeat covers CI/backoff liveness without forging a healthy completion", () => {
+    const f = fixture();
+    f.patch({ lastHealthyAt: 100_000, heartbeatAt: f.ports.now() });
+    expect(classify(f.observation(), binding, f.ports.now())).toBe("healthy");
+    f.advance(staleAfterMs);
+    expect(classify(f.observation(), binding, f.ports.now())).toBe("stale-health");
+  });
+  test("fresh heartbeat cannot extend fixed phase deadline and unpinned caps hold", () => {
+    const f = fixture();
+    const start = f.ports.now();
+    f.patch({
+      phase: {
+        id: "cycle-1",
+        kind: "cycle",
+        startedAt: start,
+        deadlineAt: start + 1_020_000,
+        timeoutMs: 900_000,
+        marginMs: 120_000,
+      },
+    });
+    f.advance(1_020_000);
+    f.patch({ heartbeatAt: f.ports.now() });
+    expect(classify(f.observation(), binding, f.ports.now())).toBe("phase-deadline");
+    f.patch({
+      phase: { ...f.observation().phase!, deadlineAt: start + 2_000_000, timeoutMs: 1_880_000 },
+    });
+    expect(classify(f.observation(), binding, f.ports.now())).toBe("unknown");
+  });
+  test("stale heartbeat triggers within a still-running phase; unknown writes never earn Manual", async () => {
+    const f = fixture();
+    const start = f.ports.now();
+    f.patch({
+      phase: {
+        id: "cycle-1",
+        kind: "cycle",
+        startedAt: start,
+        deadlineAt: start + 1_020_000,
+        timeoutMs: 900_000,
+        marginMs: 120_000,
+      },
+    });
+    f.advance(staleAfterMs);
+    expect(classify(f.observation(), binding, f.ports.now())).toBe("stale-health");
+    f.patch({ writes: "unknown" });
+    expect(await tick(f.ports, binding, "unknown")).toBe("observation-unknown");
+    expect(f.calls.off).toBe(0);
+  });
   test.each(["stopped", "crash-loop", "stale-health"] as const)(
     "%s calls OFF once and posts verified result",
     async (trigger) => {
@@ -113,7 +168,7 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
           ? { stopped: true }
           : trigger === "crash-loop"
             ? { crashLoop: true }
-            : { lastHealthyAt: 100_000 },
+            : { heartbeatAt: 100_000 },
       );
       expect(classify(f.observation(), binding, f.ports.now())).toBe(trigger);
       expect(await tick(f.ports, binding, "run1")).toBe("manual");
@@ -133,7 +188,7 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
   });
   test("first-cycle age starts at durable activation, not watcher start", async () => {
     const f = fixture();
-    f.patch({ lastHealthyAt: null, activatedAt: f.ports.now() });
+    f.patch({ lastHealthyAt: null, heartbeatAt: null, activatedAt: f.ports.now() });
     f.advance(staleAfterMs - 1);
     expect(await tick(f.ports, binding, "r1")).toBe("healthy");
     f.advance(1);
@@ -160,6 +215,12 @@ describe("portable independent watchdog policy (fake provider, not live OFF qual
     { activatedAt: NaN },
     { revision: "" },
     { binding: { ...binding, activation: "another-activation" } },
+    { binding: { ...binding, configDigest: "d".repeat(64) } },
+    { binding: { ...binding, serviceGeneration: "2" } },
+    { binding: { ...binding, revision: "rev-other" } },
+    { binding: { ...binding, repository: "wrong/repository" } },
+    { binding: { ...binding, stateRef: "refs/heads/other-state" } },
+    { heartbeatAt: 9_000_000 },
   ])("pre-claim uncertainty alerts but re-observes and recovers: %j", async (patch) => {
     const f = fixture();
     const original = structuredClone(f.observation());
