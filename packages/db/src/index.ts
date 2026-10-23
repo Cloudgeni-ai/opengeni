@@ -64886,7 +64886,9 @@ export async function renewSandboxAgentLink(
         ), updated as (
           update enrollments e set
             connection_lease_expires_at = greatest(
-              date_trunc('milliseconds', checked.connection_lease_expires_at),
+              case when isfinite(checked.connection_lease_expires_at)
+                then date_trunc('milliseconds', checked.connection_lease_expires_at)
+                else null end,
               checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'
             ),
             updated_at = checked.renewed_at
