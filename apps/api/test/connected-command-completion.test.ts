@@ -18,6 +18,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSandboxEnrollment,
+  createEnrollment,
   createSession,
   createWorkspace,
   initializeSessionStartAtomically,
@@ -32,12 +33,16 @@ import {
   locateConnectedCommandCompletion,
   readSessionBackgroundCommandOutput,
   claimPushedConnectedCommandCompletion,
+  claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   recordConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
-import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
+import {
+  collectConnectedCommandCompletion,
+  ingestConnectedCommandCompletion,
+} from "../src/sandbox/command-completion";
 
 function reader(
   exitCode: number | OpExit,
@@ -84,7 +89,12 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function fixture(crossWorkspace = false) {
+async function fixture(
+  crossWorkspace = false,
+  beforeAdoption?: (
+    input: Parameters<typeof adoptConnectedMachineSessionBackgroundCommand>[1],
+  ) => Promise<void>,
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -137,15 +147,160 @@ async function fixture(crossWorkspace = false) {
     connectionInstanceId: crypto.randomUUID(),
     opId: crypto.randomUUID(),
   };
-  await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+  if (beforeAdoption) {
+    const enrollment = await createEnrollment(client.db, {
+      accountId: identity.accountId,
+      workspaceId: identity.controlWorkspaceId,
+      pubkey: `ed25519:${suffix}`,
+    });
+    identity.enrollmentId = enrollment.id;
+    await shared.admin`update enrollments set connection_instance_id=${identity.connectionInstanceId},
+      connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
+  }
+  const adoption = {
     ...identity,
     turnId: claimed.turn.id,
     attemptId,
     executionGeneration: claimed.turn.executionGeneration,
     command: "sleep 30",
-  });
+  };
+  await beforeAdoption?.(adoption);
+  await adoptConnectedMachineSessionBackgroundCommand(client.db, adoption);
   return identity;
 }
+
+test("missing-row delivery is acknowledged without claiming output, and later adoption stays recoverable", async () => {
+  const acknowledgements: AgentEventAck[] = [];
+  let outputReads = 0;
+  const outputReader = reader(0);
+  const transportReader: Pick<OpStreamExecClient, "readExisting"> = {
+    readExisting: async (...args) => {
+      outputReads++;
+      return await outputReader.readExisting(...args);
+    },
+  };
+  let receiptSubject: string | undefined;
+  const bus = Object.assign(new MemoryEventBus(), {
+    getOpStreamConnection: () =>
+      ({
+        publish: (subject: string, bytes: Uint8Array) => {
+          receiptSubject = subject;
+          acknowledgements.push(AgentEventAck.decode(bytes));
+        },
+      }) as unknown as ReturnType<NonNullable<EventBus["getOpStreamConnection"]>>,
+  });
+  const command = await fixture(true, async (input) => {
+    await ingestConnectedCommandCompletion(
+      client.db,
+      ids(input),
+      { opId: input.opId, exit: OpExit.fromPartial({ exitCode: 0 }) },
+      bus,
+      transportReader,
+    );
+    expect(acknowledgements).toHaveLength(1);
+    expect(acknowledgements[0]?.ack).toEqual({
+      $case: "operationCompleted",
+      operationCompleted: { opId: input.opId },
+    });
+    expect(receiptSubject).toBe(
+      `agent.${input.controlWorkspaceId}.${input.enrollmentId}.connection.${input.connectionInstanceId}.ack`,
+    );
+    expect(outputReads).toBe(0);
+    expect(await getSessionBackgroundCommand(client.db, input)).toBeNull();
+  });
+  // The delivery receipt did not exist in storage or disable the ordinary
+  // adoption/reconciliation path. No second completion push is needed.
+  const claims = await claimConnectedMachineSessionBackgroundCommands(client.db, {
+    claimId: crypto.randomUUID(),
+    dueBefore: new Date(Date.now() + 1_000),
+    limit: 100,
+    claimTtlMs: 300_000,
+  });
+  const claim = claims.find((item) => item.commandId === command.commandId);
+  expect(claim).toBeDefined();
+  await deferConnectedMachineBackgroundCommandReconciliation(client.db, {
+    claim: claim!,
+    outcome: "provider_running",
+    retryAfterMs: 0,
+  });
+  await collectConnectedCommandCompletion(
+    client.db,
+    ids(command),
+    command.opId,
+    {
+      bus,
+      reader: transportReader,
+      releaseRpc: {
+        request: async () => {
+          throw new Error("Synthetic release unavailable");
+        },
+      },
+    },
+    { acknowledge: false },
+  );
+  expect(outputReads).toBe(1);
+  expect(acknowledgements).toHaveLength(1);
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({
+    state: "exited",
+    exitCode: 0,
+  });
+  const page = await readSessionBackgroundCommandOutput(client.db, command);
+  expect(page?.chunks.map((chunk) => chunk.chunk).join("")).toBe("final output\n");
+});
+
+test("a missing-row receipt can be retried without reading or releasing output", async () => {
+  const command = await fixture();
+  const opId = `foreground-${crypto.randomUUID()}`;
+  const failure = new Error("Receipt transport unavailable");
+  let publishes = 0;
+  const acknowledgements: AgentEventAck[] = [];
+  const bus = Object.assign(new MemoryEventBus(), {
+    getOpStreamConnection: () =>
+      ({
+        publish: (_subject: string, bytes: Uint8Array) => {
+          publishes++;
+          if (publishes === 1) throw failure;
+          acknowledgements.push(AgentEventAck.decode(bytes));
+        },
+      }) as unknown as ReturnType<NonNullable<EventBus["getOpStreamConnection"]>>,
+  });
+  let reads = 0;
+  let releases = 0;
+  const forbiddenReader = {
+    readExisting: async () => {
+      reads++;
+      throw new Error("Unexpected output read");
+    },
+  };
+  const forbiddenRelease = {
+    request: async () => {
+      releases++;
+      throw new Error("Unexpected output release");
+    },
+  };
+  const complete = () =>
+    ingestConnectedCommandCompletion(
+      client.db,
+      ids(command),
+      { opId, exit: OpExit.fromPartial({ exitCode: 0 }) },
+      bus,
+      forbiddenReader,
+      forbiddenRelease,
+    );
+  await expect(complete()).rejects.toBe(failure);
+  await complete();
+  expect(publishes).toBe(2);
+  expect(reads).toBe(0);
+  expect(releases).toBe(0);
+  expect(acknowledgements.map((ack) => ack.ack)).toEqual([
+    { $case: "operationCompleted", operationCompleted: { opId } },
+  ]);
+  expect(await locateConnectedCommandCompletion(client.db, { ...command, opId })).toBeNull();
+  expect(await getSessionBackgroundCommand(client.db, command)).toMatchObject({ state: "running" });
+  const [row] =
+    await shared.admin`select output_consumed_at, output_release_observed_at from session_background_commands where id = ${command.commandId}`;
+  expect(row).toEqual({ output_consumed_at: null, output_release_observed_at: null });
+});
 
 test("pushed terminal proof settles the original command once despite route changes and reaper backoff", async () => {
   const command = await fixture(true);
