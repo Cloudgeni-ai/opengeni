@@ -1,5 +1,49 @@
 # @opengeni/worker-bundle
 
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [93bd89d]
+- Updated dependencies [b331283]
+- Updated dependencies [ca3f931]
+- Updated dependencies [960ae8d]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [2ffad67]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/db@5.0.0
+  - @opengeni/runtime@5.0.0
+  - @opengeni/events@5.0.0
+  - @opengeni/sdk@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/core@5.0.0
+  - @opengeni/documents@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/github@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/storage@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/vaults-keeper@5.0.0
+  - @opengeni/vaults-onepassword@5.0.0
+  - @opengeni/vaults-protonpass@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/decisions@5.0.0
+  - @opengeni/jev@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/subscriptions@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
 ## 4.8.0
 
 ### Patch Changes
