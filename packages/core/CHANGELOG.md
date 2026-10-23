@@ -1,5 +1,25 @@
 # @opengeni/core
 
+## 5.2.1
+
+### Patch Changes
+
+- 9413acc: Read a scoped Skill-presence boolean for session effective-tool metadata instead of loading every active Skill descriptor. Preserve live visibility and activation rules; full Skill catalog reads remain unchanged.
+- Updated dependencies [e1126c2]
+- Updated dependencies [9413acc]
+  - @opengeni/codex@5.2.0
+  - @opengeni/db@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/runtime@5.2.0
+  - @opengeni/documents@5.2.0
+  - @opengeni/events@5.2.0
+  - @opengeni/storage@5.2.0
+  - @opengeni/capabilities@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/vaults@5.2.0
+
 ## 5.1.2
 
 ### Patch Changes

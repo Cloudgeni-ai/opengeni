@@ -1,5 +1,13 @@
 # @opengeni/codex
 
+## 5.2.1
+
+### Patch Changes
+
+- e1126c2: Include bounded, content-free failure causes in Codex request audit events so operators can distinguish caller aborts, transport errors, stream resets, and consumer cancellation.
+  - @opengeni/contracts@5.2.0
+  - @opengeni/network@5.2.0
+
 ## 5.1.2
 
 ### Patch Changes

@@ -1,5 +1,39 @@
 # @opengeni/worker-bundle
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [e1126c2]
+- Updated dependencies [9413acc]
+- Updated dependencies [2d6484c]
+  - @opengeni/codex@5.2.0
+  - @opengeni/db@5.2.0
+  - @opengeni/core@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/runtime@5.2.0
+  - @opengeni/documents@5.2.0
+  - @opengeni/events@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/github@5.2.0
+  - @opengeni/storage@5.2.0
+  - @opengeni/agent-proto@5.2.0
+  - @opengeni/capabilities@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/decisions@5.2.0
+  - @opengeni/interaction@5.2.0
+  - @opengeni/jev@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/subscriptions@5.2.0
+  - @opengeni/tool-gateway@5.2.0
+  - @opengeni/vaults@5.2.0
+  - @opengeni/vaults-keeper@5.2.0
+  - @opengeni/vaults-onepassword@5.2.0
+  - @opengeni/vaults-protonpass@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
 ## 5.1.2
 
 ### Patch Changes
