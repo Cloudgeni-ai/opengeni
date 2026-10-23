@@ -51,7 +51,10 @@ beforeAll(async () => {
   mock.module("@opengeni/react/app/app-context", () => ({
     useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
   }));
+  // Keep every real export (usePage and friends); only navigation is recorded.
+  const navigation = await import("@opengeni/react/app/lib/navigation");
   mock.module("@opengeni/react/app/lib/navigation", () => ({
+    ...navigation,
     useNavigate: () => (options: { search: Record<string, unknown> }) => {
       navigations.push(options);
     },
