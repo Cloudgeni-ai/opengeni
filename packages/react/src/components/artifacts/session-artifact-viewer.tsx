@@ -72,7 +72,7 @@ function viewerClientKey(client: ViewerClient): string {
  * A host-mountable viewer for one editable artifact or Site from a session,
  * with its own header (title, Back, Close). Mount it in any sized container
  * (a side panel, a sheet); it fills it. Data flows through the provider's
- * client and `createSessionProxyHandler({ artifacts: true })`, scoped to
+ * client (for example through `createSessionProxyHandler`), scoped to
  * `sessionId`.
  */
 export function SessionArtifactViewer({ labels, ...props }: SessionArtifactViewerProps) {

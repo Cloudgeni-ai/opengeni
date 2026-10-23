@@ -65,8 +65,8 @@ export type OpenGeniChatProps = ClientOverride &
         ) => Promise<string>)
       | undefined;
     /**
-     * Hide the "New chat" entry point. It is also hidden when the session proxy
-     * reports chat creation unavailable (no `createSession` hook) and no
+     * Show the "New chat" entry point. Defaults to true. It is also hidden when
+     * an older session proxy reports `sessionCreation: false` and no
      * `createSession` prop is given.
      */
     newChat?: boolean | undefined;
@@ -79,8 +79,8 @@ export type OpenGeniChatProps = ClientOverride &
       SessionConversationProps,
       "sessionId" | "client" | "workspaceId" | "baseUrl" | "headers" | "fetch"
     >;
-    /** Forwarded to the list (rename/archive toggles, page size). */
-    listProps?: Pick<SessionListProps, "rename" | "archive" | "pageSize"> | undefined;
+    /** Forwarded to the list (rename/archive toggles, own chats only, page size). */
+    listProps?: Pick<SessionListProps, "rename" | "archive" | "mineOnly" | "pageSize"> | undefined;
     labels?: Partial<OpenGeniChatLabels> | undefined;
     className?: string | undefined;
     /** Defaults to filling the host. */

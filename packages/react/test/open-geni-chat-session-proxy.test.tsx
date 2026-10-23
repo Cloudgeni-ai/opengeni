@@ -1,7 +1,8 @@
 // Regression: the stock `<OpenGeniChat baseUrl>` against the real
 // `createSessionProxyHandler`, a real server `OpenGeniClient`, and a recording
-// fake upstream. Every browser request goes through the proxy's allowlist, so a
-// stock control that the default proxy cannot serve shows up here as a 404.
+// fake upstream. The relay passes Opengeni's routes through as the resolved
+// user, so a stock control that fails here is a relay defect, not a missing
+// allowlist entry.
 import { afterEach, describe, expect, jest, test } from "bun:test";
 import {
   OpenGeniClient,
@@ -350,6 +351,9 @@ async function mountStockChat(
         ],
       });
     }
+    if (path === `${ws}/access/grant`) {
+      return json({ workspaceId: WS, accountId: "acc", subjectId: "sub-1", permissions: [] });
+    }
     if (path === ws) return json({ id: WS, name: "W", settings: {} });
     if (path.endsWith("/events/stream") || path.endsWith("/live-events/stream")) {
       return new Response(hanging(request.signal), {
@@ -478,16 +482,6 @@ async function mountStockChat(
         contentType: "image/png",
       });
     }
-    // Retained associations: only this conversation produced these artifacts.
-    const association =
-      /^\/v1\/workspaces\/[^/]+\/sessions\/([^/]+)\/artifact-associations\/([^/]+)$/.exec(path);
-    if (association) {
-      const [, sourceId, artifactId] = association;
-      if (sourceId !== S || ![IMG, PUB, VID].includes(artifactId!)) {
-        return json({ error: { code: "not_found", message: "no" } }, { status: 404 });
-      }
-      return json({ sessionId: sourceId, artifactId, kind: url.searchParams.get("kind") });
-    }
     if (path === `${ws}/artifacts/${PUB}/content`) {
       return range(PUB_BYTES, "image/png", request.headers.get("range"));
     }
@@ -595,7 +589,7 @@ function failures(log: readonly string[]): string[] {
 }
 
 describe("stock OpenGeniChat behind the default session proxy", () => {
-  test("media the session produced displays through the proxy; Sites are unavailable without a request", async () => {
+  test("media the session produced displays through the relay, and Sites load on request", async () => {
     const chat = await mountStockChat({ createSession: (input) => input });
     // Expand the browser screenshot so its retained bytes load.
     await chat.click(/Observed browser/);
@@ -604,12 +598,10 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(text).not.toContain("retrieval is not configured");
     expect(text).not.toContain("retrieval failed");
 
-    // 1. The proxy serves no Sites by default: a static card, no request.
-    expect(chat.container.querySelector("[data-og-site-preview-unavailable]")?.textContent).toBe(
-      "Site preview unavailable",
-    );
+    // 1. Sites are Opengeni routes like any other: the preview is offered and
+    //    reads nothing until the user asks.
+    expect(chat.container.querySelector("[data-og-site-preview-unavailable]")).toBeNull();
     expect(chat.browser.some((line) => line.includes("published-artifacts"))).toBe(false);
-    expect(chat.buttons().some((label) => /Load Site preview/.test(label))).toBe(false);
 
     // 2. Generated image, published file, screenshot and video all load.
     expect(chat.browser).toContain(`200 POST /v1/workspaces/${WS}/files/${IMG}/download-url`);
@@ -621,12 +613,6 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(chat.browser).toContain(
       `200 POST /v1/workspaces/${WS}/artifacts/${VID}/playback-source`,
     );
-    // Workspace-level reads are proven to come from this session first.
-    for (const artifactId of [PUB, VID]) {
-      expect(chat.upstream).toContain(
-        `GET /v1/workspaces/${WS}/sessions/${S}/artifact-associations/${artifactId}?kind=retained`,
-      );
-    }
     expect(
       chat.container.querySelector('img[src="https://objects.test/generated.png?sig=1"]'),
     ).not.toBeNull();
@@ -634,7 +620,7 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
 
     // 3. The composer microphone appears when the deployment can transcribe.
     expect(chat.container.querySelector("[data-og-composer-dictate]")).not.toBeNull();
-    // Live voice is opt-in for an embedder: no button and no catalog read.
+    // Live voice is opt-in for an embedded conversation: no button and no catalog read.
     expect(chat.browser.some((line) => line.includes("realtime-model-catalog"))).toBe(false);
     expect(
       chat.container.querySelector(
@@ -642,13 +628,13 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
       ),
     ).toBeNull();
 
-    // 4. A proxy with a createSession hook and archive on offers both.
+    // 4. New chat and personal archive ("Hide for me") are offered by default.
     expect(chat.buttons()).toContain("New chat");
-    expect(chat.buttons().some((label) => /^Archive:/.test(label))).toBe(true);
+    expect(chat.buttons().some((label) => /^Hide for me:/.test(label))).toBe(true);
     expect(failures(chat.browser)).toEqual([]);
   });
 
-  test("goal controls pause, resume and clear through the proxy", async () => {
+  test("goal controls pause, resume and clear through the relay", async () => {
     const chat = await mountStockChat({}, {}, undefined, true);
     expect(chat.container.textContent).toContain("Goal");
     expect(await chat.click(/^Pause goal$/)).toBe(true);
@@ -658,7 +644,6 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(chat.browser.filter((line) => line.endsWith(goal) || line.includes(`${goal} `))).toEqual(
       expect.arrayContaining([`200 GET ${goal}`, `200 PATCH ${goal}`, `204 DELETE ${goal}`]),
     );
-    // Only the status crosses the proxy; the chrome's rationale stays behind.
     expect(chat.upstream.filter((line) => line.startsWith(`PATCH ${goal}`))).toHaveLength(2);
     expect(failures(chat.browser)).toEqual([]);
   });
@@ -673,58 +658,48 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(failures(chat.browser)).toEqual([]);
   });
 
-  test("an artifact from another session is refused by the proxy", async () => {
-    const chat = await mountStockChat();
+  test("a chat the product does not authorize is refused before any upstream read", async () => {
+    const chat = await mountStockChat({ authorizeSession: (sessionId) => sessionId !== OTHER });
     const before = chat.upstream.length;
     const response = await fetch(`${BASE}/v1/workspaces/${WS}/artifacts/${PUB}/content`, {
       headers: { "x-opengeni-session-id": OTHER, range: "bytes=0-3" },
     });
     expect(response.status).toBe(404);
-    // The association check refused it; the bytes were never read upstream.
-    expect(chat.upstream.slice(before)).toEqual([
-      `GET /v1/workspaces/${WS}/sessions/${OTHER}/artifact-associations/${PUB}?kind=retained`,
-    ]);
+    expect(chat.upstream.slice(before)).toEqual([]);
   });
 
-  test("live voice appears when the proxy or the conversation opts in", async () => {
+  test("live voice appears when the conversation opts in", async () => {
     // Response delivery and the lazy React boundary must settle on real time.
     jest.useRealTimers();
     const voiceButton = (container: HTMLElement) =>
       container.querySelector(
         "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
       );
-    for (const [proxy, props] of [
-      [{ realtimeVoice: true }, {}],
-      [{}, { conversationProps: { realtimeVoice: true } }],
-    ] as const) {
-      let releaseCatalog!: () => void;
-      const catalogDelivery = new Promise<void>((resolve) => {
-        releaseCatalog = resolve;
-      });
-      try {
-        const chat = await mountStockChat(proxy, props, undefined, false, async (path) => {
+    let releaseCatalog!: () => void;
+    const catalogDelivery = new Promise<void>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    try {
+      const chat = await mountStockChat(
+        {},
+        { conversationProps: { realtimeVoice: true } },
+        undefined,
+        false,
+        async (path) => {
           if (path.endsWith("/realtime-model-catalog")) await catalogDelivery;
-        });
-        await waitFor(
-          () => chat.browser.includes(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`),
-          "the proxy did not return the realtime model catalog",
-        );
-        // A recorded HTTP 200 precedes response delivery and the React commit.
-        // Prove both opt-in paths tolerate that gap, then await the visible control.
-        expect(voiceButton(chat.container)).toBeNull();
-        releaseCatalog();
-        await waitFor(() => voiceButton(chat.container) !== null, "live voice did not render");
-        expect(voiceButton(chat.container)).not.toBeNull();
-      } finally {
-        releaseCatalog();
-        await unmountChat();
-      }
+        },
+      );
+      await waitFor(
+        () => chat.browser.includes(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`),
+        "the relay did not return the realtime model catalog",
+      );
+      // A recorded HTTP 200 precedes response delivery and the React commit.
+      expect(voiceButton(chat.container)).toBeNull();
+      releaseCatalog();
+      await waitFor(() => voiceButton(chat.container) !== null, "live voice did not render");
+    } finally {
+      releaseCatalog();
     }
-    const refused = await mountStockChat(
-      { realtimeVoice: false },
-      { conversationProps: { realtimeVoice: true } },
-    );
-    expect(voiceButton(refused.container)).toBeNull();
   });
 
   test("an anonymous visitor gets no attach control unless the proxy allows visitor uploads", async () => {
@@ -748,41 +723,34 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(attach(allowed.container)).not.toBeNull();
   });
 
-  test("voice input opts out per conversation and per proxy", async () => {
+  test("voice input opts out per conversation", async () => {
     const optedOut = await mountStockChat({}, { conversationProps: { voiceInput: false } });
     expect(optedOut.container.querySelector("textarea")).not.toBeNull();
     expect(optedOut.container.querySelector("[data-og-composer-dictate]")).toBeNull();
-    await cleanup?.();
-    cleanup = null;
-    const proxyOff = await mountStockChat({ voiceInput: false });
-    expect(proxyOff.container.querySelector("[data-og-composer-dictate]")).toBeNull();
   });
 
-  test("a proxy without createSession and with archive off hides both actions", async () => {
-    const chat = await mountStockChat({ archive: false }, { defaultSessionId: undefined });
-    expect(chat.buttons()).not.toContain("New chat");
-    expect(chat.buttons().some((label) => /^Archive:/.test(label))).toBe(false);
-    expect(chat.container.querySelector("[data-og-new-chat-unavailable]")?.textContent).toBe(
-      "New chats are not enabled for this product.",
+  test("the product hides new chat and archive through props", async () => {
+    const chat = await mountStockChat(
+      {},
+      { defaultSessionId: undefined, newChat: false, listProps: { archive: false } },
     );
-    expect(chat.container.querySelector("[data-og-composer-dictate]")).toBeNull();
+    expect(chat.buttons()).not.toContain("New chat");
+    expect(chat.buttons().some((label) => /^Hide for me:/.test(label))).toBe(false);
     expect(
       chat.browser.some((line) => line.includes("POST /v1/workspaces/" + WS + "/sessions")),
     ).toBe(false);
   });
 
   for (const unavailable of [undefined, "Starting chats is turned off."]) {
-    test(`an older proxy that refuses chat creation uses ${unavailable ? "custom" : "default"} unavailable copy`, async () => {
-      // An older proxy reports no capability flags; its create route still refuses.
+    test(`a relay that refuses chat creation uses ${unavailable ? "custom" : "default"} unavailable copy`, async () => {
+      // The product keeps creation closed with `refuse`; the config says nothing.
       const chat = await mountStockChat(
-        {},
+        {
+          refuse: ({ method, segments }) => method === "POST" && segments.join("/") === "sessions",
+        },
         {
           defaultSessionId: undefined,
           labels: unavailable ? { newChatUnavailable: unavailable } : undefined,
-        },
-        (config) => {
-          const { sessionCreation: _created, ...rest } = config;
-          return rest;
         },
       );
       const textarea = chat.container.querySelector("textarea") as HTMLTextAreaElement;

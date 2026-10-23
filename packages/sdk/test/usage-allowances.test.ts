@@ -299,30 +299,46 @@ describe("own-usage read-only proxy", () => {
     expect(calls[0]!.url.search).toBe("?period=2026-09");
   });
 
-  test("denies full usage, controls, roster selectors, wrong workspace and unsupported methods", async () => {
+  test("relays usage and allowance routes as the user and refuses other workspaces", async () => {
     const { client, calls } = fixture();
     const handler = createSessionProxyHandler(client, {
       resolve: () => ({ workspaceId, user: "resolved-user" }),
     });
     const base = `https://host.test/v1/workspaces/${workspaceId}`;
+    // Opengeni decides each of these from the user's grant (own usage only
+    // without usage and allowance permissions); the relay adds no rule of its own.
+    const relayed = [
+      ["GET", `${base}/usage`],
+      ["GET", `${base}/allowance`],
+      ["PUT", `${base}/allowance`],
+      ["POST", `${base}/allowance/grants`],
+      ["PUT", `${base}/members/user:a/allowance`],
+      ["GET", `${base}/usage/me?subjectId=other`],
+    ] as const;
+    for (const [method, path] of relayed) {
+      expect((await handler(new Request(path, { method }))).status).toBe(200);
+    }
+    // Segments are re-encoded exactly as the SDK client encodes them (`user%3Aa`).
+    expect(calls.map((call) => `${call.method} ${call.url.pathname}${call.url.search}`)).toEqual(
+      relayed.map(([method, path]) => {
+        const url = new URL(path);
+        const encoded = url.pathname.split("/").map((part) => encodeURIComponent(part));
+        return `${method} ${encoded.join("/")}${url.search}`;
+      }),
+    );
+    for (const call of calls) {
+      expect(call.actor).toEqual({
+        mode: "external",
+        identity: { externalId: "resolved-user", source: "default" },
+      });
+    }
     for (const [method, path, status] of [
-      ["GET", `${base}/usage`, 404],
-      ["GET", `${base}/allowance`, 404],
-      ["GET", `${base}/allowance/state`, 404],
-      ["PUT", `${base}/allowance`, 404],
-      ["POST", `${base}/allowance/grants`, 404],
-      ["PUT", `${base}/members/user:a/allowance`, 404],
-      ["GET", `${base}/usage/me?subjectId=other`, 400],
-      ["GET", `${base}/usage/me?cursor=other`, 400],
-      ["GET", `${base}/usage/me?limit=1`, 400],
-      ["POST", `${base}/usage/me`, 404],
-      ["DELETE", `${base}/usage/me`, 404],
       ["TRACE", `${base}/usage/me`, 405],
       ["GET", "https://host.test/v1/workspaces/other/usage/me", 403],
     ] as const) {
       expect((await handler(new Request(path, { method }))).status).toBe(status);
     }
-    expect(calls).toHaveLength(0);
+    expect(calls).toHaveLength(relayed.length);
   });
 
   test("never falls back to service identity when the host supplies no user", async () => {

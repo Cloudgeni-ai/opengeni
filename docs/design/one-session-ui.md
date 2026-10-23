@@ -142,36 +142,30 @@ embed.
   sign-out under the chat list, and the workbook's model context on every
   message.
 
-### Session proxy (open decision)
+### Session proxy
 
 `OpenGeniChat`, `SessionConversation` and `NewConversation` back customer
 pages that must not hold a credential: the browser talks to
-`createSessionProxyHandler`, an explicit allowlist of about 30 conversation
-routes run as the resolved user. The session app uses about 126 client
-methods (workspaces, access context, capabilities, connections, repositories,
-machines, projects, pins and more), so it cannot run behind today's proxy.
-Two end states are possible:
+`createSessionProxyHandler`, which runs each request as the resolved user. The
+session app uses about 126 client methods (workspaces, access context,
+capabilities, connections, repositories, machines, projects, pins and more).
+Two end states were considered:
 
-1. An opt-in app mode in the proxy that forwards the session app's
-   workspace-scoped routes as the resolved user (the API still enforces their
-   permissions), after which `OpenGeniChat` renders `SessionApp` with the
-   `embed` preset.
+1. The proxy forwards the session app's workspace-scoped routes as the
+   resolved user (the API still enforces their permissions), after which
+   `OpenGeniChat` renders `SessionApp` with the `embed` preset.
 2. A per-user browser credential minted by the customer's backend, after which
    customer pages use `SessionApp` directly and the proxy stays for chat-only
    embeds.
 
-Decision (October 22, 2026): option 1. `createSessionProxyHandler` takes
-`sessionApp: true`. The app's bootstrap (`access/me`, `workspaces`) answers
-with the resolved workspace only; other reads in that workspace and in chats
-`authorizeSession` admits pass through as the resolved user; a short list of
-the app's own writes (pin, move to a project, projects, the new-chat draft, a
-chat's tool approval settings) passes; every other write is refused, and
-rosters, keys, budgets and administration stay closed even for reads. The
-proxy keeps every existing route's rules, so the host's `createSession` and
-message hooks still decide what a new chat is. Option 2 was rejected because
-a browser credential bypasses those hooks. A product page can now render
-`SessionApp` with `apiBaseUrl` set to its proxy; `OpenGeniChat` keeps the
-conversation components until it switches to `SessionApp`.
+Decision (October 22, 2026): option 1, first as an opt-in `sessionApp` mode
+with its own list of permitted writes. Revised (October 23, 2026): the proxy
+is a relay for every route in the resolved workspace, with Opengeni's
+permissions as the only authority and no mode or per-feature flags; products
+narrow it with the key's and members' permissions and a `refuse` hook, and
+choose what users see with UI props and presets. See
+[Product relay](product-relay.md). Option 2 was rejected because a browser
+credential bypasses the host's `createSession` and message hooks.
 
 ## Plan
 

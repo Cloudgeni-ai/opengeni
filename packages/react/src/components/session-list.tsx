@@ -41,10 +41,15 @@ export type SessionListProps = ClientOverride & {
   /** Allow inline rename (`updateSession`). Defaults to true. */
   rename?: boolean | undefined;
   /**
-   * Allow archiving (`updateSessionArchive`). Defaults to true; hidden when the
-   * session proxy reports archive disabled (`archive: false`).
+   * Offer "Hide for me" (`updateSessionArchive` with `hide_for_me`). Defaults
+   * to true. An older session proxy that reports `archive: false` also hides it.
    */
   archive?: boolean | undefined;
+  /**
+   * List only chats the signed-in person started or messaged. Defaults to
+   * false: every root chat Opengeni lets them read in the workspace.
+   */
+  mineOnly?: boolean | undefined;
   /** Called after the selected chat was archived, so the host can move on. */
   onArchived?: ((sessionId: string) => void) | undefined;
   pageSize?: number | undefined;
@@ -57,10 +62,9 @@ export type SessionListProps = ClientOverride & {
 type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
 
 /**
- * The workspace's root chats for the current user, newest activity first.
- * Through `createSessionProxyHandler` the list is limited to the chats the
- * resolved user created (or everything they may read, with `sessionList:
- * "visible"`); Opengeni enforces visibility either way.
+ * The workspace's root chats the current user may read, newest activity
+ * first. Opengeni enforces visibility; `mineOnly` narrows the list to the
+ * user's own chats.
  */
 export function SessionList({
   client,
@@ -70,6 +74,7 @@ export function SessionList({
   onNewChat,
   rename = true,
   archive = true,
+  mineOnly = false,
   onArchived,
   pageSize = 30,
   refreshKey,
@@ -87,6 +92,7 @@ export function SessionList({
     archiveStatus: "active",
     sortBy: "updatedAt",
     limit,
+    ...(mineOnly ? { mineOnly: true } : {}),
   });
   const refresh = list.refresh;
   const firstRefreshKey = useRef(refreshKey);
@@ -100,7 +106,7 @@ export function SessionList({
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const formatError = useErrorMessage();
   const archiveClient = context.client as unknown as ArchiveClient;
-  // A session proxy with `archive: false` reports it; hide what would fail.
+  // An older session proxy with `archive: false` reports it; hide what would fail.
   const config = useClientConfigFlags(context.client as never);
   const canArchive =
     archive && config.archive && typeof archiveClient.updateSessionArchive === "function";
