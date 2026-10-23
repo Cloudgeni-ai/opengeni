@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   ChannelAUnavailableError,
@@ -23,7 +23,7 @@ import {
   validateCodeSearchRipgrepArgs,
   type ChannelASession,
 } from "../src/sandbox";
-import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
+import { MAC_FOLDERS_ALLOWED_ENV } from "@opengeni/sdk/this-computer";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -688,26 +688,22 @@ describe("code search from a Mac's home folder", () => {
   });
 
   test.skipIf(!hasRipgrep)(
-    "includes Desktop, Documents and Downloads once the owner answered macOS about them",
+    "includes each of Desktop, Documents and Downloads the owner allowed",
     async () => {
       const root = homeFixture();
-      const answered = join(mkdtempSync(join(tmpdir(), "code-search-answered-")), "answered");
-      roots.push(dirname(answered));
-      const env = { [MAC_FILES_ANSWERED_ENV]: answered };
-      // Named but not there yet: still asked about by nobody, so still skipped.
-      expect(await search(root, "Darwin", root, ["."], env)).toEqual([
-        "src/Library/lib.ts",
-        "src/approval.ts",
-        "src/nested/other.ts",
-      ]);
-      writeFileSync(answered, "");
+      const allowed = mkdtempSync(join(tmpdir(), "code-search-allowed-"));
+      roots.push(allowed);
+      const env = { [MAC_FOLDERS_ALLOWED_ENV]: allowed };
+      const code = ["src/Library/lib.ts", "src/approval.ts", "src/nested/other.ts"];
+      // None allowed yet: all skipped.
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(code);
+      writeFileSync(join(allowed, "Documents"), "");
       expect(await search(root, "Darwin", root, ["."], env)).toEqual(
-        [
-          ...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/inner/note.ts`),
-          "src/Library/lib.ts",
-          "src/approval.ts",
-          "src/nested/other.ts",
-        ].sort(),
+        ["Documents/inner/note.ts", ...code].sort(),
+      );
+      for (const dir of MAC_HOME_FILES_DIRS) writeFileSync(join(allowed, dir), "");
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(
+        [...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/inner/note.ts`), ...code].sort(),
       );
     },
   );
@@ -747,7 +743,7 @@ describe("code search from a Mac's home folder", () => {
     await svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 });
     expect(calls[0]).toContain("Darwin");
     expect(calls[0]).toContain('-g "!/$mac_home_dir"');
-    expect(calls[0]).toContain(MAC_FILES_ANSWERED_ENV);
+    expect(calls[0]).toContain(MAC_FOLDERS_ALLOWED_ENV);
     for (const dir of MAC_HOME_PRIVACY_GUARDED_DIRS) expect(calls[0]).toContain(`'${dir}'`);
   });
 });

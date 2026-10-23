@@ -119,28 +119,39 @@ describe("checking the folders macOS guards", () => {
   );
 
   test.skipIf(!existsSync("/bin/ls"))(
-    "lets the agent read them only once they were asked about",
+    "tells the agent which of them it may read: only the ones that opened",
     async () => {
       const { dir, computer, done } = await fakeComputer();
       const env = (computer as unknown as { agentEnv: Record<string, string> }).agentEnv;
+      const allowed = () =>
+        (computer as unknown as { foldersAllowed(): Promise<boolean> }).foldersAllowed();
       try {
-        const answered = env.OPENGENI_MAC_FILES_ANSWERED;
-        expect(answered).toBe(join(dir, "mac-files-answered"));
-        expect(existsSync(answered!)).toBe(false);
+        const folders = env.OPENGENI_MAC_FOLDERS_ALLOWED!;
+        expect(folders).toBe(join(dir, "mac-folders-allowed"));
+        expect(existsSync(folders)).toBe(false);
+        await mkdir(join(dir, "Desktop"));
+        await mkdir(join(dir, "Documents"));
+        await chmod(join(dir, "Documents"), 0o000);
         await computer.requestPermission("files");
-        expect(existsSync(answered!)).toBe(true);
+        const refusable = process.getuid?.() !== 0;
+        expect(existsSync(join(folders, "Desktop"))).toBe(true);
+        expect(existsSync(join(folders, "Documents"))).toBe(!refusable);
+        // A folder that isn't there needs no permission.
+        expect(existsSync(join(folders, "Downloads"))).toBe(true);
+
+        // Allowed later in System Settings: the next check records it.
+        await chmod(join(dir, "Documents"), 0o755);
+        await allowed();
+        expect(existsSync(join(folders, "Documents"))).toBe(true);
+        // No longer opens (refused, or macOS forgot its answer): taken back.
+        await chmod(join(dir, "Desktop"), 0o000);
+        await allowed();
+        expect(existsSync(join(folders, "Desktop"))).toBe(!refusable);
       } finally {
+        await chmod(join(dir, "Documents"), 0o755).catch(() => undefined);
+        await chmod(join(dir, "Desktop"), 0o755).catch(() => undefined);
         await done();
       }
     },
   );
-
-  test("counts an answer given before the app recorded it", async () => {
-    const { dir, done } = await fakeComputer({ requested: ["files"] });
-    try {
-      expect(existsSync(join(dir, "mac-files-answered"))).toBe(true);
-    } finally {
-      await done();
-    }
-  });
 });

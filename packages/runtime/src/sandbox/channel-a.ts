@@ -64,7 +64,7 @@ import type {
   TerminalExecResponse,
 } from "@opengeni/contracts";
 import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
-import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
+import { MAC_FOLDERS_ALLOWED_ENV } from "@opengeni/sdk/this-computer";
 import type { ProviderCommandSession } from "./provider-command-session";
 import type { RemoteOperationObservation } from "./op-correlation";
 import {
@@ -482,9 +482,9 @@ export const MAC_HOME_PRIVACY_GUARDED_DIRS: readonly string[] = [
 
 /**
  * The guarded folders the desktop app's own setup asks macOS about ("Desktop,
- * Documents and Downloads"). Once the owner has answered, reading them shows
- * no prompt, so whole-workspace walks include them again. The app's hosted
- * agent then has `MAC_FILES_ANSWERED_ENV` naming a file that exists.
+ * Documents and Downloads"). Each one the owner allowed opens without a
+ * prompt, so whole-workspace walks include it again: the app's hosted agent
+ * has `MAC_FOLDERS_ALLOWED_ENV` naming a directory with a file of that name.
  */
 export const MAC_HOME_FILES_DIRS: readonly string[] = ["Desktop", "Documents", "Downloads"];
 
@@ -498,8 +498,8 @@ const MAC_HOME_ALWAYS_SKIPPED = MAC_HOME_PRIVACY_GUARDED_DIRS.filter(
  * folder: the user's `$HOME`, or a direct child of `/Users`. It reads only
  * `uname` and the working directory's own path, so it never touches a guarded
  * folder itself, and is `0` on every other box. `mac_home_skip` then lists the
- * guarded folders to leave out: all of them, less Desktop, Documents and
- * Downloads once the owner has answered macOS about those in the app's setup.
+ * guarded folders to leave out: all of them, less each of Desktop, Documents
+ * and Downloads the owner has allowed the app to open.
  */
 const MAC_HOME_GUARD_DETECT = [
   "mac_home_guarded=0",
@@ -512,7 +512,9 @@ const MAC_HOME_GUARD_DETECT = [
   "fi",
   'if [ "$mac_home_guarded" = 1 ]; then',
   `mac_home_skip=(${MAC_HOME_ALWAYS_SKIPPED.map(shellQuote).join(" ")})`,
-  `if [ -z "\${${MAC_FILES_ANSWERED_ENV}:-}" ] || [ ! -e "\$${MAC_FILES_ANSWERED_ENV}" ]; then mac_home_skip+=(${MAC_HOME_FILES_DIRS.map(shellQuote).join(" ")}); fi`,
+  `for mac_home_dir in ${MAC_HOME_FILES_DIRS.map(shellQuote).join(" ")}; do`,
+  `if [ -z "\${${MAC_FOLDERS_ALLOWED_ENV}:-}" ] || [ ! -e "\$${MAC_FOLDERS_ALLOWED_ENV}/$mac_home_dir" ]; then mac_home_skip+=("$mac_home_dir"); fi`,
+  "done",
   "fi",
 ].join("\n");
 

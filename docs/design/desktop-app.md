@@ -180,9 +180,11 @@ are non-mutating; only explicit signed-in setup enables desktop management.
   shell it starts run as the app, any read of a guarded folder in the home
   folder (Desktop, Documents, Downloads, Library, Music, Pictures, Movies, the
   Trash) asks the person in the app's name. Code search from a Mac's home
-  folder skips those folders unless a path names them; Desktop, Documents and
-  Downloads come back once the person has answered macOS about them in setup
-  (the app passes `OPENGENI_MAC_FILES_ANSWERED`, a file that then exists).
+  folder skips those folders unless a path names them. Each of Desktop,
+  Documents and Downloads comes back once the app finds it opens, after the
+  person allowed it in setup or later in System Settings: the app passes
+  `OPENGENI_MAC_FOLDERS_ALLOWED`, a directory with one file per such folder,
+  and takes a file back when its folder stops opening.
   Repository discovery does the same, though turn-end capture, its only
   caller, doesn't run on Connected Machines today. The agent instructions say
   not to scan those folders unasked. The app declares only the microphone

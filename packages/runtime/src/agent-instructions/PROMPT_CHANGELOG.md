@@ -7,9 +7,9 @@ asks the owner about each one (Files and Folders, Photos, Apple Music and the
 media library, Contacts, Calendars and other apps' data) in the app's name.
 People saw that cascade and took the app for asking far more than it needs.
 The module now says to open those folders only when the task needs them. Code
-search also skips them on its own until the owner has answered macOS about
-Desktop, Documents and Downloads in the app's setup, then only Library, Music,
-Pictures, Movies and the Trash (see `MAC_HOME_PRIVACY_GUARDED_DIRS` in
+search also skips them on its own: always Library, Music, Pictures, Movies and
+the Trash, and each of Desktop, Documents and Downloads until the owner has
+allowed the app to open it (see `MAC_HOME_PRIVACY_GUARDED_DIRS` in
 `sandbox/channel-a.ts`). Only the modular
 composition has a Connected Machine module; legacy bytes are unchanged.
 

@@ -7,9 +7,8 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 
-import { MAC_FILES_ANSWERED_ENV } from "@opengeni/sdk/this-computer";
+import { MAC_FOLDERS_ALLOWED_ENV } from "@opengeni/sdk/this-computer";
 import {
-  MAC_HOME_FILES_DIRS,
   MAC_HOME_PRIVACY_GUARDED_DIRS,
   SandboxChannelAService,
   type ChannelASession,
@@ -76,15 +75,16 @@ describe("repository discovery from a Mac's home folder", () => {
     });
   });
 
-  test("enters Desktop, Documents and Downloads once the owner answered macOS about them", async () => {
+  test("enters only the ones of Desktop, Documents and Downloads the owner allowed", async () => {
     const root = homeWithRepositories();
-    const answered = join(tempDir("mac-home-answered-"), "answered");
-    writeFileSync(answered, "");
+    const allowed = tempDir("mac-home-allowed-");
+    writeFileSync(join(allowed, "Desktop"), "");
+    writeFileSync(join(allowed, "Downloads"), "");
     const svc = new SandboxChannelAService({
-      session: hostShellSession(root, "Darwin", root, { [MAC_FILES_ANSWERED_ENV]: answered }),
+      session: hostShellSession(root, "Darwin", root, { [MAC_FOLDERS_ALLOWED_ENV]: allowed }),
     });
     expect(await svc.detectReposDetailed()).toEqual({
-      repos: [...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/project`), "code/Library", "code/app"],
+      repos: ["Desktop/project", "Downloads/project", "code/Library", "code/app"],
       complete: true,
       degradedReason: null,
     });
