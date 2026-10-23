@@ -2,8 +2,11 @@
 
 This runbook covers the Teams bot package and controlled rollout.
 Source and package preparation are not deployment, tenant installation, publisher
-verification, or Store approval. Keep runtime switches off until an operator has
-completed the relevant checks below.
+verification, or Store approval. The environment policy in `opengeni-ops` enables
+both features in staging and keeps production switches off with empty allowlists.
+Those settings take effect through the normal release workflow; merging them does
+not deploy the application or configure Microsoft credentials. Complete the checks
+below in staging before approving a production rollout.
 
 ## Two independent integrations
 
@@ -99,10 +102,13 @@ parser's documented list format. An allowlist permits setup/use only at its
 rollout boundary; it does not bypass membership, binding, account linkage,
 provider token validation, tool policy, or approval checks.
 
-Start with dedicated pilot tenant/workspace entries while both broad switches
-remain false. Include Microsoft's actual reviewer tenant/workspace only after
-it is known; never broaden access to all tenants to get a submission reviewed.
-Keep reviewer accounts, tenant IDs and credentials outside the repository.
+Use dedicated test tenants and workspaces in staging. Its enabled broad switches
+do not bypass the explicit installer/channel allowlists or account-linking checks.
+Production remains fully off with empty allowlists until a separately reviewed
+rollout change. If a restricted reviewer environment is needed, use exact
+pilot/reviewer tenant and workspace entries with its broad switches false; never
+broaden access merely to get a submission reviewed. Keep reviewer accounts,
+tenant IDs and credentials outside the repository.
 
 ## Generate a package
 
