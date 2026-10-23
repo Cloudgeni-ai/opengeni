@@ -12,8 +12,18 @@ import { SessionChrome } from "../src/components/session-chrome";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { markActionFailure, SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
+import {
+  STREAM_RECONNECTING_NOTICE_DELAY_MS,
+  useStreamReconnecting,
+} from "../src/lib/use-calm-service-failure";
 import { fakeTurn } from "./fake-client";
-import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import {
+  flush,
+  registerDom,
+  renderComponent,
+  renderHook,
+  type RenderedComponent,
+} from "./render-hook";
 
 registerDom({ clock: "virtual" });
 
@@ -203,5 +213,74 @@ describe("queue chip while Opengeni is updating", () => {
     mounted = await renderComponent(<SessionChrome queue={queue({ error })} />);
     await flush(10);
     expect(mounted.container.textContent).toContain("needs attention");
+  });
+});
+
+describe("event stream reconnecting notice", () => {
+  type StreamProps = { state: string; initialLoading: boolean };
+  const past = STREAM_RECONNECTING_NOTICE_DELAY_MS + 1;
+
+  test("a first connection that has not reported live never reads as an update", async () => {
+    // A slow open, or a host client that never reports its stream state: the
+    // conversation is loaded and nothing has dropped, so nothing is updating.
+    const hook = await renderHook(
+      (props: StreamProps) => useStreamReconnecting(props.state, props.initialLoading),
+      {
+        state: "connecting",
+        initialLoading: true,
+      },
+    );
+    await hook.rerender({ state: "connecting", initialLoading: false });
+    await flush(10 * 60_000);
+    expect(hook.result.current).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a live stream that drops and keeps reconnecting shows the notice, and it clears on recovery", async () => {
+    const hook = await renderHook(
+      (props: StreamProps) => useStreamReconnecting(props.state, props.initialLoading),
+      {
+        state: "connecting",
+        initialLoading: false,
+      },
+    );
+    await hook.rerender({ state: "live", initialLoading: false });
+    // The quiet transient retry restarts the stream as "connecting".
+    await hook.rerender({ state: "connecting", initialLoading: false });
+    await flush(STREAM_RECONNECTING_NOTICE_DELAY_MS - 100);
+    expect(hook.result.current).toBe(false);
+    await flush(200);
+    expect(hook.result.current).toBe(true);
+    await hook.rerender({ state: "live", initialLoading: false });
+    expect(hook.result.current).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a stream the SDK reports as reconnecting shows the notice after the delay", async () => {
+    const hook = await renderHook(
+      (props: StreamProps) => useStreamReconnecting(props.state, props.initialLoading),
+      {
+        state: "reconnecting",
+        initialLoading: false,
+      },
+    );
+    await flush(past);
+    expect(hook.result.current).toBe(true);
+    await hook.unmount();
+  });
+
+  test("a new initial load forgets the earlier live stream", async () => {
+    const hook = await renderHook(
+      (props: StreamProps) => useStreamReconnecting(props.state, props.initialLoading),
+      {
+        state: "live",
+        initialLoading: false,
+      },
+    );
+    await hook.rerender({ state: "connecting", initialLoading: true });
+    await hook.rerender({ state: "connecting", initialLoading: false });
+    await flush(10 * 60_000);
+    expect(hook.result.current).toBe(false);
+    await hook.unmount();
   });
 });
