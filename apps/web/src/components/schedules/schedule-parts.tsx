@@ -139,15 +139,29 @@ export { inAppClick } from "@opengeni/react/ui/in-app-click";
    Values.
    -------------------------------------------------------------------------- */
 
+/**
+ * What kind of schedule it is. Never its state: a pause glyph here read as a
+ * button. Paused shows in Next run, the switch and the page's status chip.
+ */
 export function ScheduleTile({ task }: { task: ScheduledTask }) {
-  const active = scheduledTaskStateLabel(task).active;
   return (
     <LogoTile
       name={task.name}
-      icon={
-        active ? isKnowledgeSync(task) ? <RefreshCwIcon /> : <CalendarClockIcon /> : <PauseIcon />
-      }
+      icon={isKnowledgeSync(task) ? <RefreshCwIcon /> : <CalendarClockIcon />}
     />
+  );
+}
+
+/**
+ * Whether the list row shows the on/off switch: the viewer can pause it, and
+ * turning it on would make it run. A retired sync, or one stopped by its
+ * source or connection (paused or not), keeps Pause in the menu instead, so
+ * the switch never reads On while nothing runs and never vanishes under focus.
+ */
+export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
+  return (
+    schedulePermissions(task, access).canPauseOrDelete &&
+    scheduledTaskStateLabel({ ...task, status: "active" }).reason === "active"
   );
 }
 
@@ -240,10 +254,13 @@ export function ScheduleMenuItems({
   onEdit,
   onDuplicate,
   onDelete,
+  pauseItem = true,
 }: {
   task: ScheduledTask;
   access: ScheduleAccess;
   busy: boolean;
+  /** False where the row's switch already pauses and resumes. */
+  pauseItem?: boolean;
   onRunNow: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -273,7 +290,7 @@ export function ScheduleMenuItems({
           Run now
         </DropdownMenuItem>
       ) : null}
-      {perms.canPauseOrDelete && !retired ? (
+      {pauseItem && perms.canPauseOrDelete && !retired ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}

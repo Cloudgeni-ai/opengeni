@@ -1,6 +1,7 @@
 /**
  * The row and page actions a schedule shares between the list and its own
- * page: Run now, Pause (with Undo), Resume and Delete (a centered confirm).
+ * page: Run now, Pause (with Undo), Resume, the list switch's quiet pause and
+ * resume, and Delete (a centered confirm).
  * Every action goes through the same API calls the old page used; failures
  * say what happened in a toast and leave the list as it was.
  */
@@ -28,6 +29,11 @@ const ACTION_ERROR: Record<ScheduleAction, string> = {
 
 export interface ScheduleActions {
   busyTaskId: string | null;
+  /**
+   * Pause or resume without a toast on success, for a switch that already
+   * shows the new state. Says what failed in a toast and resolves to null.
+   */
+  setPaused: (task: ScheduledTask, paused: boolean) => Promise<ScheduledTask | null>;
   runNow: (task: ScheduledTask) => Promise<boolean>;
   pause: (task: ScheduledTask) => Promise<boolean>;
   resume: (task: ScheduledTask) => Promise<boolean>;
@@ -69,6 +75,24 @@ export function useScheduleActions({
         return false;
       } finally {
         setBusyTaskId(null);
+      }
+    },
+    [client, workspaceId],
+  );
+
+  // Leaves busyTaskId alone: each switch shows its own pending state, so
+  // several rows can change at once.
+  const setPaused = useCallback(
+    async (task: ScheduledTask, paused: boolean): Promise<ScheduledTask | null> => {
+      try {
+        return paused
+          ? await client.pauseScheduledTask(workspaceId, task.id)
+          : await client.resumeScheduledTask(workspaceId, task.id);
+      } catch (error) {
+        toast.error(ACTION_ERROR[paused ? "pause" : "resume"], {
+          description: scheduleErrorText(error),
+        });
+        return null;
       }
     },
     [client, workspaceId],
@@ -164,6 +188,7 @@ export function useScheduleActions({
 
   return {
     busyTaskId,
+    setPaused,
     runNow,
     pause,
     resume,
