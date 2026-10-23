@@ -107,6 +107,7 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import {
+  recordSourcePlacementMove,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
@@ -1067,12 +1068,32 @@ export function registerComputerSessionRoutes(
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       try {
-        const before = await getComputerSessionControlRecord(deps.db, {
+        let before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        // Still live on a machine its task has since moved away from: record
+        // the move now, so the retirement below ends it there in this call.
+        let movedNow = false;
+        if (
+          before.session.lifecycle !== "lost" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine" &&
+          (await recordSourcePlacementMove(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+          }))
+        ) {
+          movedNow = true;
+          before = await getComputerSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            computerSessionId,
+          });
+        }
         if (
           before.session.lifecycle === "lost" &&
           before.session.failureCode === "source_placement_changed" &&
@@ -1095,6 +1116,15 @@ export function registerComputerSessionRoutes(
             throw new ComputerSessionStateError(
               "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
             );
+          }
+          // The move just recorded may have left other resources of this task
+          // on that machine; end them too without making this request wait.
+          if (movedNow) {
+            void retireSourceFormerPlacements(channelServices, {
+              grant,
+              sourceSessionId: before.sourceSessionId,
+              origin: null,
+            });
           }
         }
         if (before.session.controller) controllerAuthorityRoot(deps);
