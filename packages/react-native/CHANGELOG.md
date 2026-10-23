@@ -1,5 +1,18 @@
 # @opengeni/react-native
 
+## 4.9.0
+
+### Patch Changes
+
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+- Updated dependencies [ce7f5f3]
+- Updated dependencies [f7dfe7a]
+  - @opengeni/contracts@4.9.0
+  - @opengeni/react@4.9.0
+  - @opengeni/sdk@4.9.0
+
 ## 4.8.0
 
 ### Patch Changes

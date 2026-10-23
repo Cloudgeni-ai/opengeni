@@ -1,5 +1,37 @@
 # @opengeni/api-router
 
+## 4.9.0
+
+### Patch Changes
+
+- Updated dependencies [960ae8d]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/runtime@4.9.0
+  - @opengeni/contracts@4.9.0
+  - @opengeni/core@4.9.0
+  - @opengeni/db@4.9.0
+  - @opengeni/artifact-tool@4.9.0
+  - @opengeni/capabilities@4.9.0
+  - @opengeni/codemode@4.9.0
+  - @opengeni/codex@4.9.0
+  - @opengeni/config@4.9.0
+  - @opengeni/documents@4.9.0
+  - @opengeni/events@4.9.0
+  - @opengeni/github@4.9.0
+  - @opengeni/interaction@4.9.0
+  - @opengeni/observability@4.9.0
+  - @opengeni/storage@4.9.0
+  - @opengeni/tool-gateway@4.9.0
+  - @opengeni/vaults@4.9.0
+  - @opengeni/vaults-keeper@4.9.0
+  - @opengeni/vaults-onepassword@4.9.0
+  - @opengeni/vaults-protonpass@4.9.0
+  - @opengeni/agent-proto@4.9.0
+  - @opengeni/network@4.9.0
+  - @opengeni/xai-subscription@4.9.0
+
 ## 4.8.0
 
 ### Patch Changes

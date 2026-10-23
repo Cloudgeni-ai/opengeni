@@ -1,5 +1,11 @@
 # @opengeni/jev
 
+## 4.9.0
+
+### Patch Changes
+
+- @opengeni/decisions@4.9.0
+
 ## 4.8.0
 
 ### Patch Changes

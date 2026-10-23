@@ -1,5 +1,23 @@
 # @opengeni/react
 
+## 4.9.0
+
+### Minor Changes
+
+- 217ed52: Shared chats on a member's personal machine now show one clear notice when another member's messages or worker results are waiting, naming whose work waits and why. The machine owner can continue with that work in one click; other members see that it waits for the owner before they send.
+- ce7f5f3: The Site view's chat panel no longer repeats the Site's conversation list (the sidebar already nests it under the Site row). It shows the open conversation as a regular chat with the model picker, titled in its header, with one New action. The panel can be resized by dragging its left edge or with the keyboard (320 to 720 px, leaving the Site 360 px where there is room), hidden and shown again (choosing a conversation shows it), and its width and hidden state are remembered per person. Adds a reusable `ResizeHandle` window-splitter primitive.
+
+### Patch Changes
+
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- f7dfe7a: The composer's "Opengeni is updating" line now appears only when a session event stream that was live drops and keeps reconnecting. A slow first connection, or a host client that never reports its stream state, no longer shows it or shifts the conversation.
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@4.9.0
+  - @opengeni/sdk@4.9.0
+  - @opengeni/connect@4.9.0
+
 ## 4.8.0
 
 ### Patch Changes

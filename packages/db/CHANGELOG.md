@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 4.9.0
+
+### Patch Changes
+
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@4.9.0
+  - @opengeni/codemode@4.9.0
+  - @opengeni/codex@4.9.0
+  - @opengeni/config@4.9.0
+  - @opengeni/observability@4.9.0
+  - @opengeni/network@4.9.0
+  - @opengeni/subscriptions@4.9.0
+  - @opengeni/xai-subscription@4.9.0
+
 ## 4.8.0
 
 ### Patch Changes

@@ -1,5 +1,21 @@
 # @opengeni/sdk
 
+## 4.9.0
+
+### Minor Changes
+
+- 217ed52: Shared chats on a member's personal machine now show one clear notice when another member's messages or worker results are waiting, naming whose work waits and why. The machine owner can continue with that work in one click; other members see that it waits for the owner before they send.
+
+### Patch Changes
+
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- 6d29c01: Voice calls on WebSocket voice models (Eleven Realtime, SuperGrok and AI Gateway) now start knowing the chat's earlier conversation: it is part of the voice session's instructions, as for hosted GPT Live, instead of messages sent once the socket opens, which Eleven Realtime kept unread. Progress from the agent is sent to the voice model as one update when the person starts speaking or before a requested reply, instead of one message per streamed fragment, so Eleven Realtime no longer rejects it. The connect response's `initialItems` is now always empty and deprecated.
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@4.9.0
+  - @opengeni/connect@4.9.0
+
 ## 4.8.0
 
 ### Minor Changes
