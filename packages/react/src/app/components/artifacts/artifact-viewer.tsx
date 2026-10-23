@@ -6,6 +6,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -22,8 +23,8 @@ import {
   type ZoomPanController,
 } from "../../../components/zoom-pan-image";
 import { createWorkspaceRetainedArtifactLoader } from "../../../timeline";
+import { ownsArrowKeys } from "../../../lib/keyboard-targets";
 import { Button } from "../../../ui/button";
-import { containedPortal } from "../../../ui/portal-container";
 import { userErrorText } from "../../../ui/api-error";
 import { useAppContext } from "../../app-context";
 import { EditableArtifactSurface } from "../../lib/app-surfaces";
@@ -31,6 +32,7 @@ import { artifactKey, isEditableArtifactKind } from "../../lib/artifact-catalog"
 import { saveRetainedArtifact } from "../../lib/retained-artifact-download";
 import { toast } from "../../lib/toast";
 import { LoadingPanel } from "../common";
+import { ArtifactFullWindowBar, ArtifactFullWindowDialog } from "./artifact-full-view";
 import { ArtifactTypeIcon } from "./artifact-page-chrome";
 import {
   cachedRetainedArtifactLoader,
@@ -48,8 +50,6 @@ const ArtifactDetailRoute = lazy(() =>
   import("../../routes/artifacts").then((module) => ({ default: module.ArtifactDetailRoute })),
 );
 
-const DialogContainedPortal = containedPortal(Dialog.Portal);
-
 /** Images on either side of the one on screen start loading, so stepping is instant. */
 const PRELOAD_NEIGHBOURS = 1;
 /** A horizontal touch drag at least this long steps to the neighbouring artifact. */
@@ -57,17 +57,6 @@ const SWIPE_DISTANCE = 48;
 
 type AppClient = ReturnType<typeof useAppContext>["client"];
 type ImageSources = ReturnType<typeof imageSources>;
-
-/** Keys typed here move a caret, a menu or a grid selection; they never step artifacts. */
-function ownsArrowKeys(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.isContentEditable ||
-    target.closest(
-      'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="menu"], [role="listbox"], [role="grid"], [role="slider"]',
-    ) !== null
-  );
-}
 
 function imageSources(client: AppClient, accessKeyVersion: number, workspaceId: string) {
   const cache = retainedImageCache(client);
@@ -169,13 +158,16 @@ export function ArtifactViewer({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
-      if (event.shiftKey) return;
+      // A held key steps once, rather than loading every artifact it races past.
+      if (event.shiftKey || event.repeat || event.isComposing || event.keyCode === 229) return;
       const target = event.target;
       // Keys in another dialog (a share confirmation), a field or a menu stay
-      // there, and so do keys inside a document or Site being worked on.
-      if (!(target instanceof Node) || !content.current?.contains(target)) return;
+      // there, and so do keys inside a document or Site being worked on. Focus
+      // that fell to the page (its button became disabled) still belongs here.
+      const onPage = target === document.body || target === document.documentElement;
+      if (!onPage && (!(target instanceof Node) || !content.current?.contains(target))) return;
       if (ownsArrowKeys(target)) return;
-      if (!isImage && body.current?.contains(target)) return;
+      if (!isImage && target instanceof Node && body.current?.contains(target)) return;
       event.preventDefault();
       step(event.key === "ArrowLeft" ? -1 : 1);
     };
@@ -183,27 +175,60 @@ export function ArtifactViewer({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isImage, step]);
 
-  useEffect(() => {
-    if (index < 0) return;
+  // Clicking Next at the end (or Fit once fitted) disables the focused button and
+  // drops focus to the page; bring it back so Tab and the keys stay in the viewer.
+  const zoomed = zoom.view !== null && !zoom.view.fit;
+  useLayoutEffect(() => {
+    const viewer = content.current;
+    const active = document.activeElement;
+    if (!viewer) return;
+    if (
+      active === document.body ||
+      (active instanceof HTMLButtonElement && active.disabled && viewer.contains(active))
+    )
+      viewer.focus();
+  }, [index, zoomed]);
+
+  // Only the neighbours' ids matter: the list is rebuilt on every parent render.
+  const neighbours = useMemo(() => {
+    if (index < 0) return "";
+    const ids: string[] = [];
     for (let offset = 1; offset <= PRELOAD_NEIGHBOURS; offset++) {
       for (const neighbour of [items[index + offset], items[index - offset]]) {
-        if (neighbour?.kind === "image") preloadImage(sources, neighbour.id);
+        if (neighbour?.kind === "image") ids.push(neighbour.id);
       }
     }
-  }, [index, items, sources]);
+    return ids.join("\n");
+  }, [index, items]);
+  const preloaded = useRef(new Set<string>());
+  useEffect(() => {
+    for (const id of neighbours ? neighbours.split("\n") : []) {
+      if (preloaded.current.has(id)) continue;
+      preloaded.current.add(id);
+      preloadImage(sources, id);
+    }
+  }, [neighbours, sources]);
 
-  // A horizontal swipe on a touch screen steps too.
-  const swipe = useRef<{ x: number; y: number } | null>(null);
+  // A one-finger horizontal swipe on a touch screen steps too. A second finger
+  // makes it a pinch, which never steps.
+  const swipe = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const touches = useRef(new Set<number>());
   const onPointerDown = (event: PointerEvent) => {
+    if (event.pointerType !== "touch") return;
+    touches.current.add(event.pointerId);
     // A zoomed image pans under the finger instead.
-    const zoomed = zoom.view !== null && !zoom.view.fit;
     swipe.current =
-      event.pointerType === "touch" && !zoomed ? { x: event.clientX, y: event.clientY } : null;
+      touches.current.size === 1 && !zoomed
+        ? { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+        : null;
   };
-  const onPointerUp = (event: PointerEvent) => {
+  const onPointerEnd = (event: PointerEvent) => {
+    if (event.pointerType !== "touch") return;
+    touches.current.delete(event.pointerId);
     const start = swipe.current;
+    if (!start || start.pointerId !== event.pointerId) return;
     swipe.current = null;
-    if (!start) return;
+    if (event.type !== "pointerup" || zoomed) return;
     const dx = event.clientX - start.x;
     const dy = event.clientY - start.y;
     if (Math.abs(dx) >= SWIPE_DISTANCE && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
@@ -212,99 +237,92 @@ export function ArtifactViewer({
   if (!item) return null;
   const count = items.length;
   return (
-    <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
-      <DialogContainedPortal>
-        <Dialog.Content
-          ref={content}
-          data-artifact-fullscreen
-          data-artifact-viewer
-          aria-describedby={undefined}
-          onOpenAutoFocus={(event) => {
-            // The keys work at once, and no button lights up a focus ring.
-            event.preventDefault();
-            content.current?.focus();
-          }}
-          className="fixed inset-0 z-50 flex h-dvh w-dvw flex-col overflow-hidden bg-surface text-left text-fg outline-hidden"
+    <ArtifactFullWindowDialog
+      ref={content}
+      data-artifact-viewer
+      onClose={onClose}
+      onOpenAutoFocus={(event) => {
+        // The keys work at once, and no button lights up a focus ring.
+        event.preventDefault();
+        content.current?.focus();
+      }}
+    >
+      <ArtifactFullWindowBar className="gap-2 px-2 sm:px-3">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0 pointer-coarse:size-11"
+          aria-label="Close"
+          title="Close (Esc)"
+          onClick={onClose}
         >
-          <div
-            data-window-drag
-            className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border/80 bg-surface/95 px-2 sm:px-3"
+          <XIcon aria-hidden="true" />
+        </Button>
+        <ArtifactTypeIcon kind={item.kind} className="size-4 shrink-0 text-fg-subtle" />
+        <Dialog.Title className="min-w-0 flex-1 truncate text-sm font-medium">
+          {item.title}
+        </Dialog.Title>
+        {item.kind === "image" ? (
+          <ZoomControls
+            controller={zoom}
+            className="mr-1 hidden border-r border-border/80 pr-2 sm:flex"
+          />
+        ) : null}
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="pointer-coarse:size-11"
+            aria-label="Previous"
+            title="Previous (←)"
+            disabled={index === 0}
+            onClick={() => step(-1)}
           >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 pointer-coarse:size-11"
-              aria-label="Close"
-              title="Close (Esc)"
-              onClick={onClose}
-            >
-              <XIcon aria-hidden="true" />
-            </Button>
-            <ArtifactTypeIcon kind={item.kind} className="size-4 shrink-0 text-fg-subtle" />
-            <Dialog.Title className="min-w-0 flex-1 truncate text-sm font-medium">
-              {item.title}
-            </Dialog.Title>
-            {item.kind === "image" ? (
-              <ZoomControls
-                controller={zoom}
-                className="mr-1 hidden border-r border-border/80 pr-2 sm:flex"
-              />
-            ) : null}
-            <div className="flex shrink-0 items-center gap-1">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="pointer-coarse:size-11"
-                aria-label="Previous"
-                title="Previous (←)"
-                disabled={index === 0}
-                onClick={() => step(-1)}
-              >
-                <ChevronLeftIcon aria-hidden="true" />
-              </Button>
-              <span
-                data-artifact-viewer-position
-                aria-live="polite"
-                className="min-w-14 text-center text-xs text-fg-muted tabular-nums"
-              >
-                {index + 1} of {count}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="pointer-coarse:size-11"
-                aria-label="Next"
-                title="Next (→)"
-                disabled={index === count - 1}
-                onClick={() => step(1)}
-              >
-                <ChevronRightIcon aria-hidden="true" />
-              </Button>
-              {item.kind === "image" ? (
-                <ImageDownloadButton
-                  key={item.id}
-                  workspaceId={workspaceId}
-                  sources={sources}
-                  item={item}
-                />
-              ) : null}
-              {actions}
-            </div>
-          </div>
-          <div
-            ref={body}
-            data-artifact-viewer-body
-            className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-2"
-            {...(item.kind === "image" ? { onPointerDown, onPointerUp } : {})}
+            <ChevronLeftIcon aria-hidden="true" />
+          </Button>
+          <span
+            data-artifact-viewer-position
+            aria-live="polite"
+            className="min-w-14 text-center text-xs text-fg-muted tabular-nums"
           >
-            <ViewerBody key={artifactKey(item)} workspaceId={workspaceId} item={item} zoom={zoom} />
-          </div>
-        </Dialog.Content>
-      </DialogContainedPortal>
-    </Dialog.Root>
+            {index + 1} of {count}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="pointer-coarse:size-11"
+            aria-label="Next"
+            title="Next (→)"
+            disabled={index === count - 1}
+            onClick={() => step(1)}
+          >
+            <ChevronRightIcon aria-hidden="true" />
+          </Button>
+          {item.kind === "image" ? (
+            <ImageDownloadButton
+              key={item.id}
+              workspaceId={workspaceId}
+              sources={sources}
+              item={item}
+            />
+          ) : null}
+          {actions}
+        </div>
+      </ArtifactFullWindowBar>
+      <div
+        ref={body}
+        data-artifact-viewer-body
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-2"
+        {...(item.kind === "image"
+          ? { onPointerDown, onPointerUp: onPointerEnd, onPointerCancel: onPointerEnd }
+          : {})}
+      >
+        <ViewerBody key={artifactKey(item)} workspaceId={workspaceId} item={item} zoom={zoom} />
+      </div>
+    </ArtifactFullWindowDialog>
   );
 }
 
@@ -478,7 +496,6 @@ function ZoomableImage({
       naturalSize={artifact.dimensions ?? null}
       onError={() => setFailed(true)}
       imageClassName="rounded-md shadow-og-lg"
-      labels={{ zoomIn: "Show at actual size", fit: "Fit to window" }}
     />
   );
 }

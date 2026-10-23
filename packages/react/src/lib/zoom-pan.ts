@@ -91,6 +91,32 @@ export function panBy(
   return clampView({ ...view, x: view.x + dx, y: view.y + dy }, image, viewport);
 }
 
+/** Two fingers, as their spread and midpoint. */
+export type ZoomPinch = { distance: number; middle: ZoomPoint };
+
+/**
+ * One pinch step: the image point under the fingers' previous midpoint follows
+ * them to the new midpoint, scaled by how far they spread. Panning first and then
+ * zooming around the new midpoint keeps that point exactly under the fingers.
+ */
+export function pinchTo(
+  view: ZoomView,
+  from: ZoomPinch,
+  to: ZoomPinch,
+  image: ZoomSize,
+  viewport: ZoomSize,
+): ZoomView {
+  const moved = panBy(
+    view,
+    to.middle.x - from.middle.x,
+    to.middle.y - from.middle.y,
+    image,
+    viewport,
+  );
+  if (!(from.distance > 0) || !(to.distance > 0)) return moved;
+  return zoomTo(moved, moved.scale * (to.distance / from.distance), to.middle, image, viewport);
+}
+
 /** True when the image is larger than the viewport in some direction, so it can be dragged. */
 export function canPan(view: ZoomView, image: ZoomSize, viewport: ZoomSize): boolean {
   return (

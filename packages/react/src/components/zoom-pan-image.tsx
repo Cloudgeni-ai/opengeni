@@ -11,6 +11,7 @@ import {
 } from "react";
 
 import { cn } from "../lib/cn";
+import { isTextEntryTarget } from "../lib/keyboard-targets";
 import {
   canPan,
   clampView,
@@ -18,14 +19,17 @@ import {
   MAX_ZOOM,
   minScale,
   panBy,
+  pinchTo,
   stepScale,
   toggleAt,
   zoomPercent,
   zoomTo,
+  type ZoomPinch,
   type ZoomPoint,
   type ZoomSize,
   type ZoomView,
 } from "../lib/zoom-pan";
+import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "../ui/button";
 
 type ZoomState = {
@@ -48,6 +52,8 @@ export type ZoomPanController = {
   zoomIn(point?: ZoomPoint): void;
   zoomOut(point?: ZoomPoint): void;
   zoomBy(factor: number, point: ZoomPoint): void;
+  /** One two-finger step from one spread and midpoint to the next. */
+  pinch(from: ZoomPinch, to: ZoomPinch): void;
   fit(): void;
   toggleAt(point: ZoomPoint): void;
   panBy(dx: number, dy: number): void;
@@ -137,6 +143,7 @@ export function useZoomPan(resetKey: string): ZoomPanController {
         ),
       zoomBy: (factor, point) =>
         move((current, img, port) => zoomTo(current, current.scale * factor, point, img, port)),
+      pinch: (from, to) => move((current, img, port) => pinchTo(current, from, to, img, port)),
       fit: () => move((_current, img, port) => fitView(img, port)),
       toggleAt: (point) => move((current, img, port) => toggleAt(current, point, img, port)),
       panBy: (dx, dy) => move((current, img, port) => panBy(current, dx, dy, img, port)),
@@ -171,13 +178,6 @@ export function zoomShortcut(event: KeyboardEvent): "in" | "out" | "fit" | null 
   return null;
 }
 
-function editable(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.isContentEditable || target.closest("input, textarea, select") !== null)
-  );
-}
-
 /**
  * While an image is on screen, Cmd/Ctrl + plus, minus and zero zoom the image
  * instead of the page or the desktop window. The listener runs first and
@@ -191,7 +191,7 @@ export function useZoomPanShortcuts(controller: ZoomPanController, enabled: bool
     if (!enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const action = zoomShortcut(event);
-      if (!action || editable(event.target)) return;
+      if (!action || isTextEntryTarget(event.target)) return;
       // Claimed even before the image has loaded, so the window never zooms instead.
       event.preventDefault();
       event.stopPropagation();
@@ -211,7 +211,7 @@ const CLICK_SLOP = 4;
 type Gesture = {
   moved: boolean;
   start: ZoomPoint;
-  pinch: { distance: number; middle: ZoomPoint } | null;
+  pinch: ZoomPinch | null;
 };
 
 function distance(a: ZoomPoint, b: ZoomPoint) {
@@ -243,7 +243,6 @@ export function ZoomPanSurface({
   onError,
   className,
   imageClassName,
-  labels,
 }: {
   controller: ZoomPanController;
   src: string;
@@ -255,9 +254,9 @@ export function ZoomPanSurface({
   onError?: ((event: SyntheticEvent<HTMLImageElement>) => void) | undefined;
   className?: string | undefined;
   imageClassName?: string | undefined;
-  labels?: { zoomIn?: string; fit?: string } | undefined;
 }) {
   const surface = useRef<HTMLDivElement>(null);
+  const img = useRef<HTMLImageElement>(null);
   const latest = useRef(controller);
   latest.current = controller;
   const pointers = useRef(new Map<number, ZoomPoint>());
@@ -272,7 +271,8 @@ export function ZoomPanSurface({
 
   const knownWidth = naturalSize?.width ?? 0;
   const knownHeight = naturalSize?.height ?? 0;
-  useEffect(() => {
+  // Before paint, like the viewport below, so the first frame is already fitted.
+  useLayoutEffect(() => {
     if (knownWidth > 0 && knownHeight > 0)
       latest.current.setImage({ width: knownWidth, height: knownHeight });
   }, [knownWidth, knownHeight]);
@@ -280,11 +280,16 @@ export function ZoomPanSurface({
   useLayoutEffect(() => {
     const element = surface.current;
     if (!element) return;
+    // The layout size, which ignores transforms such as a lightbox's opening scale.
     const measure = () => {
-      const rect = element.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0)
-        latest.current.setViewport({ width: rect.width, height: rect.height });
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      if (width > 0 && height > 0) latest.current.setViewport({ width, height });
     };
+    // A cached image may already be decoded before React attaches onLoad.
+    const loaded = img.current;
+    if (loaded?.complete && loaded.naturalWidth > 0 && loaded.naturalHeight > 0)
+      latest.current.setImage({ width: loaded.naturalWidth, height: loaded.naturalHeight });
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
@@ -338,13 +343,25 @@ export function ZoomPanSurface({
     };
   }, [local]);
 
-  const insideImage = (point: ZoomPoint) =>
-    !!view &&
-    !!image &&
-    point.x >= view.x &&
-    point.y >= view.y &&
-    point.x <= view.x + image.width * view.scale &&
-    point.y <= view.y + image.height * view.scale;
+  const insideImage = (point: ZoomPoint, client: { clientX: number; clientY: number }) => {
+    if (view && image)
+      return (
+        point.x >= view.x &&
+        point.y >= view.y &&
+        point.x <= view.x + image.width * view.scale &&
+        point.y <= view.y + image.height * view.scale
+      );
+    // Still loading: the image's own box decides, so a click on it never closes a lightbox.
+    const rect = img.current?.getBoundingClientRect();
+    return (
+      !!rect &&
+      rect.width > 0 &&
+      client.clientX >= rect.left &&
+      client.clientX <= rect.right &&
+      client.clientY >= rect.top &&
+      client.clientY <= rect.bottom
+    );
+  };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -374,15 +391,12 @@ export function ZoomPanSurface({
     pointers.current.set(event.pointerId, point);
     const points = [...pointers.current.values()];
     if (points.length >= 2 && current.pinch) {
-      const nextDistance = distance(points[0]!, points[1]!);
-      const nextMiddle = middle(points[0]!, points[1]!);
-      if (current.pinch.distance > 0)
-        controller.zoomBy(nextDistance / current.pinch.distance, nextMiddle);
-      controller.panBy(
-        nextMiddle.x - current.pinch.middle.x,
-        nextMiddle.y - current.pinch.middle.y,
-      );
-      current.pinch = { distance: nextDistance, middle: nextMiddle };
+      const next = {
+        distance: distance(points[0]!, points[1]!),
+        middle: middle(points[0]!, points[1]!),
+      };
+      controller.pinch(current.pinch, next);
+      current.pinch = next;
       return;
     }
     if (!current.moved && distance(point, current.start) > CLICK_SLOP) current.moved = true;
@@ -404,18 +418,19 @@ export function ZoomPanSurface({
     setDragging(false);
     if (event.type !== "pointerup" || !current || current.moved) return;
     const point = local(event);
-    if (onBackdropClick && (!view || view.fit) && !insideImage(point)) onBackdropClick();
+    if (onBackdropClick && (!view || view.fit) && !insideImage(point, event)) onBackdropClick();
     else if (view) controller.toggleAt(point);
   };
 
   const pannable = !!view && !!image && !!viewport && canPan(view, image, viewport);
   const zoomedOut = !!view && view.fit;
+  // A small image is fitted above actual size, so a click shrinks it to 100%.
+  const clickShrinks = zoomedOut && view.scale > 1;
   return (
     <div
       ref={surface}
       data-zoom-pan-surface
       role="presentation"
-      title={zoomedOut ? labels?.zoomIn : pannable ? undefined : labels?.fit}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerEnd}
@@ -426,13 +441,14 @@ export function ZoomPanSurface({
           ? "cursor-grabbing"
           : pannable
             ? "cursor-grab"
-            : zoomedOut
+            : zoomedOut && !clickShrinks
               ? "cursor-zoom-in"
               : "cursor-zoom-out",
         className,
       )}
     >
       <img
+        ref={img}
         src={src}
         alt={alt}
         draggable={false}
@@ -494,9 +510,10 @@ export function ZoomControls({
   buttonClassName?: string | undefined;
 }) {
   const modifier = useMemo(shortcutModifier, []);
-  const zoomOut = labels?.zoomOut ?? "Zoom out";
-  const zoomIn = labels?.zoomIn ?? "Zoom in";
-  const fit = labels?.fit ?? "Fit";
+  const t = useOpenGeniText();
+  const zoomOut = labels?.zoomOut ?? t("timeline.screenshotLightbox.zoomOut");
+  const zoomIn = labels?.zoomIn ?? t("timeline.screenshotLightbox.zoomIn");
+  const fit = labels?.fit ?? t("timeline.screenshotLightbox.fit");
   const { view } = controller;
   return (
     <div data-zoom-controls className={cn("flex shrink-0 items-center gap-0.5", className)}>

@@ -6,6 +6,7 @@ import {
   fitScale,
   fitView,
   panBy,
+  pinchTo,
   stepScale,
   toggleAt,
   zoomPercent,
@@ -63,6 +64,24 @@ describe("zoom geometry", () => {
     const exactFit = fitView(exact, viewport);
     expect(exactFit.scale).toBe(1);
     expect(zoomPercent(toggleAt(exactFit, { x: 500, y: 400 }, exact, viewport))).toBe(200);
+  });
+
+  test("a pinch keeps the pinched point between the fingers as they move apart and along", () => {
+    const start = zoomTo(fitView(large, viewport), 1, { x: 500, y: 400 }, large, viewport);
+    const from = { distance: 100, middle: { x: 400, y: 300 } };
+    const to = { distance: 200, middle: { x: 450, y: 320 } };
+    const imagePoint = {
+      x: (from.middle.x - start.x) / start.scale,
+      y: (from.middle.y - start.y) / start.scale,
+    };
+    const pinched = pinchTo(start, from, to, large, viewport);
+    expect(pinched.scale).toBeCloseTo(2);
+    // The image point that was under the fingers is under their new midpoint.
+    expect(pinched.x + imagePoint.x * pinched.scale).toBeCloseTo(to.middle.x);
+    expect(pinched.y + imagePoint.y * pinched.scale).toBeCloseTo(to.middle.y);
+    // Moving both fingers without spreading them only pans.
+    const moved = pinchTo(start, from, { ...from, middle: { x: 420, y: 290 } }, large, viewport);
+    expect(moved).toMatchObject({ scale: start.scale, x: start.x + 20, y: start.y - 10 });
   });
 });
 

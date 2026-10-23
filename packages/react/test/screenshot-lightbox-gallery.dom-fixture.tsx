@@ -7,6 +7,62 @@ const { LightboxProvider, useLightboxGalleryItem, useLightboxOptional } =
   await import("../src/timeline/screenshot-lightbox");
 type LightboxGalleryEntry = import("../src/timeline/screenshot-lightbox").LightboxGalleryEntry;
 type LightboxGalleryImage = import("../src/timeline/screenshot-lightbox").LightboxGalleryImage;
+
+/**
+ * Gives the zoom surface a 1000 x 800 CSS-pixel layout box (its size) at the
+ * window's origin (its position); returns the restore function.
+ */
+function measureZoomSurface(width = 1000, height = 800): () => void {
+  const proto = HTMLElement.prototype;
+  const rect = proto.getBoundingClientRect;
+  const isSurface = (element: HTMLElement) => element.hasAttribute("data-zoom-pan-surface");
+  const own = {
+    clientWidth: Object.getOwnPropertyDescriptor(proto, "clientWidth"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const inherited = (name: "clientWidth" | "clientHeight") => {
+    for (let level = Object.getPrototypeOf(proto); level; level = Object.getPrototypeOf(level)) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, name);
+      if (descriptor) return descriptor;
+    }
+    return undefined;
+  };
+  proto.getBoundingClientRect = function (this: HTMLElement) {
+    if (!isSurface(this)) return rect.call(this);
+    return {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width,
+      height,
+      right: width,
+      bottom: height,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+  for (const [name, size] of [
+    ["clientWidth", width],
+    ["clientHeight", height],
+  ] as const) {
+    const original = own[name] ?? inherited(name);
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isSurface(this) ? size : ((original?.get?.call(this) as number | undefined) ?? 0);
+      },
+    });
+  }
+  return () => {
+    proto.getBoundingClientRect = rect;
+    for (const name of ["clientWidth", "clientHeight"] as const) {
+      const descriptor = own[name];
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else Reflect.deleteProperty(proto, name);
+    }
+  };
+}
+
 describe("LightboxProvider gallery", () => {
   test("pages through registered chat images in document order, wrapping around", async () => {
     const loads: string[] = [];
@@ -243,21 +299,7 @@ describe("LightboxProvider gallery", () => {
       return <button type="button" data-open="only" />;
     }
     // The image area measures 1000 x 800 CSS pixels.
-    const measure = HTMLElement.prototype.getBoundingClientRect;
-    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-      if (!this.hasAttribute("data-zoom-pan-surface")) return measure.call(this);
-      return {
-        x: 0,
-        y: 0,
-        left: 0,
-        top: 0,
-        width: 1000,
-        height: 800,
-        right: 1000,
-        bottom: 800,
-        toJSON: () => ({}),
-      } as DOMRect;
-    };
+    const restore = measureZoomSurface();
     const rendered = await renderComponent(
       <LightboxProvider>
         <Probe />
@@ -314,7 +356,7 @@ describe("LightboxProvider gallery", () => {
       document.body.dispatchEvent(outside);
       expect(outside.defaultPrevented).toBe(false);
     } finally {
-      HTMLElement.prototype.getBoundingClientRect = measure;
+      restore();
       await rendered.unmount();
     }
   });

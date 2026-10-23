@@ -20,6 +20,7 @@ import {
   ZoomPanSurface,
 } from "../components/zoom-pan-image";
 import { cn } from "../lib/cn";
+import { isTextEntryTarget } from "../lib/keyboard-targets";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
 
@@ -90,15 +91,6 @@ const LightboxGalleryContext = createContext<LightboxGalleryRegistry | null>(nul
 
 /** Images in one timeline page together; elsewhere the whole document does. */
 const GALLERY_ROOT_SELECTOR = "[data-og-timeline-scroller]";
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.isContentEditable ||
-    target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !==
-      null
-  );
-}
 
 /**
  * Adds the element's image to the lightbox gallery so an open lightbox can page
@@ -321,7 +313,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       // Arrow keys typed into a field move its caret; they never page images.
-      if (isEditableTarget(event.target)) return;
+      if (isTextEntryTarget(event.target)) return;
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         event.preventDefault();
         step(event.key === "ArrowLeft" ? -1 : 1);
@@ -408,10 +400,6 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                         alt={state.caption ?? state.label}
                         onBackdropClick={close}
                         imageClassName="rounded-og-md border border-white/10 shadow-og-lg"
-                        labels={{
-                          zoomIn: t("timeline.screenshotLightbox.showActualSize"),
-                          fit: t("timeline.screenshotLightbox.fitToWindow"),
-                        }}
                       />
                     </div>
                     <ZoomControls

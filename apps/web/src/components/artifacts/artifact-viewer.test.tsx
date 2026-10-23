@@ -188,6 +188,61 @@ async function waitForViewer() {
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
 }
 
+/**
+ * Gives the zoom surface a 1000 x 800 CSS-pixel layout box (its size) at the
+ * window's origin (its position); returns the restore function.
+ */
+function measureZoomSurface(width = 1000, height = 800): () => void {
+  const proto = HTMLElement.prototype;
+  const rect = proto.getBoundingClientRect;
+  const isSurface = (element: HTMLElement) => element.hasAttribute("data-zoom-pan-surface");
+  const own = {
+    clientWidth: Object.getOwnPropertyDescriptor(proto, "clientWidth"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const inherited = (name: "clientWidth" | "clientHeight") => {
+    for (let level = Object.getPrototypeOf(proto); level; level = Object.getPrototypeOf(level)) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, name);
+      if (descriptor) return descriptor;
+    }
+    return undefined;
+  };
+  proto.getBoundingClientRect = function (this: HTMLElement) {
+    if (!isSurface(this)) return rect.call(this);
+    return {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width,
+      height,
+      right: width,
+      bottom: height,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+  for (const [name, size] of [
+    ["clientWidth", width],
+    ["clientHeight", height],
+  ] as const) {
+    const original = own[name] ?? inherited(name);
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isSurface(this) ? size : ((original?.get?.call(this) as number | undefined) ?? 0);
+      },
+    });
+  }
+  return () => {
+    proto.getBoundingClientRect = rect;
+    for (const name of ["clientWidth", "clientHeight"] as const) {
+      const descriptor = own[name];
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else Reflect.deleteProperty(proto, name);
+    }
+  };
+}
+
 async function press(key: string, target: Element = viewer()!) {
   await act(async () => {
     target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
@@ -248,6 +303,87 @@ test("an image opens large and the buttons step through the list in its order", 
   expect(control("Next").disabled).toBe(false);
 });
 
+test("the arrow keys keep working after the clicked button reaches the end and turns off", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-3.png");
+  // A clicked button has focus, and loses it to the page once it is disabled.
+  control("Next").focus();
+  await act(async () => control("Next").click());
+  expect(position()).toBe("5 of 5");
+  expect(control("Next").disabled).toBe(true);
+  const focused = document.activeElement;
+  expect(focused === control("Next")).toBe(false);
+  await press("ArrowLeft", focused ?? document.body);
+  expect(position()).toBe("4 of 5");
+  // Focus that fell to the page still steps the viewer.
+  await press("ArrowLeft", document.body);
+  expect(position()).toBe("3 of 5");
+});
+
+test("the viewer closes when the artifact on screen leaves the list", async () => {
+  app.client = fakeClient().client;
+  const remove: { current: (id: string) => void } = { current: () => {} };
+  function Shrinking() {
+    const [items, setItems] = useState(catalog);
+    remove.current = (id) => setItems((current) => current.filter((item) => item.id !== id));
+    return (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        compact
+        viewer
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+        onSelect={() => {}}
+      />
+    );
+  }
+  const container = await render(() => <Shrinking />);
+  await openFromList(container, "shot-2.png");
+  // Another artifact going away only renumbers the sequence.
+  await act(async () => remove.current("shot-1"));
+  await settle();
+  expect(viewerTitle()).toBe("shot-2.png");
+  expect(position()).toBe("1 of 4");
+  await act(async () => remove.current("shot-2"));
+  await settle();
+  expect(viewer()).toBeNull();
+});
+
+test("a one-finger swipe steps, but a two-finger pinch never does", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-1.png");
+  const touch = async (type: string, pointerId: number, x: number) => {
+    const body = viewer()!.querySelector("[data-artifact-viewer-body]")!;
+    await act(async () => {
+      body.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          pointerId,
+          pointerType: "touch",
+          clientX: x,
+          clientY: 300,
+        }),
+      );
+    });
+  };
+  // Two fingers spreading sideways, lifted one after the other.
+  await touch("pointerdown", 1, 500);
+  await touch("pointerdown", 2, 700);
+  await touch("pointerup", 2, 900);
+  await touch("pointerup", 1, 300);
+  expect(position()).toBe("1 of 5");
+  // One finger dragged to the left shows the next artifact.
+  await touch("pointerdown", 3, 600);
+  await touch("pointerup", 3, 400);
+  await settle();
+  expect(position()).toBe("2 of 5");
+});
+
 test("Left and Right arrow keys step, never from inside a document, and Escape closes", async () => {
   app.client = fakeClient().client;
   const container = await render(() => <Library />);
@@ -257,7 +393,7 @@ test("Left and Right arrow keys step, never from inside a document, and Escape c
   expect(position()).toBe("2 of 5");
   await press("ArrowLeft");
   expect(position()).toBe("1 of 5");
-  // Modified arrows belong to the browser and the system.
+  // An unmodified press steps; a modified one belongs to the browser and the system.
   await press("ArrowRight", viewer()!);
   await act(async () => {
     viewer()!.dispatchEvent(
@@ -345,21 +481,7 @@ test("the workspace library keeps opening images on their page, where it browses
 test("images zoom with the keyboard, buttons and clicks, and start fitted again after a step", async () => {
   app.client = fakeClient().client;
   // The image area measures 1000 x 800 CSS pixels.
-  const measure = HTMLElement.prototype.getBoundingClientRect;
-  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
-    if (!this.hasAttribute("data-zoom-pan-surface")) return measure.call(this);
-    return {
-      x: 0,
-      y: 0,
-      left: 0,
-      top: 0,
-      width: 1000,
-      height: 800,
-      right: 1000,
-      bottom: 800,
-      toJSON: () => ({}),
-    } as DOMRect;
-  };
+  const restore = measureZoomSurface();
   try {
     const container = await render(() => <Library />);
     await openFromList(container, "shot-1.png");
@@ -450,6 +572,28 @@ test("images zoom with the keyboard, buttons and clicks, and start fitted again 
     document.body.dispatchEvent(outside);
     expect(outside.defaultPrevented).toBe(false);
   } finally {
-    HTMLElement.prototype.getBoundingClientRect = measure;
+    restore();
+  }
+});
+
+test("zoom and arrow keys typed into a field are left to the field", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-1.png");
+  const field = document.createElement("input");
+  document.body.append(field);
+  try {
+    const typed = new KeyboardEvent("keydown", {
+      key: "=",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    field.dispatchEvent(typed);
+    expect(typed.defaultPrevented).toBe(false);
+    await press("ArrowRight", field);
+    expect(position()).toBe("1 of 5");
+  } finally {
+    field.remove();
   }
 });
