@@ -180,7 +180,11 @@ async function openFromList(container: HTMLElement, title: string, { opens = tru
   expect(action).toBeDefined();
   await act(async () => action!.click());
   await settle();
-  for (let waited = 0; opens && !viewer() && waited < 5000; waited += 20)
+  if (opens) await waitForViewer();
+}
+
+async function waitForViewer() {
+  for (let waited = 0; !viewer() && waited < 5000; waited += 20)
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
 }
 
