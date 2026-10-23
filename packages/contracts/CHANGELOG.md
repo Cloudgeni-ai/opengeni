@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 4.7.0
+
+### Minor Changes
+
+- 31095f1: Add a single personal Google Drive MCP connection with reviewed file-management extensions and ordinary agent scheduling. Retire native Drive source-sync and publishing setup while preserving historical connections, imported documents and run history. Keep Drive MCP setup disabled by default until provider prerequisites and OAuth verification are complete.
+
 ## 4.6.1
 
 ## 4.5.0

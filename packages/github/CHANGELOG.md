@@ -1,5 +1,16 @@
 # @opengeni/github
 
+## 4.7.0
+
+### Patch Changes
+
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [7308de5]
+  - @opengeni/config@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/network@4.7.0
+
 ## 4.6.1
 
 ### Patch Changes
