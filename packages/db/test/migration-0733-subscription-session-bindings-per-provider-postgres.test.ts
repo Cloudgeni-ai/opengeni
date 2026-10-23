@@ -451,6 +451,13 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
+      // 0924 adds the Teams conversation tables to both posture inventories.
+      "teams_bot_inbox",
+      "teams_bot_installations",
+      "teams_bot_links",
+      "teams_bot_outbox",
+      "teams_bot_proofs",
+      "teams_bot_routes",
     ];
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.

@@ -510,6 +510,9 @@ beforeAll(async () => {
     // Current event readers also project 0810's nullable usage source key and
     // 0889's nullable tool name.
     await staging`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
+    // Current update readers project 0917's nullable continuation receipt.
+    // Stage only its columns; keep its authority routines and migration withheld.
+    await staging`alter table session_system_updates add column continued_by_subject_id text, add column continued_at timestamptz`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -745,6 +748,13 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
+      // 0924 adds the Teams conversation tables to both posture inventories.
+      "teams_bot_inbox",
+      "teams_bot_installations",
+      "teams_bot_links",
+      "teams_bot_outbox",
+      "teams_bot_proofs",
+      "teams_bot_routes",
     ];
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [
