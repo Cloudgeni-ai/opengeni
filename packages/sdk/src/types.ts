@@ -6628,10 +6628,13 @@ export type InboxSettings = {
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export type SessionInboxMute = {
   repliesMuted: boolean;
+  scope?: "session" | "schedule";
 };
 
 /**
