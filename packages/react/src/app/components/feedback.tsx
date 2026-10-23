@@ -162,6 +162,7 @@ export function SessionFeedback(props: {
           ? "inline-flex items-center gap-1.5"
           : "flex items-center gap-1 text-xs text-fg-muted"
       }
+      role="group"
       aria-label={props.turnId ? "Reply feedback" : "Session feedback"}
     >
       <Button
