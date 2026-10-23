@@ -170,6 +170,11 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
         "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+        // Teams setup and account linking require the person's verified browser.
+        "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
       ].sort(),

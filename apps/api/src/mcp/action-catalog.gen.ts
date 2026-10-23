@@ -731,6 +731,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "continueSessionWaitingWork",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue",
+    "request": [],
+    "response": [
+      "ContinueSessionWaitingWorkResponse"
+    ]
+  },
+  {
     "id": "controlSession",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/control",
@@ -1364,6 +1373,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
@@ -2307,6 +2332,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyDiffResponse"
     ]
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": []
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/knowledge/entries",
@@ -5469,6 +5501,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/integrations/teams/messages",
+    "method": "POST",
+    "path": "/v1/integrations/teams/messages",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/organizations/:organizationId/codex/accounts/:accountId/activate",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId/activate",
@@ -5640,6 +5679,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links",
     "request": [],
     "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/knowledge/search",
@@ -6178,6 +6225,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser"
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
