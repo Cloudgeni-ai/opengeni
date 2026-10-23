@@ -1710,7 +1710,7 @@ describe("buildTimeline", () => {
       englishText,
       buildTimeline(englishText, [
         ...turn("by-agent", "agent_attempt"),
-        ...turn("by-system", "system"),
+        ...turn("by-system", "system", "skipped"),
         ...turn("skipped-by-agent", "agent_attempt", "skipped"),
         ...turn("by-person", "human"),
         ...turn("by-api", "api"),
@@ -1722,20 +1722,20 @@ describe("buildTimeline", () => {
     const topLevel = groups.flatMap((group) =>
       group.kind === "item" && group.item.kind === "human-input" ? [group.item.turnId] : [],
     );
-    expect(topLevel).toEqual(["by-person", "by-api", "legacy", "expired"]);
-    const inWork = Object.fromEntries(
-      groups.flatMap((group) =>
-        group.kind === "activity" && group.work
-          ? group.work.details.flatMap((detail) =>
-              detail.kind === "item" && detail.item.kind === "human-input"
-                ? [[detail.item.turnId, detail.item]]
-                : [],
-            )
-          : [],
-      ),
-    ) as Record<string, HumanInputItem>;
-    expect(Object.keys(inWork)).toEqual(["by-agent", "by-system", "skipped-by-agent"]);
-    expect(inWork["by-system"]?.answeredBySystem).toBe(true);
+    // A system skip is a scheduled run's question nobody answered in time: the
+    // person must still see it, like an expired question.
+    expect(topLevel).toEqual(["by-system", "by-person", "by-api", "legacy", "expired"]);
+    const inWork: Record<string, HumanInputItem> = {};
+    for (const group of groups) {
+      if (group.kind !== "activity" || !group.work) continue;
+      for (const detail of group.work.details) {
+        if (detail.kind !== "item" || detail.item.kind !== "human-input") continue;
+        // Each question folds into its own turn's work, not a neighbour's.
+        expect(group.id).toBe(`work-${detail.item.turnId}`);
+        inWork[detail.item.turnId!] = detail.item;
+      }
+    }
+    expect(Object.keys(inWork)).toEqual(["by-agent", "skipped-by-agent"]);
     expect(isAgentWorkHumanInput(inWork["by-agent"]!)).toBe(true);
     const labels = {
       answered: "Answered",
@@ -1793,7 +1793,6 @@ describe("buildTimeline", () => {
       isAgentWorkHumanInput({
         ...item,
         response: { outcome: "expired" },
-        answeredBySystem: true,
       }),
     ).toBe(false);
   });

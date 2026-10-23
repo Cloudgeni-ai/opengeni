@@ -4613,8 +4613,8 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
 }
 
 /**
- * A question an agent (such as a sub-session's parent) or the system answered:
- * one quiet work row, "Asked  Target branch → main", that opens to the full
+ * A question an agent (such as a sub-session's parent) answered or skipped: one
+ * quiet work row, "Asked  Target branch → main", that opens to the full
  * question and answer. Nothing sits on the person's side.
  */
 function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
@@ -4624,13 +4624,7 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
     item.questions.map((question, index) => [question.id, index + 1]),
   );
   const skipped = item.response.outcome === "skipped";
-  const byLine = item.answeredBySystem
-    ? skipped
-      ? t("messageTimeline.skippedAutomatically")
-      : t("messageTimeline.answeredAutomatically")
-    : skipped
-      ? t("messageTimeline.agentSkipped")
-      : t("messageTimeline.agentAnswered");
+  const byLine = skipped ? t("messageTimeline.agentSkipped") : t("messageTimeline.agentAnswered");
   const summary = agentWorkHumanInputSummary(item, {
     answered: t("messageTimeline.answered"),
     skipped: t("messageTimeline.skipped"),

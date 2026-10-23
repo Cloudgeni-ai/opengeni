@@ -619,25 +619,9 @@ describe("structured human-input history", () => {
     }
   });
 
-  test("an answer or skip by the system is quiet work; an expired question stays visible", async () => {
+  test("an agent's skip is quiet work; a system skip or an expired question stays visible", async () => {
     timelineSequence = 0;
     let r = await renderComponent(
-      <MessageTimeline
-        events={subSessionQuestionEvents("system")}
-        turnSummary={{ rolling: true }}
-      />,
-    );
-    await flush();
-    expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
-    await act(async () => turnSummaryTrigger(r.container)!.click());
-    await flush();
-    expect(r.container.querySelector("[data-og-agent-answered]")?.textContent).toContain(
-      "Target branch → main and release/2026.10",
-    );
-    await r.unmount();
-
-    timelineSequence = 0;
-    r = await renderComponent(
       <MessageTimeline
         events={subSessionQuestionEvents("agent_attempt", "skipped")}
         turnSummary={{ rolling: true }}
@@ -647,9 +631,31 @@ describe("structured human-input history", () => {
     expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
     await act(async () => turnSummaryTrigger(r.container)!.click());
     await flush();
-    expect(r.container.querySelector("[data-og-agent-answered]")?.textContent).toContain(
-      "Target branch → Skipped",
+    const skippedRow = r.container.querySelector("[data-og-agent-answered]");
+    expect(skippedRow?.textContent).toContain("Target branch → Skipped");
+    await act(async () => {
+      skippedRow!
+        .querySelector<HTMLElement>('[role="button"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(skippedRow?.textContent).toContain("Agent skipped");
+    await r.unmount();
+
+    // The system settles a question only when a scheduled run's question went
+    // unanswered in time: the person must still see that card.
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
     );
+    await flush();
+    const systemSkipped = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(systemSkipped).not.toBeNull();
+    expect(systemSkipped?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(systemSkipped?.textContent).toContain("Skipped");
     await r.unmount();
 
     timelineSequence = 0;

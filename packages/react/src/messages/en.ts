@@ -1682,7 +1682,6 @@ export const englishMessages = {
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.agentSkipped": "Agent skipped",
   "messageTimeline.answered": "Answered",
-  "messageTimeline.answeredAutomatically": "Answered automatically",
   "messageTimeline.asked": "Asked",
   "messageTimeline.auto": "Auto",
   "messageTimeline.backToYourMessage": "Back to your message",
@@ -1756,7 +1755,6 @@ export const englishMessages = {
   "messageTimeline.review": "Review",
   "messageTimeline.setUpProvider": "Set up {provider}",
   "messageTimeline.skipped": "Skipped",
-  "messageTimeline.skippedAutomatically": "Skipped automatically",
   "messageTimeline.theAgentRequestedStructuredInput": "The agent requested structured input.",
   "messageTimeline.thisAutomationWasNotGranted":
     "This automation was not granted access to your personal connection.",
@@ -1886,6 +1884,7 @@ export const englishMessages = {
     "File verification timed out. Retry the upload.",
   "native.presentation.activity": "Activity",
   "native.presentation.agentAnswered": "Agent answered",
+  "native.presentation.agentSkipped": "Agent skipped",
   "native.presentation.agentAsked": "Agent asked",
   "native.presentation.allObservedSubscriptionsWereCapped":
     "All observed subscriptions were capped",
@@ -2105,6 +2104,7 @@ export const englishMessages = {
   "native.timeline.messageAttachments.attachment": "Attachment",
   "native.timeline.messageAttachments.openName": "Open {name}",
   "native.timeline.messages.agentAnswered": "Agent answered",
+  "native.timeline.messages.agentSkipped": "Agent skipped",
   "native.timeline.messages.agents": "Agents",
   "native.timeline.messages.aLittleLongerThanUsual": "A little longer than usual…",
   "native.timeline.messages.backToYourMessage": "Back to your message",

@@ -3,17 +3,18 @@ import type { HumanInputSecretAnswerResult } from "@opengeni/sdk";
 import type { HumanInputItem, TimelineItem } from "./types";
 
 /**
- * A settled question that an agent (such as a sub-session's parent) or the
- * system answered or skipped. It is agent work, not conversation: readable
- * turns fold it into that turn's work details as one quiet row, and nothing is
- * drawn on the person's side. Questions a person answered, and expired or
- * cancelled ones, stay in the conversation.
+ * A settled question that an agent (such as a sub-session's parent) answered or
+ * skipped. It is agent work, not conversation: readable turns fold it into that
+ * turn's work details as one quiet row, and nothing is drawn on the person's
+ * side. Questions a person answered, and expired, cancelled or system-settled
+ * ones (a scheduled run's question nobody answered in time), stay in the
+ * conversation.
  */
 export function isAgentWorkHumanInput(item: TimelineItem): item is HumanInputItem {
   return (
     item.kind === "human-input" &&
     (item.response.outcome === "answered" || item.response.outcome === "skipped") &&
-    (item.answeredByAgent === true || item.answeredBySystem === true)
+    item.answeredByAgent === true
   );
 }
 

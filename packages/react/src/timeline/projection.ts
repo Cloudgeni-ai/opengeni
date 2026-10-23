@@ -631,8 +631,8 @@ export function buildTimeline(
         // A structured answer resumes the frozen tool call rather than adding a
         // synthetic user.message to model history. Keep the original question
         // and the resolved human choice together as first-class chat history;
-        // neither belongs behind the generic activity fold. An agent's or the
-        // system's answer is the exception: readable turns fold it into work.
+        // neither belongs behind the generic activity fold. An agent's answer
+        // is the exception: readable turns fold it into work.
         const item = humanInputItemFromResponse(event, payload, humanInputRequests);
         if (!item) break;
         closeStreamingTail();
@@ -2041,7 +2041,6 @@ function humanInputItemFromResponse(
     response: normalizedResponse,
     answers,
     answeredByAgent: payload.respondedByKind === "agent_attempt",
-    ...(payload.respondedByKind === "system" ? { answeredBySystem: true } : {}),
     occurredAt: event.occurredAt,
   };
 }
@@ -2591,7 +2590,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
     } else if (isAgentWorkHumanInput(item)) {
-      // A question an agent or the system answered is agent work, like a tool
+      // A question an agent answered or skipped is agent work, like a tool
       // call: it folds into its turn's work details, never the person's side.
       workForTurn().work!.details.push({ kind: "item", item });
     } else {

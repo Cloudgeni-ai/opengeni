@@ -1401,8 +1401,8 @@ function AgentMessageRow({ item, context }: { item: AgentMessageItem; context: G
 }
 
 /**
- * A question an agent (such as a sub-session's parent) or the system answered:
- * one quiet work row that opens to the full question and answer, as on web.
+ * A question an agent (such as a sub-session's parent) answered or skipped: one
+ * quiet work row that opens to the full question and answer, as on web.
  */
 function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
   const t = useOpenGeniText();
@@ -1410,13 +1410,10 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
   const m = useNativeTimelineMessages();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
   const skipped = item.response.outcome === "skipped";
-  const byLine = item.answeredBySystem
-    ? skipped
-      ? t("messageTimeline.skippedAutomatically")
-      : t("messageTimeline.answeredAutomatically")
-    : skipped
-      ? t("messageTimeline.agentSkipped")
-      : t("messageTimeline.agentAnswered");
+  // Host overrides of the outcome copy (`timelineMessages`) still apply here.
+  const byLine = skipped
+    ? (m.humanInputOutcome.agentSkipped ?? m.humanInputOutcome.skipped)
+    : (m.humanInputOutcome.agentAnswered ?? m.humanInputOutcome.answered);
   const summary = agentWorkHumanInputSummary(item, {
     answered: t("messageTimeline.answered"),
     skipped: t("messageTimeline.skipped"),
@@ -1439,7 +1436,8 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
       icon="message-circle-question"
       title={t("messageTimeline.asked")}
       preview={summary}
-      accessibilityLabel={`${t("messageTimeline.asked")}: ${summary}`}
+      // Screen readers would announce the arrow; speak a plain separator instead.
+      accessibilityLabel={`${t("messageTimeline.asked")}: ${summary.split(" → ").join(": ")}`}
     >
       <View style={{ gap: 12 }}>
         {item.questions.map((question, index) => (

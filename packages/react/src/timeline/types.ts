@@ -91,8 +91,8 @@ export type HumanInputAnswerSummary = {
  * One resolved structured question in the conversation. The live pending form
  * is rendered at the timeline tip by the host; after settlement this item keeps
  * both the agent's question and the human's answer visible as chat history.
- * A question an agent or the system answered is agent work instead: readable
- * turns fold it into that turn's work details (see `isAgentWorkHumanInput`).
+ * A question an agent answered or skipped is agent work instead: readable turns
+ * fold it into that turn's work details (see `isAgentWorkHumanInput`).
  */
 export type HumanInputItem = {
   kind: "human-input";
@@ -104,8 +104,6 @@ export type HumanInputItem = {
   answers: HumanInputAnswerSummary[];
   /** An agent (such as the parent of a sub-session) gave this answer, not a person. */
   answeredByAgent?: boolean;
-  /** The system (a service or automation, not a person or an agent) gave this answer. */
-  answeredBySystem?: boolean;
   occurredAt: string;
 };
 

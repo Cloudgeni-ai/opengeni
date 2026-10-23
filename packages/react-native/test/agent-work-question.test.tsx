@@ -176,6 +176,7 @@ mock.module("expo-file-system", () => ({ Directory: Object, File: Object, Paths:
 registerDom();
 
 const { MessageTimeline } = await import("../src/timeline/message-timeline");
+const { NativeTimelineMessagesProvider } = await import("../src/timeline/messages");
 
 let sequence = 0;
 function event(type: string, payload: unknown, turnId: string | null = "turn-1"): SessionEvent {
@@ -192,7 +193,7 @@ function event(type: string, payload: unknown, turnId: string | null = "turn-1")
   } as SessionEvent;
 }
 
-function subSession(respondedByKind: string): SessionEvent[] {
+function subSession(respondedByKind: string, outcome = "answered"): SessionEvent[] {
   sequence = 0;
   const questions = [
     {
@@ -221,10 +222,10 @@ function subSession(respondedByKind: string): SessionEvent[] {
     event("user.humanInputResponse", {
       requestId: "review-base",
       respondedByKind,
-      response: {
-        outcome: "answered",
-        answers: [{ questionId: "base", values: ["both"] }],
-      },
+      response:
+        outcome === "answered"
+          ? { outcome, answers: [{ questionId: "base", values: ["both"] }] }
+          : { outcome },
     }),
     event("agent.toolCall.output", { id: "ask-1", output: "{}" }),
     event("agent.message.completed", {
@@ -275,6 +276,45 @@ test("a question a person answered keeps its conversation card", async () => {
     expect(text).toContain("Agent asked");
     expect(text).toContain("You answered");
     expect(text).toContain("main and release/2026.10");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an agent's skip is quiet work that honours the host's outcome copy", async () => {
+  const view = await renderComponent(
+    <NativeTimelineMessagesProvider
+      messages={{
+        humanInputOutcome: {
+          answered: "You answered",
+          skipped: "Skipped",
+          expired: "Expired",
+          cancelled: "Cancelled",
+          agentSkipped: "Parent skipped",
+        },
+      }}
+    >
+      <MessageTimeline events={subSession("agent_attempt", "skipped")} />
+    </NativeTimelineMessagesProvider>,
+  );
+  try {
+    expect(view.container.textContent).not.toContain("Agent asked");
+    await pressLabelled(view.container, /Worked for/);
+    expect(view.container.textContent).toContain("Target branch → Skipped");
+    // The spoken label has no arrow for screen readers to announce.
+    await pressLabelled(view.container, /^Asked: Target branch: Skipped$/);
+    expect(view.container.textContent).toContain("Parent skipped");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a system skip (a scheduled run's unanswered question) keeps its card", async () => {
+  const view = await renderComponent(<MessageTimeline events={subSession("system", "skipped")} />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Agent asked");
+    expect(text).toContain("Skipped");
   } finally {
     await view.unmount();
   }

@@ -323,8 +323,8 @@ export function nativeHumanInputSummary(
   const outcome =
     item.response.outcome === "answered" && item.answeredByAgent
       ? (labels.humanInputOutcome.agentAnswered ?? labels.humanInputOutcome.answered)
-      : item.response.outcome === "answered" && item.answeredBySystem
-        ? (labels.humanInputOutcome.systemAnswered ?? labels.humanInputOutcome.answered)
+      : item.response.outcome === "skipped" && item.answeredByAgent
+        ? (labels.humanInputOutcome.agentSkipped ?? labels.humanInputOutcome.skipped)
         : labels.humanInputOutcome[item.response.outcome];
   const answers = humanInputAnswerLines(item.answers, item.response, labels.secretSaved, false)
     .map(
