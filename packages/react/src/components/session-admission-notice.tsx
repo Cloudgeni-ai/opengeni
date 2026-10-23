@@ -9,6 +9,8 @@ import {
   sessionAdmissionMachineChangedCopy,
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
+  sessionWaitingWorkExplainsBlock,
+  waitingWorkCopy,
 } from "../session-admission-model";
 import { Button } from "../ui/button";
 import { Notice } from "../ui/notice";
@@ -29,16 +31,35 @@ export function PersonalMachineExplanation({
   action?: ReactNode | undefined;
 }) {
   const t = useOpenGeniText();
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copy = personalMachineCopy(t, access, { queued });
-  const request = copy.ownerRequest;
   return (
     <>
       <p>{copy.explanation}</p>
       <p className="mt-1">{copy.next}</p>
+      {copy.workNote ? <p className="mt-1">{copy.workNote}</p> : null}
+      <OwnerRequestActions request={copy.ownerRequest} label={copy.copyRequest} action={action} />
+    </>
+  );
+}
+
+/** A way forward plus "Copy request to …": a message the person sends the owner themselves. */
+function OwnerRequestActions({
+  request,
+  label,
+  action,
+}: {
+  request: string | null;
+  label: string | null;
+  action?: ReactNode | undefined;
+}) {
+  const t = useOpenGeniText();
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  if (!action && !(request && label)) return null;
+  return (
+    <>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {action}
-        {request && copy.copyRequest ? (
+        {request && label ? (
           <Button
             type="button"
             variant="outline"
@@ -52,7 +73,7 @@ export function PersonalMachineExplanation({
               }
             }}
           >
-            {copyState === "copied" ? t("sessionAdmission.requestCopied") : copy.copyRequest}
+            {copyState === "copied" ? t("sessionAdmission.requestCopied") : label}
           </Button>
         ) : null}
       </div>
@@ -62,6 +83,82 @@ export function PersonalMachineExplanation({
         </p>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Updates from other people's work (their agents' messages and workers'
+ * results) wait because this chat runs on somebody's personal machine. One
+ * notice for all of them, updated in place: it says whose updates wait and
+ * why, and gives the machine's owner the way to let the agent continue with
+ * them under the owner's own access. Everyone else acts from the composer's
+ * notice (choose a machine, or ask the owner). Renders nothing when nothing waits.
+ */
+export function SessionWaitingWorkNotice({
+  access,
+  busy = false,
+  onContinue,
+}: {
+  access: SessionMachineAccess;
+  /** Another control action is in flight. */
+  busy?: boolean | undefined;
+  /** The owner lets the agent continue with them; omitted where the host can't. */
+  onContinue?: (() => Promise<void>) | undefined;
+}) {
+  const t = useOpenGeniText();
+  const descriptionId = useId();
+  const pending = useRef(false);
+  const [continuing, setContinuing] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const copy = waitingWorkCopy(t, access);
+  if (!copy) return null;
+  const canContinue = copy.continueAction !== null && onContinue !== undefined;
+
+  async function continueWork() {
+    if (pending.current || busy || !onContinue) return;
+    pending.current = true;
+    setContinuing(true);
+    setFailure(null);
+    try {
+      await onContinue();
+    } catch (error) {
+      // 409: the chat is not running the owner's own work yet (for example,
+      // someone else sent the last message before it moved to this machine).
+      setFailure(
+        (error as { status?: unknown } | null)?.status === 409
+          ? t("sessionAdmission.continueWaitingWorkNeedsYourTurn")
+          : t("sessionAdmission.continueWaitingWorkFailed"),
+      );
+    } finally {
+      pending.current = false;
+      setContinuing(false);
+    }
+  }
+
+  return (
+    <Notice tone="waiting" title={copy.title}>
+      <div id={descriptionId} role="status" aria-live="polite">
+        <p>{copy.explanation}</p>
+        {copy.continueAction === null || canContinue ? <p className="mt-1">{copy.next}</p> : null}
+      </div>
+      {canContinue ? (
+        <Button
+          type="button"
+          className="mt-2 min-h-11"
+          disabled={busy || continuing}
+          aria-busy={continuing}
+          aria-describedby={descriptionId}
+          onClick={() => void continueWork()}
+        >
+          {continuing ? t("sessionAdmission.continuingWaitingWork") : copy.continueAction}
+        </Button>
+      ) : null}
+      {failure ? (
+        <p role="alert" className="mt-2">
+          {failure}
+        </p>
+      ) : null}
+    </Notice>
   );
 }
 
@@ -102,6 +199,12 @@ export type SessionAdmissionNoticeProps = {
   machineAccess?: SessionMachineAccess | null | undefined;
   /** The machine picker offered when the saved message needs a different machine. */
   machineAction?: ReactNode | undefined;
+  /**
+   * As the machine's owner, let the agent continue with other people's
+   * waiting updates (`machineAccess.waitingWork`): continue, then recheck a
+   * blocked chat and refresh. Omit where the host cannot.
+   */
+  onContinueWaitingWork?: (() => Promise<void>) | undefined;
 };
 
 /**
@@ -119,6 +222,7 @@ export function SessionAdmissionNotice({
   onRecheck,
   machineAccess,
   machineAction,
+  onContinueWaitingWork,
 }: SessionAdmissionNoticeProps) {
   const t = useOpenGeniText();
   const descriptionId = useId();
@@ -142,6 +246,21 @@ export function SessionAdmissionNotice({
       );
     }
   }, [machineBlocked, machineSandboxId, blockedAt]);
+  // Other people's updates waiting on a personal machine: one calm notice
+  // that says whose and why, instead of a generic permission failure.
+  if (
+    machineAccess?.waitingWork?.length &&
+    !machineBlocked &&
+    sessionWaitingWorkExplainsBlock(reason)
+  ) {
+    return (
+      <SessionWaitingWorkNotice
+        access={machineAccess}
+        busy={busy || (paused && reason !== null)}
+        onContinue={canControl ? onContinueWaitingWork : undefined}
+      />
+    );
+  }
   if (!reason) return null;
   const machineChanged =
     reason.reason === "database_claim_rejected" &&
@@ -344,20 +463,25 @@ export function SessionStartNotice({
       failureDetail={start.machineChoiceError}
     />
   ) : undefined;
-  if (start.reason) {
-    return (
-      <SessionAdmissionNotice
-        key={session.id}
-        session={session}
-        machineAccess={start.machineAccess}
-        machineAction={picker}
-        canControl={canControl}
-        paused={session.effectiveControl.state === "paused"}
-        busy={busy}
-        onRecheck={start.recheck}
-      />
-    );
-  }
-  if (!showPreSendWarning || !start.warnBeforeSending) return null;
-  return <SessionMachineAccessNotice access={start.machineAccess} action={picker} />;
+  const waiting = (start.machineAccess?.waitingWork?.length ?? 0) > 0;
+  return (
+    <>
+      {start.reason || waiting ? (
+        <SessionAdmissionNotice
+          key={session.id}
+          session={session}
+          machineAccess={start.machineAccess}
+          machineAction={picker}
+          canControl={canControl}
+          paused={session.effectiveControl.state === "paused"}
+          busy={busy}
+          onRecheck={start.recheck}
+          onContinueWaitingWork={start.continueWaitingWork}
+        />
+      ) : null}
+      {showPreSendWarning && start.warnBeforeSending ? (
+        <SessionMachineAccessNotice access={start.machineAccess} action={picker} />
+      ) : null}
+    </>
+  );
 }

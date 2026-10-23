@@ -560,6 +560,7 @@ import type {
   OpenMachinePrivacySettingsResponse,
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
+  ContinueSessionWaitingWorkResponse,
   ListWorkspaceMembersResponse,
   ListWorkspaceMemberCandidatesResponse,
   ListSlackUserLinkAccessRequestsResponse,
@@ -2849,6 +2850,23 @@ export class OpenGeniClient {
       "POST",
       `${sessionPath(workspaceId, sessionId)}/active-sandbox`,
       request,
+    );
+  }
+
+  /**
+   * As the owner of the personal machine a chat runs on, let the agent
+   * continue with other people's waiting results (see
+   * `SessionMachineAccess.waitingWork`) under your own authority. Resume the
+   * blocked chat afterwards so it runs.
+   */
+  async continueSessionWaitingWork(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<ContinueSessionWaitingWorkResponse> {
+    return await this.requestJson<ContinueSessionWaitingWorkResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/waiting-work/continue`,
+      {},
     );
   }
 

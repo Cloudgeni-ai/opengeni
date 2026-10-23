@@ -16,6 +16,7 @@
 
 import {
   ChangeMachineAudienceRequest,
+  ContinueSessionWaitingWorkResponse,
   MachineAudiencePreviewRequest,
   OpenMachinePrivacySettingsRequest,
   MachineMetricsSeriesResponse,
@@ -28,6 +29,8 @@ import {
 } from "@opengeni/contracts";
 import {
   changeMachineAudience,
+  continueSessionWaitingWork,
+  nestedPostgresSqlState,
   getLiveEnrollmentConnection,
   listEnrollments,
   previewMachineAudienceChange,
@@ -497,5 +500,39 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       body.target,
     );
     return c.json(SwapActiveSandboxResponse.parse(result));
+  });
+
+  // ── POST /workspaces/:ws/sessions/:sessionId/waiting-work/continue ─────────
+  // The personal machine's owner lets the agent continue, under their own
+  // authority, with results other people's work left waiting in this chat.
+  // Only that person may; the database enforces it. The caller then resumes
+  // the blocked chat with its usual fenced Resume.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/waiting-work/continue", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (grantHasAgentAttemptAuthority(grant)) {
+      // A person decides this; an agent cannot lend itself the owner's machine.
+      throw new HTTPException(403, { message: "only the machine's owner can continue this work" });
+    }
+    try {
+      const continued = await continueSessionWaitingWork(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: c.req.param("sessionId"),
+        subjectId: grant.subjectId,
+      });
+      return c.json(ContinueSessionWaitingWorkResponse.parse({ continued }));
+    } catch (error) {
+      const sqlState = nestedPostgresSqlState(error);
+      if (sqlState === "42501")
+        throw new HTTPException(403, {
+          message: "only the machine's owner can continue this work",
+        });
+      if (sqlState === "55000")
+        throw new HTTPException(409, {
+          message: "the chat is not continuing the machine owner's own work right now",
+        });
+      throw error;
+    }
   });
 }

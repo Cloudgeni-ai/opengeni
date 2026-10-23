@@ -2,7 +2,7 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
-export { getSessionMachineAccess } from "./session-machine-access";
+export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
