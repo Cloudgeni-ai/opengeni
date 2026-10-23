@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# Opengeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
+# Opengeni Runner installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
 #   curl -fsSL https://app.opengeni.ai/install.sh | sh
@@ -1060,7 +1060,7 @@ start_background_agent() {
     return 0
   fi
   log "could not install a background service on this host; connection is saved"
-  log "start the foreground agent with: $_service_bin run"
+  log "run Opengeni Runner in the foreground with: $_service_bin run"
 }
 
 # Connect and leave the machine online in the background.
@@ -1119,7 +1119,7 @@ finish() {
     return 0
   fi
 
-  printf '%s\n' "opengeni-agent installed."
+  printf '%s\n' "Opengeni Runner installed."
   if [ -n "$_enroll_env" ]; then
     printf '%s\n' "Next: $_enroll_env $_bin connect && $_bin start"
   else

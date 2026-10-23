@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// The Opengeni self-hosted agent: run your own machine as a first-class Opengeni
+/// Opengeni Runner: run your own machine as a first-class Opengeni
 /// sandbox.
 #[derive(Debug, Parser)]
 #[command(name = "opengeni-agent", version, about, long_about = None)]
@@ -36,7 +36,7 @@ pub struct Cli {
     pub api_url: Option<String>,
 }
 
-/// The agent subcommands.
+/// The Runner subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Enroll if needed, then dial the control plane and serve in the foreground
@@ -52,16 +52,16 @@ pub enum Command {
     Connections,
     /// Stop serving and forget one local workspace/deployment connection.
     Disconnect(DisconnectArgs),
-    /// Install if needed and keep the agent running in the background across
+    /// Install if needed and keep the Runner running in the background across
     /// logouts and reboots. This is the normal post-connect command.
     Start(StartArgs),
-    /// Pause the background agent, including across logins, until start resumes it.
+    /// Pause the background Runner, including across logins, until start resumes it.
     Stop(ServiceScopeArgs),
-    /// Show whether the background agent is installed and running.
+    /// Show whether the background Runner is installed and running.
     Status(ServiceStatusArgs),
     /// Advanced service management (install/uninstall/start/stop/status).
     Service(ServiceArgs),
-    /// Print the operating-system permissions this agent holds for screen
+    /// Print the operating-system permissions this Runner holds for screen
     /// control, as one JSON line. `--request` first asks for one of them.
     Permissions(PermissionsArgs),
     /// Check for and apply a signed self-update for this channel + target.
@@ -70,7 +70,7 @@ pub enum Command {
     /// dependency-free fallback for Connected Machine commands; it uses the
     /// same public Codemode API and execution journal as `@opengeni/codemode`.
     Codemode(CodemodeArgs),
-    /// Remove the agent: stop any service, delete the binary, and (with `--purge`)
+    /// Remove the Runner: stop any service, delete the binary, and (with `--purge`)
     /// remove credentials + deactivate the enrollment.
     Uninstall(UninstallArgs),
     /// Chrome Native Messaging stdio proxy. Installed and invoked by Chrome;

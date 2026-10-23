@@ -23,12 +23,12 @@ const STATUS_REFRESH_MS = 1000;
 async function refresh(options: { label: boolean }): Promise<void> {
   const status = (await chrome.runtime.sendMessage({ type: "status" })) as Status;
   document.body.dataset.connected = String(status.connected);
-  state.textContent = status.connected ? "Connected" : (status.title ?? "Agent unavailable");
+  state.textContent = status.connected ? "Connected" : (status.title ?? "Runner unavailable");
   detail.textContent = status.connected
     ? `This Chrome profile is ready in ${BRAND.product}. Tabs attach only when an agent uses them.`
     : (status.detail ??
       status.error ??
-      `Start the ${BRAND.product} agent on this computer to connect this profile.`);
+      `Start ${BRAND.product} Runner on this computer to connect this profile.`);
   detail.title = status.connected ? "" : (status.error ?? "");
   // Only fill the label on open and after saving, so a refresh never
   // overwrites what the person is typing.

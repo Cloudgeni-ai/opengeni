@@ -6,6 +6,11 @@ an organization, workspace, or organization user and driven by the agent directl
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
+The program that runs on the machine is **Opengeni Runner** (command
+`opengeni-agent`, source in [`../agent`](../agent)). In this document, "native
+agent", "machine agent" and "Connected Machine agent" mean the Runner; "the
+agent" in the context of a session means the AI agent driving it.
+
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
