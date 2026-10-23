@@ -549,7 +549,10 @@ strict read-only shadow only retains local evidence and never writes remote stat
 Telemetry reports the nearest-rank rolling 24-hour p95 from each exact
 head/ready-event's **first measured provider CI start**, deduplicating reruns and
 bisection candidates. More than 1,800 seconds emits a stop signal and holds new
-batch work/landing; reconciliation and observation continue. stage.json reports
+batch work, but an already-published trusted-green candidate can drain through
+all ordinary landing guards. Capacity-induced latency must not deadlock a tested
+candidate. Red/unknown results, new publication and retries remain held;
+reconciliation and observation continue. stage.json reports
 sample count, coverageSince and completeWindow alongside the signal. This is a
 sample of heads that reached CI, not a latency claim for unknown/unstarted work
 or a completeness claim about all historical PRs. Small/partial samples are

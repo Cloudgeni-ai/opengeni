@@ -2135,6 +2135,40 @@ describe("review regressions: observation, admission and telemetry", () => {
     expect(next.kind).toBe("build");
     if (next.kind === "build") expect(next.publish).toBe(false);
   });
+  test("latency stop drains only an otherwise eligible trusted-green candidate", () => {
+    const c = candidate();
+    c.runs = [run(c, "success")];
+    const o = observation([pull(1)], [c]);
+    o.telemetry = {
+      status: "stop",
+      p95ReadyToCiSeconds: 2271,
+      samples: 7,
+      coverageSince: NOW,
+      completeWindow: false,
+    };
+    expect(plan(o, cfg).kind).toBe("land");
+    expect(plan({ ...o, candidates: [] }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, ready: [] }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, ready: [pull(1, "f".repeat(40))] }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("wait");
+    for (const outcome of ["code_failure", "infrastructure", "unknown", "cancelled"] as const) {
+      c.runs = [run(c, outcome)];
+      expect(plan(o, cfg).kind).toBe("wait");
+    }
+    c.runs = [run(c, "success", 1, false)];
+    expect(plan(o, cfg).kind).toBe("wait");
+    c.runs = [run(c, "success"), { ...run(c, "unknown", 2), status: "in_progress" }];
+    expect(plan(o, cfg).kind).toBe("wait");
+    c.runs = [{ ...run(c, "success"), headSha: "f".repeat(40) }];
+    expect(plan(o, cfg).kind).toBe("wait");
+    c.runs = [{ ...run(c, "success"), workflow: "other.yml" }];
+    expect(plan(o, cfg).kind).toBe("wait");
+    c.runs = [run(c, "success")];
+    expect(plan({ ...o, telemetry: { ...o.telemetry, completeWindow: true } }, cfg).kind).toBe(
+      "land",
+    );
+  });
   test("measured stages and rolling latency survive restart; missing history is unknown, not green", async () => {
     const f = await fixture(),
       settings = { ...cfg, outputDir: join(f.root, "telemetry") },
@@ -2152,7 +2186,8 @@ describe("review regressions: observation, admission and telemetry", () => {
     expect(measured.telemetry?.status).toBe("stop");
     expect(measured.telemetry?.samples).toBe(1);
     expect(measured.telemetry?.completeWindow).toBe(false);
-    expect(plan(measured, settings).kind).toBe("wait");
+    expect(plan(measured, settings).kind).toBe("land");
+    expect(plan({ ...measured, candidates: [] }, settings).kind).toBe("wait");
     const records = await journal.records(o.now);
     expect(records.stages[c.manifest.batchId]?.builtAt).toBeNull();
     expect(records.stages[c.manifest.batchId]?.landedAt).toBeNull();
