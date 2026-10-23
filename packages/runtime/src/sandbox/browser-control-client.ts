@@ -12,6 +12,7 @@ import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
+  COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -2483,7 +2484,8 @@ export class ComputerControlSessionClient {
     return ComputerActionReceipt.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("actions"),
+        // Controllers that predate role stand-ins ignore this parameter.
+        path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
         token: this.controlToken,
         body: parsed,
       }),

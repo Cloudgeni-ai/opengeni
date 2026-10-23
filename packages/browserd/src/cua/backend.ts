@@ -17,6 +17,7 @@ import {
   type ComputerBackendActionCommand,
   type ComputerBackendClipboard,
   type ComputerBackendErrorCode,
+  type ComputerBackendRoleStandIn,
 } from "../computer-backend";
 import {
   callDesktop,
@@ -34,6 +35,7 @@ import {
   dateFields,
   dateFieldTyping,
   locate,
+  observedRole,
   opensOnInvoke,
   parseDateValue,
   projectElements,
@@ -291,15 +293,19 @@ export class CuaComputerBackend implements ComputerBackend {
         await this.batchSteps(command);
         return;
       }
-      await this.operations(command);
+      await this.operations(this.withStandIn(command).command);
     });
   }
 
-  dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
+  dispatch(
+    command: ComputerBackendActionCommand,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+  ): Promise<ComputerBackendObservation | null> {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch") return await this.dispatchBatch(command);
+      if (command.action.type === "batch")
+        return await this.dispatchBatch(command, false, standIn);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -319,7 +325,8 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
           );
       }
-      const operations = await this.operations(command);
+      const local = this.withStandIn(command);
+      const operations = await this.operations(local.command);
       // Filling a date field takes several steps: run them as one batch.
       if (
         operations.length > 1 &&
@@ -329,6 +336,7 @@ export class CuaComputerBackend implements ComputerBackend {
         return await this.dispatchBatch(
           { ...command, action: { type: "batch", actions: [command.action] } },
           true,
+          standIn,
         );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
@@ -386,6 +394,7 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
+      if (local.standIn) standIn?.(local.standIn);
       const after = await this.observeAfter(command.targetId, acted, known, report);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
@@ -482,15 +491,24 @@ export class CuaComputerBackend implements ComputerBackend {
    * the only state its refs come from, before any of them runs. */
   private async batchSteps(
     command: ComputerBackendActionCommand,
-  ): Promise<{ steps: Operation[]; actionOf: number[] }> {
+  ): Promise<{ steps: Operation[]; actionOf: number[]; standIns: ComputerBackendRoleStandIn[] }> {
     if (command.action.type !== "batch") throw new Error("not a batch");
     const { actions } = command.action;
     const steps: Operation[] = [];
     const actionOf: number[] = [];
+    const standIns: ComputerBackendRoleStandIn[] = [];
     for (const [index, action] of actions.entries()) {
       try {
+        // Only the first action stands in from the batch's observation: a
+        // later one may name an element an earlier one brings up, so CUA
+        // finds it when its step runs, once the window settles.
+        const local =
+          index === 0
+            ? this.withStandIn({ ...command, action })
+            : { command: { ...command, action }, standIn: null };
+        if (local.standIn) standIns.push(local.standIn);
         const operations = await this.operations(
-          { ...command, action },
+          local.command,
           index > 0,
           steps.some((step) => step.stepOptions !== undefined),
         );
@@ -509,7 +527,7 @@ export class CuaComputerBackend implements ComputerBackend {
         throw refused;
       }
     }
-    return { steps, actionOf };
+    return { steps, actionOf, standIns };
   }
 
   /** A batch runs as one CUA run_steps call (or a few, when its actions take
@@ -521,8 +539,10 @@ export class CuaComputerBackend implements ComputerBackend {
   private async dispatchBatch(
     command: ComputerBackendActionCommand,
     single = false,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
   ): Promise<ComputerBackendObservation | null> {
-    const { steps, actionOf } = await this.batchSteps(command);
+    const { steps, actionOf, standIns } = await this.batchSteps(command);
+    const actions = command.action.type === "batch" ? command.action.actions : [];
     const observed = this.observations.get(command.targetId);
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
@@ -553,11 +573,34 @@ export class CuaComputerBackend implements ComputerBackend {
           code: null,
           cuaCode: null,
           message: error.message,
+          standIns: [],
         };
+      }
+      // CUA used the one element of a role pressed alike for a step that
+      // named its element by role and name (see namedOperation).
+      for (const used of outcome.standIns) {
+        const actionIndex = actionOf[start + used.step]!;
+        const action = actions[actionIndex];
+        if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
+        standIns.push({
+          actionIndex,
+          requestedRole: action.locator.role,
+          role: observedRole(used.role),
+          name: used.name,
+        });
       }
       if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
       else stopped = { step: start + outcome.completed, outcome };
     }
+    // The actions that ran in full acted on their stand-ins.
+    const ran = stopped ? actionOf[stopped.step]! : actions.length;
+    const reported = new Set<number>();
+    if (standIn)
+      for (const used of standIns.sort((a, b) => a.actionIndex - b.actionIndex))
+        if (used.actionIndex < ran && !reported.has(used.actionIndex)) {
+          reported.add(used.actionIndex);
+          standIn(used);
+        }
     if (!stopped) {
       const after = await this.observeAfter(command.targetId, acted, known, report);
       if (after?.target.id !== command.targetId) return after;
@@ -1854,6 +1897,61 @@ export class CuaComputerBackend implements ComputerBackend {
    * so when every element still reads the same, in the same order, the ref
    * acts through its element's current token. Otherwise it is refused. A ref
    * seen nowhere says which observation is current. */
+  /** An action that presses a button or link it names by role and name, when
+   * nothing of that role has the name in the current observation and exactly
+   * one element of the other of the two roles does, with that whole name:
+   * the action names that element by its ref instead, and says so. Models
+   * confuse the two roles, and on the web the difference is rarely visible.
+   * Several such elements fail at once, naming their refs. */
+  private withStandIn(command: ComputerBackendActionCommand): {
+    command: ComputerBackendActionCommand;
+    standIn: ComputerBackendRoleStandIn | null;
+  } {
+    const none = { command, standIn: null };
+    const action = command.action;
+    if (action.type !== "semantic" || action.locator.kind !== "role") return none;
+    const { role, name, exact } = action.locator;
+    if (name === undefined || !PRESSED_ALIKE_ROLES.has(role) || !PRESSING_ACTIONS.has(action.action))
+      return none;
+    const observed = this.observations.get(command.targetId);
+    if (!observed || observed.observationId !== command.expectedObservationId) return none;
+    if (observed.roots.some((node) => node.role === role)) {
+      try {
+        locate(observed.roots, action.locator);
+        return none;
+      } catch (error) {
+        // Several of the role named: that error stands.
+        if (!(error instanceof ComputerBackendError) || error.code !== "locator_not_found")
+          return none;
+      }
+    }
+    const wanted = exact === true ? name : name.trim().toLowerCase();
+    const alike = observed.roots.filter(
+      (node) =>
+        node.role !== role &&
+        PRESSED_ALIKE_ROLES.has(node.role) &&
+        node.actions.includes(action.action) &&
+        node.name !== undefined &&
+        (exact === true ? node.name : node.name.trim().toLowerCase()) === wanted,
+    );
+    if (alike.length > 1)
+      throw new ComputerBackendError(
+        "locator_ambiguous",
+        `No ${role} here is named "${name}", and ${alike.length} elements of other roles are: ${alike
+          .slice(0, 5)
+          .map((node) => `${node.role} ${node.ref}`)
+          .join(", ")}; act on the one meant by its ref`,
+        false,
+        false,
+      );
+    const node = alike[0];
+    if (!node) return none;
+    return {
+      command: { ...command, action: { ...action, locator: { kind: "ref", ref: node.ref } } },
+      standIn: { actionIndex: 0, requestedRole: role, role: node.role, name: node.name! },
+    };
+  }
+
   private locateObserved(
     targetId: string,
     observed: ComputerBackendObservation,
@@ -1925,6 +2023,12 @@ const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
 /** How long a batch step that names its element waits for it to appear and
  * enable: CUA's longest wait for one step. */
 const NAMED_STEP_WAIT_MS = 10_000;
+
+/** Roles pressed alike, which an action that presses one may stand in for
+ * each other (see withStandIn). Toggles, choices and menus keep their roles. */
+const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+/** Actions that do the same on a button and a link. */
+const PRESSING_ACTIONS: ReadonlySet<string> = new Set(["invoke", "focus", "show_menu"]);
 /** How long its lookup then waits, once the check found the element. */
 const NAMED_STEP_FIND_MS = 1_000;
 

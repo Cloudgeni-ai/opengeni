@@ -3743,6 +3743,33 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerActionCommand = z.infer<typeof ComputerActionCommand>;
 
+/** An action whose locator named a pressable control by role and name, when
+ * nothing of that role had the name and the one control of a role pressed
+ * alike (a button for a link, or a link for a button) with that exact name
+ * was used instead. */
+export const ComputerActionRoleStandIn = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actionIndex: z
+        .number()
+        .int()
+        .min(0)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH - 1),
+      /** The role the locator named. */
+      requestedRole: resolvedTargetRole,
+      /** The role of the element used. */
+      role: resolvedTargetRole,
+      name: resolvedTargetText,
+    })
+    .strict(),
+);
+export type ComputerActionRoleStandIn = z.infer<typeof ComputerActionRoleStandIn>;
+
+/** Query parameter by which a caller asks a computer controller to include
+ * `roleStandIns` in an action receipt. Controllers that predate the field
+ * ignore it, and callers that do not send it receive receipts without it. */
+export const COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER = "receiptRoleStandIns";
+
 export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3756,6 +3783,14 @@ export const ComputerActionReceipt = /* @__PURE__ */ defineSchema(() =>
       settledAt: z.string().datetime({ offset: true }).nullable(),
       observation: ComputerObservation.nullable(),
       error: InteractionError.nullable(),
+      /** Actions that acted on an element of another role than the one named,
+       * in dispatch order. Present only when the controller supports it and the
+       * caller asked for it; never persisted in the controller's operation
+       * journal, so an idempotent replay omits it. */
+      roleStandIns: z
+        .array(ComputerActionRoleStandIn)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH)
+        .optional(),
     })
     .strict()
     .superRefine((receipt, context) => {

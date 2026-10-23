@@ -31,6 +31,11 @@ const roles: Record<string, string> = {
 };
 
 const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
+
+/** The role an observation shows for an element CUA names by its own role. */
+export function observedRole(role: string): string {
+  return roles[role] ?? role;
+}
 const QUOTED = String.raw`"((?:[^"\\]|\\.)*)"`;
 const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
 const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");

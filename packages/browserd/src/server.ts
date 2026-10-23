@@ -10,6 +10,7 @@ import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission"
 import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
+  COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
@@ -969,7 +970,13 @@ export class BrowserControlServer {
           409,
         );
       }
-      return success(await supervisor.action(command));
+      const receipt = await supervisor.action(command);
+      // Older clients parse receipts strictly. Return role stand-ins only to
+      // a caller that asked for them.
+      if (url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1")
+        return success(receipt);
+      const { roleStandIns: _roleStandIns, ...withoutStandIns } = receipt;
+      return success(withoutStandIns);
     }
     if (segments.length === 4 && segments[3] === "heartbeat") {
       if (request.method !== "POST") {
