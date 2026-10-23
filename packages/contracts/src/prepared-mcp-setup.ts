@@ -1,8 +1,9 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 const fieldId = /* @__PURE__ */ defineSchema(() =>
-  z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
+  primitives.string.regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/),
 );
 const headerName = /* @__PURE__ */ defineSchema(() =>
   z
@@ -23,7 +24,7 @@ const headerPart = /* @__PURE__ */ defineSchema(() =>
 export const PreparedMcpSetup = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: z.string().trim().min(1).max(256),
+      name: primitives.string.trim().min(1).max(256),
       endpointUrl: z
         .string()
         .url()
@@ -59,7 +60,7 @@ export const PreparedMcpSetup = /* @__PURE__ */ defineSchema(() =>
         .min(1)
         .max(32),
       secretFields: z
-        .array(z.object({ id: fieldId, label: z.string().trim().min(1).max(256) }).strict())
+        .array(z.object({ id: fieldId, label: primitives.string.trim().min(1).max(256) }).strict())
         .max(32),
     })
     .strict()
@@ -110,7 +111,7 @@ export const CustomMcpSetupRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       kind: z.literal("mcp"),
-      name: z.string().trim().min(1).max(256),
+      name: primitives.string.trim().min(1).max(256),
       endpointUrl: z
         .string()
         .url()
@@ -129,7 +130,7 @@ export const CustomMcpSetupRequest = /* @__PURE__ */ defineSchema(() =>
             return false;
           }
         }),
-      rationale: z.string().trim().min(1).max(2000),
+      rationale: primitives.string.trim().min(1).max(2000),
       ownership: z.enum(["personal", "workspace"]).optional(),
       mcpSetup: PreparedMcpSetup.optional(),
     })

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Session } from "./index";
@@ -99,7 +100,7 @@ export const ArchivedSessionImportEvent = /* @__PURE__ */ /* @__PURE__ */ define
       /** Source turn identity is presentation correlation; no execution row is created. */
       turnId: z.string().uuid().nullable().optional(),
       payload: z
-        .record(z.string(), z.unknown())
+        .record(primitives.string, z.unknown())
         .refine(isImportJson, "Payload must be bounded JSON"),
     })
     .strict()
@@ -136,10 +137,7 @@ export const AppendArchivedSessionEventsRequest = /* @__PURE__ */ /* @__PURE__ *
   z
     .object({
       batchId: z.string().min(1).max(200),
-      offset: z
-        .number()
-        .int()
-        .nonnegative()
+      offset: primitives.nonnegativeInteger
         .max(Number.MAX_SAFE_INTEGER)
         .refine((value) => !Object.is(value, -0)),
       events: importEvents.min(1),
@@ -156,9 +154,9 @@ export type AppendArchivedSessionEventsRequest = z.infer<typeof AppendArchivedSe
 export const ImportArchivedSessionResponse = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     session: /* @__PURE__ */ z.lazy(() => Session),
-    importId: z.string(),
-    created: z.boolean(),
-    nextOffset: z.number().int().nonnegative(),
+    importId: primitives.string,
+    created: primitives.boolean,
+    nextOffset: primitives.nonnegativeInteger,
   }),
 );
 export type ImportArchivedSessionResponse = z.infer<typeof ImportArchivedSessionResponse>;
@@ -166,10 +164,10 @@ export type ImportArchivedSessionResponse = z.infer<typeof ImportArchivedSession
 export const AppendArchivedSessionEventsResponse = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
   () =>
     z.object({
-      sessionId: z.string().uuid(),
-      importId: z.string(),
-      nextOffset: z.number().int().nonnegative(),
-      replayed: z.boolean(),
+      sessionId: primitives.uuid,
+      importId: primitives.string,
+      nextOffset: primitives.nonnegativeInteger,
+      replayed: primitives.boolean,
     }),
 );
 export type AppendArchivedSessionEventsResponse = z.infer<

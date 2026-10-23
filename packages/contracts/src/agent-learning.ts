@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -66,7 +67,7 @@ export const AgentLearningSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       owner: AgentLearningOwner,
-      version: z.number().int().nonnegative(),
+      version: primitives.nonnegativeInteger,
       defaults: AgentLearningDefaults,
     })
     .strict(),
@@ -77,7 +78,7 @@ export const AgentLearningContextSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       context: AgentLearningContext,
-      version: z.number().int().nonnegative(),
+      version: primitives.nonnegativeInteger,
       overrides: AgentLearningOverrides,
     })
     .strict(),
@@ -87,20 +88,20 @@ export type AgentLearningContextSettings = z.infer<typeof AgentLearningContextSe
 /** Versioned settings returned by both central and contextual editors. */
 export const AgentLearningSettingsRecord = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    ownerKey: z.string(),
-    contextKey: z.string(),
-    version: z.number().int().nonnegative(),
+    ownerKey: primitives.string,
+    contextKey: primitives.string,
+    version: primitives.nonnegativeInteger,
     settings: AgentLearningOverrides,
   }),
 );
 export type AgentLearningSettingsRecord = z.infer<typeof AgentLearningSettingsRecord>;
 export const AgentLearningOverrideRecord = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    contextKey: z.string(),
-    version: z.number().int().positive(),
+    contextKey: primitives.string,
+    version: primitives.positiveInteger,
     settings: AgentLearningOverrides,
-    updatedAt: z.string(),
-    label: z.string(),
+    updatedAt: primitives.string,
+    label: primitives.string,
   }),
 );
 export type AgentLearningOverrideRecord = z.infer<typeof AgentLearningOverrideRecord>;
@@ -116,7 +117,7 @@ export const AgentLearningEffectiveCategory = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       mode: AgentLearningMode,
-      inherited: z.boolean(),
+      inherited: primitives.boolean,
     })
     .strict(),
 );
@@ -168,7 +169,7 @@ export function agentLearningDefaultsFromLegacy(input: {
 }): AgentLearningDefaults {
   const parsed = z
     .object({
-      memoryEnabled: z.boolean().optional(),
+      memoryEnabled: primitives.optionalBoolean,
       workspaceMode: z.enum(["off", "suggest", "automatic"]).optional(),
     })
     .strict()

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -6,7 +7,7 @@ export const SessionMessageSearchRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       query: z.string().min(1).max(200),
-      sessionId: z.string().uuid().optional(),
+      sessionId: primitives.optionalUuid,
       groupBy: z.literal("session").optional(),
       archiveStatus: z.enum(["active", "archived", "all"]).optional(),
       limit: z.number().int().min(1).max(50).optional(),
@@ -22,19 +23,19 @@ export type SessionMessageSearchRequest = z.infer<typeof SessionMessageSearchReq
 
 export const SessionMessageSearchMatch = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    sessionId: z.string().uuid(),
-    sessionTitle: z.string().nullable(),
-    eventId: z.string().uuid(),
-    sequence: z.number().int().positive(),
-    turnId: z.string().uuid().nullable(),
+    sessionId: primitives.uuid,
+    sessionTitle: primitives.nullableString,
+    eventId: primitives.uuid,
+    sequence: primitives.positiveInteger,
+    turnId: primitives.nullableUuid,
     role: z.enum(["user", "assistant"]),
-    messageId: z.string().nullable(),
+    messageId: primitives.nullableString,
     /** All offsets are zero-based UTF-16 code units; ends are exclusive. */
-    messageMatchOffset: z.number().int().nonnegative(),
+    messageMatchOffset: primitives.nonnegativeInteger,
     snippet: z.object({
-      text: z.string(),
-      matchStart: z.number().int().nonnegative(),
-      matchEnd: z.number().int().nonnegative(),
+      text: primitives.string,
+      matchStart: primitives.nonnegativeInteger,
+      matchEnd: primitives.nonnegativeInteger,
     }),
   }),
 );
@@ -50,12 +51,12 @@ export type SessionMessageSearchMatch = z.infer<typeof SessionMessageSearchMatch
 export const SessionMessageSearchResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     matches: z.array(SessionMessageSearchMatch).max(50),
-    nextCursor: z.string().nullable(),
-    hasMore: z.boolean(),
-    scannedMessages: z.number().int().nonnegative(),
-    matchedMessageCount: z.number().int().nonnegative(),
-    matchedOccurrenceCount: z.number().int().nonnegative(),
-    countIsExact: z.boolean(),
+    nextCursor: primitives.nullableString,
+    hasMore: primitives.boolean,
+    scannedMessages: primitives.nonnegativeInteger,
+    matchedMessageCount: primitives.nonnegativeInteger,
+    matchedOccurrenceCount: primitives.nonnegativeInteger,
+    countIsExact: primitives.boolean,
   }),
 );
 export type SessionMessageSearchResponse = z.infer<typeof SessionMessageSearchResponse>;

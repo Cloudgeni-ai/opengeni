@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { IntegrationInstanceKey, IntegrationSource } from "./index";
@@ -57,8 +58,8 @@ export const ConnectNextAction = /* @__PURE__ */ defineSchema(() =>
               .object({
                 name: opaqueId,
                 label: z.string().max(256),
-                required: z.boolean(),
-                secret: z.boolean(),
+                required: primitives.boolean,
+                secret: primitives.boolean,
                 options: z
                   .array(z.object({ value: opaqueId, label: z.string().max(512) }).strict())
                   .max(1000)
@@ -134,13 +135,13 @@ export const ConnectAttempt = /* @__PURE__ */ defineSchema(() =>
       workspaceId: opaqueId,
       providerId: opaqueId,
       ownership: ConnectOwnership,
-      revision: z.number().int().positive(),
+      revision: primitives.positiveInteger,
       state: ConnectAttemptState,
-      credentialsCommitted: z.boolean(),
-      integrationInstalled: z.boolean(),
+      credentialsCommitted: primitives.boolean,
+      integrationInstalled: primitives.boolean,
       completionRequirement: z.enum(["connection", "integration", "provider_setup"]),
       nextAction: ConnectNextAction,
-      expiresAt: z.string().datetime({ offset: true }),
+      expiresAt: primitives.string.datetime({ offset: true }),
       account: ConnectAccount.optional(),
       installationTarget: ConnectInstallationTarget.optional(),
       source: IntegrationSource.optional(),
@@ -148,7 +149,7 @@ export const ConnectAttempt = /* @__PURE__ */ defineSchema(() =>
       /** Exact installed catalog identity after a verified prepared MCP setup. */
       mcpCapabilityId: opaqueId.optional(),
       error: z
-        .object({ code: opaqueId, message: z.string().max(2048), retryable: z.boolean() })
+        .object({ code: opaqueId, message: z.string().max(2048), retryable: primitives.boolean })
         .strict()
         .optional(),
     })
@@ -208,7 +209,7 @@ export type ConnectAdvance = z.infer<typeof ConnectAdvance>;
 export const ConnectOperationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedRevision: z.number().int().positive().safe(),
+      expectedRevision: primitives.positiveInteger.safe(),
       idempotencyKey: opaqueId,
     })
     .strict(),

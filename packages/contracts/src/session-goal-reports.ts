@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -11,8 +12,7 @@ export const SessionGoalReportRequirement = /* @__PURE__ */ defineSchema(() =>
           "Stable report requirement identifier, at most 64 ASCII characters; not a title or status.",
         )
         .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
-      title: z
-        .string()
+      title: primitives.string
         .trim()
         .min(1)
         .max(512)
@@ -43,11 +43,8 @@ export const SessionGoalReportDelivery = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       requirementId: SessionGoalReportRequirement.shape.id,
-      artifactId: z
-        .string()
-        .regex(/^[0-9a-f]{32}$/)
-        .refine((value) => !/^0+$/.test(value)),
-      inspectionReceiptId: z.string().uuid(),
+      artifactId: primitives.string.regex(/^[0-9a-f]{32}$/).refine((value) => !/^0+$/.test(value)),
+      inspectionReceiptId: primitives.uuid,
     })
     .strict(),
 );

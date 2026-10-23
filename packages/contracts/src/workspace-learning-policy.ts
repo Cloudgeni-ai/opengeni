@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -23,13 +24,10 @@ export function normalizeWorkspaceLearningSourceKind(value: string): string {
 }
 
 export const WorkspaceLearningSourceKind = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .transform(normalizeWorkspaceLearningSourceKind)
     .pipe(
-      z
-        .string()
-        .min(1)
+      primitives.nonEmptyString
         .max(WORKSPACE_LEARNING_POLICY_SOURCE_KIND_MAX_CHARS)
         .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
     ),
@@ -37,9 +35,7 @@ export const WorkspaceLearningSourceKind = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceLearningSourceKind = z.infer<typeof WorkspaceLearningSourceKind>;
 
 export const WorkspaceLearningSourceId = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
-    .min(1)
+  primitives.nonEmptyString
     .max(WORKSPACE_LEARNING_POLICY_SOURCE_ID_MAX_CHARS)
     .refine(
       (value) => value.trim() === value,
@@ -124,9 +120,9 @@ export function canonicalizeWorkspaceLearningSourceOverrides(
 }
 
 const revisionIdentityShape = {
-  id: z.string().uuid(),
-  revision: z.number().int().positive(),
-  policyHash: z.string().regex(/^[0-9a-f]{64}$/),
+  id: primitives.uuid,
+  revision: primitives.positiveInteger,
+  policyHash: primitives.string.regex(/^[0-9a-f]{64}$/),
 };
 
 export const WorkspaceLearningPolicyRevisionIdentity = /* @__PURE__ */ defineSchema(() =>
@@ -139,27 +135,27 @@ export type WorkspaceLearningPolicyRevisionIdentity = z.infer<
 export const WorkspaceLearningPolicyRevision = /* @__PURE__ */ defineSchema(() =>
   z.object({
     ...revisionIdentityShape,
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+    operationId: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
     workspaceMode: WorkspaceLearningMode,
     sourceOverrides: WorkspaceLearningSourceOverrides,
-    supersedesRevisionId: z.string().uuid().nullable(),
-    createdBySubjectId: z.string().min(1),
-    createdAt: z.string().datetime(),
+    supersedesRevisionId: primitives.nullableUuid,
+    createdBySubjectId: primitives.nonEmptyString,
+    createdAt: primitives.dateTime,
   }),
 );
 export type WorkspaceLearningPolicyRevision = z.infer<typeof WorkspaceLearningPolicyRevision>;
 
 export const WorkspaceLearningPolicyHead = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    revisionId: z.string().uuid(),
-    revision: z.number().int().positive(),
-    policyHash: z.string().regex(/^[0-9a-f]{64}$/),
-    activationVersion: z.number().int().positive(),
-    activatedAt: z.string().datetime(),
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    revisionId: primitives.uuid,
+    revision: primitives.positiveInteger,
+    policyHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    activationVersion: primitives.positiveInteger,
+    activatedAt: primitives.dateTime,
   }),
 );
 export type WorkspaceLearningPolicyHead = z.infer<typeof WorkspaceLearningPolicyHead>;
@@ -173,17 +169,17 @@ export type WorkspaceLearningPolicyActivationType = z.infer<
 
 export const WorkspaceLearningPolicyActivationEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    operationId: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+    id: primitives.uuid,
+    operationId: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
     type: WorkspaceLearningPolicyActivationType,
-    activationVersion: z.number().int().positive(),
+    activationVersion: primitives.positiveInteger,
     oldRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
     newRevision: WorkspaceLearningPolicyRevisionIdentity,
-    actorSubjectId: z.string().min(1),
-    reason: z.string().min(1).max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
-    createdAt: z.string().datetime(),
+    actorSubjectId: primitives.nonEmptyString,
+    reason: primitives.nonEmptyString.max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
+    createdAt: primitives.dateTime,
   }),
 );
 export type WorkspaceLearningPolicyActivationEvent = z.infer<
@@ -192,20 +188,20 @@ export type WorkspaceLearningPolicyActivationEvent = z.infer<
 
 export const WorkspaceLearningPolicySnapshot = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    turnId: z.string().uuid(),
-    attemptId: z.string().uuid(),
-    executionGeneration: z.number().int().positive(),
+    id: primitives.uuid,
+    accountId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    sessionId: primitives.uuid,
+    turnId: primitives.uuid,
+    attemptId: primitives.uuid,
+    executionGeneration: primitives.positiveInteger,
     revision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
-    activationVersion: z.number().int().nonnegative(),
+    activationVersion: primitives.nonnegativeInteger,
     activatedAt: z.string().datetime().nullable(),
     workspaceMode: WorkspaceLearningMode,
     sourceOverrides: WorkspaceLearningSourceOverrides,
-    snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
-    createdAt: z.string().datetime(),
+    snapshotHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    createdAt: primitives.dateTime,
   }),
 );
 export type WorkspaceLearningPolicySnapshot = z.infer<typeof WorkspaceLearningPolicySnapshot>;
@@ -213,7 +209,7 @@ export type WorkspaceLearningPolicySnapshot = z.infer<typeof WorkspaceLearningPo
 export const WorkspaceLearningPolicyRouterContext = /* @__PURE__ */ defineSchema(() =>
   z.object({
     mode: WorkspaceLearningMode,
-    snapshotId: z.string().uuid(),
+    snapshotId: primitives.uuid,
     revisionId: z.string().min(1).max(512),
   }),
 );
@@ -223,11 +219,11 @@ export type WorkspaceLearningPolicyRouterContext = z.infer<
 
 export const WorkspaceLearningPolicyEffectiveMode = /* @__PURE__ */ defineSchema(() =>
   WorkspaceLearningPolicyRouterContext.extend({
-    inherited: z.boolean(),
+    inherited: primitives.boolean,
     source: WorkspaceLearningSourceRef,
     policyRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
-    activationVersion: z.number().int().nonnegative(),
-    snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
+    activationVersion: primitives.nonnegativeInteger,
+    snapshotHash: primitives.string.regex(/^[0-9a-f]{64}$/),
   }),
 );
 export type WorkspaceLearningPolicyEffectiveMode = z.infer<

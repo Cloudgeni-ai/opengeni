@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 /**
  * The one password generator shared by agents (`secret_save` with
@@ -33,10 +34,10 @@ export const GeneratePasswordSpec = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       length: z.number().int().min(8).max(128).default(24),
-      lowercase: z.boolean().default(true),
-      uppercase: z.boolean().default(true),
-      digits: z.boolean().default(true),
-      symbols: z.boolean().default(true),
+      lowercase: primitives.boolean.default(true),
+      uppercase: primitives.boolean.default(true),
+      digits: primitives.boolean.default(true),
+      symbols: primitives.boolean.default(true),
       // No quotes, $, `, \, braces, /, &, ; or | by default: generated values
       // stay safe to paste into shells, URLs and config files.
       symbolSet: z
@@ -45,8 +46,8 @@ export const GeneratePasswordSpec = /* @__PURE__ */ defineSchema(() =>
         .max(64)
         .refine(isPrintableAscii, "symbolSet must be printable ASCII without spaces")
         .default(SECRET_GENERATOR_DEFAULT_SYMBOLS),
-      excludeAmbiguous: z.boolean().default(true),
-      requireEachClass: z.boolean().default(true),
+      excludeAmbiguous: primitives.boolean.default(true),
+      requireEachClass: primitives.boolean.default(true),
     })
     .strict()
     .refine(

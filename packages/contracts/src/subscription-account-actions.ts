@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -10,7 +11,7 @@ import { z } from "zod";
 /** Rename an account. An empty or null label goes back to the account's email. */
 export const SubscriptionAccountRenameRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    label: z.string().trim().max(200).nullable(),
+    label: primitives.string.trim().max(200).nullable(),
   }),
 );
 export type SubscriptionAccountRenameRequest = z.infer<typeof SubscriptionAccountRenameRequest>;
@@ -22,8 +23,8 @@ export type SubscriptionAccountRenameRequest = z.infer<typeof SubscriptionAccoun
  */
 export const SubscriptionAccountToggleRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    enabled: z.boolean(),
-    expectedVersion: z.number().int().positive(),
+    enabled: primitives.boolean,
+    expectedVersion: primitives.positiveInteger,
   }),
 );
 export type SubscriptionAccountToggleRequest = z.infer<typeof SubscriptionAccountToggleRequest>;
@@ -31,7 +32,7 @@ export type SubscriptionAccountToggleRequest = z.infer<typeof SubscriptionAccoun
 /** Account picking: true spreads work across every usable account, false uses the primary one only. */
 export const SubscriptionRotationSettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    rotationEnabled: z.boolean(),
+    rotationEnabled: primitives.boolean,
   }),
 );
 export type SubscriptionRotationSettingsRequest = z.infer<
@@ -69,8 +70,8 @@ export type CodexSourceRequest = z.infer<typeof CodexSourceRequest>;
 /** Choose the Codex account that serves Codex Apps; expectedVersion is the current designation version. */
 export const CodexAppsDesignationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    accountId: z.string().uuid(),
-    expectedVersion: z.number().int().nonnegative(),
+    accountId: primitives.uuid,
+    expectedVersion: primitives.nonnegativeInteger,
   }),
 );
 export type CodexAppsDesignationRequest = z.infer<typeof CodexAppsDesignationRequest>;
@@ -78,7 +79,7 @@ export type CodexAppsDesignationRequest = z.infer<typeof CodexAppsDesignationReq
 /** Pin one chat to a Codex account by id, or "auto" to let Opengeni pick again. */
 export const SessionCodexAccountPinRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    target: z.string().min(1).describe('"auto" or a Codex account id'),
+    target: primitives.nonEmptyString.describe('"auto" or a Codex account id'),
   }),
 );
 export type SessionCodexAccountPinRequest = z.infer<typeof SessionCodexAccountPinRequest>;
