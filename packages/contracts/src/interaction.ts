@@ -457,11 +457,15 @@ export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
 /** One enrolled machine agent currently reporting its browser-bridge inventory.
  * A bridge with zero devices is operational but has no Chrome profile connected
- * through the Opengeni extension yet. */
+ * through the Opengeni extension yet. `sandboxId` and `machineName` name the
+ * Connected Machine it runs on (the sandbox a session's active machine points
+ * to, and that machine's plain name); null when unknown. */
 export const AttachedBrowserBridge = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       enrollmentId: z.string().uuid(),
+      sandboxId: z.string().uuid().nullable().default(null),
+      machineName: z.string().nullable().default(null),
       state: z.enum(["online", "offline"]),
       bridgeGeneration: attachedBridgeGeneration,
       inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
