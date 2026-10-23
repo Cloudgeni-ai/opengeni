@@ -26,7 +26,6 @@ export function connectionAccountIdentityLabel(
       metadata.name,
       metadata.slackUserName,
       metadata.username,
-      metadata.slackUserId,
     ]
       .map(text)
       .find(Boolean) ?? fallback;
@@ -38,7 +37,6 @@ export function connectionAccountIdentityLabel(
     metadata.workspace_name,
     nestedName(metadata.team),
     nestedName(metadata.workspace),
-    metadata.slackTeamId,
   ]
     .map(text)
     .find(Boolean);

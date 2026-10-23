@@ -445,7 +445,7 @@ test("transient account failure still offers Retry in the composer menu", async 
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {
   for (const metadata of [{ email: "Label" }, { displayName: "Label" }, { accountName: "Label" }]) {
-    const label = connectionAccountLabel({ ...accounts[0]!, metadata }, "Mail account 1");
+    const label = connectionAccountLabel({ ...accounts[0]!, metadata }, "Mail account");
     expect(label).toBe("Label");
     expect(label).not.toContain(accounts[0]!.id);
   }
@@ -456,21 +456,21 @@ test("account labels use readable metadata and never fall back to a raw connecti
     { team: { name: "Label" } },
     { workspace: { name: "Label" } },
   ]) {
-    const label = connectionAccountLabel({ ...accounts[1]!, metadata }, "Mail account 2");
-    expect(label).toContain("Mail account 2");
+    const label = connectionAccountLabel({ ...accounts[1]!, metadata }, "Mail account");
+    expect(label).toContain("Mail account");
     expect(label).toContain("Label");
     expect(label).not.toContain(accounts[1]!.id);
   }
   const combined = connectionAccountLabel(
     { ...accounts[0]!, metadata: { email: "alex@example.com", teamName: "Support team" } },
-    "Mail account 1",
+    "Mail account",
   );
   expect(combined).toContain("alex@example.com");
   expect(combined).toContain("Support team");
   expect(combined).not.toContain(accounts[0]!.id);
   for (const account of accounts) {
-    const label = connectionAccountLabel({ ...account, metadata: {} }, "Mail account 1");
-    expect(label).toBe("Mail account 1");
+    const label = connectionAccountLabel({ ...account, metadata: {} }, "Mail account");
+    expect(label).toBe("Mail account");
     expect(label).not.toContain(account.id);
   }
 });
