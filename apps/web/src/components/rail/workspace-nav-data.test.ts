@@ -31,6 +31,7 @@ describe("workspace rail destinations", () => {
       "/workspaces/$workspaceId/plugins",
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/schedules",
+      "/workspaces/$workspaceId/meetings",
       "/workspaces/$workspaceId/artifacts",
     ]);
     expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");

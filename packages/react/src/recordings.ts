@@ -12,6 +12,7 @@ export {
   useRecordingModels,
   useRecordingPeople,
   useRecordings,
+  useRecordingsClient,
   useTranscript,
 } from "./hooks/use-recordings";
 export type {

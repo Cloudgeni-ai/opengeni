@@ -825,14 +825,23 @@ export function ListRow({
               // Tables keep rows to one line once the columns show, unless
               // the line still has facts that aren't columns.
               table && metaItems.length === 0 && "@[640px]/list:hidden",
-              // Only folded facts: the line disappears once the columns show.
+              // Only folded facts (and a status, which moves to the row's end
+              // from 480px): the line disappears once the columns show.
               !table &&
                 !secondary &&
                 hasColumns &&
                 metaItems.length === 0 &&
-                !status &&
                 !narrowState &&
                 "@[640px]/list:hidden",
+              // Only a status: it moves to the row's end from 480px, taking
+              // the line with it, so the title stays centred.
+              !table &&
+                !secondary &&
+                !hasColumns &&
+                metaItems.length === 0 &&
+                status &&
+                !narrowState &&
+                "@[480px]/list:hidden",
             )}
           >
             {secondary && !(disabled && disabledReason) ? (

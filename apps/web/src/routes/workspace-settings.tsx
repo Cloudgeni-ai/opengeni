@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { resolveWorkspaceBusySend } from "@opengeni/contracts";
 
 import { AgentActivityRow } from "@/components/settings/agent-activity";
+import { MeetingDefaultsSection } from "@/components/meetings/meeting-settings";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
 import { DefaultMachineRow } from "@/components/settings/default-machine-row";
@@ -445,6 +446,22 @@ function WorkspaceGeneralSettings({
       <Section title="Chats">
         <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
       </Section>
+
+      <MeetingDefaultsSection
+        workspaceId={workspaceId}
+        personal={personal}
+        canManage={canManageSettings}
+        onConnectModels={
+          canAddAccounts
+            ? () =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "models", workspace: workspaceId },
+                })
+            : undefined
+        }
+      />
 
       <Section
         title="New session defaults"

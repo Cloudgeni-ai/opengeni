@@ -36657,6 +36657,7 @@
       "useRecordingPeople": "value",
       "UseRecordingResult": "type",
       "useRecordings": "value",
+      "useRecordingsClient": "value",
       "UseRecordingsOptions": "type",
       "UseRecordingsResult": "type",
       "useTranscript": "value",

@@ -23,6 +23,8 @@
 //   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
 //   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
 //   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/meetings                 → meetings list with the recorder
+//   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
 //   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
@@ -207,6 +209,11 @@ const LazyRigDetailRoute = lazyRouteComponent(
   "RigDetailRoute",
 );
 const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazyMeetingsRoute = lazyRouteComponent(() => import("@/routes/meetings"), "MeetingsRoute");
+const LazyMeetingDetailRoute = lazyRouteComponent(
+  () => import("@/routes/meetings"),
+  "MeetingDetailRoute",
+);
 const LazyScheduleDetailRoute = lazyRouteComponent(
   () => import("@/routes/schedules"),
   "ScheduleDetailRoute",
@@ -669,6 +676,16 @@ const workspaceScheduleEditRoute = createRoute({
   path: "schedules/$scheduleId/edit",
   component: ScheduleEdit,
 });
+const workspaceMeetingsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "meetings",
+  component: Meetings,
+});
+const workspaceMeetingDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "meetings/$recordingId",
+  component: MeetingDetail,
+});
 const workspacePlaygroundRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "playground",
@@ -925,6 +942,8 @@ const routeTree = rootRoute.addChildren([
     workspaceScheduleNewRoute,
     workspaceScheduleDetailRoute,
     workspaceScheduleEditRoute,
+    workspaceMeetingsRoute,
+    workspaceMeetingDetailRoute,
     workspacePlaygroundRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
@@ -1176,6 +1195,16 @@ function Playground() {
 function ScheduleDetail() {
   const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
   return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
+}
+
+function Meetings() {
+  const { workspaceId } = workspaceMeetingsRoute.useParams();
+  return <LazyMeetingsRoute workspaceId={workspaceId} />;
+}
+
+function MeetingDetail() {
+  const { workspaceId, recordingId } = workspaceMeetingDetailRoute.useParams();
+  return <LazyMeetingDetailRoute workspaceId={workspaceId} recordingId={recordingId} />;
 }
 
 function ScheduleEdit() {

@@ -128,6 +128,18 @@ function useEmbeddedRecordings(
   return { client: candidate as RecordingsClientLike, workspaceId };
 }
 
+/**
+ * The recordings client the hooks use, for calls no hook wraps (deleting from
+ * a list, reading track audio): the explicit `recordings` client, else one
+ * built over the provider's SDK client.
+ */
+export function useRecordingsClient(options: RecordingsClientOverride = {}): {
+  client: RecordingsClientLike;
+  workspaceId: string;
+} {
+  return useEmbeddedRecordings(options, [], "useRecordingsClient");
+}
+
 // --- Capture -------------------------------------------------------------------
 
 export type UseRecorderOptions = RecordingsClientOverride & {
