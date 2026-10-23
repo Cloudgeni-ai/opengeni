@@ -339,3 +339,73 @@ test("a workspace that refuses Site access is not asked again while the menu sta
   expect(catalogCalls).toHaveLength(1);
   expect(groups().find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
 });
+
+function catalogSite(id: string, title: string) {
+  return {
+    id,
+    kind: "site",
+    title,
+    status: "active",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  };
+}
+
+test("a Site only the server found stays listed while the next answer loads", async () => {
+  catalog = async (options) =>
+    options.q === "usage"
+      ? { items: [catalogSite(sites.launch, "Usage launch checklist")], nextCursor: null }
+      : new Promise(() => {});
+  await openMenu();
+  await type("usage");
+  await type("usage l");
+  expect(catalogCalls.map((call) => call.options.q)).toEqual(["usage", "usage l"]);
+  expect(groups().find((group) => group.label === "Sites")?.options).toEqual([
+    "Usage launch checklist",
+  ]);
+});
+
+test("quick typing asks the server once, for the last query", async () => {
+  await openMenu();
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    for (const value of ["u", "us", "usa", "usag", "usage"]) {
+      setter.call(input(), value);
+      input().dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  expect(catalogCalls.map((call) => call.options.q)).toEqual(["usage"]);
+});
+
+test("a slow answer to an earlier query never shows under a later one", async () => {
+  catalog = (options) =>
+    options.q === "usag"
+      ? new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                items: [catalogSite(sites.launch, "Usage stale answer")],
+                nextCursor: null,
+              }),
+            150,
+          ),
+        )
+      : Promise.resolve({ items: [], nextCursor: null });
+  await openMenu();
+  await type("usag");
+  await type("usage");
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  expect(groups().find((group) => group.label === "Sites")?.options).toEqual(["Usage dashboard"]);
+});
+
+test("one letter matches the sidebar's Sites without asking the server", async () => {
+  await openMenu();
+  await type("r");
+  expect(catalogCalls).toEqual([]);
+  expect(groups().find((group) => group.label === "Sites")?.options).toContain("Roadmap");
+});

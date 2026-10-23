@@ -106,6 +106,9 @@ const SITE_RESULT_LIMIT = 5;
 const RECENT_SITE_LIMIT = 3;
 /** Sites the server title search returns per query. */
 const SERVER_SITE_LIMIT = 10;
+/** Shorter queries match only the Sites the sidebar has loaded. */
+const MIN_SERVER_SITE_QUERY = 2;
+const NO_SITES: readonly SiteRecord[] = [];
 const SERVER_DEBOUNCE_MS = 120;
 /** Other workspaces whose titles the server searches too, most used first. */
 const OTHER_WORKSPACES_SEARCHED = 9;
@@ -282,9 +285,15 @@ function isAccessFailure(error: unknown): boolean {
  */
 function useServerSiteSearch(workspaceId: string, query: string, open: boolean) {
   const { client } = useAppContext();
-  const [state, setState] = useState<{ key: string; sites: SiteRecord[]; loading: boolean }>({
+  const [state, setState] = useState<{
+    key: string;
+    workspaceId: string;
+    sites: readonly SiteRecord[];
+    loading: boolean;
+  }>({
     key: "",
-    sites: [],
+    workspaceId: "",
+    sites: NO_SITES,
     loading: false,
   });
   const denied = useRef<string | null>(null);
@@ -296,12 +305,18 @@ function useServerSiteSearch(workspaceId: string, query: string, open: boolean) 
   useEffect(() => {
     if (
       !open ||
-      !trimmed ||
+      // One letter would scan the whole catalog on every keystroke; the Sites
+      // the sidebar has loaded still match it locally.
+      trimmed.length < MIN_SERVER_SITE_QUERY ||
       !workspaceId ||
       denied.current === workspaceId ||
       typeof client.listArtifactCatalog !== "function"
     ) {
-      setState({ key: "", sites: [], loading: false });
+      setState((current) =>
+        current.loading || current.sites.length > 0
+          ? { key: "", workspaceId: "", sites: NO_SITES, loading: false }
+          : current,
+      );
       return;
     }
     setState((current) => ({ ...current, loading: true }));
@@ -323,6 +338,7 @@ function useServerSiteSearch(workspaceId: string, query: string, open: boolean) 
           const items = Array.isArray(page?.items) ? page.items : [];
           setState({
             key,
+            workspaceId,
             sites: siteRecords(
               workspaceId,
               items.filter((item) => item?.kind === "site"),
@@ -334,7 +350,7 @@ function useServerSiteSearch(workspaceId: string, query: string, open: boolean) 
           if (controller.signal.aborted) return;
           if (isAccessFailure(error)) denied.current = workspaceId;
           // Chats and actions still show; Sites are an addition.
-          setState({ key, sites: [], loading: false });
+          setState({ key, workspaceId, sites: NO_SITES, loading: false });
         });
     }, SERVER_DEBOUNCE_MS);
     return () => {
@@ -342,8 +358,12 @@ function useServerSiteSearch(workspaceId: string, query: string, open: boolean) 
       controller.abort();
     };
   }, [client, workspaceId, trimmed, key, open]);
+  const current = state.key === key;
   return {
-    sites: state.key === key ? state.sites : [],
+    sites: current ? state.sites : NO_SITES,
+    // While the next answer loads, the last one's Sites stay candidates (by
+    // their title alone), so a Site does not blink out on every keystroke.
+    previous: !current && state.workspaceId === workspaceId ? state.sites : NO_SITES,
     loading: state.loading,
   };
 }
@@ -753,7 +773,12 @@ function CommandMenuDialog(props: {
         item: workspaceItem(choice, "Workspaces", trimmed),
       });
     }
-    const siteScores = rankSites(knownSites, serverSites.sites, trimmed);
+    const knownIds = new Set(knownSites.map((site) => site.id));
+    const siteScores = rankSites(
+      [...knownSites, ...serverSites.previous.filter((site) => !knownIds.has(site.id))],
+      serverSites.sites,
+      trimmed,
+    );
     // Letters-in-order guesses only help when nothing really matches; next to
     // real matches they are noise ("pin" → "Postgres … investigation").
     const hasRealMatch =
@@ -846,6 +871,7 @@ function CommandMenuDialog(props: {
     server.query,
     server.rows,
     serverSites.sites,
+    serverSites.previous,
     siteDirectoryVersion,
     subjectId,
     surface,

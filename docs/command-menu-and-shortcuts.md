@@ -134,16 +134,18 @@ Opening it is instant: no request is made before it appears.
 - **Sites:** this workspace's Sites whose title matches appear in a "Sites"
   group (at most five), ranked like chat titles, right after the chats (chats
   always come first; with no matching chats, Sites take their place). The Site
-  rows the sidebar has loaded answer instantly; the artifact catalog's Site
-  title search
+  rows the sidebar has loaded (the same rows it shows) answer instantly; from
+  two characters, the artifact catalog's Site title search
   (`GET /v1/workspaces/:workspaceId/artifact-catalog?kind=site&q=…`, active
-  Sites only) merges the rest as it answers, with the catalog's access checks,
-  so another person's Only me Site never shows. Hostnames are not matched:
-  reading a Site's publication needs Site manager access. A failed Site search
-  leaves the rest of the menu as it is; a workspace that refuses access is not
-  asked again until the menu opens next. Enter opens the Site in the app's Site
-  view, as its sidebar row does (the desktop app too); ⌘Enter on the web opens
-  it in a new tab.
+  Sites only) merges the rest as it answers, with the catalog's access checks.
+  So the menu lists only Sites the person can already see in the sidebar or the
+  catalog, never another person's Only me Site. While the next answer loads,
+  the last answer's Sites stay listed if their title still matches. Hostnames
+  are not matched: reading a Site's publication needs Site manager access. A
+  failed Site search leaves the rest of the menu as it is; a workspace that
+  refuses access is not asked again until the menu opens next. Enter opens the
+  Site in the app's Site view, as its sidebar row does (the desktop app too);
+  ⌘/Ctrl+Enter on the web opens it in a new tab.
 - **Fork chat:** forks the chat on screen from its latest message, the same as
   the fork button under a message, and opens the same confirmation.
 - **Ranking:** whole-title prefix, then a word in the title starting with the

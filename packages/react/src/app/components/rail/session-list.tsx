@@ -2448,9 +2448,12 @@ export function SessionList() {
     rememberChats(directorySubject, [...pinned, ...sessions]);
   }, [directorySubject, pinned, sessions]);
   // ⌘K lists the Site rows shown here too: recent ones before anything is
-  // typed, and the ones whose title matches. Filtered views are left out.
+  // typed, and the ones whose title matches. Filtered views (archived, needs
+  // you, mine only) are left out so they never replace the full list.
   const sidebarSiteGroups =
-    hierarchyMode && browseStatus !== "archived" && !needsYouOnly ? rootPage.siteGroups : null;
+    hierarchyMode && browseStatus !== "archived" && !needsYouOnly && !mineOnly
+      ? rootPage.siteGroups
+      : null;
   useEffect(() => {
     if (sidebarSiteGroups)
       rememberSidebarSites(directorySubject, rail.workspaceId, sidebarSiteGroups);
