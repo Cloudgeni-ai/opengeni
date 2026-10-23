@@ -45,6 +45,7 @@ async function openFixture(html: string) {
     observation: BrowserObservation,
     name: string,
     type: "click" | "double_click" = "click",
+    selector?: string,
   ) => {
     const command: BrowserActionCommand = {
       protocolVersion: 1,
@@ -57,7 +58,12 @@ async function openFixture(html: string) {
       expectedFrameId: observation.frameId!,
       actor: { kind: "human", subjectId: "click-hit-target-fixture" },
       observationMode: "none",
-      action: { type, locator: { kind: "role", role: "button", name, exact: true } },
+      action: {
+        type,
+        locator: selector
+          ? { kind: "css", selector }
+          : { kind: "role", role: "button", name, exact: true },
+      },
     };
     return controller.run(command);
   };
@@ -167,6 +173,37 @@ e2e(
       ]);
     } finally {
       await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a lookalike that takes the target's place is not the target",
+  async () => {
+    // Three rows with identical "Delete" buttons. Row 1 is removed as the
+    // pointer arrives, so row 2's button moves under the pointer.
+    const rows = await openFixture(
+      '<!doctype html><title>Rows</title><style>body{margin:0}.row{height:40px}</style><div id="list"><div class="row" id="r1"><button id="d1">Delete</button></div><div class="row" id="r2"><button id="d2">Delete</button></div><div class="row" id="r3"><button id="d3">Delete</button></div></div><script>globalThis.deleted=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")deleted.push(event.target.id)});d1.addEventListener("pointerover",()=>r1.remove());</script>',
+    );
+    try {
+      const refused = await rows.click(rows.initial, "Delete", "click", "#d1");
+      expect(refused.state).not.toBe("completed");
+      expect(await rows.evaluate("deleted")).toEqual([]);
+    } finally {
+      await rows.close();
+    }
+    // Hovering an unlabelled toolbar re-renders it with "Delete" where
+    // "Archive" was.
+    const toolbar = await openFixture(
+      '<!doctype html><title>Toolbar</title><style>body{margin:0}button{width:120px;height:30px}</style><div role="toolbar" id="bar" style="padding:30px"><button id="archive">Archive</button></div><script>globalThis.clicked=[];document.addEventListener("click",(event)=>{if(event.target.tagName==="BUTTON")clicked.push(event.target.textContent)});bar.addEventListener("pointerover",()=>{if(bar.dataset.swapped)return;bar.dataset.swapped="1";bar.innerHTML="<button id=delete>Delete</button>"});</script>',
+    );
+    try {
+      const refused = await toolbar.click(toolbar.initial, "Archive");
+      expect(refused.state).not.toBe("completed");
+      expect(await toolbar.evaluate("clicked")).toEqual([]);
+    } finally {
+      await toolbar.close();
     }
   },
   60_000,

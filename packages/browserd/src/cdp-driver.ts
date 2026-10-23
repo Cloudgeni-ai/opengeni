@@ -7478,8 +7478,20 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
   const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
-  const tag = element.tagName;
-  const original = describe(element);
+  // What the target is by itself (not by the ancestor describe() names),
+  // and where it sits: a copy must match both.
+  const identity = (node) =>
+    [
+      node.tagName,
+      node.getAttribute("role") || "",
+      String(node.getAttribute("aria-label") || node.getAttribute("title") || node.textContent || "")
+        .replace(/\\s+/g, " ")
+        .trim()
+        .slice(0, 200),
+    ].join("|");
+  const original = identity(element);
+  const parent = element.parentElement;
+  const position = parent ? Array.prototype.indexOf.call(parent.children, element) : -1;
   const reaches = (hit) => {
     if (hit instanceof Node && owns(element, hit)) return true;
     // Seen from outside a closed shadow root, a press on the target is
@@ -7492,11 +7504,12 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
     )
       return true;
     // The page re-rendered the target since it was found, replacing it with
-    // a copy: the press reaches the copy, as it would a person's.
-    if (!element.isConnected) {
-      for (let node = hit instanceof Element ? hit : hit && hit.parentElement; node; node = node.parentElement) {
-        if (node.tagName === tag && describe(node) === original) return true;
-      }
+    // a copy in the same place of the same parent: the press reaches the
+    // copy, as it would a person's. A lookalike elsewhere (the next row's
+    // identical button once this row is removed) is not the target.
+    if (!element.isConnected && parent && parent.isConnected) {
+      const copy = parent.children[position];
+      if (copy && identity(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
     }
     return false;
   };
