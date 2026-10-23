@@ -4,7 +4,7 @@
   "units": "milliseconds",
   "evidence": {
     "repository": "Cloudgeni-ai/opengeni",
-    "targetSha": "0b378e80f49e2b9d6e9a34d1896dba65173d68b8",
+    "targetSha": "45c8987fc2861ecb186f05a18877f64f0e5f7e57",
     "measurement": "Elapsed log timestamps between successive file starts or the shard pass marker; includes every browser engine and runner overhead. Only files in successful shard jobs that completed every file are used; killed or failed files are never used.",
     "selection": "Every successful Impacted E2E shard job on main since the Bun 1.4.4 pin whose source has this file's exact content and the same bun.lock, .bun-version and browser runner. Each weight is the lower-median observed interval for that file; fileSources names the job that observed it.",
     "sources": [
@@ -163,6 +163,48 @@
         "attempt": 1,
         "sourceSha": "6063fe342bd581791e742e09cf6aa7877a03df11",
         "jobIds": [120103063724, 120103063752, 120103063800]
+      },
+      {
+        "runId": 39959099140,
+        "attempt": 1,
+        "sourceSha": "f8fb5f5f2ef2728a5cee83b26d67b92c3907f58b",
+        "jobIds": [120434445608, 120434445617, 120434446027]
+      },
+      {
+        "runId": 39962261253,
+        "attempt": 1,
+        "sourceSha": "ca3f9312d6aea4069851e53d6a6f5cfd754f669f",
+        "jobIds": [120444268614, 120444268669, 120444268868]
+      },
+      {
+        "runId": 39964425514,
+        "attempt": 2,
+        "sourceSha": "0bcef4673c7c6e5b46d3b7665afe11925c8df304",
+        "jobIds": [120465254449, 120465254516]
+      },
+      {
+        "runId": 39964464343,
+        "attempt": 1,
+        "sourceSha": "487bd43d3076abc126b462f71c4517ff209d99db",
+        "jobIds": [120451809296, 120451809314, 120451809498]
+      },
+      {
+        "runId": 39966953600,
+        "attempt": 1,
+        "sourceSha": "2a2be773d7dcfe6e8796da00784c0071248a8789",
+        "jobIds": [120460111593, 120460111703, 120460111707]
+      },
+      {
+        "runId": 39967018299,
+        "attempt": 1,
+        "sourceSha": "1320d6caac27d6a83d830da26cb7b54b7e75daaf",
+        "jobIds": [120460142713]
+      },
+      {
+        "runId": 39967473461,
+        "attempt": 1,
+        "sourceSha": "45c8987fc2861ecb186f05a18877f64f0e5f7e57",
+        "jobIds": [120465271388, 120465271408]
       }
     ],
     "fileSources": {
@@ -215,8 +257,8 @@
         "observations": 22
       },
       "test/e2e/compact-session-view.browser.e2e.ts": {
-        "jobId": 119982667766,
-        "observations": 18
+        "jobId": 120451809498,
+        "observations": 6
       },
       "test/e2e/composer-focus-handoff.browser.e2e.ts": {
         "jobId": 120103063752,
@@ -263,8 +305,8 @@
         "observations": 25
       },
       "test/e2e/error-branding.browser.e2e.ts": {
-        "jobId": 120094495514,
-        "observations": 24
+        "jobId": 120434446027,
+        "observations": 4
       },
       "test/e2e/external-vaults.e2e.ts": {
         "jobId": 119986958409,
@@ -371,8 +413,8 @@
         "observations": 24
       },
       "test/e2e/session-sidebar.browser.e2e.ts": {
-        "jobId": 119963015107,
-        "observations": 14
+        "jobId": 120465271388,
+        "observations": 7
       },
       "test/e2e/session-skill-review.browser.e2e.ts": {
         "jobId": 119982667700,
@@ -482,8 +524,8 @@
       "planningWeight": 11988
     },
     "test/e2e/compact-session-view.browser.e2e.ts": {
-      "sha256": "71a815c9213aec71bfd8f9fc35c191b5e0100b1ec087f7ab8be2c938dea3d5de",
-      "planningWeight": 122313
+      "sha256": "d5539964e2f97a9d81bb4601fa8985f912a79357bea3f54ac63f1b15cb876279",
+      "planningWeight": 144989
     },
     "test/e2e/composer-focus-handoff.browser.e2e.ts": {
       "sha256": "0d92661c153cc97b847eb75406fb63d4279f12e465392bafb2fe066ec5f44b2b",
@@ -530,8 +572,8 @@
       "planningWeight": 19515
     },
     "test/e2e/error-branding.browser.e2e.ts": {
-      "sha256": "a8a73fe8cf8df8742f877ab6e180d1c1fb1c0e70fb5fa4d92df4fade3879a37d",
-      "planningWeight": 26851
+      "sha256": "28d8ca874d00a970cc87a9253b4d702172257af30f928612ec1de2a4c669fdab",
+      "planningWeight": 20464
     },
     "test/e2e/external-vaults.e2e.ts": {
       "sha256": "1dada50fe35ced1dd8fa918a3904a4c6a06683fc88648750cf20cb77f7c4db64",
@@ -638,8 +680,8 @@
       "planningWeight": 16020
     },
     "test/e2e/session-sidebar.browser.e2e.ts": {
-      "sha256": "e952aff701f793c5e94088005e4bfff0ab1cb7ed70d961ef6d7eecd7316ccb1c",
-      "planningWeight": 70817
+      "sha256": "758cc294499438e3edece651ca06fed981d39e2c98e4b55ced61499a728ed5b0",
+      "planningWeight": 88340
     },
     "test/e2e/session-skill-review.browser.e2e.ts": {
       "sha256": "a39771fe1257a867eca281d3bf454bdca6050aa5df9b535bf6f5fafe6209fdbb",
