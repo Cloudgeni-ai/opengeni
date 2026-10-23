@@ -65,7 +65,11 @@ import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
-import { startEventIntakePrunePump, startEventTriggerDispatchPump } from "./event-trigger-dispatch";
+import {
+  startEventIntakePrunePump,
+  startEventTriggerDispatchPump,
+  startMcpEventSubscriptionPump,
+} from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -655,6 +659,12 @@ export async function startApi(
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopMcpEventSubscriptionPump = startMcpEventSubscriptionPump({
+    db: dbClient.db,
+    settings,
+    bus,
+    observability,
+  });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -736,6 +746,7 @@ export async function startApi(
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
+      await stopMcpEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.

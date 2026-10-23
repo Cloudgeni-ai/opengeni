@@ -52,6 +52,7 @@ export default defineConfig({
     "src/organization-integration-policy.ts",
     "src/organization-user-setup.ts",
     "src/realtime.ts",
+    "src/recordings.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifacts-worker.ts",
     "src/interaction.ts",

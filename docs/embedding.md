@@ -1516,6 +1516,12 @@ approvals. Hooks outside that baseline export exact structural refinements:
 used by the mounted hooks; it does not stub workspace administration, billing,
 sandbox environment, connected-machine, or unrelated workbench APIs.
 
+Meeting recording embeds the same way: `@opengeni/sdk/recordings` gives a
+headless, local-first recorder and uploader, and `@opengeni/react/recordings`
+gives capture, list, transcript and speaker hooks over an explicit
+`recordings` client when the host proxies the API. See
+[`recordings.md`](recordings.md#embedding).
+
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the
 stock web implementation calls the SDK's

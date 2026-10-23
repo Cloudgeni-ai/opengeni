@@ -263,6 +263,14 @@ describe("recording routes", () => {
     });
     const versions = await scope.owner.call("GET", `/recordings/${recordingId}/transcripts`);
     expect(versions.body.versions).toHaveLength(1);
+    // Each issued upload URL is a recorded audit fact; the URL and object key never are.
+    const audits = await shared.admin`
+      select action, metadata from audit_events
+      where account_id = ${scope.accountId} and target_id = ${recordingId}`;
+    const issued = audits.filter((row) => row.action === "recording.signed_upload.issued");
+    expect(issued.length).toBeGreaterThan(0);
+    expect(JSON.stringify(issued)).not.toContain("storage.example");
+    expect(JSON.stringify(issued)).not.toContain("workspaces/");
   });
 
   test("a workspace default shares new recordings; only the owner deletes", async () => {

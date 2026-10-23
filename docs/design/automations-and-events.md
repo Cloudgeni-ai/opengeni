@@ -135,40 +135,80 @@ delivery as `ignored`.
 
 ### MCP Events
 
-- **Discovery.** A server supports events when `server/discover` advertises
-  `io.modelcontextprotocol/events` under `capabilities.extensions` (the draft)
-  or as a top-level `events` capability (an earlier shape some servers use).
-  Opengeni declares the extension in its client capabilities. `events/list`
-  results are cached per connection and refreshed when a trigger is edited and
-  on every subscription refresh.
-- **Subscriptions.** One subscription per (owner, connection, event name,
-  canonical arguments), shared by every trigger that asks for the same thing.
-  Each has its own row id, cursor, mode and status.
+- **Sources.** An MCP event source is one person's connection to an MCP
+  server, so it is always private to that person and is created as them (a
+  workspace API key alone gets 422). Creating it checks that the server
+  advertises `io.modelcontextprotocol/events` under `capabilities.extensions`;
+  a server without it, or one not added to the workspace, gets 422. The source
+  pins the connection it was created with; without one it uses the first
+  connection the owner can use for that server. Servers that sign in through
+  the embedding app (host authority) cannot be used, because nobody is there
+  to sign in when a subscription runs.
+- **Discovery.** Opengeni declares the extension in its client capabilities.
+  `events/list` is read in pages (at most 20 pages, 500 types) and cached for
+  10 minutes per source. The source's event-types endpoint always reads it
+  fresh. The cache is dropped when the server says a type is gone, its schema
+  changed, or a delivery mode is not supported.
+- **Triggers.** An MCP trigger names exactly one event type and may carry
+  arguments, which are validated against the type's `inputSchema` when the
+  automation is saved. A type that is missing, or that offers only modes this
+  deployment cannot use, is rejected with a plain reason. If the server cannot
+  be reached while saving, a trigger is accepted only when the automation
+  already listens on the same stream, so edits to other fields still work.
+- **Streams and subscriptions.** A stream is an event name plus canonical
+  arguments; its key is the SHA-256 of both. Triggers and stored events carry
+  their stream key, so an event fires only the triggers of its own stream,
+  never one with other arguments. Every distinct stream a source's runnable
+  automations ask for is one row in `mcp_event_subscriptions`, shared by every
+  trigger that asks for the same thing. The row owns the cursor, the mode, the
+  webhook route and secret, the server's subscription id and the failure
+  state. Saving, pausing, resuming or deleting an automation syncs the rows and
+  wakes them; a row no runnable automation wants is unsubscribed and removed.
+- **The pump.** The API runs a pump every 5 seconds that claims due rows with a
+  5 minute lease (up to 32 per pass, 8 at a time, more passes while full
+  batches come back) and runs one step for each.
 - **Mode.** Webhook when the event type offers it and the deployment has a
-  public https origin; otherwise poll. Push is not used yet; event types that
-  offer only push are shown as unavailable.
+  public https origin and an encryption key; otherwise poll. If the server
+  can't reach the webhook address or refuses webhook delivery, the step falls
+  back to polling at once when the type offers it, and polling then sticks.
+  Push needs a held-open connection per subscription, which Opengeni does not
+  keep; types that offer only push are shown as unavailable.
 - **Webhook mode.** The callback URL is the subscription's own ingress route,
   `/v1/webhooks/events/:routeId`, so the receiver selects the secret from the
   path, including for the first `verification` envelope. Opengeni
   generates a `whsec_` secret (32 random bytes), suggests a 24 hour TTL and
-  refreshes at 80% of the granted lifetime, always passing the last persisted
-  cursor and `maxAgeMs` of 6 hours. Deliveries are verified over the raw body,
-  deduplicated on `webhook-id` and on `eventId` within the subscription, and
-  their cursor watermark is persisted. `gap` marks possible missed events;
-  `terminated` ends the subscription. A delivery for a subscription Opengeni
-  has ended answers 410, which the spec makes non-retryable; deleting a
+  refreshes at 80% of the granted lifetime (at least a minute apart), always
+  passing the last persisted cursor and `maxAgeMs` of 6 hours. The
+  verification envelope is answered with its challenge, and the subscription
+  id in its header is recorded. Deliveries are verified over the raw body,
+  deduplicated on `webhook-id` and on `eventId` within the stream, and their
+  cursor watermark is persisted. `gap` marks the next stored event as possibly
+  preceded by missed ones. `terminated` is logged and wakes the subscription,
+  which subscribes again or blocks its triggers if the server refuses. A
+  delivery for a subscription Opengeni has ended, or one whose id no longer
+  matches, is answered 410, which the spec makes non-retryable. Removing a
   subscription also calls `events/unsubscribe`, and an unrefreshed one lapses at
   its TTL.
 - **Poll mode.** A durable loop per subscription calls `events/poll` with the
   cursor and `maxEvents: 50`, drains immediately while `hasMore`, and otherwise
   waits `nextPollMs`, never less than 15 seconds and 60 seconds when the server
-  gives none.
+  gives none (at most an hour). The first poll has no cursor and only learns
+  where "now" is, so an automation never fires on old events. Each page with
+  events is one logged delivery, so it can be replayed. `truncated` marks a gap
+  the same way a webhook `gap` does.
 - **Requests** carry the `Mcp-Name` header with the event name and run as the
-  owner through the shared MCP client with the owner's resolved credentials.
-- **Termination.** `NotFound` or `Unsupported` with `schema_changed` re-lists
-  and resubscribes when the event type still exists. `Forbidden` and failed
-  credential resolution block the trigger and notify the owner, through the
-  same blocker path schedules use.
+  owner through the shared MCP client with the owner's resolved credentials
+  (base64 sentinel form for names that are not plain ASCII). A 401 refreshes
+  the credential and retries once.
+- **Failures.** `Unsupported` with `schema_changed` starts the stream over from
+  "now" and marks a gap. Problems a person has to fix block the stream's
+  triggers with a plain reason and post one notice to the owner in the chat
+  the automation last ran in, like the storm guard's: the type is gone,
+  `Forbidden`, rejected arguments, the server no longer offers events, the
+  connection needs reconnecting, or the server can't reach the webhook. A
+  blocked stream is retried every 15 minutes and unblocks itself (withdrawing
+  the notice) once a step succeeds. Other errors retry with backoff from 30
+  seconds up to 15 minutes and block only after an hour of failing.
 - **Guarantees** are the spec's: at-least-once when the server's cursor is
   durable, per-subscription ordering for poll, best-effort ordering for webhook.
   Opengeni orders an inbox batch by event time and tells the agent when events

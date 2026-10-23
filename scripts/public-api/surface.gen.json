@@ -6867,6 +6867,222 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recording-models",
+      "sdk": [
+        "OpenGeniRecordingsClient.listRecordingModels"
+      ],
+      "request": [],
+      "response": [
+        "ListRecordingModelsResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recording-people",
+      "sdk": [
+        "OpenGeniRecordingsClient.listRecordingPeople"
+      ],
+      "request": [],
+      "response": [
+        "ListRecordingPeopleResponse",
+        "RecordingPerson"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recording-people",
+      "sdk": [
+        "OpenGeniRecordingsClient.createRecordingPerson"
+      ],
+      "request": [
+        "CreateRecordingPersonRequest"
+      ],
+      "response": [
+        "RecordingPerson"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recordings",
+      "sdk": [
+        "OpenGeniRecordingsClient.listRecordings"
+      ],
+      "request": [],
+      "response": [
+        "ListRecordingsResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings",
+      "sdk": [
+        "OpenGeniRecordingsClient.createRecording"
+      ],
+      "request": [
+        "CreateRecordingRequest"
+      ],
+      "response": [
+        "Recording"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId",
+      "sdk": [
+        "OpenGeniRecordingsClient.deleteRecording"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId",
+      "sdk": [
+        "OpenGeniRecordingsClient.getRecording"
+      ],
+      "request": [],
+      "response": [
+        "Recording"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId",
+      "sdk": [
+        "OpenGeniRecordingsClient.updateRecording"
+      ],
+      "request": [
+        "UpdateRecordingRequest"
+      ],
+      "response": [
+        "Recording"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/chunks/complete",
+      "sdk": [
+        "OpenGeniRecordingsClient.completeRecordingChunks"
+      ],
+      "request": [
+        "CompleteRecordingChunksRequest"
+      ],
+      "response": [
+        "CompleteRecordingChunksResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/finalize",
+      "sdk": [
+        "OpenGeniRecordingsClient.finalizeRecording"
+      ],
+      "request": [
+        "FinalizeRecordingRequest"
+      ],
+      "response": [
+        "FinalizeRecordingResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/segments",
+      "sdk": [
+        "OpenGeniRecordingsClient.updateRecordingSegments"
+      ],
+      "request": [
+        "UpdateRecordingSegmentsRequest"
+      ],
+      "response": [
+        "UpdateRecordingSegmentsResponse"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/speakers",
+      "sdk": [
+        "OpenGeniRecordingsClient.updateRecordingSpeakers"
+      ],
+      "request": [
+        "UpdateRecordingSpeakersRequest"
+      ],
+      "response": [
+        "UpdateRecordingSpeakersResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/tracks/:trackNumber/audio",
+      "sdk": [
+        "OpenGeniRecordingsClient.getRecordingTrackAudio"
+      ],
+      "request": [],
+      "response": [
+        "RecordingTrackAudio"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/transcript",
+      "sdk": [
+        "OpenGeniRecordingsClient.getRecordingTranscript"
+      ],
+      "request": [],
+      "response": [
+        "RecordingTranscriptPage"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/transcripts",
+      "sdk": [
+        "OpenGeniRecordingsClient.listRecordingTranscriptVersions"
+      ],
+      "request": [],
+      "response": [
+        "ListRecordingTranscriptVersionsResponse",
+        "RecordingTranscriptVersion"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/transcripts",
+      "sdk": [
+        "OpenGeniRecordingsClient.createRecordingTranscript"
+      ],
+      "request": [
+        "CreateRecordingTranscriptRequest"
+      ],
+      "response": [
+        "RecordingTranscriptVersion"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/transcripts/:versionId/current",
+      "sdk": [
+        "OpenGeniRecordingsClient.setCurrentRecordingTranscript"
+      ],
+      "request": [],
+      "response": [
+        "RecordingTranscriptVersion"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/recordings/:recordingId/uploads",
+      "sdk": [
+        "OpenGeniRecordingsClient.createRecordingUploads"
+      ],
+      "request": [
+        "CreateRecordingUploadsRequest"
+      ],
+      "response": [
+        "CreateRecordingUploadsResponse"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/rigs",
       "sdk": [
         "OpenGeniClient.listRigs"
@@ -13397,6 +13613,29 @@
         "$.file": "ref(FileAsset)!"
       }
     },
+    "CompleteRecordingChunksRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chunkNumbers": "array!",
+        "$.chunkNumbers[]": "integer",
+        "$.trackNumber": "integer!"
+      }
+    },
+    "CompleteRecordingChunksResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.missing": "array!",
+        "$.missing[]": "integer",
+        "$.uploaded": "array!",
+        "$.uploaded[]": "integer"
+      }
+    },
     "ComposerDraft": {
       "io": [
         "output"
@@ -14775,6 +15014,77 @@
         "$.scope": "ref(VariableSetScope)!",
         "$.stableKey": "string!",
         "$.title": "string!"
+      }
+    },
+    "CreateRecordingPersonRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.displayName": "string!",
+        "$.email": "string?",
+        "$.externalRef": "string?",
+        "$.memberSubjectId": "string?",
+        "$.personId": "string?"
+      }
+    },
+    "CreateRecordingRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalRef": "string?",
+        "$.metadata": "object?",
+        "$.metadata{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
+        "$.metadata{}|0": "string",
+        "$.metadata{}|1": "number",
+        "$.metadata{}|2": "boolean",
+        "$.metadata{}|3": "array",
+        "$.metadata{}|3[]": "ref(__schema0)",
+        "$.metadata{}|4": "object",
+        "$.metadata{}|4{}": "ref(__schema0)",
+        "$.recordingId": "string!",
+        "$.startedAt": "string?",
+        "$.title": "string?",
+        "$.tracks": "array!",
+        "$.tracks[]": "object",
+        "$.tracks[].mimeType": "string!",
+        "$.tracks[].source": "ref(RecordingTrackSource)!",
+        "$.tracks[].trackNumber": "integer!",
+        "$.transcription": "ref(RecordingTranscriptionOptions)?",
+        "$.visibility": "ref(SessionVisibility)?"
+      }
+    },
+    "CreateRecordingTranscriptRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.transcription": "ref(RecordingTranscriptionOptions)?"
+      }
+    },
+    "CreateRecordingUploadsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chunks": "array!",
+        "$.chunks[]": "ref(RecordingChunkDescriptor)",
+        "$.trackNumber": "integer!"
+      }
+    },
+    "CreateRecordingUploadsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.uploads": "array!",
+        "$.uploads[]": "ref(RecordingChunkUpload)"
       }
     },
     "CreateRigRequest": {
@@ -16259,6 +16569,29 @@
         "$": "object",
         "$.epoch": "integer!",
         "$.root": "string!"
+      }
+    },
+    "FinalizeRecordingRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endedAt": "string?",
+        "$.tracks": "array!",
+        "$.tracks[]": "object",
+        "$.tracks[].chunkCount": "integer!",
+        "$.tracks[].trackNumber": "integer!"
+      }
+    },
+    "FinalizeRecordingResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.recording": "ref(Recording)!",
+        "$.transcript": "ref(RecordingTranscriptVersion)!"
       }
     },
     "FirstPartyMcpToolName": {
@@ -19624,6 +19957,52 @@
         "$.repositories": "array!",
         "$.repositories[]": "ref(PersonalGitHubRepositoryCatalogItem)",
         "$.selection": "ref(PersonalGitHubRepositorySelectionState)!"
+      }
+    },
+    "ListRecordingModelsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.default": "object!",
+        "$.default.model": "string!",
+        "$.default.providerId": "string!",
+        "$.models": "array!",
+        "$.models[]": "ref(RecordingTranscriptionModel)"
+      }
+    },
+    "ListRecordingPeopleResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.people": "array!",
+        "$.people[]": "ref(RecordingPerson)"
+      }
+    },
+    "ListRecordingTranscriptVersionsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.versions": "array!",
+        "$.versions[]": "ref(RecordingTranscriptVersion)"
+      }
+    },
+    "ListRecordingsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.nextBefore": "object! null",
+        "$.nextBefore.id": "string!",
+        "$.nextBefore.startedAt": "string!",
+        "$.recordings": "array!",
+        "$.recordings[]": "ref(Recording)"
       }
     },
     "ListSessionGoalRevisionsResponse": {
@@ -23005,6 +23384,60 @@
         "$.targetAuthorityKind": "ref(KnowledgeEntryScope)!"
       }
     },
+    "Recording": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.captureEndedAt": "string! null",
+        "$.createdAt": "string!",
+        "$.durationMilliseconds": "integer!",
+        "$.externalRef": "string! null",
+        "$.id": "string!",
+        "$.metadata": "object!",
+        "$.metadata{}": "unknown",
+        "$.ownerSubjectId": "string!",
+        "$.startedAt": "string!",
+        "$.state": "ref(RecordingState)!",
+        "$.title": "string!",
+        "$.tracks": "array!",
+        "$.tracks[]": "ref(RecordingTrack)",
+        "$.transcript": "ref(RecordingTranscriptVersion)! null",
+        "$.transcription": "ref(RecordingTranscriptionOptions)!",
+        "$.updatedAt": "string!",
+        "$.visibility": "ref(SessionVisibility)!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "RecordingChunkDescriptor": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.byteLength": "integer!",
+        "$.chunkNumber": "integer!",
+        "$.durationMilliseconds": "integer!",
+        "$.sha256": "string!",
+        "$.startMilliseconds": "integer!"
+      }
+    },
+    "RecordingChunkUpload": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chunkNumber": "integer!",
+        "$.expiresAt": "string! null",
+        "$.headers": "object!",
+        "$.headers{}": "string",
+        "$.method": "const!=[\"\\\"PUT\\\"\"]",
+        "$.uploaded": "boolean!",
+        "$.url": "string! null"
+      }
+    },
     "RecordingCodec": {
       "io": [
         "output"
@@ -23013,12 +23446,216 @@
         "$": "enum=[\"\\\"h264-mp4\\\"\",\"\\\"vp9-webm\\\"\"]"
       }
     },
+    "RecordingDiarization": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"none\\\"\",\"\\\"ours\\\"\",\"\\\"provider\\\"\",\"\\\"tracks\\\"\"]"
+      }
+    },
     "RecordingMode": {
       "io": [
         "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"manual\\\"\",\"\\\"on-turn\\\"\",\"\\\"on-verify\\\"\"]"
+      }
+    },
+    "RecordingPerson": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.displayName": "string!",
+        "$.email": "string! null",
+        "$.externalRef": "string! null",
+        "$.id": "string!",
+        "$.memberSubjectId": "string! null"
+      }
+    },
+    "RecordingSpeaker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.confidence": "number! null",
+        "$.label": "string!",
+        "$.name": "string!",
+        "$.personId": "string! null",
+        "$.source": "ref(RecordingSpeakerSource)! null"
+      }
+    },
+    "RecordingSpeakerSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"carried_over\\\"\",\"\\\"confirmed\\\"\",\"\\\"suggested\\\"\",\"\\\"track\\\"\"]"
+      }
+    },
+    "RecordingState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"capturing\\\"\",\"\\\"failed\\\"\",\"\\\"processing\\\"\",\"\\\"ready\\\"\"]"
+      }
+    },
+    "RecordingTrack": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chunkCount": "integer!",
+        "$.durationMilliseconds": "integer!",
+        "$.kind": "const!=[\"\\\"audio\\\"\"]",
+        "$.mimeType": "string!",
+        "$.playable": "boolean!",
+        "$.source": "ref(RecordingTrackSource)!",
+        "$.totalBytes": "integer!",
+        "$.trackNumber": "integer!"
+      }
+    },
+    "RecordingTrackAudio": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.bytes": "integer!",
+        "$.expiresAt": "string!",
+        "$.mimeType": "string!",
+        "$.url": "string!"
+      }
+    },
+    "RecordingTrackSource": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"microphone\\\"\",\"\\\"mixed\\\"\",\"\\\"system\\\"\",\"\\\"upload\\\"\"]"
+      }
+    },
+    "RecordingTranscriptPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.nextAfter": "integer! null",
+        "$.segments": "array!",
+        "$.segments[]": "ref(RecordingTranscriptSegment)",
+        "$.speakers": "array!",
+        "$.speakers[]": "ref(RecordingSpeaker)",
+        "$.version": "ref(RecordingTranscriptVersion)!"
+      }
+    },
+    "RecordingTranscriptSegment": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.edited": "boolean!",
+        "$.endMilliseconds": "integer!",
+        "$.index": "integer!",
+        "$.speakerLabel": "string! null",
+        "$.startMilliseconds": "integer!",
+        "$.text": "string!",
+        "$.trackNumber": "integer! null"
+      }
+    },
+    "RecordingTranscriptVersion": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.audioMilliseconds": "integer!",
+        "$.completedAt": "string! null",
+        "$.costUsd": "number! null",
+        "$.createdAt": "string!",
+        "$.diarization": "ref(RecordingDiarization)! null",
+        "$.diarized": "boolean!",
+        "$.errorCode": "string! null",
+        "$.id": "string!",
+        "$.isCurrent": "boolean!",
+        "$.languages": "array!",
+        "$.languages[]": "string",
+        "$.model": "string!",
+        "$.options": "ref(RecordingTranscriptionOptions)!",
+        "$.providerId": "string!",
+        "$.recordingId": "string!",
+        "$.requestedBySubjectId": "string!",
+        "$.segmentCount": "integer!",
+        "$.state": "ref(RecordingTranscriptVersionState)!",
+        "$.versionNumber": "integer!"
+      }
+    },
+    "RecordingTranscriptVersionState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"complete\\\"\",\"\\\"failed\\\"\",\"\\\"processing\\\"\",\"\\\"queued\\\"\"]"
+      }
+    },
+    "RecordingTranscriptionCapabilities": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.batch": "boolean!",
+        "$.diarization": "boolean!",
+        "$.keyterms": "boolean!",
+        "$.languageDetection": "boolean!",
+        "$.languages": "array!",
+        "$.languages[]": "string",
+        "$.live": "boolean!",
+        "$.liveDiarization": "boolean!",
+        "$.maxDurationSeconds": "number! null",
+        "$.maxFileBytes": "number! null",
+        "$.maxSpeakers": "integer! null",
+        "$.multichannel": "boolean!",
+        "$.speakerLibrary": "boolean!",
+        "$.wordTimestamps": "boolean!"
+      }
+    },
+    "RecordingTranscriptionModel": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.capabilities": "ref(RecordingTranscriptionCapabilities)!",
+        "$.model": "string!",
+        "$.name": "string!",
+        "$.providerId": "string!",
+        "$.providerName": "string!",
+        "$.usdPerHour": "number! null"
+      }
+    },
+    "RecordingTranscriptionOptions": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.keyterms": "array?",
+        "$.keyterms[]": "string",
+        "$.language": "string?",
+        "$.maxSpeakers": "integer?",
+        "$.model": "string?",
+        "$.providerId": "string?"
       }
     },
     "RefreshScheduledTaskAccessRequest": {
@@ -28565,6 +29202,75 @@
         "$.additionalInstructions": "string? null",
         "$.model": "string? null",
         "$.status": "ref(AutomationSourceStatus)?"
+      }
+    },
+    "UpdateRecordingRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalRef": "string? null",
+        "$.metadata": "object?",
+        "$.metadata{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
+        "$.metadata{}|0": "string",
+        "$.metadata{}|1": "number",
+        "$.metadata{}|2": "boolean",
+        "$.metadata{}|3": "array",
+        "$.metadata{}|3[]": "ref(__schema0)",
+        "$.metadata{}|4": "object",
+        "$.metadata{}|4{}": "ref(__schema0)",
+        "$.title": "string?",
+        "$.visibility": "ref(SessionVisibility)?"
+      }
+    },
+    "UpdateRecordingSegmentsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.edits": "array!",
+        "$.edits[]": "object",
+        "$.edits[].segmentIndex": "integer!",
+        "$.edits[].text": "string! null"
+      }
+    },
+    "UpdateRecordingSegmentsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.segments": "array!",
+        "$.segments[]": "ref(RecordingTranscriptSegment)"
+      }
+    },
+    "UpdateRecordingSpeakersRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.assignments": "array?",
+        "$.assignments[]": "object",
+        "$.assignments[].label": "string!",
+        "$.assignments[].name": "string? null",
+        "$.assignments[].personId": "string? null",
+        "$.segmentOverrides": "array?",
+        "$.segmentOverrides[]": "object",
+        "$.segmentOverrides[].label": "string!",
+        "$.segmentOverrides[].segmentIndex": "integer!"
+      }
+    },
+    "UpdateRecordingSpeakersResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.speakers": "array!",
+        "$.speakers[]": "ref(RecordingSpeaker)"
       }
     },
     "UpdateRigRequest": {
@@ -34157,6 +34863,28 @@
     "@opengeni/sdk/realtime-websocket-transport": {
       "createRealtimeWebsocketTransportStarter": "value"
     },
+    "@opengeni/sdk/recordings": {
+      "BrowserRecorder": "type",
+      "BrowserRecorderErrorCode": "type",
+      "BrowserRecorderOptions": "type",
+      "BrowserRecorderSnapshot": "type",
+      "BrowserRecorderState": "type",
+      "canCaptureSystemAudio": "value",
+      "createBrowserRecorder": "value",
+      "createIndexedDbRecordingChunkStore": "value",
+      "createMemoryRecordingChunkStore": "value",
+      "OpenGeniRecordingsClient": "value",
+      "OpenGeniRecordingsTransport": "type",
+      "preferredRecordingMimeType": "value",
+      "RecordingChunk": "type",
+      "RecordingChunkStore": "type",
+      "RecordingTransport": "type",
+      "RecordingUploader": "value",
+      "RecordingUploaderOptions": "type",
+      "RecordingUploadStatus": "type",
+      "sha256Hex": "value",
+      "StoredRecording": "type"
+    },
     "@opengeni/sdk/session-history-import": {
       "appendArchivedSessionEvents": "value",
       "AppendArchivedSessionEventsRequest": "type",
@@ -35949,6 +36677,24 @@
       "useSessionCodexRealtime": "value",
       "useSessionRealtime": "value",
       "useWorkspaceRealtimeModelSelection": "value"
+    },
+    "@opengeni/react/recordings": {
+      "RecordingsClientLike": "type",
+      "RecordingsClientOverride": "type",
+      "useRecorder": "value",
+      "UseRecorderOptions": "type",
+      "UseRecorderResult": "type",
+      "useRecording": "value",
+      "useRecordingModels": "value",
+      "UseRecordingOptions": "type",
+      "useRecordingPeople": "value",
+      "UseRecordingResult": "type",
+      "useRecordings": "value",
+      "UseRecordingsOptions": "type",
+      "UseRecordingsResult": "type",
+      "useTranscript": "value",
+      "UseTranscriptOptions": "type",
+      "UseTranscriptResult": "type"
     },
     "@opengeni/react/responsive.css": {
       "default": "value"
@@ -39789,6 +40535,26 @@
       "updateAppRegistration",
       "updateRepositoryBinding"
     ],
+    "OpenGeniRecordingsClient": [
+      "completeRecordingChunks",
+      "createRecording",
+      "createRecordingPerson",
+      "createRecordingTranscript",
+      "createRecordingUploads",
+      "deleteRecording",
+      "finalizeRecording",
+      "getRecording",
+      "getRecordingTrackAudio",
+      "getRecordingTranscript",
+      "listRecordingModels",
+      "listRecordingPeople",
+      "listRecordingTranscriptVersions",
+      "listRecordings",
+      "setCurrentRecordingTranscript",
+      "updateRecording",
+      "updateRecordingSegments",
+      "updateRecordingSpeakers"
+    ],
     "OpenGeniSecureContextRequiredError": [
       "code",
       "reason",
@@ -39839,6 +40605,17 @@
     ],
     "OpenGeniToolsClient": [
       "forWorkspace"
+    ],
+    "RecordingUploader": [
+      "addChunk",
+      "begin",
+      "discard",
+      "dispose",
+      "finalized",
+      "finish",
+      "resume",
+      "status",
+      "subscribe"
     ],
     "SiteAuthConnectionCollection": [
       "connection",
@@ -52442,6 +53219,91 @@
       ]
     },
     "@opengeni/sdk/realtime:CodexRealtimeMicrophoneError": {},
+    "@opengeni/sdk/recordings:OpenGeniRecordingsClient": {
+      "completeRecordingChunks": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CompleteRecordingChunksRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CompleteRecordingChunksResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateRecordingRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Recording\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createRecordingPerson": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateRecordingPersonRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createRecordingTranscript": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateRecordingTranscriptRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "createRecordingUploads": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateRecordingUploadsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"CreateRecordingUploadsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "deleteRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "finalizeRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"FinalizeRecordingRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"FinalizeRecordingResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Recording\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getRecordingTrackAudio": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTrackAudio\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getRecordingTranscript": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"after\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"limit\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptPage\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listRecordingModels": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListRecordingModelsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listRecordingPeople": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"query\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingPerson\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listRecordings": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"query\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"externalRef\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"before\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"startedAt\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"id\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"}},{\"computed\":false,\"key\":{\"name\":\"limit\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ListRecordingsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "listRecordingTranscriptVersions": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setCurrentRecordingTranscript": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingTranscriptVersion\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Recording\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateRecordingSegments": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSegmentsRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSegmentsResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateRecordingSpeakers": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSpeakersRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"versionId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateRecordingSpeakersResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk/recordings:RecordingUploader": {
+      "addChunk": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingChunk\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "begin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StoredRecording\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"chunkCounts\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"created\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"endedAt\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"phase\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"updatedAt\"},\"type\":\"TSLiteralType\"}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Omit\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "discard": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "dispose": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "finalized": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "finish": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"endedAt\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Date\",\"optional\":false,\"type\":\"Identifier\"}}},{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingUploadStatus\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "resume": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSStringKeyword\"},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "status": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingUploadStatus\",\"optional\":false,\"type\":\"Identifier\"}}]}}"
+      ],
+      "subscribe": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"params\":[{\"name\":\"status\",\"optional\":false,\"type\":\"Identifier\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RecordingUploadStatus\",\"optional\":false,\"type\":\"Identifier\"}}}],\"returnType\":{\"type\":\"TSVoidKeyword\"},\"type\":\"TSFunctionType\"},\"optional\":false,\"rest\":false}],\"result\":{\"params\":[],\"returnType\":{\"type\":\"TSVoidKeyword\"},\"type\":\"TSFunctionType\"}}"
+      ]
+    },
     "@opengeni/sdk/site-bridge-host:SiteBridgeDocumentLease": {
       "close": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"

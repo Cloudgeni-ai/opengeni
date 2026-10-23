@@ -246,8 +246,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: event_deliveries, event_ingress_routes, event_sources, event_triggers, inbound_events, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
-      "protected tables are missing: event_deliveries, event_sources, event_triggers, inbound_events, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "runtime privilege tables are missing: event_deliveries, event_ingress_routes, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "protected tables are missing: event_deliveries, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -258,13 +258,11 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     // The current binary's posture is checked after the rest of the upgrade:
     // later migrations add routines it requires, so apply them and provision
     // again, as a deployment does before starting the current runtime.
-    await client.close();
     const later = heldBack.filter((name) => name > MIGRATION);
     if (later.length > 0)
       await staging`delete from schema_migrations where name in ${staging(later)}`;
     await migrate(owned.ownerUrl, DATA_SCHEMA, { applicationDatabaseRoles: ["opengeni_app"] });
     await provisionRoles(owned.adminUrl, roles);
-    client = createDb(appUrl.toString(), { searchPath: `${DATA_SCHEMA},opengeni_private,public` });
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
     // This pre-0864 binary predates forward-compatible posture (#5263): later
@@ -280,12 +278,13 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
         options,
       ),
     ).toEqual([
-      "RLS tables are absent from the declared contract: event_deliveries, event_sources, event_triggers, inbound_events, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "RLS tables are absent from the declared contract: event_deliveries, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, recording_chunks, recording_events, recording_people, recording_segment_edits, recording_speaker_assignments, recording_tracks, recording_transcript_segments, recording_transcript_versions, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, session_message_search_texts, site_opens, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
       "table event_deliveries grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table event_ingress_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table event_sources grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table event_triggers grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table inbound_events grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table mcp_event_subscriptions grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table recording_chunks grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",

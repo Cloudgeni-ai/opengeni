@@ -1822,6 +1822,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
   "managed_sign_in_method_operations",
+  "mcp_event_subscriptions",
   "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
@@ -2232,6 +2233,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_event_subscriptions",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
   "mcp_oauth_authorization_requests",
@@ -2774,14 +2776,7 @@ const DECLARED_TARGET_TABLES = new Set<string>([
 // inventory, NOT a new grant list; all named checks below remain authoritative.
 // New private capabilities must be explicitly registered here as known and get
 // their own authority checks. Do not refresh this inventory from a live catalog.
-export const BACKGROUND_RUNTIME_ROUTINES = [
-  "list_due_event_trigger_tasks_v1(integer)",
-  "prune_event_intake_v1(integer, integer, integer)",
-  "list_stalled_recording_work_v1(integer)",
-] as const;
-
 const DECLARED_PRIVATE_ROUTINES = new Set<string>([
-  ...BACKGROUND_RUNTIME_ROUTINES,
   ...legacyRoutines.private,
   ...OWNER_INTERNAL_PRIVATE_ROUTINES,
   ...RETIRED_PRIVATE_ROUTINES,
@@ -6043,29 +6038,6 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
-  for (const name of BACKGROUND_RUNTIME_ROUTINES) {
-    const recording = name === "list_stalled_recording_work_v1(integer)";
-    if (!tableByName.has(recording ? "recordings" : "scheduled_task_event_settings")) continue;
-    const routines = posture.privateRoutines.filter((routine) => routine.name === name);
-    const routine = routines[0];
-    const owners = (
-      recording
-        ? ["recordings", "recording_transcript_versions"]
-        : ["scheduled_task_event_settings", "event_deliveries", "inbound_events"]
-    ).map((table) => tableByName.get(table)?.owner);
-    if (
-      routines.length !== 1 ||
-      !routine ||
-      !routine.execute ||
-      routine.publicExecute ||
-      !routine.securityDefiner ||
-      routine.owner === expectedRole ||
-      owners.some((owner) => !owner || owner !== routine.owner) ||
-      !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
-    ) {
-      violations.push(`background capability ${name} is missing or unsafe`);
-    }
-  }
   // Read-only maintenance work checks hold exactly the authority of the claim
   // each previews. Once that claim exists, its check must too, so a cadence
   // never silently loses the ability to see work.

@@ -470,7 +470,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "recording_speaker_assignments",
       "recording_segment_edits",
       "recording_events",
-      // 0932 adds the Teams conversation tables to both posture inventories.
+      // 0932 MCP event subscriptions are also withheld.
+      "mcp_event_subscriptions",
+      // 0934 adds the Teams conversation tables to both posture inventories.
       "teams_bot_inbox",
       "teams_bot_installations",
       "teams_bot_links",

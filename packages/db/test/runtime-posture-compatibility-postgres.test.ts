@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { readFile } from "node:fs/promises";
 import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
@@ -23,14 +22,6 @@ let client: DbClient | null = null;
 let baseline: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 let preCompatibility: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 const options = { rlsStrategy: "force" as const, targetSchema: "og_data" };
-// One explicit maintenance break; never filter arbitrary previous-binary failures.
-const maintenanceBaselineCommit = "c4092a7156ddcb54d6863f021eea3d0fc2c2a0e6";
-const maintenanceBaselineViolations = [
-  "table event_ingress_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
-  "unknown routine opengeni_private.list_due_event_trigger_tasks_v1(integer) exposes SECURITY DEFINER execution",
-  "unknown routine opengeni_private.list_stalled_recording_work_v1(integer) exposes SECURITY DEFINER execution",
-  "unknown routine opengeni_private.prune_event_intake_v1(integer, integer, integer) exposes SECURITY DEFINER execution",
-];
 
 beforeAll(async () => {
   // Explicit opt-in avoids a silent successful no-DB run in the dedicated CI
@@ -38,7 +29,6 @@ beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
   const root = resolve(import.meta.dir, "../../..");
   const pin = await readRuntimePostureBaseline(root);
-  expect(pin.sourceCommit).toBe(maintenanceBaselineCommit);
   baseline = await loadRuntimePostureBaseline(root, pin.sourceCommit);
   preCompatibility = await loadRuntimePostureBaseline(root, PRE_COMPATIBILITY_PRODUCTION_SOURCE);
   console.log(
@@ -87,42 +77,12 @@ realTest("readiness inspects both namespaces once without caching posture", asyn
 });
 
 realTest(
-  "0933 maintenance keeps current readiness and refuses the exact previous binary",
+  "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
   async () => {
     await assertRuntimeDatabasePosture(client!.db, options);
-    const previous = await baseline!.module.inspectRuntimeDatabasePosture(client!.db, options);
-    expect(baseline!.module.evaluateRuntimeDatabasePosture(previous, options)).toEqual(
-      maintenanceBaselineViolations,
-    );
-    await expect(
-      baseline!.module.assertRuntimeDatabasePosture(client!.db, options),
-    ).rejects.toThrow();
+    await baseline!.module.assertRuntimeDatabasePosture(client!.db, options);
   },
 );
-
-realTest("the exact 0933 maintenance fence refuses a live listed runtime", async () => {
-  const source = await readFile(
-    new URL("../drizzle/0933_background_capability_posture.sql", import.meta.url),
-    "utf8",
-  );
-  expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
-  expect(source).toContain("-- maintenance-justification:");
-  const fence = source.match(
-    /DO \$event_capability_runtime_drain\$[\s\S]*?\$event_capability_runtime_drain\$;/u,
-  )?.[0];
-  expect(fence).toBeDefined();
-  // The real app connection is live: execute the production fence, not a source-only assertion.
-  await assertRuntimeDatabasePosture(client!.db, options);
-  await expect(
-    database!.admin.begin(async (transaction) => {
-      await transaction.unsafe("SELECT set_config($1, $2, true)", [
-        "opengeni.migration_application_roles",
-        JSON.stringify(["opengeni_app"]),
-      ]);
-      await transaction.unsafe(fence!);
-    }),
-  ).rejects.toMatchObject({ code: "55000" });
-});
 
 realTest(
   "reproduces the production bcc60cd8 upgrade rejection without broadening EXECUTE",
@@ -178,9 +138,7 @@ realTest(
       }
     }
     expect(evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
-    expect(baseline!.module.evaluateRuntimeDatabasePosture(future, options)).toEqual(
-      maintenanceBaselineViolations,
-    );
+    expect(baseline!.module.evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
     console.log(
       "production owner-only trigger definers still require a prior contract",
       unsafeTriggerNames,
@@ -201,7 +159,7 @@ realTest(
 );
 
 realTest(
-  "both binaries preserve their exact baseline and reject additional catalog regressions",
+  "both binaries admit additive safe objects and reject catalog-level regressions",
   async () => {
     const admin = database!.admin;
     const owner = database!.ownerRole;
@@ -219,9 +177,7 @@ realTest(
         ),
       );
     const expectReady = async () => {
-      const [current, previous] = await violations();
-      expect(current).toEqual([]);
-      expect(previous).toEqual(maintenanceBaselineViolations);
+      for (const result of await violations()) expect(result).toEqual([]);
     };
     const expectUnready = async (fragment: string) => {
       for (const result of await violations())

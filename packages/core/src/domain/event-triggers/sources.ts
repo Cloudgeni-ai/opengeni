@@ -21,6 +21,7 @@ import {
   getEventSource,
   getInboundEvents,
   getScheduledTask,
+  listMcpEventStreamKeys,
   listRecentEventTypes,
   recordEventDelivery,
   resolveEventIngressRoute,
@@ -40,7 +41,23 @@ import {
   WebhookBodyError,
   type WebhookAdapterReading,
 } from "./webhook-adapters";
+import {
+  withMcpEventSourceClient,
+  McpEventSourceUnavailableError,
+  mcpServerDisplayName,
+  type McpEventsFetch,
+} from "./mcp-event-source-client";
+import { mcpDeliveryEvents, receiveMcpEventWebhook } from "./mcp-event-subscriptions";
+import {
+  forgetMcpSourceEventTypes,
+  mcpEventTypeDescriptor,
+  mcpSourceEventTypes,
+  mcpWebhookBaseUrl,
+  McpServerWithoutEventsError,
+} from "./mcp-event-types";
+import { serverOffersMcpEvents } from "./mcp-events-protocol";
 import { generateStandardWebhookSecret } from "./webhook-signatures";
+import { eventSourceWebhookUrl } from "./webhook-url";
 
 /**
  * Event sources and the webhook intake. A webhook source is a URL a person
@@ -48,8 +65,6 @@ import { generateStandardWebhookSecret } from "./webhook-signatures";
  * source's secret, stored, deduplicated and normalized into events, and the
  * events queue on the automations whose triggers match.
  */
-
-export const EVENT_WEBHOOK_PATH_PREFIX = "/v1/webhooks/events/";
 
 export function eventTriggersEnabled(settings: Pick<Settings, "eventTriggersEnabled">): boolean {
   return settings.eventTriggersEnabled === true;
@@ -104,10 +119,6 @@ export async function requireEventSource(
   return source;
 }
 
-export function eventSourceWebhookUrl(baseUrl: string, routeId: string): string {
-  return `${baseUrl.replace(/\/+$/u, "")}${EVENT_WEBHOOK_PATH_PREFIX}${routeId}`;
-}
-
 export function eventSourceForClient(source: EventSourceRecord, baseUrl: string): EventSource {
   return {
     id: source.id,
@@ -143,18 +154,21 @@ function requireEncryptionKey(settings: Settings): Uint8Array {
   return key;
 }
 
-export async function createEventSourceForViewer(input: {
-  db: Database;
-  settings: Settings;
-  accountId: string;
-  workspaceId: string;
-  /** The caller's grant subject, recorded as the creator. */
-  createdBySubjectId: string;
-  viewer: EventSourceViewer;
-  request: ParsedCreateEventSourceRequest;
-  baseUrl: string;
-}): Promise<CreateEventSourceResponse> {
+export async function createEventSourceForViewer(
+  input: {
+    db: Database;
+    settings: Settings;
+    accountId: string;
+    workspaceId: string;
+    /** The caller's grant subject, recorded as the creator. */
+    createdBySubjectId: string;
+    viewer: EventSourceViewer;
+    request: ParsedCreateEventSourceRequest;
+    baseUrl: string;
+  } & McpEventSourceNetwork,
+): Promise<CreateEventSourceResponse> {
   const request = input.request;
+  if (request.kind === "mcp") return await createMcpEventSource(input, request);
   if (request.kind !== "webhook") {
     throw new HTTPException(422, {
       message: `${request.kind} event sources are not available on this deployment yet`,
@@ -187,6 +201,78 @@ export async function createEventSourceForViewer(input: {
   };
 }
 
+/** Network access for MCP sources; tests replace the transport. */
+export type McpEventSourceNetwork = { fetch?: McpEventsFetch };
+
+/**
+ * Turn a failure to reach an MCP source's server into the answer a person
+ * sees: what to fix, or that the server could not be reached right now.
+ */
+export function mcpSourceHttpError(error: unknown, serverName: string): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (
+    error instanceof McpEventSourceUnavailableError ||
+    error instanceof McpServerWithoutEventsError
+  ) {
+    return new HTTPException(422, { message: error.message });
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return new HTTPException(503, {
+    message: `Couldn't reach ${serverName} to read its events (${message.slice(0, 200)}). Try again shortly.`,
+  });
+}
+
+/**
+ * An MCP source listens to one connector with its creator's own sign-in, so
+ * it is always private to that person. The server must offer events.
+ */
+async function createMcpEventSource(
+  input: Parameters<typeof createEventSourceForViewer>[0] & McpEventSourceNetwork,
+  request: Extract<ParsedCreateEventSourceRequest, { kind: "mcp" }>,
+): Promise<CreateEventSourceResponse> {
+  const owner = input.viewer.subjectId;
+  if (!owner) {
+    throw new HTTPException(422, {
+      message: "An MCP event source listens with a person's own sign-in. Create it as that person.",
+    });
+  }
+  const target = {
+    kind: "mcp" as const,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    ownerSubjectId: owner,
+    mcpServerId: request.serverId,
+    connectionId: request.connectionId ?? null,
+  };
+  let connection: { name: string; connectionId: string | null };
+  try {
+    connection = await withMcpEventSourceClient(
+      { db: input.db, settings: input.settings, ...(input.fetch ? { fetch: input.fetch } : {}) },
+      target,
+      async (client, { server, connectionId }) => {
+        const name = mcpServerDisplayName(server);
+        if (!serverOffersMcpEvents(client)) throw new McpServerWithoutEventsError(name);
+        return { name, connectionId };
+      },
+    );
+  } catch (error) {
+    throw mcpSourceHttpError(error, request.serverId);
+  }
+  const { source } = await createEventSource(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    createdBySubjectId: input.createdBySubjectId,
+    kind: "mcp",
+    name: request.name ?? connection.name,
+    ownerSubjectId: owner,
+    visibility: "private",
+    mcpServerId: request.serverId,
+    connectionId: connection.connectionId,
+  });
+  forgetMcpSourceEventTypes(source.id);
+  return { source: eventSourceForClient(source, input.baseUrl) };
+}
+
 export async function updateEventSourceForViewer(input: {
   db: Database;
   settings: Settings;
@@ -198,6 +284,11 @@ export async function updateEventSourceForViewer(input: {
   if (request.visibility !== undefined && source.ownerSubjectId === null) {
     throw new HTTPException(422, {
       message: "This source belongs to the workspace, so everyone in it can already use it",
+    });
+  }
+  if (request.visibility === "workspace" && source.kind === "mcp") {
+    throw new HTTPException(422, {
+      message: "An MCP source listens with your own sign-in, so it stays private to you",
     });
   }
   if (
@@ -324,9 +415,15 @@ function readDelivery(
   };
 }
 
+/**
+ * `gone` and `challenge` answer MCP servers: a delivery for a subscription
+ * that ended (410, do not retry) and a webhook verification handshake.
+ */
 export type WebhookIntakeResult =
   | { outcome: "not_found" }
+  | { outcome: "gone" }
   | { outcome: "rejected"; reason: string }
+  | { outcome: "challenge"; challenge: string }
   | { outcome: "stored"; delivery: EventDelivery; duplicate: boolean };
 
 /**
@@ -344,6 +441,16 @@ export async function receiveEventWebhook(input: {
 }): Promise<WebhookIntakeResult> {
   if (!eventTriggersEnabled(input.settings)) return { outcome: "not_found" };
   const route = await resolveEventIngressRoute(input.db, input.routeId);
+  if (route?.kind === "mcp") {
+    return await receiveMcpEventWebhook({
+      deps: { db: input.db, settings: input.settings },
+      route: { routeId: input.routeId, workspaceId: route.workspaceId },
+      headers: input.headers,
+      body: input.body,
+      receivedAt: input.receivedAt ?? new Date(),
+    });
+  }
+  if (!route && input.headers.has("x-mcp-subscription-id")) return { outcome: "gone" };
   if (!route || route.kind !== "webhook") return { outcome: "not_found" };
   const source = await getEventSource(input.db, route.workspaceId, route.sourceId);
   if (!source || source.kind !== "webhook" || !source.adapter || !source.secretEncrypted) {
@@ -413,7 +520,7 @@ export async function replayEventDelivery(input: {
     input.deliveryId,
   );
   if (!stored) throw new HTTPException(404, { message: "event delivery not found" });
-  if (!stored.body || source.kind !== "webhook") {
+  if (!stored.body || (source.kind !== "webhook" && source.kind !== "mcp")) {
     throw new HTTPException(409, {
       message:
         stored.delivery.status === "rejected"
@@ -427,13 +534,23 @@ export async function replayEventDelivery(input: {
     });
   }
   const receivedAt = new Date();
-  const outcome = readDelivery(source, new Headers(stored.headers), stored.body, receivedAt, {
-    refire: true,
-  });
+  let outcome: DeliveryOutcome;
+  if (source.kind === "mcp") {
+    const events = mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt);
+    if (events.length === 0) {
+      throw new HTTPException(409, { message: "This delivery carried no events to replay" });
+    }
+    outcome = { status: "accepted", reason: null, events };
+  } else {
+    outcome = readDelivery(source, new Headers(stored.headers), stored.body, receivedAt, {
+      refire: true,
+    });
+  }
   const recorded = await recordEventDelivery(input.db, {
     accountId: source.accountId,
     workspaceId: source.workspaceId,
     sourceId: source.id,
+    streamKey: stored.streamKey,
     ...outcome,
     dedupeKey: `replay:${randomUUID()}`,
     body: stored.body,
@@ -477,6 +594,18 @@ export async function sendTestEvent(input: {
     type: input.request.type,
     data: input.request.data,
   });
+  // An MCP event belongs to one subscription stream: send it on each stream
+  // an automation listens to for this type, so each of them can fire.
+  const streamKeys =
+    source.kind === "mcp"
+      ? await listMcpEventStreamKeys(input.db, source.workspaceId, source.id, input.request.type)
+      : [""];
+  if (streamKeys.length === 0) {
+    throw new HTTPException(422, {
+      message: `No automation listens for "${input.request.type}" on this source yet`,
+    });
+  }
+  const bounded = boundEvent(event, receivedAt);
   const recorded = await recordEventDelivery(input.db, {
     accountId: source.accountId,
     workspaceId: source.workspaceId,
@@ -488,7 +617,7 @@ export async function sendTestEvent(input: {
     bodyBytes: Buffer.byteLength(body, "utf8"),
     bodySha256: sha256Hex(body),
     headers: {},
-    events: [boundEvent(event, receivedAt)],
+    events: streamKeys.map((streamKey) => ({ ...bounded, streamKey })),
     match: eventMatchesTrigger,
   });
   const [stored] = await getInboundEvents(input.db, source.workspaceId, recorded.eventIds);
@@ -502,10 +631,30 @@ export async function sendTestEvent(input: {
 }
 
 /** The event types a trigger on this source can name. */
-export async function listEventSourceTypes(input: {
-  db: Database;
-  source: EventSourceRecord;
-}): Promise<EventTypeDescriptor[]> {
+export async function listEventSourceTypes(
+  input: {
+    db: Database;
+    settings: Settings;
+    source: EventSourceRecord;
+  } & McpEventSourceNetwork,
+): Promise<EventTypeDescriptor[]> {
+  if (input.source.kind === "mcp") {
+    const webhookAvailable = mcpWebhookBaseUrl(input.settings) !== null;
+    try {
+      return await withMcpEventSourceClient(
+        { db: input.db, settings: input.settings, ...(input.fetch ? { fetch: input.fetch } : {}) },
+        input.source,
+        async (client, { server }) =>
+          (
+            await mcpSourceEventTypes(client, input.source, mcpServerDisplayName(server), {
+              fresh: true,
+            })
+          ).map((type) => mcpEventTypeDescriptor(type, webhookAvailable)),
+      );
+    } catch (error) {
+      throw mcpSourceHttpError(error, input.source.name);
+    }
+  }
   const recent = await listRecentEventTypes(input.db, input.source.workspaceId, input.source.id);
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);

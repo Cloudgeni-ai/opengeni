@@ -1,4 +1,5 @@
 name: CI
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Version PR {0} head {1}', inputs.automation_pr_number, inputs.automation_head_sha) || github.event.head_commit.message || 'CI' }}
 
 on:
   push:
@@ -55,8 +56,10 @@ concurrency:
   # finished (for example a red build left waiting for release approval)
   # stalled every later main push behind it. Available runner capacity, not
   # workflow concurrency, decides how many main runs execute at once.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
+  # Version validation is cancelled only by the explicit exact-head supersession
+  # handler, never by a repeated dispatch of the same head or a new main push.
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 permissions:
   contents: read
@@ -69,7 +72,7 @@ jobs:
     name: Admit automation Version PR
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 320
     permissions:
       actions: read # authenticate the exact Version PR producer run
       checks: write # publish idempotent checks on the candidate head SHA
@@ -154,6 +157,12 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+
+      - name: Yield Version validation to main and batch CI
+        if: ${{ steps.admission.outcome == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/github-pr-ci.ts priority pr
 
       - name: Install trusted-base dependencies
         if: ${{ steps.admission.outcome == 'success' }}

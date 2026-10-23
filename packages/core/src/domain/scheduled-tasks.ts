@@ -64,6 +64,7 @@ import {
   type KnowledgeContext,
   dbSql,
   deleteScheduledTask,
+  wakeScheduledTaskMcpEventSubscriptions,
   getConnectionMetadata,
   getEnrollment,
   getLiveEnrollmentConnection,
@@ -1445,6 +1446,7 @@ async function withScheduledTaskEventsUpdate(
         db: input.db,
         workspaceId: existing.workspaceId,
         ownerSubjectId: existing.ownerSubjectId,
+        taskId: existing.id,
         schedule,
         action: update.action ?? existing.action,
         events: input.payload.events,
@@ -1459,7 +1461,8 @@ async function withScheduledTaskEventsUpdate(
     });
   }
   const resumes = update.status === "active" && existing.status !== "active";
-  if (!events && !resumes) return update;
+  const statusChanges = update.status !== undefined && update.status !== existing.status;
+  if (!events && !statusChanges) return update;
   const prior = update.beforeUpdateCommit;
   return {
     ...update,
@@ -1467,6 +1470,10 @@ async function withScheduledTaskEventsUpdate(
       await prior?.(tx);
       if (events) await writeScheduledTaskEvents(tx, existing, events);
       if (resumes) await rearmScheduledTaskEventsOnResume(tx, existing);
+      // A paused automation ends its MCP subscriptions; resuming starts them again.
+      else if (statusChanges) {
+        await wakeScheduledTaskMcpEventSubscriptions(tx, existing.workspaceId, existing.id);
+      }
     },
   };
 }
@@ -2368,6 +2375,7 @@ export async function deleteScheduledTaskLifecycle(input: {
             });
           })()
         : await deleteScheduledTask(tx, input.workspaceId, task.id);
+      if (wasLive) await wakeScheduledTaskMcpEventSubscriptions(tx, input.workspaceId, task.id);
       return { task, deletion };
     },
   );

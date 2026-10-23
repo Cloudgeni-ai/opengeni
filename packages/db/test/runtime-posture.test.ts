@@ -573,14 +573,6 @@ function safePosture(): RuntimeDatabasePosture {
       })),
     ],
     privateRoutines: [
-      ...runtimePosture.BACKGROUND_RUNTIME_ROUTINES.map((name) => ({
-        name,
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-        configuration: ["search_path=pg_catalog, public, pg_temp"],
-      })),
       {
         name: "knowledge_index_due_v1(text, integer)",
         owner: "opengeni_migrator",
@@ -783,62 +775,6 @@ describe("runtime database posture evaluator", () => {
       expect(evaluateRuntimeDatabasePosture(executable, options)).toContain(
         `subscription owner implementation ${name} is missing or unsafe`,
       );
-    }
-  });
-
-  test("requires exact event trigger capabilities with safe ownership, ACLs and search paths", () => {
-    const names = [
-      "scheduled_task_event_settings",
-      "event_deliveries",
-      "inbound_events",
-      "recordings",
-      "recording_transcript_versions",
-    ];
-    const eventOptions: RuntimeDatabasePostureOptions = {
-      ...options,
-      protectedTables: ["tenant_rows", ...names],
-      tablePrivileges: {
-        ...options.tablePrivileges,
-        ...Object.fromEntries(
-          names.map((name) => [name, ["SELECT", "INSERT", "UPDATE", "DELETE"]]),
-        ),
-      },
-    };
-    function eventPosture() {
-      const posture = safePosture();
-      for (const name of [
-        "scheduled_task_event_settings",
-        "event_deliveries",
-        "inbound_events",
-        "recordings",
-        "recording_transcript_versions",
-      ])
-        posture.tables.push({ ...posture.tables[0]!, name });
-      return posture;
-    }
-    expect(evaluateRuntimeDatabasePosture(eventPosture(), eventOptions)).toEqual([]);
-    for (const name of runtimePosture.BACKGROUND_RUNTIME_ROUTINES) {
-      for (const unsafe of [
-        null,
-        { execute: false },
-        { publicExecute: true },
-        { securityDefiner: false },
-        { owner: "opengeni_app" },
-        { owner: "unrelated_owner" },
-        { configuration: ["search_path=public, opengeni_private, public"] },
-        { configuration: ["search_path=pg_catalog, public"] },
-      ]) {
-        const posture = eventPosture();
-        if (unsafe)
-          Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
-        else
-          posture.privateRoutines = posture.privateRoutines.filter(
-            (routine) => routine.name !== name,
-          );
-        expect(evaluateRuntimeDatabasePosture(posture, eventOptions)).toContain(
-          `background capability ${name} is missing or unsafe`,
-        );
-      }
     }
   });
 
@@ -1811,7 +1747,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
-          // 0918 Teams durable integration state: full DML and FORCE RLS.
+          // 0934 Teams durable integration state: full DML and FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -1839,6 +1775,12 @@ describe("runtime database posture evaluator", () => {
             : 0) +
           // 0929 credential-free event ingress routes: full DML, no RLS.
           (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0932 MCP Events subscriptions: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
@@ -1906,10 +1848,12 @@ describe("runtime database posture evaluator", () => {
         1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
         1 + // 0908 personal Site opens: full-DML, FORCE-RLS.
         1 + // 0909 session message search texts: read and insert, FORCE-RLS.
-        6 + // 0932 Teams durable integration state: full-DML, FORCE-RLS.
+        6 + // 0934 Teams durable integration state: full-DML, FORCE-RLS.
         8 + // 0929 event triggers: seven full-DML FORCE-RLS tables and one routing table.
-        9; // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
+        9 + // 0930 meeting recordings: FORCE-RLS; eight full-DML, one read and insert.
+        1; // 0932 MCP Events subscriptions: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
+      expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
       expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
       expect(FORCE_RLS_TABLES).toContain("site_opens");

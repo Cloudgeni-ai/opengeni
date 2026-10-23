@@ -6302,19 +6302,3 @@ The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
 bridge with one shared history/replies slot per minute and no search. Apply the
 generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
 for the feature limits and external-workspace release acceptance.
-
-### Background capability repair (0933)
-
-Migration 0933 is a maintenance cutover for the event-trigger and recording capabilities
-introduced by 0929 and 0930. Stop every API, control worker and turn worker before the release's
-middle migration span, supply the complete old/new runtime login list through
-`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply migrations and provision the current
-role, then start only the matching binary. The previous evaluator rejects these callable
-SECURITY DEFINER capabilities and the new non-RLS event ingress routing table's CRUD contract;
-never restart a pre-0933 binary or use one as rollback. The forward repair hardens the function
-search paths and strips inherited runtime grants; 0929 and 0930 remain immutable. Teams
-migration 0932 remains independently rolling-safe.
-
-The recording recovery inventory additionally receives exact table-owner SELECT policies on
-recordings and transcript versions. Runtime roles remain subject to workspace/private-owner RLS;
-the bounded inventory emits identifiers only.

@@ -47,6 +47,9 @@ export function infrastructureRetryReason(candidate: Candidate, run: Run, config
   )
     return null;
   const reason = run.infrastructureRetryReason;
+  if (run.trusted && run.outcome === "code_failure") return "failed-batch";
+  if (reason === "failed-batch" && ["infrastructure", "cancelled"].includes(run.outcome))
+    return reason;
   if (reason === "verified-infrastructure" && run.trusted && run.outcome === "infrastructure")
     return reason;
   if (reason === "provider-cancelled" && run.outcome === "cancelled") return reason;
@@ -176,6 +179,20 @@ function planCandidate(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A failed exact candidate gets one flake allowance before any split or
+      // singleton parking. The durable retry intent prevents duplicate requests.
+      if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
+        if (ledger.retries[root.manifest.batchId])
+          return { kind: "wait", reason: "single batch retry already requested; no duplicate" };
+        if (
+          !run.completedAt ||
+          Date.parse(o.now) < Date.parse(run.completedAt) + 60000 ||
+          inflight >= c.maxInflight ||
+          o.mainBusy
+        )
+          return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
+        return { kind: "retry", candidate: root, run };
+      }
       if (run.trusted && run.outcome === "code_failure") {
         const children = descendants(root.manifest.batchId, o.candidates).filter(
           (id) => id !== root.manifest.batchId && !ledger.invalidated.includes(id),

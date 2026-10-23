@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
-import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
+import { type ReadyEvent } from "./evidence";
+import { admitGitHub, type HostedCheck, type RequiredCheck } from "./github-admission";
 import {
   type Config,
   type Manifest,
@@ -48,7 +49,13 @@ const CAPACITY_HOLD_REASONS: Record<CapacityHold, string> = {
 export function isControlPlanePath(path: unknown): boolean {
   return (
     typeof path === "string" &&
-    (path === ".github/workflows/batch-ci.yml" ||
+    ([
+      ".github/workflows/batch-ci.yml",
+      ".github/workflows/pr-ci.yml",
+      ".github/workflows/pr-ci-superseded.yml",
+      ".github/workflows/merge-queue.yml",
+    ].includes(path) ||
+      path === "scripts/ci/github-pr-ci.ts" ||
       path.startsWith("scripts/ci/batch-") ||
       path.startsWith("scripts/merge-batcher/") ||
       /^scripts\/ci\/(?:impact|run-unit-shard|profile-command|shared-pg)(?:[./-]|$)/.test(path) ||
@@ -98,6 +105,9 @@ export class GitHubAuth {
     const message = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({ iat: now - 60, exp: now + 540, iss: app })}`;
     const signature = createSign("RSA-SHA256").update(message).sign(key, "base64url");
     // Authentication only; repository mutation permissions are NOT requested in shadow.
+    // Do not explicitly request checks:read: the deployment App lacks that grant.
+    // Authenticated check reads work on this public repository; private repositories
+    // must qualify access separately. Unreadable checks remain fail-closed below.
     const permissions =
       this.env.BATCHER_MODE === "active"
         ? {
@@ -106,6 +116,7 @@ export class GitHubAuth {
             actions: "write",
             pull_requests: "write",
             issues: "write",
+            administration: "read",
           }
         : this.env.BATCHER_MODE === "shadow-ci"
           ? {
@@ -114,8 +125,15 @@ export class GitHubAuth {
               actions: "read",
               pull_requests: "read",
               issues: "read",
+              administration: "read",
             }
-          : { contents: "read", actions: "read", pull_requests: "read", issues: "read" };
+          : {
+              contents: "read",
+              actions: "read",
+              pull_requests: "read",
+              issues: "read",
+              administration: "read",
+            };
     const response = await this.transport(
       `https://api.github.com/app/installations/${installation}/access_tokens`,
       {
@@ -407,12 +425,47 @@ export class GitHubReader {
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
+    const rules = await this.pages(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
+    if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
+    if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
+      throw Error("Required workflow rules need explicit hosted-check mapping before admission");
+    const classic = await this.classicBranchPolicy();
+    const required: RequiredCheck[] = rules
+      .filter((r) => r.type === "required_status_checks")
+      .flatMap((r) =>
+        (r.parameters?.required_status_checks ?? []).map((c: Json) => ({
+          context: c.context,
+          integrationId: c.integration_id,
+        })),
+      );
+    required.push(
+      ...(classic?.requiredStatusChecks ?? []).map((c: Json) => ({
+        context: c.context,
+        integrationId: c.app?.databaseId ?? null,
+      })),
+    );
+    if (required.some((c) => typeof c.context !== "string" || !c.context))
+      throw new Error("Malformed required checks");
+    const reviewRequired =
+      Boolean(classic?.requiresApprovingReviews || classic?.requiresCodeOwnerReviews) ||
+      rules.some(
+        (r) =>
+          r.type === "pull_request" &&
+          (r.parameters?.required_approving_review_count > 0 ||
+            r.parameters?.require_code_owner_review ||
+            r.parameters?.require_last_push_approval),
+      );
+    const conversationResolutionRequired =
+      Boolean(classic?.requiresConversationResolution) ||
+      rules.some(
+        (r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution,
+      );
     for (const pull of pulls) {
       const number = Number(pull.number);
       const queueReady =
         Array.isArray(pull.labels) && pull.labels.some((l: Json) => l.name === "queue-ready");
-      if (!pull.auto_merge && !queueReady) {
-        excluded.push({ number, reason: "no ready signal" });
+      if (!queueReady) {
+        excluded.push({ number, reason: "queue-ready label required" });
         continue;
       }
       let events: ReadyEvent[];
@@ -425,34 +478,209 @@ export class GitHubReader {
         excluded.push({ number, reason: "actual ready-event timeline unavailable" });
         continue;
       }
-      const comments = (await this.pages(`issues/${number}/comments`)).map(
-        (x): Comment => ({
-          id: String(x.id),
-          body: x.body,
-          updatedAt: x.updated_at,
-          authorAssociation: x.author_association,
-        }),
-      );
+      let checks: HostedCheck[];
+      try {
+        checks = await this.hostedChecks(pull.head?.sha ?? "");
+      } catch (error) {
+        if (error instanceof ProviderError && [404, 410].includes(error.status)) {
+          excluded.push({ number, reason: "Exact-head hosted run or job no longer readable" });
+          continue;
+        }
+        throw error;
+      }
+      const review =
+        reviewRequired || conversationResolutionRequired
+          ? await this.nativeReview(number)
+          : { decision: null, unresolved: false };
       const files = await this.pages(`pulls/${number}/files`);
       const controlPlane = files.some((file) =>
         [file.filename, file.previous_filename].some(isControlPlanePath),
       );
-      const input: PullInput = {
+      const admission = admitGitHub({
         controlPlane,
         number,
         headSha: pull.head?.sha ?? "",
         headRef: pull.head?.ref ?? "",
         draft: Boolean(pull.draft),
-        autoMerge: Boolean(pull.auto_merge),
         queueReady,
         events,
-        comments,
-      };
-      const admission = admit(input);
+        checks,
+        required,
+        reviewRequired,
+        reviewDecision: review.decision,
+        conversationResolutionRequired,
+        unresolvedThreads: review.unresolved,
+      });
       if (admission.ready) ready.push(admission.ready);
       else excluded.push({ number, reason: admission.reason });
     }
     return { ready, excluded };
+  }
+  async openPullNumbers(): Promise<number[]> {
+    const pulls = await this.pages("pulls?state=open");
+    if (pulls.some((p) => !Number.isSafeInteger(p.number) || p.number <= 0))
+      throw Error("Invalid open PR inventory");
+    return [...new Set(pulls.map((p) => p.number as number))].sort((a, b) => a - b);
+  }
+  async classicBranchPolicy(): Promise<Json | null> {
+    const [owner, name] = this.config.repository.split("/");
+    const response = await this.transport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query ClassicBranchPolicy($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){branchProtectionRule{requiresApprovingReviews requiresCodeOwnerReviews requiresConversationResolution requiredStatusChecks{context app{databaseId}}}}}}`,
+        variables: { owner, name, ref: `refs/heads/${this.config.baseBranch}` },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    this.checkRateLimit(response);
+    if (!response.ok) throw new ProviderError(response.status, "branch protection");
+    const data = (await response.json()) as Json,
+      ref = data.data?.repository?.ref;
+    if (data.errors || !ref || !("branchProtectionRule" in ref))
+      throw Error("Classic branch protection unavailable");
+    if (ref.branchProtectionRule === null) {
+      const branch = await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}`);
+      if (Array.isArray(branch) || typeof branch.protected !== "boolean")
+        throw Error("Classic protection absence is not proven by this token");
+      if (branch.protected) {
+        // protected:true includes rulesets. A null projection or REST404 alone
+        // is ambiguous; only a positive, complete empty classic inventory lifts
+        // that ambiguity. Nonempty inventories are held rather than guessing
+        // GitHub's branch-pattern matching or silently ignoring classic rules.
+        let absent = false;
+        try {
+          await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}/protection`);
+        } catch (error) {
+          if (!(error instanceof ProviderError) || error.status !== 404) throw error;
+          absent = true;
+        }
+        if (!absent) throw Error("Classic protection changed during observation");
+        const inventoryResponse = await this.transport("https://api.github.com/graphql", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await this.auth.token()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query: `query ClassicProtectionInventory($owner:String!,$name:String!){repository(owner:$owner,name:$name){branchProtectionRules(first:100){totalCount nodes{id} pageInfo{hasNextPage endCursor}}}}`,
+            variables: { owner, name },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+        this.checkRateLimit(inventoryResponse);
+        if (!inventoryResponse.ok)
+          throw new ProviderError(inventoryResponse.status, "classic protection inventory");
+        const inventoryData = (await inventoryResponse.json()) as Json;
+        const inventory = inventoryData.data?.repository?.branchProtectionRules;
+        if (
+          inventoryData.errors ||
+          !inventory ||
+          inventory.totalCount !== 0 ||
+          !Array.isArray(inventory.nodes) ||
+          inventory.nodes.length !== 0 ||
+          inventory.pageInfo?.hasNextPage !== false ||
+          inventory.pageInfo.endCursor !== null
+        )
+          throw Error("Classic protection absence is not proven by complete inventory");
+      }
+    }
+    return ref.branchProtectionRule;
+  }
+  async hostedChecks(head: string): Promise<HostedCheck[]> {
+    if (!/^[a-f0-9]{40}$/.test(head)) return [];
+    const checks = await this.pages(`commits/${head}/check-runs?filter=latest`, "check_runs");
+    const runs = new Map<number, { run: Json; jobs: Json[] }>();
+    const result: HostedCheck[] = [];
+    for (const check of checks) {
+      if (check.app?.slug !== "github-actions") continue;
+      const match = String(check.details_url ?? "").match(
+        /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)(?:\/|$)/,
+      );
+      if (!match) continue;
+      const id = Number(match[1]);
+      if (!runs.has(id)) {
+        const run = (await this.get(`actions/runs/${id}`)) as Json;
+        const jobs = await this.pages(
+          `actions/runs/${id}/attempts/${run.run_attempt}/jobs`,
+          "jobs",
+        );
+        runs.set(id, { run, jobs });
+      }
+      const { run, jobs } = runs.get(id)!;
+      const exactJob = jobs.find((j) =>
+        String(j.check_run_url).endsWith(`/check-runs/${check.id}`),
+      );
+      const hosted =
+        jobs.length > 0 &&
+        jobs
+          .filter((j) => j.conclusion !== "skipped")
+          .every(
+            (j) =>
+              j.runner_group_id === 0 &&
+              j.runner_group_name === "GitHub Actions" &&
+              Number.isSafeInteger(j.runner_id) &&
+              j.runner_id > 0 &&
+              Array.isArray(j.labels) &&
+              !j.labels.includes("self-hosted") &&
+              j.labels.some((l: string) => /^(ubuntu|windows|macos)-/.test(l)),
+          ) &&
+        !!exactJob &&
+        exactJob.status === "completed" &&
+        exactJob.conclusion === "success";
+      result.push({
+        id: check.id,
+        name: check.name,
+        headSha: check.head_sha,
+        status: check.status,
+        conclusion: check.conclusion,
+        appId: check.app.id,
+        appSlug: check.app.slug,
+        runId: id,
+        attempt: run.run_attempt,
+        workflow: String(run.path).split("@")[0]!,
+        runHeadSha: run.head_sha,
+        hosted,
+      });
+    }
+    return result;
+  }
+  async nativeReview(number: number): Promise<{ decision: string | null; unresolved: boolean }> {
+    const [owner, name] = this.config.repository.split("/");
+    let cursor: string | null = null,
+      unresolved = false,
+      decision: string | null = null;
+    for (let page = 0; page < 1000; page++) {
+      const response = await this.transport("https://api.github.com/graphql", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await this.auth.token()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `query BranchReview($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100,after:$cursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}`,
+          variables: { owner, name, number, cursor },
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      this.checkRateLimit(response);
+      if (!response.ok) throw new ProviderError(response.status, "native review");
+      const data = (await response.json()) as Json,
+        pull = data.data?.repository?.pullRequest,
+        threads = pull?.reviewThreads;
+      if (data.errors || !Array.isArray(threads?.nodes) || !threads.pageInfo)
+        throw Error("Native branch review unavailable");
+      decision = pull.reviewDecision ?? null;
+      unresolved ||= threads.nodes.some((t: Json) => t.isResolved !== true);
+      if (!threads.pageInfo.hasNextPage) return { decision, unresolved };
+      if (typeof threads.pageInfo.endCursor !== "string" || threads.pageInfo.endCursor === cursor)
+        throw Error("Review pagination stalled");
+      cursor = threads.pageInfo.endCursor;
+    }
+    throw Error("Review pagination incomplete");
   }
   async runs(manifest: Manifest, branch: string): Promise<Run[]> {
     const raw = await this.pages(
@@ -482,7 +710,7 @@ export class GitHubReader {
         }>(key);
         if (
           cached &&
-          (cached.run.outcome === "success" || cached.retryPolicyVersion === 2) &&
+          (cached.run.outcome === "success" || cached.retryPolicyVersion === 3) &&
           (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
         ) {
           result.push(cached.run);
@@ -554,6 +782,20 @@ export class GitHubReader {
             }
           }
         }
+        // Provider-confirmed failed jobs may be retried once even without a
+        // trusted result artifact. This grants no landing or member-blame proof.
+        if (
+          status === "completed" &&
+          ["failure", "timed_out", "cancelled"].includes(details.conclusion)
+        ) {
+          const jobs = await this.pages(`actions/runs/${run.id}/attempts/${attempt}/jobs`, "jobs");
+          if (
+            jobs.length > 0 &&
+            jobs.every((j) => j.status === "completed") &&
+            jobs.some((j) => ["failure", "timed_out"].includes(j.conclusion))
+          )
+            infrastructureRetryReason = "failed-batch";
+        }
         const verifiedRun: Run = {
           id: Number(run.id),
           attempt,
@@ -573,7 +815,7 @@ export class GitHubReader {
           await this.cache.set(key, {
             run: verifiedRun,
             conclusion: details.conclusion,
-            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 2 }),
+            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 3 }),
           });
       }
     }
@@ -927,6 +1169,9 @@ export class GitHubMutations {
       !Number.isSafeInteger(run.id) ||
       run.id < 1 ||
       !(
+        (run.trusted && run.outcome === "code_failure") ||
+        (run.infrastructureRetryReason === "failed-batch" &&
+          ["infrastructure", "cancelled"].includes(run.outcome)) ||
         (run.infrastructureRetryReason === "verified-infrastructure" &&
           run.trusted &&
           run.outcome === "infrastructure") ||
@@ -934,9 +1179,7 @@ export class GitHubMutations {
         (run.infrastructureRetryReason === "no-job-logs" && run.outcome === "infrastructure")
       )
     )
-      throw new Error(
-        "Only a first-attempt terminal candidate infrastructure failure may be retried",
-      );
+      throw new Error("Only a first-attempt terminal candidate failure may be retried");
     await this.post(`actions/runs/${run.id}/rerun`, {});
   }
   async announce(number: number, body: string): Promise<void> {
