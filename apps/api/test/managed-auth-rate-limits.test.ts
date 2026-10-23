@@ -7,7 +7,9 @@ import {
   MANAGED_AUTH_DATABASE_POOL_OPTIONS,
 } from "../src/auth/managed-auth";
 import {
+  MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  MANAGED_AUTH_UNLIMITED_PATHS,
   MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX,
   MANAGED_AUTH_EMAIL_THROTTLES,
   ManagedAuthEmailThrottleError,
@@ -35,6 +37,17 @@ describe("managed auth client-address rate limits", () => {
       "/reset-password/*",
     ]) {
       expect(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES).toHaveProperty([path]);
+    }
+  });
+
+  test("exempt only session reads and sign-out, and keep every credential limit", () => {
+    expect([...MANAGED_AUTH_UNLIMITED_PATHS]).toEqual(["/get-session", "/sign-out"]);
+    for (const path of MANAGED_AUTH_UNLIMITED_PATHS) {
+      expect(MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES[path]).toBe(false);
+      expect(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES).not.toHaveProperty([path]);
+    }
+    for (const [path, rule] of Object.entries(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES)) {
+      expect(MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES[path]).toEqual(rule);
     }
   });
 

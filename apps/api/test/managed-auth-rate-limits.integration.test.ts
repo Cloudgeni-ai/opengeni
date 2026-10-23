@@ -93,6 +93,13 @@ async function postFromClient(
   );
 }
 
+async function rateLimitKeys(pattern: string): Promise<string[]> {
+  const rows = await shared.admin<Array<{ key: string }>>`
+    select key from auth_rate_limits where key like ${pattern} order by key
+  `;
+  return rows.map(({ key }) => key);
+}
+
 function uniqueEmail(label: string): string {
   return `rate-limit-${label}-${crypto.randomUUID()}@example.test`;
 }
@@ -150,6 +157,39 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       `${limited}|/sign-in/email`,
       "203.0.113.11|/sign-in/email",
     ]);
+  }, 60_000);
+
+  test("never refuses session reads from a busy shared address", async () => {
+    // Better Auth's default limit (100 per 10 s) resets only after 10 s with
+    // no admitted request, so steady page loads from one address used to fail
+    // from the 101st session read on. Session reads carry no credential.
+    const app = managedApp();
+    const busy = "203.0.113.40";
+    const statuses = new Set<number>();
+    for (let read = 0; read < 130; read += 1) {
+      const response = await app.request(
+        "/v1/auth/get-session",
+        { method: "GET", headers: { origin: ORIGIN, "x-forwarded-for": busy } },
+        apiRequestBindingsForTransportPeer(EDGE_PEER),
+      );
+      statuses.add(response.status);
+      await response.body?.cancel();
+    }
+    expect([...statuses]).toEqual([200]);
+    const keys = await rateLimitKeys("%|/get-session");
+    expect(keys).toEqual([]);
+
+    // Credential endpoints from the same address stay limited.
+    const max = MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES["/sign-in/email"].max;
+    let last = 0;
+    for (let attempt = 0; attempt <= max; attempt += 1) {
+      const response = await postFromClient(app, "/v1/auth/sign-in/email", busy, {
+        email: uniqueEmail("busy"),
+        password: "wrong-password-123",
+      });
+      last = response.status;
+    }
+    expect(last).toBe(429);
   }, 60_000);
 
   test("ignores forwarding headers unless a proxy chain is declared", async () => {
