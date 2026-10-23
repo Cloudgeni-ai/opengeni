@@ -1,5 +1,12 @@
 # @opengeni/vaults-protonpass
 
+## 5.1.2
+
+### Patch Changes
+
+- @opengeni/contracts@5.1.0
+- @opengeni/vaults@5.1.0
+
 ## 5.0.2
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "description": "Placement-resident browser controller for Opengeni: launches and drives managed Chrome over CDP.",
   "license": "Apache-2.0",

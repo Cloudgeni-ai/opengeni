@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 5.1.2
+
+### Patch Changes
+
+- 4e1a73f: Read workspace control state and kind within one fresh scoped transaction, preserving hidden-workspace handling and nested scope restoration.
+  - @opengeni/codemode@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/subscriptions@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
 ## 5.0.2
 
 ### Minor Changes
