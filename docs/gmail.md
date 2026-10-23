@@ -106,6 +106,13 @@ promise an automatic agent wakeup. Renew watches before expiration, deduplicate
 notifications using history and retain polling reconciliation. `stop_watch`
 stops the account's current watch, including any existing watch.
 
+Automations do not need a watch. A Gmail event source (`createEventSource({ kind:
+"gmail" })`) reads the owner's mailbox history about once a minute, only while
+an enabled automation listens to it, and turns each new inbox message into a
+`message.received` event with headers and a snippet, never the full body. The source
+is private to the person who connected the mailbox. No Pub/Sub topic is
+required.
+
 Settings reads include language, vacation, POP/IMAP, auto-forwarding, filters,
 send-as aliases and forwarding addresses. Delegation reads require service-account
 domain-wide authority and are excluded from the connected-user bridge. S/MIME and client-side

@@ -25,8 +25,8 @@ an agent reliably, without a second execution engine beside scheduled tasks.
   - a **webhook endpoint** a person creates and pastes into another app (Linear,
     Sentry, or any sender that signs with Standard Webhooks);
   - an **app** Opengeni already connects to and receives events from directly
-    (GitHub through the platform GitHub App, Slack through the Slack app, Gmail
-    through a mailbox watch);
+    (GitHub through the platform GitHub App, Slack through the Slack app), or
+    reads changes from (Gmail, through the owner's Gmail connection);
   - an **MCP connection** whose server offers the events extension.
 - **Event.** One normalized occurrence: source, type, time, subject, actor,
   a one-line summary and bounded data. Every source produces the same shape.
@@ -156,10 +156,34 @@ delivery as `ignored`.
     authorized bot user), so a stored delivery reads the same on replay.
   - Recording never affects the conversation: a failure is logged and the
     callback is handled as before.
-- **Gmail**: a Pub/Sub push endpoint verified by Google's OIDC token. A mailbox
-  with an active trigger keeps a `users.watch` (renewed daily); each
-  notification reads `history.list` with the owner's connection and emits
-  `message.received` events.
+- **Gmail**: one person's mailbox, read with the Gmail connection their chats
+  use. Gmail only pushes changes through an operator-owned Pub/Sub topic, so
+  instead of depending on that setup the source has a **feed**: Opengeni reads
+  the mailbox history every minute while an automation listens.
+  - A source is private to its owner and one per mailbox in a workspace.
+    Adding it reads the Gmail profile to learn the address.
+  - The feed keeps the history id as its cursor. Its first read only learns
+    where "now" is. Each read lists `history.list` (new messages, `INBOX`)
+    since the cursor and reads each new message's headers and snippet
+    (`format=metadata`), never its body. When Gmail no longer has the history
+    (about a week), the feed starts from now and marks the gap.
+  - Type: `message.received`. Data: mailbox, message and thread ids, From
+    (with a lower-case `from_address`), To, Cc, subject, snippet, label ids and
+    date. Mail Opengeni's own Gmail tools wrote carries a Message-ID at
+    `opengeni.invalid` and marks an own event.
+  - The stored delivery body is the headers and snippets read, so a read
+    replays the same. A large backlog is read 100 messages at a time.
+- **Feeds in general.** A source whose app has no webhook Opengeni can receive
+  gets one feed row (`event_source_feeds`): cursor, gap flag, next read, lease
+  and failure state. One pump reads due feeds through a per-app adapter (read
+  since the cursor, record, say when to read again; classify refusals). A feed
+  is read only while a runnable automation listens to its source; otherwise it
+  forgets its cursor and idles, and trigger, automation and source changes
+  wake it. A refusal a person has to fix (a sign-in, a removed connector)
+  blocks the source's triggers with a plain reason and tells each owner once;
+  the feed retries every 15 minutes and the first good read unblocks them.
+  Other failures back off and block after an hour. Adding another app of this
+  kind is one adapter.
 
 ### MCP Events
 

@@ -198,9 +198,43 @@ export async function createEventSource(
           .returning({ routeId: schema.eventIngressRoutes.routeId });
         routeId = input.kind === "webhook" ? (route?.routeId ?? null) : null;
       }
+      if (eventSourceKindHasFeed(input.kind)) {
+        await tx.insert(schema.eventSourceFeeds).values({
+          sourceId: inserted.id,
+          accountId: inserted.accountId,
+          workspaceId: inserted.workspaceId,
+        });
+      }
       return { source: mapSource(inserted, routeId), created: true };
     }),
   );
+}
+
+/**
+ * Sources whose events Opengeni reads from the app's change history instead
+ * of receiving them: each has a feed (migration 0935) the feed pump reads.
+ */
+export function eventSourceKindHasFeed(kind: EventSourceKind): boolean {
+  return kind === "gmail";
+}
+
+/** Have the feed pump read these sources' feeds now. */
+export async function wakeEventSourceFeeds(
+  scoped: Database,
+  workspaceId: string,
+  sourceIds: readonly string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return;
+  await scoped
+    .update(schema.eventSourceFeeds)
+    .set({ nextActionAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(schema.eventSourceFeeds.workspaceId, workspaceId),
+        inArray(schema.eventSourceFeeds.sourceId, [...sourceIds]),
+        sql`${schema.eventSourceFeeds.nextActionAt} > now()`,
+      ),
+    );
 }
 
 /** The route key of one GitHub App installation's deliveries. */
@@ -344,6 +378,10 @@ export async function updateEventSource(
       )
       .returning();
     if (!row) return null;
+    // Turning a source off or on, or sharing it, changes whether its feed is wanted.
+    if (patch.status !== undefined || patch.visibility !== undefined) {
+      await wakeEventSourceFeeds(scoped, workspaceId, [row.id]);
+    }
     const routes = await routesBySource(scoped, [row.id]);
     return mapSource(row, routes.get(row.id) ?? null);
   });
@@ -1117,7 +1155,7 @@ export async function setScheduledTaskEvents(
           sql`update scheduled_task_event_inbox set status = 'skipped'
             where workspace_id = ${input.workspaceId} and task_id = ${input.taskId} and status = 'pending'`,
         );
-        await syncMcpEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
+        await syncEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
         return;
       }
       await tx
@@ -1187,7 +1225,7 @@ export async function setScheduledTaskEvents(
           ),
         );
       }
-      await syncMcpEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
+      await syncEventSubscriptions(tx, input.workspaceId, input.taskId, previous);
     }),
   );
   return (
@@ -1197,12 +1235,13 @@ export async function setScheduledTaskEvents(
 
 /**
  * Create the MCP subscriptions an automation's triggers want and wake every
- * subscription it uses or used, so the subscription pump starts, keeps or
- * ends each one now instead of at its next poll or refresh. The pump decides
- * from the committed triggers and automation whether a subscription is still
- * wanted, so this may run before a status change in the same transaction.
+ * subscription and source feed it uses or used, so the pumps start, keep or
+ * end each one now instead of at its next poll or refresh. The pumps decide
+ * from the committed triggers and automation whether a subscription or feed
+ * is still wanted, so this may run before a status change in the same
+ * transaction.
  */
-export async function syncMcpEventSubscriptions(
+export async function syncEventSubscriptions(
   tx: Database,
   workspaceId: string,
   taskId: string,
@@ -1246,6 +1285,24 @@ export async function syncMcpEventSubscriptions(
           }
         )`,
   );
+  await tx.execute(
+    sql`update event_source_feeds feed
+      set next_action_at = now(), updated_at = now()
+      where feed.workspace_id = ${workspaceId} and feed.next_action_at > now()
+        and (
+          feed.source_id in (
+            select trigger.source_id from event_triggers trigger
+            where trigger.workspace_id = ${workspaceId} and trigger.task_id = ${taskId})
+          ${
+            previous.length > 0
+              ? sql`or feed.source_id in (${sql.join(
+                  previous.map((entry) => sql`${entry.sourceId}::uuid`),
+                  sql`, `,
+                )})`
+              : sql``
+          }
+        )`,
+  );
 }
 
 /** A resumed automation starts over: `once` can fire again and the guard forgets the past episode. */
@@ -1260,22 +1317,22 @@ export async function rearmScheduledTaskEvents(
         set armed_at = now(), completed_at = null, throttle_notified = false, updated_at = now()
         where workspace_id = ${workspaceId} and task_id = ${taskId}`,
     );
-    await syncMcpEventSubscriptions(scoped, workspaceId, taskId);
+    await syncEventSubscriptions(scoped, workspaceId, taskId);
   });
 }
 
 /**
- * Have the subscription pump look at an automation's MCP streams now, after
- * it was paused, resumed or deleted, so a stream nothing wants is ended at
- * once instead of at its next poll or refresh.
+ * Have the pumps look at an automation's MCP streams and source feeds now,
+ * after it was paused, resumed or deleted, so a stream nothing wants is ended
+ * at once and a feed starts reading as soon as an automation listens again.
  */
-export async function wakeScheduledTaskMcpEventSubscriptions(
+export async function wakeScheduledTaskEventSubscriptions(
   db: Database,
   workspaceId: string,
   taskId: string,
 ): Promise<void> {
   await withWorkspaceRls(db, workspaceId, (scoped) =>
-    syncMcpEventSubscriptions(scoped, workspaceId, taskId),
+    syncEventSubscriptions(scoped, workspaceId, taskId),
   );
 }
 
@@ -1302,6 +1359,72 @@ export async function setEventTriggerStatus(
         ),
       ),
   );
+}
+
+/** An automation whose trigger changed state because its source or stream did. */
+export type EventTriggerNotice = {
+  taskId: string;
+  taskName: string;
+  /** The chat the owner opens from the notice; null when the automation never ran. */
+  sessionId: string | null;
+};
+
+/**
+ * Block (or unblock) every trigger listening on one stream of a source (the
+ * empty stream key is every trigger of a source without streams), with a
+ * plain-language reason. Returns the automations whose triggers changed state
+ * now, so the owner is told once per episode.
+ */
+export async function setEventStreamTriggerStatus(
+  db: Database,
+  workspaceId: string,
+  stream: { sourceId: string; streamKey: string },
+  status: "active" | "blocked",
+  reason: string | null,
+): Promise<EventTriggerNotice[]> {
+  const statusReason = status === "active" ? null : (reason ?? "Blocked").slice(0, 500);
+  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const changed = await rawRows<{ task_id: string; was: string }>(
+      scoped,
+      sql`with previous as (
+          select id, status from event_triggers
+          where workspace_id = ${workspaceId} and source_id = ${stream.sourceId}
+            and stream_key = ${stream.streamKey} and status <> 'disabled'
+          for update
+        )
+        update event_triggers trigger
+        set status = ${status}, status_reason = ${statusReason}, updated_at = now()
+        from previous
+        where trigger.id = previous.id
+          and (trigger.status <> ${status} or trigger.status_reason is distinct from ${statusReason})
+        returning trigger.task_id, previous.status as was`,
+    );
+    const transitioned = [
+      ...new Set(changed.filter((row) => row.was !== status).map((row) => row.task_id)),
+    ];
+    if (transitioned.length === 0) return [];
+    const tasks = await rawRows<{ id: string; name: string; session_id: string | null }>(
+      scoped,
+      sql`select task.id, task.name,
+          coalesce(task.reusable_session_id, (
+            select run.session_id from scheduled_task_runs run
+            where run.workspace_id = task.workspace_id and run.task_id = task.id
+              and run.session_id is not null
+            order by run.created_at desc limit 1)) as session_id
+        from scheduled_tasks task
+        where task.workspace_id = ${workspaceId} and task.deleted_at is null
+          and task.id in (${sql.join(
+            transitioned.map((taskId) => sql`${taskId}::uuid`),
+            sql`, `,
+          )})
+        order by task.id`,
+    );
+    return tasks.map((task) => ({
+      taskId: task.id,
+      taskName: task.name,
+      sessionId: task.session_id,
+    }));
+  });
 }
 
 /** Identity-only inventory of automations whose inbox is due; every read after it is workspace-scoped. */

@@ -68,7 +68,7 @@ import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch"
 import {
   startEventIntakePrunePump,
   startEventTriggerDispatchPump,
-  startMcpEventSubscriptionPump,
+  startEventSubscriptionPump,
 } from "./event-trigger-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
@@ -659,7 +659,7 @@ export async function startApi(
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
-  const stopMcpEventSubscriptionPump = startMcpEventSubscriptionPump({
+  const stopEventSubscriptionPump = startEventSubscriptionPump({
     db: dbClient.db,
     settings,
     bus,
@@ -746,7 +746,7 @@ export async function startApi(
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
-      await stopMcpEventSubscriptionPump();
+      await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();
       // Write queued presence before the database pool closes.

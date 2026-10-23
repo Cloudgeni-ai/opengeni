@@ -4,10 +4,12 @@ import type { EventOccurrenceToStart } from "@opengeni/db";
 import { signStandardWebhook, type SessionWorkflowClient } from "@opengeni/core";
 import {
   bindAuthorizedGitHubInstallationRepositories,
+  createConnection,
   createDb,
   createOrganizationApiKey,
   createWorkspace,
   deleteGitHubInstallationBinding,
+  encryptEnvironmentValue,
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
@@ -21,7 +23,7 @@ import {
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
-import { pumpDueMcpEventSubscriptions } from "@opengeni/core";
+import { pumpDueEventSourceFeeds, pumpDueMcpEventSubscriptions } from "@opengeni/core";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -48,8 +50,14 @@ const memberPermissions = [
 
 async function fixture(options: {
   enabled: boolean;
-  mcpServers?: Array<{ id: string; name: string; url: string }>;
+  mcpServers?: Array<{
+    id: string;
+    name: string;
+    url: string;
+    connectionRef?: { providerDomain: string; kind: "oauth2"; subjectScope: "subject" };
+  }>;
   github?: { webhookSecret: string; appSlug: string; api: AppDependencies["githubAppApi"] };
+  eventSourceFetch?: typeof fetch;
 }) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Event source fixture') returning id`;
@@ -104,6 +112,7 @@ async function fixture(options: {
     } as unknown as SessionWorkflowClient,
     managedAuth: null,
     ...(options.github ? { githubAppApi: options.github.api } : {}),
+    ...(options.eventSourceFetch ? { eventSourceFetch: options.eventSourceFetch } : {}),
   } as unknown as AppDependencies);
   const source = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -1168,5 +1177,390 @@ describe("GitHub event sources", () => {
     expect(message).toContain("https://ci.example/hooks/github");
     expect(message).toContain("https://opengeni.example/v1/webhooks/github");
     expect(github.setUrls).toEqual([]);
+  });
+});
+
+describe("Gmail event sources", () => {
+  const MAILBOX = "owner@example.com";
+  const TOKEN = "gmail-access-token";
+  const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
+  const GMAIL_MCP = "https://gmailmcp.googleapis.com/mcp/v1";
+
+  type FakeMessage = {
+    id: string;
+    historyId: number;
+    from: string;
+    subject: string;
+    messageId?: string;
+    labels?: string[];
+    deleted?: boolean;
+  };
+
+  /** Gmail's REST API for one mailbox: profile, inbox history and message metadata. */
+  function fakeGmail() {
+    let history = 100;
+    let expiredBefore = 0;
+    let revoked = false;
+    const messages: FakeMessage[] = [];
+    const requests: string[] = [];
+    const reply = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (!url.toString().startsWith(GMAIL)) return reply(404, {});
+      const path = url.pathname.replace("/gmail/v1/users/me", "");
+      requests.push(path);
+      if (revoked || new Headers(init?.headers).get("authorization") !== `Bearer ${TOKEN}`) {
+        return reply(401, { error: { message: "Invalid Credentials", status: "UNAUTHENTICATED" } });
+      }
+      if (path === "/profile") {
+        return reply(200, { emailAddress: MAILBOX, historyId: String(history) });
+      }
+      if (path === "/history") {
+        const start = Number(url.searchParams.get("startHistoryId"));
+        expect(url.searchParams.get("labelId")).toBe("INBOX");
+        expect(url.searchParams.get("historyTypes")).toBe("messageAdded");
+        if (start < expiredBefore) {
+          return reply(404, {
+            error: { message: "Requested entity was not found.", errors: [{ reason: "notFound" }] },
+          });
+        }
+        const added = messages.filter(
+          (message) => message.historyId > start && (message.labels ?? ["INBOX"]).includes("INBOX"),
+        );
+        return reply(200, {
+          history: added.map((message) => ({
+            id: String(message.historyId),
+            messagesAdded: [
+              {
+                message: {
+                  id: message.id,
+                  threadId: `thread-${message.id}`,
+                  labelIds: message.labels ?? ["INBOX", "UNREAD"],
+                },
+              },
+            ],
+          })),
+          historyId: String(history),
+        });
+      }
+      const id = /^\/messages\/([^/]+)$/u.exec(path)?.[1];
+      const message = messages.find((candidate) => candidate.id === id);
+      if (!message || message.deleted) return reply(404, { error: { message: "Not Found" } });
+      expect(url.searchParams.get("format")).toBe("metadata");
+      expect(url.searchParams.getAll("metadataHeaders")).toContain("Message-ID");
+      return reply(200, {
+        id: message.id,
+        threadId: `thread-${message.id}`,
+        labelIds: message.labels ?? ["INBOX", "UNREAD"],
+        snippet: `About ${message.subject}`,
+        internalDate: String(Date.parse("2026-10-20T10:00:00Z") + message.historyId * 1000),
+        payload: {
+          headers: [
+            { name: "From", value: message.from },
+            { name: "To", value: MAILBOX },
+            { name: "Subject", value: message.subject },
+            ...(message.messageId ? [{ name: "Message-ID", value: message.messageId }] : []),
+          ],
+        },
+      });
+    }) as typeof fetch;
+    return {
+      fetch,
+      requests,
+      receive(from: string, subject: string, extra: Partial<FakeMessage> = {}) {
+        history += 1;
+        const message = { id: `msg-${history}`, historyId: history, from, subject, ...extra };
+        messages.push(message);
+        return message;
+      },
+      expireHistory() {
+        expiredBefore = history;
+      },
+      revoke(value: boolean) {
+        revoked = value;
+      },
+    };
+  }
+
+  async function gmailFixture() {
+    const gmail = fakeGmail();
+    const f = await fixture({
+      enabled: true,
+      mcpServers: [
+        {
+          id: "gmail",
+          name: "Gmail",
+          url: GMAIL_MCP,
+          connectionRef: {
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      ],
+      eventSourceFetch: gmail.fetch,
+    });
+    const connect = async (subjectId: string) =>
+      await createConnection(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        subjectId,
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        grantedScopes: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.modify",
+        ],
+        credentialEncrypted: encryptEnvironmentValue(
+          Buffer.from(f.settings.environmentsEncryptionKey!, "base64"),
+          JSON.stringify({ access_token: TOKEN, token_type: "Bearer", mcp_url: GMAIL_MCP }),
+        ),
+        metadata: { gmailEmail: MAILBOX, mcpUrl: GMAIL_MCP },
+        createdBySubjectId: subjectId,
+      });
+    const createSource = async () =>
+      await f.app.request(f.sources, {
+        method: "POST",
+        headers: f.owner.headers,
+        body: JSON.stringify({ kind: "gmail" }),
+      });
+    const started: EventOccurrenceToStart[] = [];
+    const pump = async () => {
+      await shared.admin`update event_source_feeds
+        set next_action_at = now() - interval '1 second', lease_until = null
+        where workspace_id = ${f.workspace.id}`;
+      await pumpDueEventSourceFeeds({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        fetch: gmail.fetch,
+      });
+    };
+    const dispatch = async () => {
+      await makeDue(f.workspace.id);
+      await dispatchDueEventTriggers({
+        db: db.db,
+        settings: f.settings,
+        bus: f.bus,
+        startRun: async (occurrence) => {
+          if (occurrence.workspaceId === f.workspace.id) started.push(occurrence);
+        },
+      });
+    };
+    const feed = async () =>
+      (
+        await shared.admin`select cursor, gap_pending, failures from event_source_feeds
+          where workspace_id = ${f.workspace.id}`
+      )[0];
+    const automation = async (sourceId: string) => {
+      const response = await f.createAutomation(f.owner.headers, {
+        triggers: [
+          {
+            sourceId,
+            eventTypes: ["message.received"],
+            conditions: [
+              { field: "data.from_address", op: "contains", value: "@customer.example" },
+            ],
+          },
+        ],
+      });
+      expect(response.status).toBe(201);
+      return await f.json(response);
+    };
+    const queued = async (taskId: string) =>
+      Number(
+        (
+          await shared.admin`select count(*)::int as count from scheduled_task_event_inbox
+            where task_id = ${taskId}`
+        )[0]!.count,
+      );
+    const events = async (sourceId: string) =>
+      (
+        await f.json(
+          await f.app.request(`${f.sources}/${sourceId}/events`, { headers: f.owner.headers }),
+        )
+      ).events as Array<Record<string, any>>;
+    const task = async (id: string) =>
+      await f.json(await f.app.request(`${f.tasks}/${id}`, { headers: f.owner.headers }));
+    return {
+      ...f,
+      gmail,
+      connect,
+      createSource,
+      pump,
+      dispatch,
+      started,
+      feed,
+      automation,
+      queued,
+      events,
+      task,
+    };
+  }
+
+  test("a source is the owner's own mailbox, read with their Gmail connection", async () => {
+    const f = await gmailFixture();
+    const asService = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.service,
+      body: JSON.stringify({ kind: "gmail" }),
+    });
+    expect(asService.status).toBe(422);
+    const unconnected = await f.createSource();
+    expect(unconnected.status).toBe(422);
+    expect(await unconnected.text()).toContain("Connect your Gmail account first");
+
+    await f.connect(f.owner.subjectId);
+    const created = await f.createSource();
+    expect(created.status).toBe(201);
+    const { source } = await f.json(created);
+    expect(source).toMatchObject({
+      kind: "gmail",
+      name: `Gmail (${MAILBOX})`,
+      visibility: "private",
+      ownerSubjectId: f.owner.subjectId,
+      webhookUrl: null,
+    });
+    const again = await f.json(await f.createSource());
+    expect(again.source.id).toBe(source.id);
+    const shareAttempt = await f.app.request(`${f.sources}/${source.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ visibility: "workspace" }),
+    });
+    expect(shareAttempt.status).toBe(422);
+    const hidden = await f.app.request(`${f.sources}/${source.id}`, { headers: f.other.headers });
+    expect(hidden.status).toBe(404);
+    const { eventTypes } = await f.json(
+      await f.app.request(`${f.sources}/${source.id}/event-types`, { headers: f.owner.headers }),
+    );
+    expect(eventTypes.map((entry: any) => entry.type)).toEqual(["message.received"]);
+
+    // Nothing listens yet, so the mailbox is not read.
+    const before = f.gmail.requests.length;
+    await f.pump();
+    expect(f.gmail.requests.length).toBe(before);
+    expect(await f.feed()).toMatchObject({ cursor: null });
+  });
+
+  test("new inbox mail wakes the automation once; Opengeni's own mail and earlier mail don't", async () => {
+    const f = await gmailFixture();
+    await f.connect(f.owner.subjectId);
+    const { source } = await f.json(await f.createSource());
+    f.gmail.receive("Early <early@customer.example>", "Sent before anyone listened");
+    const automation = await f.automation(source.id);
+
+    // The first read only learns where "now" is.
+    await f.pump();
+    expect(await f.feed()).toMatchObject({ cursor: "101", gap_pending: false });
+    expect(await f.events(source.id)).toHaveLength(0);
+
+    f.gmail.receive("Ada Lovelace <Ada@Customer.example>", "Order 42 is late");
+    f.gmail.receive("Bob <bob@other.example>", "Lunch?");
+    f.gmail.receive("Spam <spam@customer.example>", "Win", { labels: ["SPAM"] });
+    await f.pump();
+    const stored = await f.events(source.id);
+    expect(stored.map((event) => event.subject)).toEqual(["Lunch?", "Order 42 is late"]);
+    expect(stored[1]).toMatchObject({
+      type: "message.received",
+      summary: "Email from Ada Lovelace: Order 42 is late",
+      url: `https://mail.google.com/mail/?authuser=${encodeURIComponent(MAILBOX)}#all/thread-msg-102`,
+      actor: { kind: "person", name: "Ada Lovelace" },
+      data: {
+        mailbox: MAILBOX,
+        from_address: "ada@customer.example",
+        subject: "Order 42 is late",
+        snippet: "About Order 42 is late",
+        labels: ["INBOX", "UNREAD"],
+      },
+    });
+    expect(await f.queued(automation.id)).toBe(1);
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toEqual([automation.id]);
+
+    // Reading again finds nothing new.
+    await f.pump();
+    expect(await f.events(source.id)).toHaveLength(2);
+
+    // Mail Opengeni's own Gmail tools wrote is recorded but fires nothing.
+    f.gmail.receive("Ada Lovelace <ada@customer.example>", "Your summary", {
+      messageId: `<${crypto.randomUUID()}@opengeni.invalid>`,
+    });
+    // A message deleted before it is read is left out and said so.
+    f.gmail.receive("Cy <cy@customer.example>", "Never mind", { deleted: true });
+    await f.pump();
+    const [own] = await f.events(source.id);
+    expect(own).toMatchObject({ subject: "Your summary", actor: { kind: "opengeni" } });
+    expect(await f.queued(automation.id)).toBe(1);
+    const deliveries = (
+      await f.json(
+        await f.app.request(`${f.sources}/${source.id}/deliveries`, { headers: f.owner.headers }),
+      )
+    ).deliveries as Array<Record<string, any>>;
+    expect(deliveries[0]?.reason).toBe("1 message was deleted before Opengeni read it");
+
+    // History Gmail no longer keeps is a gap: reading starts from now.
+    f.gmail.receive("Lost <lost@customer.example>", "Lost");
+    f.gmail.expireHistory();
+    await f.pump();
+    expect(await f.feed()).toMatchObject({ gap_pending: true });
+    f.gmail.receive("Dee <dee@customer.example>", "After the gap");
+    await f.pump();
+    const [latest] = await f.events(source.id);
+    expect(latest).toMatchObject({ subject: "After the gap", gapBefore: true });
+    expect(await f.feed()).toMatchObject({ gap_pending: false });
+
+    // A replayed read fires its mail again.
+    const [read] = (
+      await f.json(
+        await f.app.request(`${f.sources}/${source.id}/deliveries`, { headers: f.owner.headers }),
+      )
+    ).deliveries as Array<Record<string, any>>;
+    const replay = await f.app.request(`${f.sources}/${source.id}/deliveries/${read!.id}/replay`, {
+      method: "POST",
+      headers: f.owner.headers,
+    });
+    expect(replay.status).toBe(201);
+    expect((await f.json(replay)).delivery.eventIds).toHaveLength(1);
+  });
+
+  test("a revoked sign-in blocks the triggers until it clears; pausing stops reading", async () => {
+    const f = await gmailFixture();
+    await f.connect(f.owner.subjectId);
+    const { source } = await f.json(await f.createSource());
+    const automation = await f.automation(source.id);
+    await f.pump();
+
+    f.gmail.revoke(true);
+    await f.pump();
+    const blocked = await f.task(automation.id);
+    expect(blocked.events.triggers[0]).toMatchObject({
+      status: "blocked",
+      statusReason: "Reconnect Gmail to keep its mail coming",
+    });
+
+    f.gmail.revoke(false);
+    await f.pump();
+    expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
+      status: "active",
+      statusReason: null,
+    });
+
+    const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
+      method: "PATCH",
+      headers: f.owner.headers,
+      body: JSON.stringify({ status: "paused" }),
+    });
+    expect(paused.status).toBe(200);
+    await f.pump();
+    expect(await f.feed()).toMatchObject({ cursor: null });
+    const reads = f.gmail.requests.length;
+    await f.pump();
+    expect(f.gmail.requests.length).toBe(reads);
   });
 });

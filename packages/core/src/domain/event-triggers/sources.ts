@@ -42,6 +42,8 @@ import {
   githubSourceEventTypes,
   type GitHubAppWebhookPort,
 } from "./github-source";
+import { gmailDeliveryEvents, gmailEventTypeCatalog } from "./gmail-events";
+import { createGmailEventSource } from "./gmail-source";
 import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
@@ -184,6 +186,15 @@ export async function createEventSourceForViewer(
     const source = await createSlackEventSource({ ...input, name: request.name });
     return { source: eventSourceForClient(source, input.baseUrl) };
   }
+  if (request.kind === "gmail") {
+    const source = await createGmailEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      connectionId: request.connectionId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
   if (request.kind !== "webhook") {
     throw new HTTPException(422, {
       message: `${request.kind} event sources are not available on this deployment yet`,
@@ -307,9 +318,12 @@ export async function updateEventSourceForViewer(input: {
       message: "This source belongs to the workspace, so everyone in it can already use it",
     });
   }
-  if (request.visibility === "workspace" && source.kind === "mcp") {
+  if (request.visibility === "workspace" && (source.kind === "mcp" || source.kind === "gmail")) {
     throw new HTTPException(422, {
-      message: "An MCP source listens with your own sign-in, so it stays private to you",
+      message:
+        source.kind === "gmail"
+          ? "A Gmail source reads your own mailbox, so it stays private to you"
+          : "An MCP source listens with your own sign-in, so it stays private to you",
     });
   }
   if (
@@ -479,6 +493,7 @@ const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set(
   "mcp",
   "github",
   "slack",
+  "gmail",
 ]);
 
 /** Run a stored delivery through intake again; its events fire again even if seen before. */
@@ -511,8 +526,14 @@ export async function replayEventDelivery(input: {
   }
   const receivedAt = new Date();
   let outcome: DeliveryOutcome;
-  if (source.kind === "mcp") {
-    const events = mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt);
+  if (source.kind === "mcp" || source.kind === "gmail") {
+    const events =
+      source.kind === "mcp"
+        ? mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt)
+        : gmailDeliveryEvents(stored.body, receivedAt).map((event) => ({
+            ...boundEvent(event, receivedAt),
+            externalId: null,
+          }));
     if (events.length === 0) {
       throw new HTTPException(409, { message: "This delivery carried no events to replay" });
     }
@@ -642,6 +663,7 @@ export async function listEventSourceTypes(
     return await githubSourceEventTypes(recent, input.githubApp ?? null);
   }
   if (input.source.kind === "slack") return slackEventTypeCatalog();
+  if (input.source.kind === "gmail") return gmailEventTypeCatalog();
   if (input.source.kind === "webhook") {
     return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
   }

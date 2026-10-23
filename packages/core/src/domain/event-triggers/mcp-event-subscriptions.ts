@@ -1,10 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
-import {
-  NOTIFICATION_SUBTITLE_MAX_CHARS,
-  SessionNotificationPostedPayload,
-  type EventDelivery,
-} from "@opengeni/contracts";
+import type { EventDelivery } from "@opengeni/contracts";
 import {
   claimMcpEventSubscription,
   decryptEnvironmentValue,
@@ -19,15 +15,14 @@ import {
   recordEventDelivery,
   recordMcpEventDelivery,
   recordMcpEventGap,
-  setMcpEventStreamTriggerStatus,
+  setEventStreamTriggerStatus,
   setMcpEventSubscriptionServerId,
   wakeMcpEventSubscription,
   type EventSourceRecord,
   type McpEventSubscriptionRecord,
-  type McpEventTriggerNotice,
   type StoredEventInput,
 } from "@opengeni/db";
-import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { McpStreamableHttpClient } from "../mcp-streamable-http-client";
 import {
@@ -55,6 +50,7 @@ import {
 } from "./mcp-events-protocol";
 import { eventMatchesTrigger } from "./matching";
 import { boundEvent, firstText, parseEventTime, type NormalizedEventInput } from "./normalize";
+import { postTriggerNotices } from "./trigger-notices";
 import { generateStandardWebhookSecret, verifyStandardWebhook } from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
 
@@ -159,50 +155,6 @@ export function mcpDeliveryEvents(
   return read.kind === "event"
     ? storedOccurrences([read.occurrence], receivedAt, { refire: true, streamKey })
     : [];
-}
-
-function triggerNoticeKey(taskId: string): string {
-  return `automation-trigger-${taskId}`;
-}
-
-function clip(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
-}
-
-async function postTriggerNotices(
-  deps: McpEventSubscriptionPumpDeps,
-  workspaceId: string,
-  notices: McpEventTriggerNotice[],
-  change: { blocked: true; reason: string } | { blocked: false },
-): Promise<void> {
-  for (const notice of notices) {
-    if (!notice.sessionId) continue;
-    const key = triggerNoticeKey(notice.taskId);
-    const event = change.blocked
-      ? {
-          type: "session.notification.posted",
-          payload: SessionNotificationPostedPayload.parse({
-            key,
-            title: "Automation stopped receiving events",
-            subtitle: clip(notice.taskName.trim() || "Automation", NOTIFICATION_SUBTITLE_MAX_CHARS),
-            body: `${change.reason}. Opengeni keeps trying every 15 minutes and the automation picks up again once this is fixed.`,
-            urgency: "normal",
-            replaced: false,
-          }),
-        }
-      : { type: "session.notification.withdrawn", payload: { key } };
-    try {
-      await appendAndPublishEvents(deps.db, deps.bus, workspaceId, notice.sessionId, [
-        event,
-      ] as Parameters<typeof appendAndPublishEvents>[4]);
-    } catch (error) {
-      // The automation page still shows the trigger's state and reason.
-      deps.observability?.warn("Automation trigger notice was not posted", {
-        taskId: notice.taskId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
 }
 
 /** A refusal a person has to fix: the triggers are blocked with this reason. */
@@ -450,7 +402,7 @@ async function block(
   subscription: McpEventSubscriptionRecord,
   reason: string,
 ): Promise<void> {
-  const notices = await setMcpEventStreamTriggerStatus(
+  const notices = await setEventStreamTriggerStatus(
     deps.db,
     subscription.workspaceId,
     { sourceId: subscription.sourceId, streamKey: subscription.streamKey },
@@ -493,7 +445,7 @@ export async function runMcpEventSubscriptionStep(
       ...outcome,
       outcome: { kind: "success" },
     });
-    const notices = await setMcpEventStreamTriggerStatus(
+    const notices = await setEventStreamTriggerStatus(
       deps.db,
       workspaceId,
       { sourceId: subscription.sourceId, streamKey: subscription.streamKey },

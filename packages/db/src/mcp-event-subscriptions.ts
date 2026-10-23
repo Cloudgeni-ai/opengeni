@@ -1,5 +1,6 @@
-import { and, eq, sql, type SQL } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { automationsListenTo } from "./event-trigger-listening";
 import {
   recordEventDeliveryInTransaction,
   type RecordEventDeliveryInput,
@@ -67,29 +68,6 @@ function mapSubscription(row: SubscriptionRow): McpEventSubscriptionRecord {
   };
 }
 
-/**
- * Whether a runnable automation still wants a subscription's stream: an
- * active or blocked trigger (a blocked one waits for the subscription to
- * recover) on an active, undeleted, unfinished automation whose owner may use
- * the active source.
- */
-function streamWanted(workspaceId: string, sourceId: SQL, streamKey: SQL): SQL {
-  return sql`exists (
-    select 1 from event_triggers trigger
-    join scheduled_tasks task
-      on task.id = trigger.task_id and task.workspace_id = trigger.workspace_id
-    join scheduled_task_event_settings settings
-      on settings.task_id = trigger.task_id and settings.workspace_id = trigger.workspace_id
-    join event_sources source
-      on source.id = trigger.source_id and source.workspace_id = trigger.workspace_id
-    where trigger.workspace_id = ${workspaceId} and trigger.source_id = ${sourceId}
-      and trigger.stream_key = ${streamKey} and trigger.status in ('active', 'blocked')
-      and task.status = 'active' and task.deleted_at is null and settings.completed_at is null
-      and source.status = 'active'
-      and (source.visibility = 'workspace' or source.owner_subject_id is null
-        or source.owner_subject_id = task.owner_subject_id))`;
-}
-
 /** Identity-only inventory of subscriptions whose next step is due; every read after it is workspace-scoped. */
 export async function listDueMcpEventSubscriptions(
   db: Database,
@@ -137,7 +115,7 @@ export async function claimMcpEventSubscription(
       if (!row) return null;
       const [wanted] = await rawRows<{ wanted: boolean }>(
         tx,
-        sql`select ${streamWanted(workspaceId, sql`${row.sourceId}::uuid`, sql`${row.streamKey}`)} as wanted`,
+        sql`select ${automationsListenTo(workspaceId, sql`${row.sourceId}::uuid`, sql`${row.streamKey}`)} as wanted`,
       );
       return { subscription: mapSubscription(row), wanted: wanted?.wanted === true };
     }),
@@ -481,76 +459,11 @@ export async function wakeMcpEventSubscription(
         where subscription.workspace_id = ${workspaceId} and subscription.id = ${subscriptionId}
           ${
             options.onlyIfUnwanted
-              ? sql`and not ${streamWanted(workspaceId, sql`subscription.source_id`, sql`subscription.stream_key`)}`
+              ? sql`and not ${automationsListenTo(workspaceId, sql`subscription.source_id`, sql`subscription.stream_key`)}`
               : sql``
           }`,
     ),
   );
-}
-
-/** An automation whose trigger changed state because of its subscription. */
-export type McpEventTriggerNotice = {
-  taskId: string;
-  taskName: string;
-  /** The chat the owner opens from the notice; null when the automation never ran. */
-  sessionId: string | null;
-};
-
-/**
- * Block (or unblock) every trigger listening on a subscription's stream, with
- * a plain-language reason. Returns the automations whose triggers changed
- * state now, so the owner is told once per episode.
- */
-export async function setMcpEventStreamTriggerStatus(
-  db: Database,
-  workspaceId: string,
-  stream: { sourceId: string; streamKey: string },
-  status: "active" | "blocked",
-  reason: string | null,
-): Promise<McpEventTriggerNotice[]> {
-  const statusReason = status === "active" ? null : (reason ?? "Blocked").slice(0, 500);
-  return await withWorkspaceRls(db, workspaceId, async (scoped) => {
-    const changed = await rawRows<{ task_id: string; was: string }>(
-      scoped,
-      sql`with previous as (
-          select id, status from event_triggers
-          where workspace_id = ${workspaceId} and source_id = ${stream.sourceId}
-            and stream_key = ${stream.streamKey} and status <> 'disabled'
-          for update
-        )
-        update event_triggers trigger
-        set status = ${status}, status_reason = ${statusReason}, updated_at = now()
-        from previous
-        where trigger.id = previous.id
-          and (trigger.status <> ${status} or trigger.status_reason is distinct from ${statusReason})
-        returning trigger.task_id, previous.status as was`,
-    );
-    const transitioned = [
-      ...new Set(changed.filter((row) => row.was !== status).map((row) => row.task_id)),
-    ];
-    if (transitioned.length === 0) return [];
-    const tasks = await rawRows<{ id: string; name: string; session_id: string | null }>(
-      scoped,
-      sql`select task.id, task.name,
-          coalesce(task.reusable_session_id, (
-            select run.session_id from scheduled_task_runs run
-            where run.workspace_id = task.workspace_id and run.task_id = task.id
-              and run.session_id is not null
-            order by run.created_at desc limit 1)) as session_id
-        from scheduled_tasks task
-        where task.workspace_id = ${workspaceId} and task.deleted_at is null
-          and task.id in (${sql.join(
-            transitioned.map((taskId) => sql`${taskId}::uuid`),
-            sql`, `,
-          )})
-        order by task.id`,
-    );
-    return tasks.map((task) => ({
-      taskId: task.id,
-      taskName: task.name,
-      sessionId: task.session_id,
-    }));
-  });
 }
 
 /** The streams of a source that automations listen on for one event name. */

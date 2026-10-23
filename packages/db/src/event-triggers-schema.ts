@@ -266,3 +266,21 @@ export const mcpEventSubscriptions = pgTable(
     route: uniqueIndex("mcp_event_subscriptions_route_id_key").on(table.routeId),
   }),
 );
+
+// Migration 0935: the reading position of a source whose events Opengeni
+// reads from the app's change history (Gmail), one per source.
+export const eventSourceFeeds = pgTable("event_source_feeds", {
+  sourceId: uuid("source_id").primaryKey(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  cursor: text("cursor"),
+  gapPending: boolean("gap_pending").notNull().default(false),
+  nextActionAt: timestamp("next_action_at", { withTimezone: true }).notNull().defaultNow(),
+  leaseUntil: timestamp("lease_until", { withTimezone: true }),
+  failures: integer("failures").notNull().default(0),
+  failingSince: timestamp("failing_since", { withTimezone: true }),
+  lastError: text("last_error"),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
