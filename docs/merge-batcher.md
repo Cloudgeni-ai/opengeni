@@ -1,5 +1,62 @@
 # Portable merge batcher
 
+## Active child diagnostics
+
+The active CLI emits `batcher-child-failure/v1` on stderr, retaining bounded,
+credential-redacted error name, message, stack, phase, operation and HTTP status.
+The complete JSON record fits within 6144 bytes; truncation is explicit. Atomic
+push errors retain their unsafe phase through outer controller handling. This is
+diagnostic evidence, never permission to replay a transaction: existing CAS,
+unknown-effect reconciliation, admission and candidate-CI retry rules remain
+authoritative. Supervisors must preserve unsafe holds rather than interpreting
+every nonzero child exit as an ordinary retry.
+
+The supervised active child must emit a valid structured failure record. Missing,
+malformed or signal-terminated output is an unknown outcome and stops the writer;
+a valid unclassified record uses backoff and stops after three consecutive failures.
+Success or a classified provider failure resets that streak, not other local errors.
+Known pre-spawn rejections may back off; ambiguous starts and CAS outcomes stop.
+
+The deployment supervisor's local checkpoint retains counts, backoff and stop
+latches. A surviving in-flight or outcome-unknown checkpoint holds without spawning
+a writer. Complete checkpoint loss loses this local policy state; cold-start remote
+reconciliation is mandatory but does not recreate failure history. A supervisor
+STOP is not a GitHub Manual-rules restoration. The reviewed operator OFF procedure
+and rules restoration are separately required for a durable operational stop.
+
+An explicitly authorized operator START creates a new control generation and resets
+the **settled** failure streak, backoff and local stop latch from the preceding
+generation. This is an operator reset, not an automatic retry. Surviving in-flight
+or outcome-unknown checkpoint phases remain fail-closed across generations; START
+does not authorize clearing them or replaying an unknown write.
+
+### Evidenced operator OFF time in latency accounting
+
+`BATCHER_OPERATOR_OFF_EVIDENCE` optionally supplies bounded noncredential JSON with
+schema `batcher-operator-off/v1`, repository/branchPrefix/mode/serviceUid, consecutive
+provider control versions (`version`, `at`, `state`, `generation`) and proven drain
+receipts (`at`, `controlVersion`, `controlGeneration`, `serviceUid`, `manualZero`,
+`writerExited`, `stateStable`, `forced`). This is trusted operator input, not an
+authentication mechanism: retain the provider version responses and actual drained
+STOP receipts, verify the service identity, then approve the configuration change.
+Untrusted PR/comment content must never populate it.
+
+Credit begins only at successful non-forced drain completion and ends at the first
+subsequent START control version. Gaps, invalid scope, future/reversed timestamps,
+unproven exits and intervals longer than seven days are refused; open STOP intervals
+earn no credit. No duration is inferred from missing observations. The journal adds
+evidence-digest-bound intervals to stage records without altering raw timestamps.
+Intervals are clipped to each exact ready-binding/first-CI-start window and unioned
+with evidenced main-capacity waits, avoiding overlap or duplicate credit. Raw p95 is
+still reported and genuine residual slowness still triggers the breaker. Credits
+survive ordinary journal/ledger reconstruction; no state file is edited by hand.
+
+No historical OFF duration is assumed merely because the service is stopped now.
+Without configured evidence or retained credits, the original conservative raw
+latency remains. Supervisors must explicitly forward the optional setting to the
+active child; adding evidence requires a separately reviewed runtime configuration
+update, not an implicit history reset.
+
 ## Explicit first activation initialization
 
 Active mode requires a present, operator-initialized `refs/heads/batcher-state`.
@@ -546,10 +603,15 @@ unmeasured stages remain null. Active writes checkpoint samples and missing-run
 state in the durable Git ledger. Shadow-ci includes them in its next publication;
 strict read-only shadow only retains local evidence and never writes remote state.
 
-Telemetry reports the nearest-rank rolling 24-hour p95 from each exact
+Telemetry reports the nearest-rank rolling two-hour p95 from each exact
 head/ready-event's **first measured provider CI start**, deduplicating reruns and
 bisection candidates. More than 1,800 seconds emits a stop signal and holds new
-batch work/landing; reconciliation and observation continue. stage.json reports
+batch work, but an already-published trusted-green candidate can drain through
+all ordinary landing guards. Capacity-induced latency must not deadlock a tested
+candidate. Red/unknown results, new publication and retries remain held;
+reconciliation and observation continue. The window is based on the first CI
+start; an aged-out sample is unknown, not newly healthy. Historical stage data is
+retained, not reset. stage.json reports raw and capacity/OFF-adjusted p95, windowSeconds,
 sample count, coverageSince and completeWindow alongside the signal. This is a
 sample of heads that reached CI, not a latency claim for unknown/unstarted work
 or a completeness claim about all historical PRs. Small/partial samples are
@@ -557,6 +619,18 @@ explicit; missing history is unknown, never reset to healthy. Restart reloads th
 retained journal or Git samples; cache loss cannot fabricate historical timings.
 Observation gaps reset coverageSince rather than turning elapsed downtime into
 a complete window; retained real latency samples can still trigger the stop signal.
+Only bounded observed main-capacity holds are deducted. Both consecutive complete
+observations must show main demand alone preventing admission, the same main run
+and capacity configuration, and the same ready binding; the gap may not exceed
+five minutes. The normal planner must also select that head for publication with
+only the main-capacity gate removed; occupied batch slots, conflicts or other
+admission holds do not earn credit. The intervals describe controller backpressure, not provider queue
+time or proof of uninterrupted provider activity. Overlaps are unioned and clipped
+to readiness through the first CI start. Unknown scans, changed bindings, other-work
+capacity, and long observation gaps receive no credit. Credits persist with stage
+samples; old samples without credits remain raw. There is no historical backfill
+or hand-edited ledger recovery. The current slow sample therefore remains a hold
+until it leaves the recent window unless genuine recorded credits already exist.
 Use separate writable output directories for replicas; remote Git, not the local
 journal, fences their mutations. External historical reruns can be observed after
 the 15-minute cache window plus a rotating scan cycle (ceil(historical refs / 8)

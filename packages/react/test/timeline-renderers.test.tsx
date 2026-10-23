@@ -491,6 +491,32 @@ describe("structured human-input history", () => {
     await r.unmount();
   });
 
+  test("says an agent answered when the sub-session's parent answered first", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-agent",
+            respondedByKind: "agent_attempt",
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "region", values: ["eu-north"] }],
+            },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+
+    const text =
+      r.container.querySelector('[data-human-input-history="request-agent"]')?.textContent ?? "";
+    expect(text).toContain("Agent answered");
+    expect(text).not.toContain("You answered");
+    expect(text).toContain("eu-north");
+    await r.unmount();
+  });
+
   test("keeps fallback multi-answer labels visible when the request is outside the page", async () => {
     timelineSequence = 0;
     const r = await renderComponent(

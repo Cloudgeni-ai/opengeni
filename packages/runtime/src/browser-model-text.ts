@@ -386,10 +386,21 @@ export function browserSessionLine(session: {
   }`;
 }
 
-type AttachedProfileText = { id: string; name: string; profileLabel?: string | undefined };
+type AttachedProfileText = {
+  id: string;
+  name: string;
+  profileLabel?: string | undefined;
+  machine?: string | undefined;
+  onThisMachine?: boolean | undefined;
+};
 
+/** A profile with the computer it is on, so the agent can tell when it landed
+ * on another machine than the one this session runs on. */
 function attachedProfileText(profile: AttachedProfileText): string {
-  return `${quoted(profile.name)}${profile.profileLabel ? ` (${profile.profileLabel})` : ""} deviceId ${profile.id}`;
+  const machine = profile.machine
+    ? ` on ${quoted(profile.machine)}${profile.onThisMachine ? " (this session's machine)" : ""}`
+    : "";
+  return `${quoted(profile.name)}${profile.profileLabel ? ` (${profile.profileLabel})` : ""}${machine} deviceId ${profile.id}`;
 }
 
 export function browserOpenText(output: {

@@ -169,6 +169,10 @@ export type AttachedBrowserDevice = {
 
 export type AttachedBrowserBridge = {
   enrollmentId: string;
+  /** The Connected Machine this bridge runs on; null when unknown. */
+  sandboxId: string | null;
+  /** That machine's plain name; null when unknown. */
+  machineName: string | null;
   state: "online" | "offline";
   bridgeGeneration: string;
   inventoryRevision: number;
@@ -775,6 +779,8 @@ export type InteractionSemanticSnapshot = {
   roots: InteractionSemanticNode[];
   nodeCount: number;
   incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+  /** No elements are listed: the session reads them with the native window-state tool. */
+  readByNativeTools?: true | undefined;
 };
 
 export type InteractionSemanticDiff = {

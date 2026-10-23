@@ -87,6 +87,7 @@ import {
 } from "../timeline/message-sender";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
+import { copySelectionWithoutPageStyles } from "../lib/selection-clipboard";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
@@ -2632,6 +2633,11 @@ export function MessageTimeline({
                           tabIndex={-1}
                           onScroll={onScroll}
                           onWheel={onWheel}
+                          // Copy selected text without the timeline's colours and
+                          // backgrounds; the browser would otherwise paste them along.
+                          onCopy={(event) =>
+                            copySelectionWithoutPageStyles(event, event.currentTarget)
+                          }
                           onTouchStart={(event) => {
                             stopSettlement();
                             const touch = event.touches.length === 1 ? event.touches[0] : undefined;
@@ -4483,7 +4489,9 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
   );
   const settledLabel =
     item.response.outcome === "answered"
-      ? t("messageTimeline.youAnswered")
+      ? item.answeredByAgent
+        ? t("messageTimeline.agentAnswered")
+        : t("messageTimeline.youAnswered")
       : item.response.outcome === "skipped"
         ? t("messageTimeline.skipped")
         : item.response.outcome === "expired"

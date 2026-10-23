@@ -171,7 +171,12 @@ export class GitHubActiveExecutor implements Executor {
     try {
       await this.writer.transaction(updates);
     } catch (error) {
-      if (await this.committed(updates)) return;
+      try {
+        if (await this.committed(updates)) return;
+      } catch {
+        // Verification failure cannot replace the original ambiguous push outcome.
+        throw error;
+      }
       // An unreadable/ambiguous remote is never retried inside this operation.
       // The next complete observation reconstructs refs and durable intentions.
       throw error;

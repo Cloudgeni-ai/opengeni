@@ -98,6 +98,7 @@ import {
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
 import { BrowserWindowParking } from "./window-parking";
+import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 // Attached Chrome without file access receives upload bytes over its
@@ -391,6 +392,9 @@ type TargetState = {
   frameGeneration: string;
   accessibility: CdpAccessibilitySnapshot | null;
   dialog: BrowserDialog | null;
+  /** Hit-target guards a JavaScript dialog kept from being read back. Page
+   * scripts are paused under the dialog, so they are removed once it closes. */
+  unsettledHitTargetGuards: HitTargetGuard[];
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
@@ -487,9 +491,25 @@ export type AgentBrowserDriverOptions = {
    * creates page targets. Remote and non-Chromium CDP engines commonly scope
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
-  /** The browser belongs to the person (attached Chrome): an explicit end
-   * closes the tabs this session opened that are still blank. */
-  closeUnusedOwnedTabsOnEnd?: boolean;
+  /** The browser belongs to the person (attached Chrome). The driver tracks
+   * the tabs this session opens there, and closing the driver (however the
+   * session's runtime goes away) closes the ones still blank. A runtime that
+   * continues a session continues in the tab the earlier one was using. */
+  ownedTabs?: {
+    /** What an earlier runtime of this session left in the browser. */
+    previous?: OwnedTabsState | null;
+    /** Called whenever the tracked tabs change, before anything else can. */
+    onChange?: (tabs: OwnedTabsState) => void;
+    /** Called once the driver closed; `tabsSettled` is false when a blank
+     * tab it opened could not be closed (or is still in use elsewhere). */
+    onClosed?: (tabsSettled: boolean) => void | Promise<void>;
+    /** A blank tab this session opened that another session is using now
+     * stays open; whoever cleans up later closes it once it is free. */
+    inUseElsewhere?: (targetId: string) => boolean;
+    /** How long a continuing runtime waits for the earlier tab to answer
+     * before it opens a new one instead. */
+    rebindTimeoutMs?: number;
+  };
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
   focusEmulation?: boolean;
@@ -584,10 +604,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
-  private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  private readonly ownedTabs: AgentBrowserDriverOptions["ownedTabs"] | null;
   private readonly navigationCommitTimeoutMs: number;
   /** Tabs this session created, in a browser it does not own. */
   private readonly createdTargetIds = new Set<string>();
+  /** Blank tabs this session closed itself, most recent last. */
+  private readonly closedBlankTargetIds = new Set<string>();
+  /** The tab an earlier runtime of this session was using; start continues
+   * in it rather than opening another. */
+  private rebindTargetId: string | null = null;
+  private reportedOwnedTabs = "";
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
    * working without it instead of each paying the refusal. */
@@ -689,7 +715,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? validateHeadlessSessionCookies(options.headlessSessionCookies)
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
-    this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
+    this.ownedTabs = options.ownedTabs ?? null;
+    if (this.ownedTabs?.previous) {
+      for (const targetId of this.ownedTabs.previous.created) this.createdTargetIds.add(targetId);
+      for (const targetId of this.ownedTabs.previous.closedBlank)
+        this.closedBlankTargetIds.add(targetId);
+      this.rebindTargetId = this.ownedTabs.previous.selected;
+    }
     this.navigationCommitTimeoutMs =
       options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
     this.tabControl = options.tabControl ?? true;
@@ -781,6 +813,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       await this.windowParking?.presentNow();
       if (deferNavigation) connection.assertNavigable?.(url);
+      // A session continuing in the person's browser (after an idle release
+      // or a controller restart) carries on in the tab it was using.
+      const rebound = deferNavigation ? null : await this.rebindPreviousTarget(connection);
+      if (rebound) return rebound;
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
         { url: "about:blank", background: true, ...this.contextScope() },
@@ -789,13 +825,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof created.targetId !== "string" || !created.targetId) {
         throw new Error("browser did not return its initial page target");
       }
-      if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(created.targetId);
+      this.recordCreatedTarget(created.targetId);
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
       try {
         target = await this.waitForCreatedTargetInfo(connection, created.targetId);
         this.selectedTargetId = target.targetId;
+        this.ownedTabsChanged();
         if (deferNavigation)
           await this.navigate(await this.ensureTargetState(target), url, options);
         this.windowParking?.arm();
@@ -924,12 +961,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
-    if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(result.targetId);
+    this.recordCreatedTarget(result.targetId);
     const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
+    this.ownedTabsChanged();
     if (deferNavigation) {
       try {
         await this.navigate(createdState, url, options);
@@ -941,6 +979,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (!isNavigationTimeout(error)) {
           await this.discardCreatedTarget(connection, result.targetId);
           if (this.selectedTargetId === result.targetId) this.selectedTargetId = previousSelection;
+          this.ownedTabsChanged();
         }
         throw error;
       }
@@ -953,14 +992,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     this.removeState(targetId);
-    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     try {
       await this.closeTargetAndSettle(connection, targetId);
+      this.createdTargetIds.delete(targetId);
     } catch {
       // Best effort: the tab may already be gone, and the original failure
-      // is what the caller needs to see.
+      // is what the caller needs to see. A tab still open stays recorded, so
+      // the session's cleanup closes it while it is blank.
     }
+    this.ownedTabsChanged();
   }
 
   /** A managed Chrome opens its own new-tab page at launch beside the page
@@ -1000,6 +1041,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
+    this.ownedTabsChanged();
     return await this.observe(targetId);
   }
 
@@ -1016,30 +1058,143 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    this.ownedTabsChanged();
     return await this.listTargets();
   }
 
   /** Close the tabs this session opened in the person's browser that are
-   * still blank, so ending the session does not leave empty tabs behind.
-   * Tabs that show a page stay: the person may still want what the agent
-   * left there. */
-  async closeUnusedOwnedTabs(): Promise<void> {
-    if (!this.closeUnusedOwnedTabsOnEnd || this.createdTargetIds.size === 0 || !this.connection)
-      return;
+   * still blank, so a session never leaves empty tabs behind, however its
+   * runtime goes away. Tabs that show a page stay: the person may still want
+   * what the agent left there. Never touches a tab the session did not open.
+   * Returns whether every such tab is closed. */
+  async closeUnusedOwnedTabs(): Promise<boolean> {
+    if (!this.ownedTabs || this.createdTargetIds.size === 0) return true;
     const connection = this.connection;
-    const infos = await this.targetInfos(connection);
-    for (const info of infos) {
-      if (!this.createdTargetIds.has(info.targetId) || !isBlankTabUrl(info.url)) continue;
-      try {
-        await this.closeTargetAndSettle(connection, info.targetId);
-      } catch {
-        // Best effort per tab; the session end itself still proceeds.
+    if (!connection) return false;
+    let infos: TargetInfo[];
+    try {
+      infos = await this.targetInfos(connection);
+    } catch {
+      return false;
+    }
+    let settled = true;
+    for (const targetId of [...this.createdTargetIds]) {
+      const info = infos.find((candidate) => candidate.targetId === targetId);
+      if (!info) {
+        // Already closed, by the person or by the browser.
+        this.createdTargetIds.delete(targetId);
+        continue;
       }
-      this.createdTargetIds.delete(info.targetId);
+      if (!isBlankTabUrl(info.url)) continue;
+      if (this.ownedTabs.inUseElsewhere?.(targetId)) {
+        settled = false;
+        continue;
+      }
+      try {
+        await this.closeTargetAndSettle(connection, targetId);
+        this.removeState(targetId);
+        this.createdTargetIds.delete(targetId);
+        this.closedBlankTargetIds.delete(targetId);
+        this.closedBlankTargetIds.add(targetId);
+      } catch {
+        // Kept, so a later cleanup closes it.
+        settled = false;
+      }
+    }
+    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
+      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
+    }
+    this.ownedTabsChanged();
+    return settled;
+  }
+
+  /** Continue in the tab an earlier runtime of this session was using when
+   * it is still open and answers promptly; null when a new tab is needed
+   * instead. A tab whose page does not answer (a dialog the page opened while
+   * no agent held the browser blocks it, and only the person can answer that
+   * one) is left as it is, rather than holding the session's return. */
+  private async rebindPreviousTarget(
+    connection: BrowserCdpConnection,
+  ): Promise<BrowserObservationValue | null> {
+    const targetId = this.rebindTargetId;
+    this.rebindTargetId = null;
+    if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => {
+      deadline = setTimeout(
+        () => resolve(null),
+        this.ownedTabs?.rebindTimeoutMs ?? REBIND_TIMEOUT_MS,
+      );
+      deadline.unref?.();
+    });
+    let abandoned = false;
+    const rebind = (async () => {
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      if (abandoned || !info || !isVisibleTarget(info)) return null;
+      this.selectedTargetId = targetId;
+      return await this.observe(targetId);
+    })().catch(() => null);
+    try {
+      const observation = await Promise.race([rebind, expired]);
+      if (observation) {
+        this.windowParking?.arm();
+        this.ownedTabsChanged();
+        return observation;
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    // A tab that cannot be read now (it closed meanwhile, Chrome will no
+    // longer let the extension control it, or its page is not answering) is
+    // not worth failing the session for: open a new one, as a new session
+    // would. A read still waiting on the tab ends by itself.
+    abandoned = true;
+    if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    if (!this.attaching.has(targetId)) this.removeState(targetId);
+    return null;
+  }
+
+  private recordCreatedTarget(targetId: string): void {
+    if (!this.ownedTabs) return;
+    this.createdTargetIds.add(targetId);
+    this.ownedTabsChanged();
+  }
+
+  /** Report the tracked tabs to the owner's ledger when they changed. */
+  private ownedTabsChanged(): void {
+    const onChange = this.ownedTabs?.onChange;
+    if (!onChange) return;
+    const tabs: OwnedTabsState = {
+      created: [...this.createdTargetIds],
+      selected: this.selectedTargetId,
+      closedBlank: [...this.closedBlankTargetIds],
+    };
+    const serialized = JSON.stringify(tabs);
+    if (serialized === this.reportedOwnedTabs) return;
+    this.reportedOwnedTabs = serialized;
+    try {
+      onChange(tabs);
+    } catch {
+      // Recording is the owner's concern; it never fails browser work.
     }
   }
 
   async close(): Promise<void> {
+    // In the person's own browser, the empty tabs this session opened go
+    // with it, whatever ends the runtime. Best effort: closing never fails
+    // because a tab could not be closed.
+    const tabsSettled =
+      this.ownedTabs && this.started ? await this.closeUnusedOwnedTabs().catch(() => false) : true;
+    try {
+      await this.closeDriver();
+    } finally {
+      await this.ownedTabs?.onClosed?.(tabsSettled);
+    }
+  }
+
+  private async closeDriver(): Promise<void> {
     this.windowParking?.close();
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
@@ -1173,18 +1328,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return this.preserveHeadlessSessionCookies;
   }
 
+  /** When the most recent JavaScript dialog still waiting for an answer
+   * opened (epoch milliseconds), or null when none is. Chrome offers a dialog
+   * only to the debugger that was attached when it opened: one attached later
+   * can neither see nor answer it, and the page stays blocked. Letting go of
+   * the browser now would strand it. */
+  openDialogSince(): number | null {
+    let newest: number | null = null;
+    for (const state of this.states.values()) {
+      if (!state.dialog) continue;
+      const openedAt = Date.parse(state.dialog.openedAt);
+      if (Number.isFinite(openedAt) && (newest === null || openedAt > newest)) newest = openedAt;
+    }
+    return newest;
+  }
+
   async target(targetId: string): Promise<BrowserTargetValue | null> {
     const connection = await this.ensureConnection();
     const info = (await this.targetInfos(connection)).find(
       (candidate) => candidate.targetId === targetId,
     );
+    if (!info && this.closedBlankTargetIds.has(targetId))
+      throw this.closedBlankTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
     // event-derived target/document/frame generations authoritative until the
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
-    if (!state.dialog) await this.refreshFrame(state);
+    // A dialog can open just before its event arrives (the person's own
+    // Chrome reports events by polling): a read that meets one reports it.
+    if (!state.dialog) {
+      try {
+        await this.untilDialog(state, async () => await this.refreshFrame(state));
+      } catch (error) {
+        if (!(error instanceof DialogBlockedError)) throw error;
+      }
+    }
     return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
@@ -1740,6 +1920,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             // this action reads the page, ends the batch here: the page
             // cannot answer until the dialog is handled.
             await this.untilDialog(state, async () => {
+              await this.settleUnsettledHitTargetGuards(state);
               if (
                 completedActions > 0 &&
                 command.action.type === "batch" &&
@@ -2654,6 +2835,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
       documentGeneration: documentGeneration(
@@ -4137,7 +4319,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
         if (current !== action.checked)
-          await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+          await this.clickNode(
+            state,
+            node.backendDOMNodeId,
+            "left",
+            1,
+            node.frameId ?? state.frame.id,
+          );
         return;
       }
       case "scroll": {
@@ -4324,7 +4512,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     let clicked = false;
     try {
-      await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+      await this.clickNode(state, node.backendDOMNodeId, "left", 1, frameId);
       clicked = true;
       const event = await Promise.race([chooser, dialog]);
       if (event === "dialog") throw new DialogOpenedSignal("upload control opened a dialog");
@@ -5075,24 +5263,236 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
-    await this.sendActionTarget(
-      state,
-      "Input.dispatchMouseEvent",
-      { type: "mouseMoved", x, y },
-      input,
-    );
-    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+    const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
+    try {
       await this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
-        { type: "mousePressed", x, y, button, clickCount },
+        { type: "mouseMoved", x, y },
         input,
       );
-      await this.sendActionTarget(
+      for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x, y, button, clickCount },
+          input,
+        );
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x, y, button, clickCount },
+          input,
+        );
+      }
+    } catch (error) {
+      // The input already fails or pauses this action (a JavaScript dialog,
+      // an unresponsive tab), and reading the guard back now could wait on
+      // the same page. The next action removes it, and it disarms itself
+      // after a few seconds regardless.
+      if (guard !== null) {
+        guard.stopReports();
+        state.unsettledHitTargetGuards.push(guard);
+      }
+      throw error;
+    }
+    if (guard === null) return;
+    const blocked = await this.settleHitTargetGuard(state, guard, count);
+    if (blocked !== null) {
+      // The pointer did move there, so whatever its arrival did stands, and
+      // the refusal is reported as an unknown outcome.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser element is covered by ${blocked.slice(0, 160)} at its center; the click was not delivered`,
+        true,
+      );
+    }
+  }
+
+  /**
+   * Installs the hit-target guard for one click, before any pointer input, and
+   * returns a handle to it. Only an engine without the guard (Lightpanda, which
+   * has no compositor hit testing to race) clicks unguarded; on Chromium a
+   * guard that cannot be installed refuses the click instead of sending it
+   * unverified. When the target's frame is known the listeners live in an
+   * isolated world, out of page scripts' reach, and also report each press's
+   * verdict as it happens, so the verdict survives the document going away
+   * before it is read back.
+   */
+  private async installHitTargetGuard(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    frameId: string | undefined,
+  ): Promise<HitTargetGuard | null> {
+    if (this.engine === "lightpanda") return null;
+    if (backendDOMNodeId === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "browser node cannot receive pointer input",
+      );
+    }
+    const connection = await this.ensureConnection();
+    const reportSession = this.commandSession(state, "Runtime.addBinding");
+    const token = randomUUID();
+    const verdicts: Array<string | null> = [];
+    let stopReports: () => void = () => undefined;
+    let executionContextId: number | undefined;
+    if (frameId !== undefined) {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
-        "Input.dispatchMouseEvent",
-        { type: "mouseReleased", x, y, button, clickCount },
-        input,
+        "Page.createIsolatedWorld",
+        { frameId, worldName: HIT_TARGET_GUARD_WORLD },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) {
+        throw new Error("CDP did not create an isolated world for the click guard");
+      }
+      executionContextId = world.executionContextId as number;
+      // Exposed only to the guard's isolated world; the page cannot see or
+      // call it. Chrome reports calls without the Runtime domain enabled.
+      await this.sendTarget(state, "Runtime.addBinding", {
+        name: HIT_TARGET_VERDICT_BINDING,
+        executionContextName: HIT_TARGET_GUARD_WORLD,
+      });
+      stopReports = connection.on(
+        "Runtime.bindingCalled",
+        (event) => {
+          if (event.params.name !== HIT_TARGET_VERDICT_BINDING) return;
+          if (typeof event.params.payload !== "string") return;
+          let report: unknown;
+          try {
+            report = JSON.parse(event.params.payload);
+          } catch {
+            return;
+          }
+          if (!isRecord(report) || report.token !== token) return;
+          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+        },
+        reportSession,
+      );
+    }
+    try {
+      const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+        backendNodeId: backendDOMNodeId,
+        ...(executionContextId === undefined ? {} : { executionContextId }),
+      });
+      if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+        throw new InteractionDefiniteDriverError(
+          "locator_not_found",
+          "browser element is no longer present",
+        );
+      }
+      const nodeObjectId = resolved.object.objectId;
+      try {
+        const installed = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+          state,
+          "Runtime.callFunctionOn",
+          {
+            objectId: nodeObjectId,
+            functionDeclaration: HIT_TARGET_GUARD_FUNCTION,
+            arguments: [{ value: token }],
+          },
+        );
+        if (installed.exceptionDetails || !isRecord(installed.result)) {
+          throw new Error("browser click guard could not be installed");
+        }
+        if (typeof installed.result.objectId !== "string") {
+          // The guard function returns null only for a detached element.
+          throw new InteractionDefiniteDriverError(
+            "locator_not_found",
+            "browser element is no longer present",
+          );
+        }
+        return {
+          objectId: installed.result.objectId,
+          reported: executionContextId !== undefined,
+          verdicts,
+          stopReports,
+        };
+      } finally {
+        // Not awaited: CDP runs a session's commands in order, and nothing
+        // waits on the release.
+        void this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
+          () => undefined,
+        );
+      }
+    } catch (error) {
+      stopReports();
+      throw error;
+    }
+  }
+
+  /**
+   * Removes the guard's listeners and returns what it held back, or null when
+   * every press reached the target. When the guarded document is gone before
+   * the readback (the click, a hover effect, a timer or a navigation replaced
+   * or detached it), the verdicts the guard reported as each press happened
+   * decide; without a verdict for every press, and on any other failure, it
+   * is unknown whether the click reached the target, and the error says so.
+   */
+  private async settleHitTargetGuard(
+    state: TargetState,
+    guard: HitTargetGuard,
+    presses: number,
+  ): Promise<string | null> {
+    const unknown = () =>
+      new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "browser click was sent, but whether it reached the element could not be confirmed; check the page before continuing",
+      );
+    let settled: { result?: unknown; exceptionDetails?: unknown };
+    try {
+      settled = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId: guard.objectId,
+          functionDeclaration: "function () { return this.settle(); }",
+          returnByValue: true,
+        },
+      );
+    } catch (error) {
+      if (error instanceof CdpProtocolError && GUARD_DOCUMENT_GONE.test(error.message)) {
+        // Over the extension bridge, the reports the guard sent before its
+        // document went away can still be on their way; take them in first.
+        try {
+          await (await this.ensureConnection()).flushEvents?.();
+        } catch {
+          // The verdicts already in decide, as without a bridge.
+        }
+        guard.stopReports();
+        const blocked = guard.verdicts.find((verdict) => verdict !== null);
+        if (blocked !== undefined) return blocked;
+        if (guard.reported && guard.verdicts.length >= presses) return null;
+        throw unknown();
+      }
+      guard.stopReports();
+      if (!(error instanceof CdpProtocolError)) throw error;
+      throw unknown();
+    }
+    guard.stopReports();
+    void this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
+      () => undefined,
+    );
+    const value = isRecord(settled.result) ? settled.result.value : undefined;
+    if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
+      throw unknown();
+    }
+    return value === null || value === "" ? null : value;
+  }
+
+  /** Removes guards an interrupted click left armed, so they cannot hold back
+   * later input. Best effort: a guard that cannot be reached is gone with its
+   * document or disarms itself shortly. */
+  private async settleUnsettledHitTargetGuards(state: TargetState): Promise<void> {
+    if (state.dialog) return;
+    const guards = state.unsettledHitTargetGuards.splice(0);
+    for (const guard of guards) {
+      await this.sendTarget(state, "Runtime.callFunctionOn", {
+        objectId: guard.objectId,
+        functionDeclaration: "function () { this.settle(); }",
+      }).catch(() => undefined);
+      await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
+        () => undefined,
       );
     }
   }
@@ -5302,6 +5702,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           potentialEffect: true,
         },
       );
+      // Layout that reacts to the scroll, such as a popover that follows its
+      // anchor, catches up on the next frames. Test the hit after it has.
+      await this.callOnNode(state, backendDOMNodeId, SETTLE_FRAMES_FUNCTION, [], {
+        isolatedFrameId: frameId,
+      });
       if (await this.hitsAtCenter(state, backendDOMNodeId)) {
         return await this.centerPoint(state, backendDOMNodeId);
       }
@@ -6400,9 +6805,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (candidate) => candidate.targetId === targetId,
     );
     if (!info || !isVisibleTarget(info)) {
+      if (!info && this.closedBlankTargetIds.has(targetId))
+        throw this.closedBlankTargetError(targetId);
       throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
     }
     return info;
+  }
+
+  /** The session closed its own empty tab when it last let go of the
+   * person's browser: say so, and where to continue. */
+  private closedBlankTargetError(targetId: string): InteractionDefiniteDriverError {
+    const current = this.selectedTargetId;
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
+    );
   }
 
   /** Headed Chromium can acknowledge a background target before its first URL
@@ -6702,6 +7119,11 @@ function tabCrashedError(): InteractionDefiniteDriverError {
   );
 }
 
+/** How long a runtime continuing a session in the person's own browser waits
+ * for the tab the session was using before it opens a new one instead. A
+ * live page answers in well under a second. */
+const REBIND_TIMEOUT_MS = 5_000;
+
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
 
@@ -6735,7 +7157,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
 
 /** A tab with no page: the blank document a new tab starts on (attached
  * Chrome creates it as an empty data URL) or the browser's new-tab page. */
-function isBlankTabUrl(url: string): boolean {
+export function isBlankTabUrl(url: string): boolean {
   return (
     url === "" ||
     url === "about:blank" ||
@@ -7180,30 +7602,162 @@ const HIT_TEST_FUNCTION = `function() {
   return Boolean(hit && owns(element, hit));
 }`;
 
-// Describes the element on top at the target's centre by its nearest
-// labelled ancestor: role (or tag) and accessible label. Text content is
-// read only from non-editable elements and bounded; input values never are.
+// Describes an element by its nearest labelled ancestor: role (or tag) and
+// accessible label. Text content is read only from non-editable elements and
+// bounded; input values never are.
+const DESCRIBE_HELPER = `
+  const describe = (hit) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    let node = hit instanceof Element ? hit : hit && hit.parentElement;
+    if (!(node instanceof Element)) return "another element";
+    const start = node;
+    for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
+      const role = node.getAttribute("role");
+      const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+      if (role || label) {
+        const kind = role || node.tagName.toLowerCase();
+        return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+      }
+      node = node.parentElement;
+    }
+    const editable = start.closest("input, textarea, select, [contenteditable]");
+    const text = editable ? "" : clean(start.textContent).slice(0, 60);
+    return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+  };`;
+
+// Describes the element on top at the target's centre, or null when nothing
+// else is there.
 const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
   const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
   if (!hit || owns(element, hit) || owns(hit, element)) return null;
-  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-  let node = hit;
-  for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
-    const role = node.getAttribute("role");
-    const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
-    if (role || label) {
-      const kind = role || node.tagName.toLowerCase();
-      return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+  return describe(hit);
+}`;
+
+// Guards one pointer click on the target. Hit-testing happens before input is
+// sent, and the page can still move something over the target in between: a
+// popover following its anchor after a scroll, or a card the pointer's arrival
+// opens. Capture listeners on the target's window see each press first; one
+// that would reach anything other than the target (or its descendants) is
+// cancelled and stopped there, as are the release and clicks that follow it,
+// and the guard records what was in the way. Releases and clicks are not
+// judged by their own target: pointer capture can retarget a release, and a
+// label forwards its click to its control.
+// Returns the guard object; its settle() removes the listeners and
+// reports what was held back. A guard that is never settled (a JavaScript
+// dialog interrupted the click) disarms itself after a few seconds.
+const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
+
+/** One click's guard: its object in the page, and the verdicts it reported
+ * for each press as it happened (null: the press reached the target; text:
+ * what it landed on instead). `reported` is false when the guard runs where
+ * it cannot report (no isolated world), so only its readback counts. */
+interface HitTargetGuard {
+  objectId: string;
+  reported: boolean;
+  verdicts: Array<string | null>;
+  stopReports: () => void;
+}
+
+const HIT_TARGET_GUARD_FUNCTION = `function(token) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const view = element.ownerDocument && element.ownerDocument.defaultView;
+  if (!view) return null;
+  ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
+  const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
+  // The target's own markup and its parent's text, as found: a copy must
+  // match both, so a re-render that shifted other data into the target's
+  // place (the next item's button, a row now showing another invoice) does
+  // not pass for it.
+  const markup = (node) => String(node.outerHTML || "");
+  const text = (node) => String(node.textContent || "");
+  const original = markup(element);
+  const parent = element.parentElement;
+  const parentText = parent ? text(parent) : "";
+  const position = parent ? Array.prototype.indexOf.call(parent.children, element) : -1;
+  const reaches = (hit) => {
+    if (hit instanceof Node && owns(element, hit)) return true;
+    // Seen from outside a closed shadow root, a press on the target is
+    // retargeted to that root's host.
+    if (
+      hit instanceof Element &&
+      hit.shadowRoot === null &&
+      owns(hit, element) &&
+      element.getRootNode() !== hit.getRootNode()
+    )
+      return true;
+    // The page re-rendered the target since it was found, replacing it with
+    // a copy in the same place of the same parent: the press reaches the
+    // copy, as it would a person's. A lookalike elsewhere (the next row's
+    // identical button once this row is removed) is not the target.
+    if (!element.isConnected && parent && parent.isConnected && text(parent) === parentText) {
+      const copy = parent.children[position];
+      if (copy && markup(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
     }
-    node = node.parentElement;
-  }
-  const editable = hit.closest("input, textarea, select, [contenteditable]");
-  const text = editable ? "" : clean(hit.textContent).slice(0, 60);
-  return hit.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+    return false;
+  };
+  const presses = ["pointerdown", "mousedown"];
+  const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  const types = [...presses, ...followers];
+  const guard = { blocked: null };
+  const expiresAt = Date.now() + 5000;
+  let pointerDowns = 0;
+  const listener = (event) => {
+    if (Date.now() > expiresAt) {
+      guard.settle();
+      return;
+    }
+    if (!event.isTrusted) return;
+    if (presses.includes(event.type)) {
+      if (event.type === "pointerdown") pointerDowns += 1;
+      const hit = event.composedPath()[0];
+      // Only a click's first press is judged: a double-click's second press
+      // lands where the first one's effect left the page (a row the first
+      // click turned into an editor), as a person's does.
+      const onTarget = pointerDowns > 1 || reaches(hit);
+      const verdict = onTarget ? null : describe(hit);
+      // One report per physical press, before any page listener after this
+      // one can replace the document.
+      if (event.type === "pointerdown" && typeof report === "function") {
+        report(JSON.stringify({ token, blocked: verdict }));
+      }
+      if (onTarget && guard.blocked === null) return;
+      if (guard.blocked === null) guard.blocked = verdict;
+    } else if (guard.blocked === null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of types) view.addEventListener(type, listener, true);
+  guard.settle = () => {
+    for (const type of types) view.removeEventListener(type, listener, true);
+    return guard.blocked;
+  };
+  return guard;
+}`;
+
+// Chromium's replies when a remote object's execution context is gone: the
+// document that held the click guard was replaced or detached.
+const GUARD_DOCUMENT_GONE =
+  /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed/i;
+
+// Resolves after the page has rendered two more frames, so layout that reacts
+// to a scroll (scroll listeners, anchored popovers) has caught up. Bounded,
+// because a hidden tab may not render frames at all.
+const SETTLE_FRAMES_FUNCTION = `function() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 100);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      clearTimeout(timer);
+      resolve(true);
+    }));
+  });
 }`;
 
 // Whether pointer input at the target's centre falls through it to one of its

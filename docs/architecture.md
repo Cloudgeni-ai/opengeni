@@ -738,7 +738,10 @@ machine-continuation anchor when needed, without changing canonical roles/conten
 exception text stays structural.
 
 Model admission overlaps pooled metadata, preserving authority;
-transaction handles stay serial. Enums remain additive within major releases;
+transaction handles stay serial. Public connection and custom-model metadata
+share a short scope through `packages/db/src/workspace-model-catalog-inputs.ts`;
+default selection and fresh admission still read independently, outside provider
+discovery and credential I/O. Enums remain additive within major releases;
 parity tests pin mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
@@ -1725,6 +1728,9 @@ VOLATILE document/source ACL helpers keep their fresh-snapshot behavior; this
 does not promise a single immutable snapshot across all nested ACL checks.
 Accepted-agent session/turn/attempt SHARE locks remain held until transaction
 completion, so reducing search work also shortens the event-writer lock queue.
+Summary collection IDs use that same body-visibility helper with only the
+`groupIds` input; they do not clone retained content or inspect discarded
+relationships. Full entry bodies keep their complete visibility projection.
 
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
@@ -3001,7 +3007,9 @@ cancellation. Landing requires the exact tested tip, a fast-forward base fence a
 a final head/readiness reread; late PR-head races require post-land reconciliation,
 never a claim that the newer head was tested. Post-merge full CI remains independent.
 Candidate plan/source/selected-unit/ready success may land on red or unknown
-full-main CI. Failed cohorts split sequentially; failed singletons are durably
+full-main CI. A two-hour latency breaker retains raw measurements and deducts only
+bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible
+trusted-green landing; all landing fences still apply. Failed cohorts split sequentially; failed singletons are durably
 parked without attribution, while unrelated ready heads proceed. Parking survives
 main advancement and readiness churn for the same PR head; new heads can re-enter.
 Comparable base evidence and trusted same-way failure fingerprints are not yet

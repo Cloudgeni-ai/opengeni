@@ -84,6 +84,19 @@ export function descendants(id: string, candidates: Candidate[]): string[] {
   return [...ids];
 }
 export function plan(o: Observation, c: Config): Action {
+  const action = planCandidate(o, c);
+  // Latency is admission backpressure, not evidence that an already tested
+  // candidate is unsafe. Drain only a landing selected by every normal guard;
+  // do not bypass provenance, readiness, base, latest-attempt or main priority.
+  if (o.telemetry?.status === "stop" && action.kind !== "land")
+    return {
+      kind: "wait",
+      reason:
+        "stop signal: recent 2h sampled capacity/OFF-adjusted p95 ready-to-CI exceeds 30 minutes",
+    };
+  return action;
+}
+function planCandidate(o: Observation, c: Config): Action {
   const ledger = structuredClone(o.ledger);
   const record = (reason: string): Action => ({ kind: "record", ledger, reason });
   const invalid = (id: string, reason: string): Action => {
@@ -96,11 +109,6 @@ export function plan(o: Observation, c: Config): Action {
   // A genuinely different head can re-enter; preserve the old base/run evidence.
   const parked = (p: Pull) =>
     ledger.parked?.some((item) => item.pull.number === p.number && item.pull.headSha === p.headSha);
-  if (o.telemetry?.status === "stop")
-    return {
-      kind: "wait",
-      reason: "stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes",
-    };
   for (const item of o.candidates) {
     const id = item.manifest.batchId;
     if (item.containedInBase && !ledger.landed.includes(id)) {

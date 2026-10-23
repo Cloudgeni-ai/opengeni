@@ -100,6 +100,8 @@ export type HumanInputItem = {
   questions: HumanInputQuestion[];
   response: HumanInputResponse;
   answers: HumanInputAnswerSummary[];
+  /** An agent (such as the parent of a sub-session) gave this answer, not a person. */
+  answeredByAgent?: boolean;
   occurredAt: string;
 };
 

@@ -447,6 +447,26 @@ describe("native session view-models", () => {
     expect(timelineAccessibilityLabel(item, labels)).toBe(
       "Agenten spurte: Fag: Velg fag\nDu svarte: Fag: Rør",
     );
+    expect(
+      timelineAccessibilityLabel(
+        { ...item, answeredByAgent: true },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Agent asked: Fag: Velg fag\nAgent answered: Fag: Rør");
+    expect(
+      timelineAccessibilityLabel(
+        { ...item, answeredByAgent: true },
+        {
+          ...labels,
+          humanInputOutcome: {
+            answered: "Du svarte",
+            skipped: "Hoppet over",
+            expired: "Utløpt",
+            cancelled: "Avbrutt",
+          },
+        },
+      ),
+    ).toBe("Agenten spurte: Fag: Velg fag\nDu svarte: Fag: Rør");
   });
 
   test("previews pending structured questions for the collapsed workspace header", () => {

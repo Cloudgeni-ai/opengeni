@@ -90,12 +90,22 @@ export type InteractionDiscovery = {
   computers: ComputerSession[];
   identities: BrowserIdentity[];
   /** Online machines ready for the extension; listed only when no attached
-   * profile is connected. */
-  attachedBrowserBridges: Array<{ enrollmentId: string; connectedProfileCount: number }>;
+   * profile is connected. `machine` is the computer's plain name;
+   * `onThisMachine` marks the computer this session runs on. */
+  attachedBrowserBridges: Array<{
+    enrollmentId: string;
+    machine?: string;
+    onThisMachine?: true;
+    connectedProfileCount: number;
+  }>;
   attachedBrowsers: Array<{
     id: string;
     name: string;
     profileLabel?: string;
+    /** The computer this profile is on, by its plain name. */
+    machine?: string;
+    /** Present when that computer is the one this session runs on. */
+    onThisMachine?: true;
     browserName: string;
     platform: AttachedBrowserDevice["platform"];
     state: AttachedBrowserDevice["state"];
@@ -112,7 +122,8 @@ export type CodemodeBrowserOpenOptions = {
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
   /** `{ kind: "attached_device" }` without a deviceId opens the person's own
-   * connected Chrome (the only, or most recently active, profile). */
+   * connected Chrome (the only, or most recently active, profile, preferring
+   * one on the computer this session runs on). */
   placement?: InteractionPlacement | { kind: "attached_device" } | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;

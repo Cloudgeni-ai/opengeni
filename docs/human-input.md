@@ -244,12 +244,45 @@ labels replace their wire ids; a readable id-based fallback keeps paginated
 history understandable.
 
 Agent-created child sessions use the same tool and lifecycle. Their requests are
-owned by the exact child session and surface when that child is opened; the
-parent session shows only its existing `Needs you` child signal. An authorized
-workspace controller answers on the child route. Settlement wakes the child's
-frozen turn and returns the structured result to that original child tool call;
-the parent receives only the child's later ordinary terminal result, not a copy
-of the human answer.
+owned by the exact child session. The web app also pins them above the
+composer of every ancestor session: for each descendant whose status is
+`requires_action` (the same state behind the parent's `Needs you` signal), the
+parent page reads that child's pending requests and newest approval events and
+renders the ordinary answer form or approval card, naming the child and linking
+to it at the request's moment. Answers and decisions go to the child's own
+routes, so the server's permission checks and the draft store are the same as
+on the child page. Several waiting children stack under one collapsible line.
+Live session-list hints that name a descendant (the server batches them, about
+every 15 seconds) and the output of the parent agent's own
+`session_human_input_respond` or `session_steer` call re-read the tree; the
+lineage poll covers pages without hints. The tree read stops at 200
+descendants and 5 levels, so the `Needs you` count can include a child the
+card does not show; the child's own page still has its request.
+Settlement wakes the child's frozen turn and returns the structured result to
+that original child tool call.
+
+The parent agent may answer the same request. When child lifecycle notices are
+enabled (`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`), the child's
+`requires_action` settlement sends the parent a `child_requires_action` update
+carrying each request's compact questions (id, kind, prompt, required, option
+ids and labels; secret questions carry no options or secret spec, and a Skill
+review question is marked `humanOnly`), so the parent can call
+`session_human_input_respond` without reading the child's history. That update
+wakes an idle parent that has an active goal, a held wait, or no goal at all. A
+mid-turn parent receives it at its next claim, and a waiting parent's
+`wait_for_input` ends.
+
+The first accepted answer wins under the request row lock. A later human
+submission returns `200` with the winning event. A later agent call returns
+`outcome: "unchanged"` with `facts.alreadyAnswered: true`, `facts.answeredBy`
+(`person | api | agent | you | system`) and a warning not to answer again.
+Either answer refreshes the human's card, which then disappears, and the parent
+gets a deferred `child_requires_action_resolved` update. The
+`user.humanInputResponse` event records `respondedByKind`
+(`human | api | agent_attempt | system`), and the conversation says "Agent
+answered" for an agent's answer. Agents are told to answer a child's question
+only from their task context and to leave questions only a person can answer
+(decisions, preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary
 

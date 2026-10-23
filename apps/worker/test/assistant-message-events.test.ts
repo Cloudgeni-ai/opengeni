@@ -8,6 +8,7 @@ import {
   listSessionEvents,
 } from "@opengeni/db";
 import { OpenAIResponsesModel, tool, type Model } from "@openai/agents";
+import type { ResolvedModelProvider } from "@opengeni/config";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
@@ -19,6 +20,7 @@ import {
   INPUT_WAIT_REPLY_REFUSAL,
   latestDurableTurnMessageText,
 } from "../src/activities/agent-turn/input-wait-reply";
+import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
 
 /** One Responses API stream: each message is announced, streamed, then done. */
 function responsesStream(
@@ -72,6 +74,124 @@ function responsesStream(
   });
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
 }
+
+type ClaudeBlock =
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+
+const claudeProvider: ResolvedModelProvider = {
+  id: "claude",
+  label: "Claude",
+  kind: "api-key",
+  api: "anthropic-messages",
+  wireProfile: "openai",
+  builtin: false,
+  baseUrl: "https://api.anthropic.com/v1",
+  apiKey: "test-key",
+  credentialSource: { kind: "deployment", mechanism: "api_key" },
+  billing: { upstreamPayer: "deployment", metering: "external" },
+};
+
+/** One Claude Messages stream; each content block streams in one delta. */
+function claudeStream(id: string, blocks: ClaudeBlock[]): Response {
+  const frames: unknown[] = [
+    {
+      type: "message_start",
+      message: {
+        id,
+        type: "message",
+        role: "assistant",
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: 10, output_tokens: 1 },
+      },
+    },
+  ];
+  blocks.forEach((block, index) => {
+    if (block.type === "thinking") {
+      frames.push(
+        {
+          type: "content_block_start",
+          index,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "thinking_delta", thinking: block.thinking },
+        },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "signature_delta", signature: block.signature },
+        },
+      );
+    } else if (block.type === "text") {
+      frames.push(
+        { type: "content_block_start", index, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } },
+      );
+    } else {
+      frames.push(
+        { type: "content_block_start", index, content_block: { ...block, input: {} } },
+        {
+          type: "content_block_delta",
+          index,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) },
+        },
+      );
+    }
+    frames.push({ type: "content_block_stop", index });
+  });
+  frames.push(
+    {
+      type: "message_delta",
+      delta: {
+        stop_reason: blocks.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn",
+      },
+      usage: { output_tokens: 20 },
+    },
+    { type: "message_stop" },
+  );
+  return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "request-id": `req_${id}` },
+  });
+}
+
+/**
+ * Claude Opus 5.5 behind the real Messages transport, answering each request
+ * with the next scripted response (`msg_1`, `msg_2`, ...).
+ */
+function scriptedClaude(responses: ClaudeBlock[][]) {
+  let calls = 0;
+  const model = new AnthropicMessagesModel(claudeProvider, "claude-opus-5-5", (async () => {
+    const blocks = responses[calls];
+    calls += 1;
+    if (!blocks) throw new Error("a yielded wait must not reach another inference");
+    return claudeStream(`msg_${calls}`, blocks);
+  }) as typeof fetch);
+  return { model, calls: () => calls };
+}
+
+// Under display "updates" reasoning comes back empty and a progress update
+// carries Anthropic's summary, not the model's words. These are the shapes of
+// the production responses whose summaries were shown as the agent's reply.
+const emptyReasoning: ClaudeBlock = { type: "thinking", thinking: "", signature: "sig_reasoning" };
+const FABRICATED =
+  "Both workers are running now. I've explained how subagents currently choose between asking you or the parent and proposed a rule.\n\n";
+const progressSummary: ClaudeBlock = {
+  type: "thinking",
+  thinking: FABRICATED,
+  signature: "sig_progress",
+};
+const waitCall = (id: string): ClaudeBlock => ({
+  type: "tool_use",
+  id,
+  name: "wait_for_input",
+  input: {},
+});
 
 describe("assistant message events from a real agent turn", () => {
   let shared: SharedTestDatabase;
@@ -409,4 +529,83 @@ describe("assistant message events from a real agent turn", () => {
       output: answer,
     });
   }, 60_000);
+
+  describe("Claude progress-update summaries are never the agent's reply", () => {
+    const messageEvents = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      events.filter((event) => event.type.startsWith("agent.message."));
+    const completedMessages = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      events
+        .filter((event) => event.type === "agent.message.completed")
+        .map((event) => event.payload);
+    const turnCompleted = (events: Awaited<ReturnType<typeof runTurn>>) =>
+      events.find((event) => event.type === "turn.completed")?.payload;
+
+    test("no text: the summary is not recorded and the model is asked to write its reply", async () => {
+      const reply = "Sub-agents can ask you through a question form, or ask their parent.";
+      const claude = scriptedClaude([
+        [emptyReasoning, progressSummary, waitCall("toolu_wait_1")],
+        [emptyReasoning, { type: "text", text: reply }, waitCall("toolu_wait_2")],
+      ]);
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(2);
+      const outputs = events.filter((event) => event.type === "agent.toolCall.output");
+      expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_REPLY_REFUSAL);
+      expect(completedMessages(events)).toEqual([
+        { text: reply, messageId: "msg_2:1", phase: "commentary" },
+      ]);
+      expect(JSON.stringify(messageEvents(events))).not.toContain("I've explained");
+      expect(turnCompleted(events)).toEqual({ output: "", reply });
+    }, 60_000);
+
+    test("no text ever: nothing is invented and the turn records no reply", async () => {
+      const claude = scriptedClaude([
+        [emptyReasoning, progressSummary, waitCall("toolu_wait_1")],
+        [emptyReasoning, progressSummary, waitCall("toolu_wait_2")],
+        [emptyReasoning, progressSummary, waitCall("toolu_wait_3")],
+      ]);
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      // Two refusals, then the wait proceeds rather than looping.
+      expect(claude.calls()).toBe(3);
+      expect(messageEvents(events)).toEqual([]);
+      expect(turnCompleted(events)).toEqual({ output: "" });
+    }, 60_000);
+
+    test("long text: the model's full answer is the reply, never the summary beside it", async () => {
+      const answer = [
+        "Those messages were not written by me.",
+        "",
+        "**Your question: can a sub-agent choose who answers?** Yes, it has two options:",
+        "",
+        "- **Ask a person.** It shows a question form, which you get in the inbox.",
+        "- **Ask its parent agent.** It sends the parent a message.",
+        "",
+        "What's missing is a rule for when to use which. ".repeat(40).trim(),
+        "",
+        "Want me to add that rule as a separate change?",
+      ].join("\n");
+      const claude = scriptedClaude([
+        [emptyReasoning, { type: "text", text: answer }, progressSummary, waitCall("toolu_wait")],
+      ]);
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(1);
+      expect(completedMessages(events)).toEqual([
+        { text: answer, messageId: "msg_1:1", phase: "commentary" },
+      ]);
+      expect(JSON.stringify(messageEvents(events))).not.toContain("I've explained");
+      expect(turnCompleted(events)).toEqual({ output: "", reply: answer });
+    }, 60_000);
+
+    test("normal text: the model's reply is recorded exactly as written", async () => {
+      const status = "Both workers are running; I'll report back when they finish.";
+      const claude = scriptedClaude([
+        [emptyReasoning, { type: "text", text: status }, waitCall("toolu_wait")],
+      ]);
+      const events = await runTurn(claude.model, "chat", { waitForInputTool: true });
+      expect(claude.calls()).toBe(1);
+      expect(completedMessages(events)).toEqual([
+        { text: status, messageId: "msg_1:1", phase: "commentary" },
+      ]);
+      expect(turnCompleted(events)).toEqual({ output: "", reply: status });
+    }, 60_000);
+  });
 });

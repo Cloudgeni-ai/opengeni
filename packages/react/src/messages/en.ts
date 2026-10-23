@@ -1676,6 +1676,7 @@ export const englishMessages = {
   "mcpConnectionStatus.connect": "Connect",
   "mcpConnectionStatus.connected": "Connected",
   "mcpConnectionStatus.reviewConnection": "Review connection",
+  "messageTimeline.agentAnswered": "Agent answered",
   "messageTimeline.agentAsked": "Agent asked",
   "messageTimeline.answered": "Answered",
   "messageTimeline.auto": "Auto",
@@ -1878,6 +1879,7 @@ export const englishMessages = {
   "native.attachments.fileVerificationTimedOutRetry":
     "File verification timed out. Retry the upload.",
   "native.presentation.activity": "Activity",
+  "native.presentation.agentAnswered": "Agent answered",
   "native.presentation.agentAsked": "Agent asked",
   "native.presentation.allObservedSubscriptionsWereCapped":
     "All observed subscriptions were capped",
@@ -2096,6 +2098,7 @@ export const englishMessages = {
   "native.timeline.inbox.yesterday": "Yesterday",
   "native.timeline.messageAttachments.attachment": "Attachment",
   "native.timeline.messageAttachments.openName": "Open {name}",
+  "native.timeline.messages.agentAnswered": "Agent answered",
   "native.timeline.messages.agents": "Agents",
   "native.timeline.messages.aLittleLongerThanUsual": "A little longer than usual…",
   "native.timeline.messages.backToYourMessage": "Back to your message",
