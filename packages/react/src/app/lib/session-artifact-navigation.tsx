@@ -6,7 +6,9 @@ import {
   useOpenGeniLinkResolver,
   type OpenGeniLinkResolver,
 } from "../../components/open-geni-links";
-import { usePage } from "./navigation";
+// The host's page, read from the app host rather than `./navigation`, which
+// many tests replace with a partial module mock.
+import { useAppHost } from "./app-host";
 import { useSessionUiFeature } from "./session-ui-features";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -61,10 +63,10 @@ export function consoleLinkResolver(target: OpenGeniLinkTarget): { href: string 
  */
 export function useAppLinkResolver(): OpenGeniLinkResolver {
   const host = useOpenGeniLinkResolver();
-  const page = usePage();
+  const page = useAppHost().navigation?.page;
   const dock = useSessionUiFeature("dock");
   return useMemo(() => {
-    const console: OpenGeniLinkResolver = !page.opensBeside
+    const console: OpenGeniLinkResolver = !page?.opensBeside
       ? consoleLinkResolver
       : (target) => {
           const resolved = consoleLinkResolver(target);
