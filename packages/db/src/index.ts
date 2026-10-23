@@ -64861,35 +64861,47 @@ export async function renewSandboxAgentLink(
 ): Promise<{ renewed: true } | { renewed: false; code: SandboxAgentLinkEnd }> {
   assertSandboxAgentLinkInput(input, input.leaseMs);
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const row = await lockSandboxEnrollment(scopedDb, input.workspaceId, input.agentId);
-    if (!row || row.kind !== "sandbox" || row.status !== "active") {
-      return { renewed: false, code: "revoked" };
-    }
-    if (row.linkEpoch !== null && Number(row.linkEpoch) > input.epoch) {
-      return { renewed: false, code: "superseded" };
-    }
-    if (row.connectionInstanceId !== input.connectionInstanceId) {
-      return { renewed: false, code: "lost" };
-    }
-    const now = await enrollmentConnectionClock(scopedDb);
-    const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
-    await scopedDb
-      .update(schema.enrollments)
-      .set({
-        // Never shorten a lease a heartbeat extended further.
-        connectionLeaseExpiresAt:
-          row.connectionLeaseExpiresAt && row.connectionLeaseExpiresAt > leaseExpiresAt
-            ? row.connectionLeaseExpiresAt
-            : leaseExpiresAt,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, input.workspaceId),
-          eq(schema.enrollments.id, input.agentId),
-        ),
-      );
-    return { renewed: true };
+    // Lock first, then sample time: clock_timestamp() in the locking SELECT's
+    // projection would run before a contended row lock is acquired. Materialize
+    // the locked row before the clock/decision, preserving the old lock order
+    // and refusal precedence without two extra database round trips.
+    const [result] = await rawRows<{ renewed: boolean; code: SandboxAgentLinkEnd }>(
+      scopedDb,
+      sql`
+        with locked as materialized (
+          select id, kind, status, link_epoch, connection_instance_id, connection_lease_expires_at
+          from enrollments
+          where workspace_id = ${input.workspaceId} and id = ${input.agentId}
+          for update
+        ), checked as materialized (
+          select locked.*,
+            case
+              when kind <> 'sandbox' or status <> 'active' then 'revoked'
+              when link_epoch > ${input.epoch} then 'superseded'
+              when connection_instance_id is distinct from ${input.connectionInstanceId} then 'lost'
+              else null
+            end as refusal,
+            date_trunc('milliseconds', clock_timestamp()) as renewed_at
+          from locked
+        ), updated as (
+          update enrollments e set
+            connection_lease_expires_at = greatest(
+              date_trunc('milliseconds', checked.connection_lease_expires_at),
+              checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'
+            ),
+            updated_at = checked.renewed_at
+          from checked
+          where e.id = checked.id and e.workspace_id = ${input.workspaceId}
+            and checked.refusal is null
+          returning e.id
+        )
+        select exists(select 1 from updated) as renewed,
+          coalesce((select refusal from checked), 'revoked') as code
+      `,
+    );
+    return result?.renewed
+      ? { renewed: true }
+      : { renewed: false, code: result?.code ?? "revoked" };
   });
 }
 
