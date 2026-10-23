@@ -5,6 +5,10 @@ import {
   createDb,
   createEnrollment,
   createSandbox,
+  createSession,
+  listWorkspaceControlEvents,
+  mutateSessionControlInTransaction,
+  withWorkspaceRls,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -366,4 +370,71 @@ test("pause timers require workspace admin even for an authenticated workspace r
     }),
   });
   expect(response.status).toBe(403);
+});
+
+test("chat control events reach only readers who can see that chat, and never stall their cursor", async () => {
+  const workspaceId = grant.workspaceId!;
+  const before = await listWorkspaceControlEvents(client.db, workspaceId, 0, 1000);
+  const after = before.at(-1)?.sequence ?? 0;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    initialMessage: "control visibility",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await withWorkspaceRls(client.db, workspaceId, async (db) =>
+    mutateSessionControlInTransaction(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      actor: { type: "human", subjectId: grant.subjectId },
+      operationKey: crypto.randomUUID(),
+      action: "pause",
+      reason: "private reason",
+    }),
+  );
+  const [sessionEvent] = await listWorkspaceControlEvents(client.db, workspaceId, after, 10);
+  expect(sessionEvent).toMatchObject({ scope: "session", rootSessionId: session.id });
+
+  const reader = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    permissions: ["workspace:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const hidden = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events?after=${after}&limit=10`,
+    { headers: { authorization: reader } },
+  );
+  expect(hidden.status).toBe(200);
+  expect(await hidden.json()).toEqual([]);
+  // The reader still moves past the event it cannot see.
+  expect(hidden.headers.get("X-OpenGeni-Next-After")).toBe(String(sessionEvent!.sequence));
+
+  const hiddenBatch = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events/stream?after=${after}&transport=http1-bounded`,
+    { headers: { authorization: reader } },
+  );
+  const hiddenBody = await hiddenBatch.text();
+  expect(hiddenBody).not.toContain(session.id);
+  expect(hiddenBody).not.toContain("private reason");
+  expect(hiddenBody).toContain(
+    `"type":"workspace.control.cursor","workspaceId":"${workspaceId}","sequence":${sessionEvent!.sequence}`,
+  );
+
+  const visible = await app.request(
+    `http://x/v1/workspaces/${workspaceId}/control-events?after=${after}&limit=10`,
+    { headers: { authorization: await authorization() } },
+  );
+  expect(await visible.json()).toEqual([
+    expect.objectContaining({ scope: "session", rootSessionId: session.id, action: "pause" }),
+  ]);
 });

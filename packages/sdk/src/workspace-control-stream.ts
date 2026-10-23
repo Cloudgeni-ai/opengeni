@@ -53,6 +53,12 @@ export async function* streamWorkspaceControlEvents(
         withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
       )) {
         if (signal?.aborted) return;
+        const skippedThrough = parseWorkspaceControlCursor(message.data);
+        if (skippedThrough !== null) {
+          // Events this reader may not see (other people's private chats).
+          cursor = Math.max(cursor, skippedThrough);
+          continue;
+        }
         const event = parseWorkspaceControlEvent(message.data);
         if (!event || event.sequence <= cursor) continue;
         cursor = event.sequence;
@@ -76,6 +82,29 @@ export async function* streamWorkspaceControlEvents(
     await sleep(jitteredDelay(delayMs, jitterRatio), signal);
     delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
   }
+}
+
+/**
+ * Cursor-only frame: the server read through `sequence` but the events after
+ * the last delivered one are not visible to this reader.
+ */
+export function parseWorkspaceControlCursor(data: string): number | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    (value as { type?: unknown }).type !== "workspace.control.cursor"
+  )
+    return null;
+  const sequence = (value as { sequence?: unknown }).sequence;
+  return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
+    ? sequence
+    : null;
 }
 
 function parseWorkspaceControlEvent(data: string): WorkspaceControlEvent | null {

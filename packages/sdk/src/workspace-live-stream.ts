@@ -8,6 +8,7 @@ import {
   withStreamInactivityTimeout,
 } from "./stream";
 import type { WorkspaceControlEvent } from "./types";
+import { parseWorkspaceControlCursor } from "./workspace-control-stream";
 
 /** Transient hints have no replay cursor; every reconnection reconciles lists. */
 export type WorkspaceSessionListEvent = {
@@ -76,6 +77,11 @@ export async function* streamWorkspaceLiveEvents(
         withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
       )) {
         if (signal?.aborted) return;
+        const skippedThrough = parseWorkspaceControlCursor(message.data);
+        if (skippedThrough !== null) {
+          controlCursor = Math.max(controlCursor, skippedThrough);
+          continue;
+        }
         const event = parseWorkspaceLiveEvent(message.data);
         if (!event) continue;
         if (event.type === "workspace.control.changed") {
