@@ -114,6 +114,7 @@ export class GitHubAuth {
             pull_requests: "write",
             issues: "write",
             checks: "read",
+            administration: "read",
           }
         : this.env.BATCHER_MODE === "shadow-ci"
           ? {
@@ -123,6 +124,7 @@ export class GitHubAuth {
               pull_requests: "read",
               issues: "read",
               checks: "read",
+              administration: "read",
             }
           : {
               contents: "read",
@@ -130,6 +132,7 @@ export class GitHubAuth {
               pull_requests: "read",
               issues: "read",
               checks: "read",
+              administration: "read",
             };
     const response = await this.transport(
       `https://api.github.com/app/installations/${installation}/access_tokens`,
@@ -541,10 +544,49 @@ export class GitHubReader {
       throw Error("Classic branch protection unavailable");
     if (ref.branchProtectionRule === null) {
       const branch = await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}`);
-      // A null GraphQL projection can mean insufficient visibility. Ruleset-only
-      // protection also needs positive provider evidence before lifting this hold.
-      if (Array.isArray(branch) || branch.protected !== false)
+      if (Array.isArray(branch) || typeof branch.protected !== "boolean")
         throw Error("Classic protection absence is not proven by this token");
+      if (branch.protected) {
+        // protected:true includes rulesets. A null projection or REST404 alone
+        // is ambiguous; only a positive, complete empty classic inventory lifts
+        // that ambiguity. Nonempty inventories are held rather than guessing
+        // GitHub's branch-pattern matching or silently ignoring classic rules.
+        let absent = false;
+        try {
+          await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}/protection`);
+        } catch (error) {
+          if (!(error instanceof ProviderError) || error.status !== 404) throw error;
+          absent = true;
+        }
+        if (!absent) throw Error("Classic protection changed during observation");
+        const inventoryResponse = await this.transport("https://api.github.com/graphql", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await this.auth.token()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query: `query ClassicProtectionInventory($owner:String!,$name:String!){repository(owner:$owner,name:$name){branchProtectionRules(first:100){totalCount nodes{id} pageInfo{hasNextPage endCursor}}}}`,
+            variables: { owner, name },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+        this.checkRateLimit(inventoryResponse);
+        if (!inventoryResponse.ok)
+          throw new ProviderError(inventoryResponse.status, "classic protection inventory");
+        const inventoryData = (await inventoryResponse.json()) as Json;
+        const inventory = inventoryData.data?.repository?.branchProtectionRules;
+        if (
+          inventoryData.errors ||
+          !inventory ||
+          inventory.totalCount !== 0 ||
+          !Array.isArray(inventory.nodes) ||
+          inventory.nodes.length !== 0 ||
+          inventory.pageInfo?.hasNextPage !== false ||
+          inventory.pageInfo.endCursor !== null
+        )
+          throw Error("Classic protection absence is not proven by complete inventory");
+      }
     }
     return ref.branchProtectionRule;
   }

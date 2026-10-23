@@ -2,6 +2,7 @@ import { test, expect, afterEach } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { generateKeyPairSync } from "node:crypto";
 import { GitHubAuth, GitHubReader } from "./github";
 import { config } from "./model";
 const roots: string[] = [];
@@ -9,6 +10,30 @@ afterEach(async () => {
   for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true });
 });
 const sha = "a".repeat(40);
+test("App tokens explicitly request granted administration read, never administration write", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  for (const mode of ["active", "shadow-ci", "shadow"]) {
+    let permissions: Record<string, string> = {};
+    const transport = (async (_input: unknown, init?: RequestInit) => {
+      permissions = JSON.parse(String(init?.body)).permissions;
+      return Response.json({
+        token: "fixture",
+        expires_at: new Date(Date.now() + 3600000).toISOString(),
+      });
+    }) as typeof fetch;
+    await new GitHubAuth(
+      {
+        BATCHER_MODE: mode,
+        GITHUB_APP_ID: "1",
+        GITHUB_APP_INSTALLATION_ID: "2",
+        GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      },
+      transport,
+    ).token();
+    expect(permissions.administration).toBe("read");
+    expect(permissions.checks).toBe("read");
+  }
+});
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "github-admission-"));
   roots.push(root);
@@ -27,6 +52,10 @@ async function fixture() {
     secondRulePage: false,
     missingRunOnce: false,
     twoPulls: false,
+    inventory: null as any,
+    inventoryStatus: 200,
+    inventoryErrors: false,
+    protectionStatus: 404,
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -52,7 +81,15 @@ async function fixture() {
             },
           },
         };
-      else if (query.includes("BranchReview"))
+      else if (query.includes("ClassicProtectionInventory")) {
+        return Response.json(
+          {
+            data: { repository: { branchProtectionRules: state.inventory } },
+            ...(state.inventoryErrors ? { errors: [{ message: "not visible" }] } : {}),
+          },
+          { status: state.inventoryStatus },
+        );
+      } else if (query.includes("BranchReview"))
         body = {
           data: {
             repository: {
@@ -100,6 +137,8 @@ async function fixture() {
           },
         ];
       else if (path === "branches/main") body = { protected: state.protected };
+      else if (path === "branches/main/protection")
+        return Response.json({}, { status: state.protectionStatus });
       else if (path === "rules/branches/main")
         body = state.secondRulePage
           ? url.searchParams.get("page") === "1"
@@ -223,6 +262,57 @@ test("null classic policy on protected branch is unknown rather than absent", as
   const f = await fixture();
   f.state.protected = true;
   await expect(f.reader.ready()).rejects.toThrow("absence is not proven");
+});
+test("ruleset-protected branch accepts positively complete empty classic inventory, retaining ruleset reviews", async () => {
+  const f = await fixture();
+  f.state.protected = true;
+  f.state.inventory = {
+    totalCount: 0,
+    nodes: [],
+    pageInfo: { hasNextPage: false, endCursor: null },
+  };
+  expect((await f.reader.ready()).ready).toHaveLength(1);
+  f.state.reviewRequired = true;
+  f.state.reviewDecision = "REVIEW_REQUIRED";
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+});
+test("404 plus null projection never waives incomplete, errored or nonempty classic inventory", async () => {
+  for (const inventory of [
+    null,
+    {},
+    { totalCount: 0, nodes: [], pageInfo: { hasNextPage: true, endCursor: "more" } },
+    { totalCount: 1, nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+    { totalCount: 0, nodes: [{ id: "rule" }], pageInfo: { hasNextPage: false, endCursor: null } },
+    { totalCount: 1, nodes: [{ id: "rule" }], pageInfo: { hasNextPage: false, endCursor: "rule" } },
+  ]) {
+    const f = await fixture();
+    f.state.protected = true;
+    f.state.inventory = inventory;
+    await expect(f.reader.ready()).rejects.toThrow("absence is not proven");
+  }
+  for (const field of ["inventoryErrors", "inventoryStatus", "protectionStatus"] as const) {
+    const f = await fixture();
+    f.state.protected = true;
+    f.state.inventory = {
+      totalCount: 0,
+      nodes: [],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    };
+    if (field === "inventoryErrors") f.state.inventoryErrors = true;
+    else f.state[field] = 403;
+    await expect(f.reader.ready()).rejects.toThrow();
+  }
+});
+test("positive classic REST policy cannot be overridden by an empty inventory", async () => {
+  const f = await fixture();
+  f.state.protected = true;
+  f.state.protectionStatus = 200;
+  f.state.inventory = {
+    totalCount: 0,
+    nodes: [],
+    pageInfo: { hasNextPage: false, endCursor: null },
+  };
+  await expect(f.reader.ready()).rejects.toThrow("changed during observation");
 });
 test("one deleted hosted run excludes only that PR", async () => {
   const f = await fixture();
