@@ -122,7 +122,7 @@ createRoot(document.getElementById("root")!).render(
         </Section>
       </div>
       <div className="flex flex-col gap-4">
-        <p className="text-sm text-fg-muted">Session header · admin access on, then off</p>
+        <p className="text-sm text-fg-muted">Session header · full access on, then off</p>
         <Header active testId="header-on" />
         <Header active={false} testId="header-off" />
       </div>

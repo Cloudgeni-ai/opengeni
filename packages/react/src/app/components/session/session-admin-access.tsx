@@ -17,15 +17,15 @@ import { useAppContext } from "../../app-context";
 import { hasInbox } from "../../lib/inbox";
 
 /* ----------------------------------------------------------------------------
-   Admin access for one session. An owner or admin gives one of their own
-   sessions admin access (when the organization allows it, in Organization
-   settings > Security & data) for an hour, a few hours, a day or with no
-   time limit; its agent can then manage what they can across the
-   organization, as them. The header shows a small shield while it is on,
+   Full access for one session (named "admin access" in the API). Any member
+   gives a session they started their own access (when the organization
+   allows it, in Organization settings > Security & data) for an hour, a few
+   hours, a day or with no time limit; its agent can then do what they can in
+   the app, as them, and never more. The header shows a small shield while it is on,
    with when it ends and a one-click way to turn it off.
    -------------------------------------------------------------------------- */
 
-/** How long admin access lasts, as offered in the app. */
+/** How long full access lasts, as offered in the app. */
 export type AdminAccessDuration = "1" | "8" | "24" | "none";
 
 export const ADMIN_ACCESS_DURATIONS: ReadonlyArray<{
@@ -99,7 +99,7 @@ export function useSessionAdminAccess(session: {
           durationHours: durationHours(duration),
         });
         setState(value);
-        toast.success(wasActive ? "Admin access updated" : "This session has admin access", {
+        toast.success(wasActive ? "Full access updated" : "This session has full access", {
           description: wasActive
             ? endsText(value.expiresAt)
             : `Its agent can use it from its next message. ${endsText(value.expiresAt)}.`,
@@ -118,10 +118,10 @@ export function useSessionAdminAccess(session: {
       .revokeSessionAdminAccess(session.workspaceId, session.id)
       .then((value) => {
         setState(value);
-        toast.success("Admin access is off for this session");
+        toast.success("Full access is off for this session");
       })
       .catch((error: unknown) => {
-        toast.error("Couldn't turn off admin access", {
+        toast.error("Couldn't turn off full access", {
           description: error instanceof Error ? error.message : String(error),
         });
       })
@@ -150,11 +150,11 @@ export function endsText(expiresAt: string | null, now: Date = new Date()): stri
 function grantedByText(state: SessionAdminAccess): string {
   const name = state.grantedBy?.name;
   return name
-    ? `This agent can manage what ${name} can across the organization, and acts as them.`
-    : "This agent can manage what the person who gave it access can across the organization, and acts as them.";
+    ? `This agent can do what ${name} can in the app, and acts as them.`
+    : "This agent can do what the person who gave it access can in the app, and acts as them.";
 }
 
-/** The small shield beside the title while the session has admin access. */
+/** The small shield beside the title while the session has full access. */
 export function SessionAdminAccessIndicator({
   control,
   onChangeTimeLimit,
@@ -183,13 +183,13 @@ function ActiveIndicator({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="Admin access is on"
-          title="Admin access is on"
+          aria-label="Full access is on"
+          title="Full access is on"
           data-session-admin-access=""
           className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
         >
           <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-warning" />
-          <span className="hidden sm:inline">Admin</span>
+          <span className="hidden sm:inline">Full access</span>
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -204,7 +204,7 @@ function ActiveIndicator({
         }}
       >
         <div className="px-2 py-1.5 text-xs text-fg-muted">
-          <p className="font-medium text-fg">Admin access is on</p>
+          <p className="font-medium text-fg">Full access is on</p>
           <p className="mt-1">{grantedByText(control.state)}</p>
           <p className="mt-1" data-session-admin-access-ends="">
             {endsText(control.state.expiresAt)}.
@@ -223,7 +223,7 @@ function ActiveIndicator({
         ) : null}
         {control.state.canRevoke ? (
           <DropdownMenuItem disabled={control.busy} onSelect={() => control.revoke()}>
-            Turn off admin access
+            Turn off full access
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
@@ -231,7 +231,7 @@ function ActiveIndicator({
   );
 }
 
-/** Gives this session admin access, or changes how long it lasts while it is on. */
+/** Gives this session full access, or changes how long it lasts while it is on. */
 export function GrantSessionAdminAccessDialog({
   control,
   open,
@@ -251,13 +251,13 @@ export function GrantSessionAdminAccessDialog({
       open={open}
       onOpenChange={onOpenChange}
       size="sm"
-      title={changing ? "Change the time limit" : "Give this session admin access?"}
+      title={changing ? "Change the time limit" : "Give this session your full access?"}
       description={
         changing
-          ? "The new limit for admin access starts now."
-          : "Its agent can then manage what you can across the organization: sessions in every workspace, settings, connections and people. Everything it does runs as you. You can turn it off at any time from the shield beside the title."
+          ? "The new limit for full access starts now."
+          : "Its agent can then do what you can in the app: your chats, workspace settings, connections and anything else you manage. Everything it does runs as you, and never goes beyond your own access. You can turn it off at any time from the shield beside the title."
       }
-      submitLabel={changing ? "Save" : "Give admin access"}
+      submitLabel={changing ? "Save" : "Give full access"}
       pendingLabel={changing ? "Saving…" : "Giving access…"}
       initialFocus="cancel"
       onSubmit={async () => {
