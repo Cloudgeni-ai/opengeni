@@ -85,7 +85,7 @@ async function withPageContext(
     version: null,
     modelNotes: {},
   });
-  const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([]);
+  const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(false);
   const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
   try {
     await run(
@@ -97,6 +97,9 @@ async function withPageContext(
       ),
     );
     const configured = rows.filter((row) => row.agent != null);
+    expect(skills).toHaveBeenCalledTimes(
+      configured.some((row) => row.agent?.capabilities.skills === "read") ? 1 : 0,
+    );
     if (configured.length) {
       expect(history).toHaveBeenCalledTimes(1);
       expect(history.mock.calls[0]?.[1]).toEqual({
@@ -563,10 +566,7 @@ describe("server effectiveTools environment projection", () => {
       version: null,
       modelNotes: {},
     });
-    const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([
-      { activationMode: "session_selected" },
-      { activationMode: "workspace_managed" },
-    ] as Awaited<ReturnType<typeof db.listSkillDescriptors>>);
+    const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(true);
     const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
       kind: "selfhosted",
     } as NonNullable<Awaited<ReturnType<typeof db.getSandbox>>>);
@@ -584,6 +584,12 @@ describe("server effectiveTools environment projection", () => {
       expect(result.activeSandboxBackends?.get(sandboxId)).toBe("selfhosted");
       expect(result.routerHistorySessionIds?.has(row.id)).toBe(true);
       expect(models).toHaveBeenCalledTimes(1);
+      expect(skills).toHaveBeenCalledTimes(1);
+      expect(skills.mock.calls[0]?.[1]).toEqual({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        subjectId: "human",
+      });
       expect(sandbox).toHaveBeenCalledTimes(1);
       expect(history).toHaveBeenCalledTimes(1);
       expect(history.mock.calls[0]?.[1]).toEqual({
