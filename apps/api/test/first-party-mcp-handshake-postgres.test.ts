@@ -237,7 +237,7 @@ describe("first-party MCP handshakes", () => {
   test("handshakes cost one live-attempt read; tools/list still builds the full surface", async () => {
     const { bearer, post } = await fixture();
     const authorization = await bearer();
-    const oneRead = ["begin", "with parent", "select target.id", "commit"];
+    const oneRead = ["begin", "with parent", "select anchor.ordinality", "commit"];
 
     const init = await post(initialize, authorization);
     expect(init.status).toBe(200);
