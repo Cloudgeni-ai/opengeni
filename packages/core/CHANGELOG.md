@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [4e1a73f]
+- Updated dependencies [442354f]
+  - @opengeni/db@5.1.0
+  - @opengeni/runtime@5.1.0
+  - @opengeni/documents@5.1.0
+  - @opengeni/events@5.1.0
+  - @opengeni/capabilities@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/storage@5.1.0
+  - @opengeni/vaults@5.1.0
+
 ## 5.0.2
 
 ### Minor Changes
