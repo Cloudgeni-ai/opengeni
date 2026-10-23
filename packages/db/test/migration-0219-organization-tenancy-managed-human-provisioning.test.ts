@@ -408,6 +408,15 @@ describe("migration 0219 managed-human organization provisioning", () => {
     const userId = `multi-org-${crypto.randomUUID()}`;
     const input = { userId, email: `${userId}@example.test`, name: userId };
     const initial = await ensureManagedAccessForUser(client.db, input);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const previousDebug = driver.options.debug;
+    const singleOrganizationQueries: string[] = [];
+    driver.options.debug = (_connection, query) => singleOrganizationQueries.push(query);
+    try {
+      await ensureManagedAccessForUser(client.db, input);
+    } finally {
+      driver.options.debug = previousDebug;
+    }
     const ownerId = `other-owner-${crypto.randomUUID()}`;
     const other = await ensureManagedAccessForUser(client.db, {
       userId: ownerId,
@@ -434,8 +443,6 @@ describe("migration 0219 managed-human organization provisioning", () => {
     await shared.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${organizationId}, ${other.defaultWorkspaceId!}, ${initial.subjectId}, 'member')`;
-    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
-    const previousDebug = driver.options.debug;
     const queries: string[] = [];
     driver.options.debug = (_connection, query) => queries.push(query);
     let projected;
@@ -444,7 +451,18 @@ describe("migration 0219 managed-human organization provisioning", () => {
     } finally {
       driver.options.debug = previousDebug;
     }
-    expect(queries).toHaveLength(6);
+    // Personal-workspace policy adds one default-org scope statement and one
+    // privacy read. Neither it nor the grant projection scales with org count.
+    expect(singleOrganizationQueries).toHaveLength(8);
+    expect(queries).toHaveLength(singleOrganizationQueries.length);
+    for (const statements of [singleOrganizationQueries, queries]) {
+      expect(
+        statements.filter((query) => query.includes('from "organization_privacy_preferences"')),
+      ).toHaveLength(1);
+      expect(
+        statements.filter((query) => query.includes('left join "workspace_memberships"')),
+      ).toHaveLength(1);
+    }
     const projectionQueries = queries.filter((query) =>
       query.includes('left join "workspace_memberships"'),
     );
