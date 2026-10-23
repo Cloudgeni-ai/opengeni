@@ -153,7 +153,8 @@ The product narrows that surface in three places, from coarse to fine:
 3. **`refuse(route, context)`.** Routes Opengeni would allow but the product
    keeps closed: return `true` for a 404, or a `Response`. `route` is
    `{ method, segments, sessionId }`, with the path segments after
-   `/v1/workspaces/{workspaceId}`.
+   `/v1/workspaces/{workspaceId}`; every hook also finds it in
+   `context.route`.
 
 `authorizeSession(sessionId, context)` adds a product-level check to every
 `sessions/{id}/...` route and every request that names a chat in
@@ -161,9 +162,20 @@ The product narrows that surface in three places, from coarse to fine:
 that would change server-owned chat setup (a chat's agent, tool policy, Skills,
 variable sets, usage limit, visibility, active sandbox and Codex account,
 forks, and `chat/completions`); browser MCP credential rotation is always
-refused. Messages (send, steer, draft submit, realtime) pass through
-`beforeForwardMessage`; bodies are bounded (`maxBodyBytes`, default 1 MiB) and
-`modelSelection: false` removes per-message model choices. Without
+refused. Every action that starts model work passes through
+`beforeForwardMessage` with its `delivery` and the browser's action key
+(`clientEventId`): messages (`create`, `send`, `steer`, `submit`), the
+person's `approval` and `answer`, `resume`, `retry`, `queue-steer` and
+`realtime` voice. It is where a product admits work (billing, rate limits)
+and adds per-message context; return a `Response` to refuse. Bodies are
+bounded (`maxBodyBytes`, default 1 MiB) and `modelSelection: false` removes
+per-message and retry model choices. `afterForward(route, response, context)`
+sees Opengeni's answer to every forwarded request before the browser does,
+so the product can record what it keeps beside Opengeni (an uploaded file's
+owner, a new chat's id, activity) or answer differently. When the hop to
+Opengeni fails or answers 408 or 5xx for a keyed action the relay read, it
+sends the action once more; Opengeni answers a repeated key with the first
+outcome. Without
 `authorizeMutation`, cross-site mutations (by `Sec-Fetch-Site`) and the content
 types a cross-site form can send are refused, so cookie-authenticated products
 should pass their CSRF check.

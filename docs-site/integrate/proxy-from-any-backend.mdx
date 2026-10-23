@@ -31,6 +31,8 @@ Narrow the surface with the organization key's permissions and each member's per
 
 **Message rules** for `POST sessions/{sid}/events` (`user.message`), `steer` and `composer-draft/submit`: reject `mcpCredentialUpdates`, and always refuse `POST sessions/{sid}/mcp-credentials/rotate` and `session-imports` (imported history is stored as genuine transcript, so only your server may write it). If you fix the model, overwrite `model`, `reasoningEffort`, and `latencyMode` with your values rather than dropping them. Your server may add `modelContext` and `mcpCredentialUpdates` itself.
 
+**Admitting work.** If your product bills, rate-limits or otherwise admits agent work, check every request that starts it: the messages above, approval decisions and human-input answers (`user.approvalDecision`, `user.humanInputResponse` on `events`), `POST sessions/{sid}/control` with `action: "resume"`, `POST sessions/{sid}/retry` (also drop its `model`, `reasoningEffort` and `latencyMode` if you fix the model), and `POST sessions/{sid}/queue/{turnId}/steer`. Key your own bookkeeping on the request's `clientEventId` (`idempotencyKey` on create): Opengeni accepts an action once per key and answers a repeat with the first outcome, so when the upstream call fails or answers 408 or 5xx you can safely send the same body once more.
+
 ## Headers
 
 Send these upstream, and nothing else from the browser:
