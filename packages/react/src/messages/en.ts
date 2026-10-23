@@ -2874,6 +2874,7 @@ export const englishMessages = {
   "sessionChrome.editInComposer": "Edit in composer",
   "sessionChrome.editMessage": "Edit message",
   "sessionChrome.editQueuedPromptIndex": "Edit queued prompt {index}",
+  "sessionChrome.goal": "Goal",
   "sessionChrome.goalActionNotConfirmedError": "Goal action not confirmed. {error}",
   "sessionChrome.goalAndActions": "Goal and actions",
   "sessionChrome.goalPrefix": "Goal ·",
@@ -2905,6 +2906,7 @@ export const englishMessages = {
   "sessionChrome.opengeniUsageAllowanceExhaustedResume":
     "{product} usage allowance exhausted. Resume when your allowance is available.",
   "sessionChrome.pause": "Pause",
+  "sessionChrome.pauseGoal": "Pause goal",
   "sessionChrome.paused": "Paused",
   "sessionChrome.pausedAtTheAutomaticContinuation":
     "Paused at the automatic continuation cap. New input (a child result, an agent message, or your prompt) resumes it; you can also resume it here.",
@@ -2917,7 +2919,6 @@ export const englishMessages = {
   "sessionChrome.pausedManuallyByAPerson":
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   "sessionChrome.pausedSuffix": "Paused · {suffix}",
-  "sessionChrome.pauseGoal": "Pause goal",
   "sessionChrome.placingInQueue": "Placing in queue",
   "sessionChrome.previousWorkStopping": "Previous work stopping",
   "sessionChrome.pursuing": "Pursuing",
@@ -2981,7 +2982,13 @@ export const englishMessages = {
   "sessionChrome.videoResult": "Video result",
   "sessionChrome.voiceHandoffQueued": "Voice handoff queued",
   "sessionChrome.voiceRequestQueued": "Voice request queued",
+  "sessionChrome.waitChecksAgain":
+    "Checks again at {clockTime} · resumes sooner if an update arrives",
+  "sessionChrome.waitDetails": "Wait details",
+  "sessionChrome.waitDue": "Due",
   "sessionChrome.waitEnded": "Wait ended",
+  "sessionChrome.waitFallback": "Waiting for work in progress",
+  "sessionChrome.waitLabel": "{reason}. {detail}",
   "sessionChrome.waiting": "Waiting",
   "sessionChrome.waitingForInputValueUntil":
     "Waiting for input{value}{until}. Relevant session input—including a child result, background-command result, agent message, schedule, or your prompt—wakes it sooner.",
@@ -2989,6 +2996,8 @@ export const englishMessages = {
     "Waiting for other session work to finish before the goal continues automatically.",
   "sessionChrome.waitingToBeIncludedIn": "Waiting to be included in an agent turn.",
   "sessionChrome.waitingToContinueAutomatically": "Waiting to continue automatically.",
+  "sessionChrome.waitRecheckDue": "Recheck due · waiting to resume",
+  "sessionChrome.waitStatus": "Wait status",
   "sessionCommandsPanel.backgroundCommand": "Background command",
   "sessionCommandsPanel.backgroundCommand2": "background command",
   "sessionCommandsPanel.commandStatusUnavailable": "Command status unavailable",

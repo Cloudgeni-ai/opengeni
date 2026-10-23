@@ -35,6 +35,7 @@
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
+//   /dev/composer-stack                      → DEV-only session column preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 // The shared session UI renders through this app's router and API helpers.
@@ -435,6 +436,19 @@ const devSessionTimelineRoute = createRoute({
   path: "dev/session-timeline",
   component: LazyDevSessionTimelineRoute,
 });
+// DEV-only: full-height session column (timeline, status stack, composer) for
+// composer-stack screenshots and measurements. Created only in development so
+// its fixtures are never emitted into a production build.
+const composerStackPreviewRoute = import.meta.env.DEV
+  ? createRoute({
+      getParentRoute: () => rootRoute,
+      path: "dev/composer-stack",
+      component: lazyRouteComponent(
+        () => import("@/routes/composer-stack"),
+        "ComposerStackPreviewRoute",
+      ),
+    })
+  : null;
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
 const uiKitRoute = import.meta.env.DEV
@@ -897,6 +911,7 @@ const routeTree = rootRoute.addChildren([
         devSessionTimelineRoute,
       ]
     : []),
+  ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
