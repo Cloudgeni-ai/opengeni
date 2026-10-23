@@ -30,8 +30,14 @@ test("App tokens explicitly request granted administration read, never administr
       },
       transport,
     ).token();
-    expect(permissions.administration).toBe("read");
-    expect(permissions.checks).toBe("read");
+    expect(permissions).toEqual({
+      contents: mode === "shadow" ? "read" : "write",
+      ...(mode === "shadow" ? {} : { workflows: "write" }),
+      actions: mode === "active" ? "write" : "read",
+      pull_requests: mode === "active" ? "write" : "read",
+      issues: mode === "active" ? "write" : "read",
+      administration: "read",
+    });
   }
 });
 async function fixture() {
@@ -56,6 +62,8 @@ async function fixture() {
     inventoryStatus: 200,
     inventoryErrors: false,
     protectionStatus: 404,
+    checkStatus: 200,
+    checkAuthorization: [] as string[],
   };
   const transport = (async (
     input: Parameters<typeof fetch>[0],
@@ -155,7 +163,9 @@ async function fixture() {
                 },
               ]
             : [];
-      else if (path === `commits/${sha}/check-runs`)
+      else if (path === `commits/${sha}/check-runs`) {
+        state.checkAuthorization.push(new Headers(init?.headers).get("Authorization") ?? "");
+        if (state.checkStatus !== 200) return Response.json({}, { status: state.checkStatus });
         body = {
           check_runs: [
             {
@@ -169,7 +179,7 @@ async function fixture() {
             },
           ],
         };
-      else if (path === "actions/runs/200") {
+      } else if (path === "actions/runs/200") {
         if (state.missingRunOnce) {
           state.missingRunOnce = false;
           return new Response("missing", { status: 404 });
@@ -217,6 +227,19 @@ test("real reader never fetches prose evidence and binds hosted exact-head proof
   expect(result.ready).toHaveLength(1);
   expect(f.state.commentsRead).toBe(false);
   expect(result.ready[0]!.binding.evidenceId).toBe("github-ci:100");
+  expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
+});
+test("denied check reads fail closed without anonymous or credential fallback", async () => {
+  for (const status of [401, 403, 404, 500]) {
+    const f = await fixture();
+    f.state.checkStatus = status;
+    if (status === 404) {
+      const result = await f.reader.ready();
+      expect(result.ready).toHaveLength(0);
+      expect(result.excluded[0]?.reason).toBe("Exact-head hosted run or job no longer readable");
+    } else await expect(f.reader.ready()).rejects.toThrow();
+    expect(f.state.checkAuthorization).toEqual(["Bearer fixture"]);
+  }
 });
 test("latest attempt must contain the required check, not an older successful job", async () => {
   const f = await fixture();

@@ -105,6 +105,9 @@ export class GitHubAuth {
     const message = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({ iat: now - 60, exp: now + 540, iss: app })}`;
     const signature = createSign("RSA-SHA256").update(message).sign(key, "base64url");
     // Authentication only; repository mutation permissions are NOT requested in shadow.
+    // Do not explicitly request checks:read: the deployment App lacks that grant.
+    // Authenticated check reads work on this public repository; private repositories
+    // must qualify access separately. Unreadable checks remain fail-closed below.
     const permissions =
       this.env.BATCHER_MODE === "active"
         ? {
@@ -113,7 +116,6 @@ export class GitHubAuth {
             actions: "write",
             pull_requests: "write",
             issues: "write",
-            checks: "read",
             administration: "read",
           }
         : this.env.BATCHER_MODE === "shadow-ci"
@@ -123,7 +125,6 @@ export class GitHubAuth {
               actions: "read",
               pull_requests: "read",
               issues: "read",
-              checks: "read",
               administration: "read",
             }
           : {
@@ -131,7 +132,6 @@ export class GitHubAuth {
               actions: "read",
               pull_requests: "read",
               issues: "read",
-              checks: "read",
               administration: "read",
             };
     const response = await this.transport(
