@@ -702,3 +702,86 @@ describe("a person's question answered before a wait", () => {
     ]);
   });
 });
+
+/*
+ * Session df030716, 13:13 UTC on 2026-10-23: Claude Opus 5.5 wrote its answer
+ * (an A/B explanation, three artifact images and a table) before
+ * wait_for_input, and it came back only as Anthropic's one-paragraph summary.
+ * The summary is now reasoning, and the answer arrives verbatim through the
+ * wait's `reply`, which settlement publishes as the turn's final answer.
+ */
+describe("a wait's verbatim reply", () => {
+  const SUMMARY =
+    "I confirmed the images weren't actually posted before, and here are the actual before/A/B comparison pictures.";
+  const REPLY = [
+    "You're right, the images never reached you. Here they are:",
+    "",
+    "- **A** keeps the sidebar collapsed.",
+    "- **B** opens it beside the Site.",
+    "",
+    "![Before](artifact:cf247ccc0000000000000000000000aa)",
+    "![Option A](artifact:f79ba9240000000000000000000000bb)",
+    "![Option B](artifact:a3dba5210000000000000000000000cc)",
+    "",
+    "| | A | B |",
+    "| --- | --- | --- |",
+    "| Sidebar | collapsed | open |",
+  ].join("\n");
+
+  function repliedWait(turnId: string, reply: string, readable: boolean): TimelineGroup[] {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Show me the before, A and B pictures" }, null),
+      event("turn.started", {}, turnId),
+      ...tool("look", "exec_command", turnId),
+      event("agent.reasoning.delta", { text: SUMMARY }, turnId),
+      event(
+        "agent.toolCall.created",
+        {
+          id: `${turnId}-wait`,
+          name: "opengeni__wait_for_input",
+          arguments: { reply, reason: "Waiting for your pick of A or B.", timeoutSeconds: 6900 },
+        },
+        turnId,
+      ),
+      event(
+        "session.wait.started",
+        { actor: "agent", reason: "Waiting for your pick of A or B.", waitTurnId: turnId },
+        turnId,
+      ),
+      event(
+        "agent.toolCall.output",
+        { id: `${turnId}-wait`, output: { status: "waiting_for_input" } },
+        turnId,
+      ),
+      event(
+        "agent.message.completed",
+        { text: reply, phase: "final_answer", messageId: "wait_for_input:reply" },
+        turnId,
+      ),
+      event("turn.completed", { output: "", reply }, turnId),
+    ];
+    return groupTimeline(
+      englishText,
+      buildTimeline(englishText, events),
+      readable ? { readableTurns: true } : undefined,
+    );
+  }
+
+  for (const readable of [true, false]) {
+    test(`is the turn's visible answer, images and table included (readable=${readable})`, () => {
+      const groups = repliedWait("turn-r", REPLY, readable);
+      expect(visibleMessages(groups)).toEqual([REPLY]);
+      const answerItem = groups.find(
+        (group) => group.kind === "item" && group.item.kind === "agent-message",
+      );
+      const answerMessage =
+        answerItem?.kind === "item" ? (answerItem.item as AgentMessageItem) : undefined;
+      expect(answerMessage?.phase).toBe("final_answer");
+      expect(answerMessage?.text).toContain(
+        "![Option B](artifact:a3dba5210000000000000000000000cc)",
+      );
+      expect(visibleMessages(groups).join("\n")).not.toContain(SUMMARY);
+    });
+  }
+});

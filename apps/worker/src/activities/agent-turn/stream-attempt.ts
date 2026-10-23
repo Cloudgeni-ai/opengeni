@@ -49,6 +49,7 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
+  modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
   isPreemptedModelResponse,
@@ -188,6 +189,7 @@ import {
 } from "./quiescence";
 import {
   inputWaitReply,
+  inputWaitReplyMessage,
   inputWaitReplyRefusal,
   latestDurableTurnMessageText,
 } from "./input-wait-reply";
@@ -1111,10 +1113,15 @@ export async function runTurnStreamAttempt(
     try {
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
-      eventing.inputWaitReplyGuard = async () => {
+      eventing.inputWaitReplyGuard = async (request) => {
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
+          reply: request.reply,
+          hasProgressUpdate: () =>
+            modelResponseHasProgressUpdate(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
           hasVisibleReply: async () =>
             Boolean(latestAssistantMessageText?.trim()) ||
             modelResponseHasVisibleText(
@@ -2285,9 +2292,17 @@ export async function runTurnStreamAttempt(
     // copy is published only when this stream did not complete that text.
     const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
     // A wait ends the turn with empty output; a human's message still gets
-    // its answer recorded for unread attention and Slack.
+    // its answer recorded for unread attention and Slack. A wait's own
+    // `reply` argument is that answer verbatim, shown as the agent's message.
+    const waitReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+    const waitReplyMessage = inputWaitReplyMessage({
+      inputWaitYielded,
+      waitReply,
+      latestAssistantMessageText,
+    });
     const reply = await inputWaitReply({
       inputWaitYielded,
+      waitReply,
       turn,
       latestAssistantMessageText,
       readLatestDurableTurnMessage: async () =>
@@ -2316,6 +2331,9 @@ export async function runTurnStreamAttempt(
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+          ...(waitReplyMessage
+            ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
+            : []),
           {
             type: "turn.completed",
             payload: {

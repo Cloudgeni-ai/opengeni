@@ -846,6 +846,7 @@ export function anthropicResponse(
   searchQueries: ReadonlyMap<string, string> = new Map(),
   requestUsages: Json[] = [],
   accountScope: string | null = null,
+  options: { progressUpdates?: boolean } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -945,11 +946,21 @@ export function anthropicResponse(
         // or of a progress update under display "updates"), never words the
         // model wrote for the person. It stays reasoning so it is never shown
         // or recorded as the agent's message (anthropicWritesProgressUpdates).
+        // Under "updates" only a progress update carries text: it is marked so
+        // the wait_for_input guard knows a note for the person was not shown
+        // as written and asks for the verbatim `reply` argument instead.
         output.push({
           type: "reasoning",
           id,
           content: block.thinking ? [{ type: "input_text", text: block.thinking }] : [],
-          providerData: { anthropic: { block: structuredClone(block) } },
+          providerData: {
+            anthropic: {
+              block: structuredClone(block),
+              ...(options.progressUpdates && block.type === "thinking" && block.thinking
+                ? { progressUpdate: true }
+                : {}),
+            },
+          },
         });
         break;
       default:
@@ -1235,6 +1246,7 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
+      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
     );
   }
 
@@ -1302,6 +1314,7 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
+      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
     );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",

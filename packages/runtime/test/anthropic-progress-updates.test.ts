@@ -8,7 +8,10 @@ import {
   anthropicWritesProgressUpdates,
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
-import { modelResponseHasVisibleText } from "../src/input-wait-yield";
+import {
+  modelResponseHasProgressUpdate,
+  modelResponseHasVisibleText,
+} from "../src/input-wait-yield";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
@@ -148,7 +151,8 @@ const expectedOutput = [
     type: "reasoning",
     id: "msg_progress:1",
     content: [{ type: "input_text", text: UPDATE }],
-    providerData: { anthropic: { block: progress } },
+    // Marked so the wait guard asks for the verbatim reply argument.
+    providerData: { anthropic: { block: progress, progressUpdate: true } },
   },
   {
     type: "function_call",
@@ -240,6 +244,78 @@ describe("Claude progress updates before a tool call", () => {
       "function_call",
     ]);
     expect(modelResponseHasVisibleText(result)).toBe(true);
+  });
+
+  test("the df030716 13:13 UTC response: a whole reply returned as a summarized update, then the wait", async () => {
+    // Opus 5.5 (high) wrote its answer, with three artifact images and a
+    // table, before wait_for_input. Claude returned it as content index 1, a
+    // signed thinking block whose only text is a one-paragraph summary: 915
+    // output tokens, 801 of them thinking, so the words themselves never came
+    // back. A worker without #5673 showed that summary as the agent's reply.
+    const summary =
+      "I confirmed the images weren't actually posted before (known bug #5673, fixed upstream but not in this release), so here are the actual before/A/B comparison pictures across devices and themes, along with a space-usage table. I'd lean toward option B for freeing up the most chat space, especially on phone — let me know which layout (A or B) you want so the worker can finish it, get it reviewed, and merge.\n\n";
+    const update = { type: "thinking", thinking: summary, signature: "EpsEupdate" };
+    const exactWait = {
+      type: "tool_use",
+      id: "toolu_01BmVpQSRzQAzEiBTn5vY3ah",
+      name: "wait_for_input",
+      input: {
+        reason:
+          "Waiting for your pick of A or B, and for the Site sidebar and live Site editing workers.",
+        timeoutSeconds: 6900,
+      },
+    };
+    const claude = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async () =>
+      Response.json({
+        ...response([reasoning, update, exactWait]),
+        id: "msg_011CgKEATPvLMvyNDMvWEjyi",
+        usage: {
+          input_tokens: 2,
+          cache_creation_input_tokens: 205_711,
+          output_tokens: 915,
+          output_tokens_details: { thinking_tokens: 801 },
+        },
+      })) as typeof fetch);
+    const result = await claude.getResponse(request());
+    expect(result.output.map((item) => item.type)).toEqual([
+      "reasoning",
+      "reasoning",
+      "function_call",
+    ]);
+    expect(result.output[1]).toMatchObject({
+      id: "msg_011CgKEATPvLMvyNDMvWEjyi:1",
+      content: [{ type: "input_text", text: summary }],
+      providerData: { anthropic: { block: update, progressUpdate: true } },
+    });
+    expect(result.usage.outputTokens).toBe(915);
+    expect(result.usage.outputTokensDetails).toMatchObject([{ reasoning_tokens: 801 }]);
+    // No message: nothing to show as the reply. The marker tells the wait
+    // guard that what the model wrote for the person did not come back.
+    expect(modelResponseHasVisibleText(result)).toBe(false);
+    expect(modelResponseHasProgressUpdate(result)).toBe(true);
+  });
+
+  test("only display updates marks progress updates; reasoning summaries never are", async () => {
+    const claude = new AnthropicMessagesModel(provider, "claude-opus-5", (async () =>
+      Response.json(response(summarizedContent))) as typeof fetch);
+    const result = await claude.getResponse(request());
+    expect(modelResponseHasProgressUpdate(result)).toBe(false);
+    // Empty reasoning under updates is not an update either.
+    expect(
+      modelResponseHasProgressUpdate({
+        output: anthropicResponse(
+          response([reasoning, wait]),
+          undefined,
+          undefined,
+          undefined,
+          [],
+          null,
+          {
+            progressUpdates: true,
+          },
+        ).output,
+      }),
+    ).toBe(false);
   });
 
   test("a skipped (empty) progress update stays an empty reasoning item", () => {

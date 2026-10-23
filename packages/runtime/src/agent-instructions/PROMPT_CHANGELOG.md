@@ -1,5 +1,18 @@
 # Modular prompt changelog
 
+An answer the agent gives in a turn that ends on `wait_for_input` now goes in
+the call's new `reply` argument, which the person sees exactly as written. The
+Progress updates guidance no longer allows posting a status right before
+`wait_for_input` when it answers the user: it says to put the whole answer in
+`reply` instead of writing it before the call, and the final-response sentence
+says `reply` carries any answer. The message-while-working rule now says to
+call `wait_for_input` with the answer in its `reply`, rather than to give the
+answer and then call it. Before, Claude Opus 5.5 and Sonnet 5.5 returned such
+an answer as a progress-update thinking block, so the person saw only
+Anthropic's one-paragraph summary of it, without its images or tables (session
+df030716, 13:13 UTC on 2026-10-23). Both compositions change identically;
+legacy prompt digests are refreshed for this reviewed change.
+
 A sub-session's question to the person now also reaches its parent agent, and
 the first answer wins. The Session coordination guidance gains one paragraph,
 shown when `session_human_input_respond` is available: the parent answers a

@@ -13,12 +13,36 @@ type StreamScope = {
   signal: AbortSignal | undefined;
 };
 
+/**
+ * One `wait_for_input` call as the gate sees it. `reply` is the call's
+ * optional verbatim message for the person (see `waitForInputReply`).
+ */
+export type InputWaitRequest = { reply: string | null };
+
+/**
+ * The verbatim reply a `wait_for_input` call carries, or null when it has none.
+ *
+ * Text a model writes before a tool call may come back only as a summary (Claude
+ * Opus 5.5 and Sonnet 5.5 return a longer note before a tool call as a signed
+ * progress-update `thinking` block whose readable text is Anthropic's summary).
+ * A tool argument always arrives exactly as written, so the reply is shown and
+ * recorded from it.
+ */
+export function waitForInputReply(args: unknown): string | null {
+  const reply =
+    args !== null && typeof args === "object" && !Array.isArray(args)
+      ? (args as { reply?: unknown }).reply
+      : undefined;
+  return typeof reply === "string" && reply.trim().length > 0 ? reply : null;
+}
+
 /** Attempt-wide trusted receipts, with separately fenced SDK stream generations.
  * Recovery may start a new stream, never erase an accepted/pending wait. Only
  * SDK yield selection sets yielded; receipt acceptance alone cannot hide output.
  */
 export class InputWaitYield {
   private accepted = false;
+  private acceptedReply: string | null = null;
   private didYield = false;
   private terminal = false;
   private readonly pending = new Set<Promise<void>>();
@@ -32,15 +56,17 @@ export class InputWaitYield {
   // Recognize our SDK boundary exit by identity, not a provider/tool error's text.
   private readonly boundaryExit = new MaxTurnsExceededError("Runtime input wait yield");
 
-  constructor(private readonly replyGuard?: () => Promise<string | null>) {}
+  constructor(
+    private readonly replyGuard?: (request: InputWaitRequest) => Promise<string | null>,
+  ) {}
 
   /** Why a requested wait must not be registered yet, or null to proceed. The
    * caller returns the reason to the model as a tool error without admission.
    */
-  async replyRefusal(): Promise<string | null> {
+  async replyRefusal(request: InputWaitRequest = { reply: null }): Promise<string | null> {
     if (!this.replyGuard || this.terminal || this.accepted) return null;
     try {
-      return await this.replyGuard();
+      return await this.replyGuard(request);
     } catch {
       // The guard is a reply-quality check, never an availability gate: when
       // it cannot decide (for example a failed read), the wait proceeds.
@@ -53,6 +79,10 @@ export class InputWaitYield {
   }
   get yielded(): boolean {
     return this.didYield;
+  }
+  /** The verbatim reply of the accepted wait, or null when it carried none. */
+  get reply(): string | null {
+    return this.acceptedReply;
   }
 
   /** Explicit SDK invocation boundary. A prior stream must have settled first.
@@ -97,7 +127,7 @@ export class InputWaitYield {
    * acquisition must not execute it. Completion only changes receipt truth; it
    * cannot reopen a stream or retrospectively select successful finalization.
    */
-  beginWait(): (success: boolean) => void {
+  beginWait(request: InputWaitRequest = { reply: null }): (success: boolean) => void {
     if (this.scope.signal?.aborted) this.endStream(this.scope);
     if (this.terminal || this.scope.ended || this.scope.phase !== "open") {
       throw new Error("Input wait was not executed: model dispatch or settlement is sealed");
@@ -111,7 +141,12 @@ export class InputWaitYield {
     return (success) => {
       if (completed) return;
       completed = true;
-      if (success) this.accepted = true;
+      if (success) {
+        // The first accepted wait ends the turn; a later one cannot replace
+        // the reply that wait already carried.
+        if (!this.accepted) this.acceptedReply = request.reply;
+        this.accepted = true;
+      }
       this.pending.delete(pending);
       release();
     };
@@ -339,5 +374,24 @@ export function modelResponseHasVisibleText(response: unknown): boolean {
         );
       })
     );
+  });
+}
+
+/**
+ * Whether the model response that asked for tools contains a Claude progress
+ * update: a note the model wrote for the person before its tool call that came
+ * back only as Anthropic's summary, as reasoning (see
+ * `anthropicWritesProgressUpdates`). Some or all of what the model meant to
+ * say is then not visible as written.
+ */
+export function modelResponseHasProgressUpdate(response: unknown): boolean {
+  const output = (response as { output?: unknown } | null | undefined)?.output;
+  if (!Array.isArray(output)) return false;
+  return output.some((item) => {
+    const reasoning = item as { type?: unknown; providerData?: unknown } | null;
+    if (reasoning?.type !== "reasoning") return false;
+    const anthropic = (reasoning.providerData as { anthropic?: { progressUpdate?: unknown } })
+      ?.anthropic;
+    return anthropic?.progressUpdate === true;
   });
 }

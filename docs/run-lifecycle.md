@@ -4152,6 +4152,18 @@ settling activity completed last is the reply; an activity that resumed the
 turn after an approval, a human-input answer or a recovery and completed none
 reads the turn's newest current durable `agent.message.completed` instead.
 
+`wait_for_input` also takes an optional `reply` argument: the agent's complete
+message for the person, exactly as written. Text a model writes just before a
+tool call is not always delivered verbatim (Claude Opus 5.5 and Sonnet 5.5
+return a longer note there as a progress-update thinking block whose readable
+text is only Anthropic's summary, see [model providers](./model-providers.md)),
+but a tool argument always is. When the accepted wait carries a `reply`,
+settlement publishes it as an `agent.message.completed` with `phase`
+`final_answer` and `messageId` `wait_for_input:reply`, before `turn.completed`,
+whoever started the turn, unless it equals the turn's latest message. For a
+turn that a human or API message started, it is also `turn.completed.payload.reply`,
+ahead of the latest message. The first accepted wait's reply wins.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
