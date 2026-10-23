@@ -1,3 +1,4 @@
+import { ArchiveConfirmationProvider } from "../lib/archive-session";
 // The Opengeni session app for an embedding page that already holds an
 // authenticated API client (a first-party side pane such as the Excel add-in,
 // the desktop app, a playground). It renders the web app's own session shell,
@@ -379,12 +380,14 @@ function SessionAppGates({
     const context = state.appContext;
     content = (
       <AppContext.Provider value={context}>
-        <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
-        <CreditRequiredGate
-          creditRequired={state.creditRequired}
-          setCreditRequired={state.setCreditRequired}
-          accessContext={state.accessContext}
-        />
+        <ArchiveConfirmationProvider>
+          <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
+          <CreditRequiredGate
+            creditRequired={state.creditRequired}
+            setCreditRequired={state.setCreditRequired}
+            accessContext={state.accessContext}
+          />
+        </ArchiveConfirmationProvider>
       </AppContext.Provider>
     );
   }

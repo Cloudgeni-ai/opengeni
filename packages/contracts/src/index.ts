@@ -8434,6 +8434,12 @@ export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: z.boolean(),
+      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      clientEventId: z.string().min(1).max(200).optional(),
+      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
+      /** Required when the locked chat tree has active work. Restore never resumes. */
+      confirmPause: z.boolean().optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),

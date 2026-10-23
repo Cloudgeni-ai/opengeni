@@ -166,3 +166,16 @@ describe("session group fill", () => {
     expect(sameSessionGroupFill(new Map(), new Map([["a", 1]]))).toBe(false);
   });
 });
+
+test("archiving does not reveal a replacement row or invent a selected row in an empty window", () => {
+  const rows = nodes(8);
+  const before = sessionGroupWindowNodes(rows, 4, null);
+  const after = sessionGroupWindowNodes(
+    rows.filter((node) => node.session.id !== "session-1"),
+    3,
+    null,
+    0,
+  );
+  expect(after).toEqual(before.filter((node) => node.session.id !== "session-1"));
+  expect(sessionGroupWindowNodes(rows, 0, "session-7", 0)).toEqual([]);
+});

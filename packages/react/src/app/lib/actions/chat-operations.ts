@@ -1,3 +1,8 @@
+import {
+  archiveActionLabel,
+  requestSessionArchive,
+  useArchiveConfirmation,
+} from "../archive-session";
 /**
  * The chat operations every surface shares: the command menu, chords, the
  * chat header and the sidebar's row menus all copy links, pin, archive and
@@ -12,6 +17,7 @@ import { notifySessionListChanged } from "../session-list-invalidation";
 import { toast } from "../toast";
 
 export type ChatOperations = {
+  archiveLabel?: (chat: SessionListRow) => string;
   /** The chat's shareable address. */
   linkTo(chat: Pick<SessionListRow, "id" | "workspaceId">): string;
   copyLink(chat: Pick<SessionListRow, "id" | "workspaceId">): Promise<void>;
@@ -44,6 +50,7 @@ async function writeClipboard(text: string): Promise<void> {
 
 export function useChatOperations(): ChatOperations {
   const context = useAppContext();
+  const confirmArchive = useArchiveConfirmation();
   const page = usePage();
   const archiving = useRef(new Set<string>());
   const linkTo = useCallback(
@@ -84,10 +91,8 @@ export function useChatOperations(): ChatOperations {
       if (!accepted) return;
       archiving.current.add(chat.id);
       try {
-        const updated = await context.client.updateSessionArchive(chat.workspaceId, chat.id, {
-          archived,
-          expectedVersion: chat.archiveVersion ?? 0,
-        });
+        const updated = await requestSessionArchive(context, chat, archived, confirmArchive);
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
         context.setSession((current) =>
           current?.id === updated.id && current.workspaceId === updated.workspaceId
@@ -121,7 +126,7 @@ export function useChatOperations(): ChatOperations {
         archiving.current.delete(chat.id);
       }
     },
-    [context],
+    [context, confirmArchive],
   );
   setArchivedRef.current = setArchived;
   const setUnread = useCallback(
@@ -153,7 +158,14 @@ export function useChatOperations(): ChatOperations {
     [context],
   );
   return useMemo(
-    () => ({ linkTo, copyLink, setPinned, setArchived, setUnread }),
-    [linkTo, copyLink, setPinned, setArchived, setUnread],
+    () => ({
+      linkTo,
+      copyLink,
+      setPinned,
+      setArchived,
+      setUnread,
+      archiveLabel: (chat: SessionListRow) => archiveActionLabel(context, chat),
+    }),
+    [linkTo, copyLink, setPinned, setArchived, setUnread, context],
   );
 }

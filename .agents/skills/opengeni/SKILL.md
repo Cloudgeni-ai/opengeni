@@ -438,6 +438,13 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 
 ## Scheduling Discovery
 
+For chat Archive, inspect `archiveHumanSessionWorkstream` and the archive request
+contract before treating it as personal visibility alone. The stock console uses
+native recursive Pause atomically with personal archive, with server-confirmed
+active-work warnings; explicit Hide for me and the embedded session proxy remain
+personal-only. Restore does not resume, and schedule definitions retain their own
+authority. See `docs/run-lifecycle.md` for the control/admission boundary.
+
 Scheduled bot posting uses ordinary selected capabilities and instructions, not a
 separate schedule-only approval field. Slack installation availability, incoming
 channel routing and workspace automation settings have distinct owners; see

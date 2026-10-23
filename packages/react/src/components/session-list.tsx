@@ -28,7 +28,7 @@ const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
   loading: t("sessionList.loadingChats"),
   loadMore: t("sessionList.showMore"),
   rename: t("sessionList.rename"),
-  archive: t("sessionList.archive"),
+  archive: "Hide for me",
   save: t("sessionList.save"),
   cancel: t("sessionList.cancel"),
 });
@@ -134,6 +134,7 @@ export function SessionList({
     void run(session.id, async () => {
       await archiveClient.updateSessionArchive!(context.workspaceId, session.id, {
         archived: true,
+        mode: "hide_for_me",
       });
       onArchived?.(session.id);
     });

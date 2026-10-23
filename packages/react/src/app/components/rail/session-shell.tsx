@@ -1,3 +1,4 @@
+import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -555,6 +556,7 @@ function SessionRouteHeader({
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
+  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -563,10 +565,8 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await context.client.updateSessionArchive(target.workspaceId, target.id, {
-          archived,
-          expectedVersion: target.archiveVersion ?? 0,
-        });
+        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
           current?.id === updated.id && current.workspaceId === updated.workspaceId
@@ -588,7 +588,7 @@ function SessionRouteHeader({
         archiveInFlight.current = false;
       }
     },
-    [context],
+    [context, confirmArchive],
   );
 
   return (
