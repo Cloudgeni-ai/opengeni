@@ -84,6 +84,8 @@ function restrictedPageError(reason: string): InteractionDefiniteDriverError {
   );
 }
 
+const MAX_TAB_URL_LENGTH = 65_536;
+
 type AttachedTab = {
   id: string;
   title: string;
@@ -1268,10 +1270,20 @@ function requireTab(value: unknown): AttachedTab {
   return {
     id: requireTargetId(tab.id),
     title: boundedString(tab.title, 0, 8_192, "tab title"),
-    url: tab.url === null ? null : boundedString(tab.url, 1, 65_536, "tab URL"),
+    url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
   };
+}
+
+/** A tab's address as Chrome reports it, or null when it reports none yet.
+ * One tab's unusual address never fails a listing or a session's start:
+ * Chrome reports a tab it has just created, or one still loading, with an
+ * empty address, and a page's own address (a large data: URL) can be far
+ * longer than anything we need to read of it. */
+function tabUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
