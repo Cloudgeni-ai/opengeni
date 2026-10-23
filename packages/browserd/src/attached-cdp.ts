@@ -294,8 +294,10 @@ export function createAttachedChromeDriver(
  * crashed controller, or a cleanup that could not reach the browser): close
  * the tabs it opened that are still blank and release the debugger
  * attachments it held. A tab that shows a page, or that a live session in
- * this process holds, stays. Returns the record to keep; it is settled when
- * nothing is left to do. A profile that reconnected under another generation
+ * this process holds, stays. A tab Chrome reports without an address yet
+ * (just created, or still loading) is neither: it stays recorded for a later
+ * sweep. Returns the record to keep; it is settled when nothing is left to
+ * do. A profile that reconnected under another generation
  * can no longer be addressed with these tab ids, so its record settles as is.
  * Any other failure throws, for a later retry.
  */
@@ -336,7 +338,13 @@ export async function settleAttachedTabLedger(
     for (const tabId of ledger.createdTabs) {
       const tab = tabs.get(tabId);
       if (!tab) continue;
-      if (tab.url === null || !isBlankTabUrl(tab.url) || held(tabId)) {
+      if (tab.url === null) {
+        // Whether it ends up blank or showing a page is not known yet.
+        createdTabs.push(tabId);
+        settled = false;
+        continue;
+      }
+      if (!isBlankTabUrl(tab.url) || held(tabId)) {
         createdTabs.push(tabId);
         continue;
       }
