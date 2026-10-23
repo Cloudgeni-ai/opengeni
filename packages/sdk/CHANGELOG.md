@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 4.8.0
+
+### Minor Changes
+
+- 3089aaf: Stay calm while Opengeni is updating. The SDK now decodes the parked maintenance answer (`{"error":"maintenance"}`) into an `OpenGeniApiError` with `code: "maintenance"`, `retryable: true` and `outcomeUnknown: false`, without a support reference. `isMaintenanceError` and `OPENGENI_MAINTENANCE_ERROR_CODE` are exported, and `isTransientRequestError` treats the marker as transient.
+
+  In the console and embedded chat, an update or brief outage no longer shows red errors, References, a "Queue needs attention" chip or error toasts. The composer shows one line, "Opengeni is updating. We'll reconnect automatically.", keeps a message sent meanwhile in place with the same idempotency key and delivers it once the API answers, and clears on its own. Reads keep retrying for as long as the maintenance marker lasts. Other transient failures stay calm for two minutes; after that, and for any definitive error, the existing error copy appears. At startup, the web, desktop and embedded apps show "Updating" or "Reconnecting" and continue by themselves when the API is back, with Try again as a secondary action.
+
+### Patch Changes
+
+- e2a641c: Muting replies on a run of a schedule that starts a new chat each time now mutes the whole schedule, so later runs stay quiet. The session menu says "Mute this schedule's replies" there, and `SessionInboxMute` carries an optional `scope`.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/connect@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes

@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 4.8.0
+
+### Patch Changes
+
+- b0d752d: Batch artifact-list source-session authorization reads within existing response windows, while preserving per-source host authorization and a separate post-host visibility check.
+- Updated dependencies [b0d752d]
+- Updated dependencies [85fb89e]
+- Updated dependencies [e4712be]
+- Updated dependencies [238c599]
+  - @opengeni/db@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/documents@4.8.0
+  - @opengeni/events@4.8.0
+  - @opengeni/capabilities@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/storage@4.8.0
+  - @opengeni/vaults@4.8.0
+  - @opengeni/network@4.8.0
+
 ## 4.7.2
 
 ### Patch Changes
