@@ -28,7 +28,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { client } from "../lib/app-api";
+import { client, connectReturnUrl } from "../lib/app-api";
 import { bundledLogo, GOOGLE_DRIVE_LOGO } from "../lib/brand-logos";
 import {
   accountSubtitle,
@@ -464,7 +464,7 @@ function AccountActions({
             : "mcp-oauth",
           ownership: account.ownership,
           reconnectAccountId: account.id,
-          returnUrl: window.location.href,
+          returnUrl: connectReturnUrl(),
           idempotencyKey: crypto.randomUUID(),
         });
         if (attempt.state === "credential_input" && account.mcpUrl)
@@ -843,7 +843,7 @@ function AddConnection({
           name={selected.name}
           logoSrc={selected.logo}
           dialogSubtitle={categoryLabel(selected.item.category) ?? "Connection"}
-          returnUrl={window.location.href}
+          returnUrl={connectReturnUrl()}
           dialogOnly
           onClose={() => setSelected(null)}
           onConfigured={() => {

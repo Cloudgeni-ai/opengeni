@@ -3,13 +3,16 @@ import { hasActionBlock, splitActionBlocks } from "../src/lib/blocks";
 
 describe("splitActionBlocks", () => {
   test("separates prose from a complete agent block", () => {
-    const text = 'Done.\n\n```geni-agent\n{"name":"Runner","emoji":"🏃"}\n```\nEnjoy.';
+    const text = 'Done.\n\n```geni-agent\n{"name":"Runner","icon":"footprints"}\n```\nEnjoy.';
     const segments = splitActionBlocks(text);
     expect(segments.map((segment) => segment.type)).toEqual(["text", "block", "text"]);
     const block = segments[1];
     expect(block?.type === "block" && block.block.kind).toBe("agent");
     expect(block?.type === "block" && block.block.complete).toBe(true);
-    expect(block?.type === "block" && block.block.payload).toEqual({ name: "Runner", emoji: "🏃" });
+    expect(block?.type === "block" && block.block.payload).toEqual({
+      name: "Runner",
+      icon: "footprints",
+    });
   });
 
   test("marks a block that is still streaming as incomplete", () => {

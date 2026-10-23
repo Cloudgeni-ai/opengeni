@@ -45,11 +45,11 @@ describe("usage", () => {
 
 describe("profiles and prefs", () => {
   test("profile patches merge", () => {
-    store.upsertProfile("ws", "s1", { name: "Runner", emoji: "🏃" });
+    store.upsertProfile("ws", "s1", { name: "Runner", icon: "footprints" });
     store.upsertProfile("ws", "s1", { description: "Tracks runs" });
     const profile = store.getProfile("s1");
     expect(profile?.name).toBe("Runner");
-    expect(profile?.emoji).toBe("🏃");
+    expect(profile?.icon).toBe("footprints");
     expect(profile?.description).toBe("Tracks runs");
   });
 

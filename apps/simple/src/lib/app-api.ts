@@ -43,13 +43,8 @@ export type EffortLevel = "fast" | "balanced" | "thorough";
 export type AgentProfile = {
   workspaceId: string;
   sessionId: string;
-  emoji: string | null;
-  color: string | null;
+  icon: string | null;
   description: string | null;
-  avatarArtifactId: string | null;
-  avatarStatus: "none" | "pending" | "ready" | "failed";
-  avatarPrompt: string | null;
-  avatarFormat: "mask" | "picture" | null;
   effort: EffortLevel | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -130,22 +125,12 @@ export const appApi = {
   updateProfile: (
     workspaceId: string,
     sessionId: string,
-    patch: { effort?: EffortLevel | null; emoji?: string | null },
+    patch: { effort?: EffortLevel | null; icon?: string | null },
   ) =>
     request<AgentProfile>(`/app/agents/${sessionId}/profile`, {
       method: "PUT",
       json: { workspaceId, ...patch },
     }),
-  regenerateAvatar: (workspaceId: string, sessionId: string, hint?: string) =>
-    request<AgentProfile>(`/app/agents/${sessionId}/avatar`, {
-      method: "POST",
-      json: { workspaceId, hint: hint ?? null },
-    }),
-  retryAvatars: (workspaceId: string) =>
-    request<{ ok: true }>("/app/avatars/retry", {
-      method: "POST",
-      json: { workspaceId },
-    }).catch(() => null),
   getBlock: (key: string) => request<AppliedBlock | null>(`/app/blocks/${encodeURIComponent(key)}`),
   applyBlock: (input: {
     workspaceId: string;

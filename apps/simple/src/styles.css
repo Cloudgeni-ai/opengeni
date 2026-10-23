@@ -121,17 +121,6 @@ body {
   }
 }
 
-/* A generated glyph used as a mask, filled with the avatar style's color. */
-.avatar-glyph {
-  display: block;
-  mask-size: contain;
-  mask-repeat: no-repeat;
-  mask-position: center;
-  -webkit-mask-size: contain;
-  -webkit-mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-}
-
 /* Settings > Connections. Opengeni's own pieces (logos, the connect dialog,
    which copies these tokens into its portal) follow the app's palette. */
 .simple-connections {

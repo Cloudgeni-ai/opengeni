@@ -1,10 +1,12 @@
 import type { AuthNeededItem } from "@opengeni/react";
 import { McpConnectionCard } from "@opengeni/react/connect";
+import { ThisComputerCard } from "@opengeni/react/this-computer";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
-import { GitBranch, Plug } from "lucide-react";
+import { GitBranch, Monitor, Plug } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { client, connectReturnUrl } from "../lib/app-api";
 import { useAppEvents } from "../lib/app-events";
+import { useAppComputer } from "../lib/this-computer";
 
 /**
  * Inline connection setup when an agent asks for a tool. OAuth services get
@@ -17,12 +19,17 @@ export function renderConnectionCard(
     workspaceId: string;
     sessionId: string;
     catalog: CapabilityCatalogItem[];
+    /** The person turned their computer on from the card. */
+    onComputerReady?: () => void;
   },
 ): ReactNode | undefined {
   const capability = item.capability;
   if (!capability) {
     if (item.authoritySource === "host") return undefined;
     return <SettingsFallback title={`Reconnect ${item.providerDomain}`} rationale={null} />;
+  }
+  if (capability.id === "api:connected-machine") {
+    return <ComputerCard rationale={capability.rationale} onReady={context.onComputerReady} />;
   }
   if (capability.id === "api:github-app") {
     return <GitHubCard workspaceId={context.workspaceId} rationale={capability.rationale} />;
@@ -44,6 +51,42 @@ export function renderConnectionCard(
     );
   }
   return <SettingsFallback title={`Connect ${capability.name}`} rationale={capability.rationale} />;
+}
+
+/**
+ * The agent asks to use this Mac. One Allow turns it on for every chat; the
+ * setup dialog walks through the macOS permissions when screen control is on.
+ */
+function ComputerCard({
+  rationale,
+  onReady,
+}: {
+  rationale: string | null | undefined;
+  onReady: (() => void) | undefined;
+}) {
+  const app = useAppComputer();
+  if (!app) {
+    return (
+      <Shell
+        icon={<Monitor size={18} />}
+        title="Use your computer"
+        rationale="Open the Opengeni Mac app to let agents use your computer."
+        action={null}
+      />
+    );
+  }
+  return (
+    <div className="simple-connections card-in my-2">
+      <ThisComputerCard
+        rationale={rationale ?? null}
+        computer={app.computer}
+        productName={app.productName}
+        labels={app.labels}
+        onSetup={app.openSetup}
+        {...(onReady ? { onReady: () => onReady() } : {})}
+      />
+    </div>
+  );
 }
 
 function Shell({

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { OpenGeniClient, type Session } from "@opengeni/sdk";
 import { opengeniApiKey, opengeniApiUrl } from "./config";
+import { isAgentIcon } from "../src/lib/agent-icons";
 import { getProfile, getPrefs, listProfiles, upsertProfile, type AgentProfile } from "./db";
 import {
   agentIdentity,
@@ -101,7 +102,7 @@ export type CreateAgentInput = {
   workspaceId: string;
   role: AgentRole;
   name: string;
-  emoji?: string | null;
+  icon?: string | null;
   description?: string | null;
   instructions?: string | null;
   firstMessage?: string | null;
@@ -166,7 +167,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Session> {
   upsertProfile(input.workspaceId, session.id, {
     name: input.name,
     role: input.role,
-    emoji: input.emoji ?? null,
+    icon: input.icon ?? null,
     description: input.description ?? null,
     customInstructions: input.instructions ?? null,
     instructionsVersion: INSTRUCTIONS_VERSION,
@@ -239,7 +240,6 @@ export async function ensureMainAgent(workspaceId: string): Promise<Session> {
       workspaceId,
       role: "main",
       name: MAIN_AGENT_NAME,
-      emoji: "✨",
       description: "Your main agent. Ask for anything.",
       idempotencyKey: `simple-app:main:${workspaceId}`,
     });
@@ -310,10 +310,9 @@ export async function applyAgentConfig(
 
 export type ProfileUpdate = {
   name?: string;
-  emoji?: string;
+  icon?: string;
   description?: string;
   instructions?: string;
-  avatarPrompt?: string;
 };
 
 /** Applies an agent's own `geni-profile` block. */
@@ -350,8 +349,7 @@ export async function applyProfileUpdate(
     description,
     customInstructions,
     instructionsVersion: INSTRUCTIONS_VERSION,
-    ...(clean(update.emoji, 16) ? { emoji: clean(update.emoji, 16) } : {}),
-    ...(clean(update.avatarPrompt, 600) ? { avatarPrompt: clean(update.avatarPrompt, 600) } : {}),
+    ...(isAgentIcon(update.icon) ? { icon: update.icon } : {}),
   });
 }
 
@@ -359,18 +357,4 @@ function clean(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, max) : null;
-}
-
-/**
- * The full bytes of a retained image. The content route answers in bounded
- * ranges, so a plain fetch only returns the first slice of a large image.
- */
-export async function downloadImage(workspaceId: string, artifactId: string) {
-  const metadata = await api.getRetainedArtifact(workspaceId, artifactId);
-  if (!metadata.available) return null;
-  const { bytes } = await api.downloadRetainedArtifact(
-    workspaceId,
-    metadata as Parameters<typeof api.downloadRetainedArtifact>[1],
-  );
-  return { bytes, contentType: metadata.contentType };
 }

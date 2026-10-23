@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { dataDirectory } from "./config";
 
 /**
- * App-owned facts Opengeni has no field for: the look of an agent (avatar,
- * emoji, color), its one-line description, a per-agent effort override, usage
+ * App-owned facts Opengeni has no field for: the look of an agent (its icon),
+ * its one-line description, a per-agent effort override, usage
  * history for the self-organizing sidebar, and which agent action blocks have
  * already been applied. Conversation, identity, instructions, pins, unread and
  * visibility stay in Opengeni.
@@ -13,15 +13,9 @@ import { dataDirectory } from "./config";
 export type AgentProfile = {
   workspaceId: string;
   sessionId: string;
-  emoji: string | null;
-  color: string | null;
+  /** A name from AGENT_ICONS; the app falls back to a keyword match. */
+  icon: string | null;
   description: string | null;
-  avatarArtifactId: string | null;
-  avatarStatus: "none" | "pending" | "ready" | "failed";
-  avatarPrompt: string | null;
-  avatarJobSessionId: string | null;
-  /** "mask": a silhouette the app colors in; "picture": an older full-color image. */
-  avatarFormat: "mask" | "picture" | null;
   effort: string | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -45,13 +39,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS agent_profiles (
     workspace_id TEXT NOT NULL,
     session_id TEXT NOT NULL PRIMARY KEY,
-    emoji TEXT,
-    color TEXT,
+    icon TEXT,
     description TEXT,
-    avatar_artifact_id TEXT,
-    avatar_status TEXT NOT NULL DEFAULT 'none',
-    avatar_prompt TEXT,
-    avatar_job_session_id TEXT,
     effort TEXT,
     name TEXT,
     role TEXT,
@@ -85,25 +74,14 @@ const profileColumns = db
   .query<{ name: string }, []>("SELECT name FROM pragma_table_info('agent_profiles')")
   .all()
   .map((column) => column.name);
-if (!profileColumns.includes("avatar_format")) {
-  // Avatars made before this column are full-color pictures.
-  db.exec("ALTER TABLE agent_profiles ADD COLUMN avatar_format TEXT");
-  db.exec(
-    "UPDATE agent_profiles SET avatar_format = 'picture' WHERE avatar_artifact_id IS NOT NULL",
-  );
-}
+// Databases from before icons keep their old avatar columns unused.
+if (!profileColumns.includes("icon")) db.exec("ALTER TABLE agent_profiles ADD COLUMN icon TEXT");
 
 type ProfileRow = {
   workspace_id: string;
   session_id: string;
-  emoji: string | null;
-  color: string | null;
+  icon: string | null;
   description: string | null;
-  avatar_artifact_id: string | null;
-  avatar_status: AgentProfile["avatarStatus"];
-  avatar_prompt: string | null;
-  avatar_job_session_id: string | null;
-  avatar_format: AgentProfile["avatarFormat"];
   effort: string | null;
   name: string | null;
   role: "main" | "agent" | null;
@@ -116,14 +94,8 @@ function toProfile(row: ProfileRow): AgentProfile {
   return {
     workspaceId: row.workspace_id,
     sessionId: row.session_id,
-    emoji: row.emoji,
-    color: row.color,
+    icon: row.icon,
     description: row.description,
-    avatarArtifactId: row.avatar_artifact_id,
-    avatarStatus: row.avatar_status,
-    avatarPrompt: row.avatar_prompt,
-    avatarJobSessionId: row.avatar_job_session_id,
-    avatarFormat: row.avatar_format,
     effort: row.effort,
     name: row.name,
     role: row.role,
@@ -148,14 +120,8 @@ export function getProfile(sessionId: string): AgentProfile | null {
 }
 
 const PROFILE_FIELDS = {
-  emoji: "emoji",
-  color: "color",
+  icon: "icon",
   description: "description",
-  avatarArtifactId: "avatar_artifact_id",
-  avatarStatus: "avatar_status",
-  avatarPrompt: "avatar_prompt",
-  avatarJobSessionId: "avatar_job_session_id",
-  avatarFormat: "avatar_format",
   effort: "effort",
   name: "name",
   role: "role",

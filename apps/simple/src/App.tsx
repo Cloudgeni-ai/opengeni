@@ -22,6 +22,7 @@ import {
 } from "./lib/app-api";
 import { AppEventsContext } from "./lib/app-events";
 import { avatarStyleId } from "./lib/avatar-styles";
+import { AppComputerProvider } from "./lib/this-computer";
 import { buildModelContext, type ReplyLength } from "./lib/context";
 import { Splash } from "./components/Splash";
 import { Welcome } from "./components/Welcome";
@@ -117,11 +118,6 @@ export function App({
   const refreshCodex = useCallback(() => {
     void client.codexStatus(workspaceId).then(setCodex, () => setCodex(null));
   }, [workspaceId]);
-  // Avatars painted before a model could draw failed; try again once one can.
-  const codexConnected = codex?.connected === true;
-  useEffect(() => {
-    if (codexConnected) void appApi.retryAvatars(workspaceId);
-  }, [codexConnected, workspaceId]);
 
   useEffect(() => {
     if (!boot?.mainSessionId) return;
@@ -325,89 +321,94 @@ export function App({
   return (
     <AppEventsContext.Provider value={events}>
       <AvatarStyleContext.Provider value={avatarStyle}>
-        <div className="flex h-full">
-          <div className="hidden w-[272px] shrink-0 border-r border-[var(--app-border)] md:block">
-            {sidebar}
-          </div>
-          {sidebarOpen ? (
-            <div className="fixed inset-0 z-40 md:hidden">
-              <div className="absolute inset-0 bg-black/30" onClick={() => setSidebarOpen(false)} />
-              <div className="card-in absolute inset-y-0 left-0 w-[86%] max-w-[320px] shadow-2xl">
-                {sidebar}
-              </div>
+        <AppComputerProvider workspaceId={workspaceId}>
+          <div className="flex h-full">
+            <div className="hidden w-[272px] shrink-0 border-r border-[var(--app-border)] md:block">
+              {sidebar}
             </div>
-          ) : null}
-          <main className="flex h-full min-w-0 flex-1 flex-col bg-[var(--app-bg)]">
-            {codex && !codex.connected ? (
-              <div className="flex shrink-0 items-center gap-3 border-b border-[var(--app-border)] bg-[var(--app-accent-soft)] px-4 py-2 text-sm">
-                <span className="min-w-0 flex-1">Connect ChatGPT so your agents can think.</span>
-                <button
-                  type="button"
-                  onClick={() => setSettings("models")}
-                  className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1 text-xs font-medium text-white"
-                >
-                  Connect
-                </button>
+            {sidebarOpen ? (
+              <div className="fixed inset-0 z-40 md:hidden">
+                <div
+                  className="absolute inset-0 bg-black/30"
+                  onClick={() => setSidebarOpen(false)}
+                />
+                <div className="card-in absolute inset-y-0 left-0 w-[86%] max-w-[320px] shadow-2xl">
+                  {sidebar}
+                </div>
               </div>
             ) : null}
-            {drafting ? (
-              <DraftAgentView
-                draft={draft}
-                workspaceName={workspaceName}
-                onChange={setDraft}
-                onSend={(text) => void sendDraft(text)}
-                onOpenSidebar={() => setSidebarOpen(true)}
-              />
-            ) : (
-              <ChatView
-                workspaceId={workspaceId}
-                agent={selected}
-                agents={agents}
-                effort={selected.profile?.effort ?? defaultEffort}
-                defaultEffort={defaultEffort}
-                replyLength={replyLength}
-                connections={connections}
-                catalog={catalog}
-                onOpenAgent={select}
-                onOpenSidebar={() => setSidebarOpen(true)}
-              />
-            )}
-          </main>
-        </div>
-        {settings ? (
-          <SettingsDialog
-            tab={settings}
-            onTab={setSettings}
-            onClose={() => setSettings(null)}
-            workspaceId={workspaceId}
-            workspaces={workspaces}
-            onSwitchWorkspace={(id) => {
-              setSettings(null);
-              onSwitchWorkspace(id);
-            }}
-            theme={theme}
-            onTheme={setTheme}
-            defaultEffort={defaultEffort}
-            onDefaultEffort={(value) => setPref("defaultEffort", value)}
-            avatarThemes={boot?.config.avatarThemes ?? []}
-            avatarTheme={avatarStyle}
-            avatarSamples={agents.slice(0, 4)}
-            onAvatarTheme={(value) => setPref("avatarTheme", value)}
-            replyLength={replyLength}
-            onReplyLength={(value) => setPref("replyLength", value)}
-            notifications={notifications}
-            onNotifications={(enabled) => {
-              if (enabled && "Notification" in window && Notification.permission === "default") {
-                void Notification.requestPermission();
-              }
-              setPref("notifications", enabled ? "on" : "off");
-            }}
-            codex={codex}
-            onCodexChanged={refreshCodex}
-            fullAppUrl={boot.config.fullAppUrl}
-            agentName={(id) => agents.find((agent) => agent.id === id)?.name ?? null}
-          />
-        ) : null}
+            <main className="flex h-full min-w-0 flex-1 flex-col bg-[var(--app-bg)]">
+              {codex && !codex.connected ? (
+                <div className="flex shrink-0 items-center gap-3 border-b border-[var(--app-border)] bg-[var(--app-accent-soft)] px-4 py-2 text-sm">
+                  <span className="min-w-0 flex-1">Connect ChatGPT so your agents can think.</span>
+                  <button
+                    type="button"
+                    onClick={() => setSettings("models")}
+                    className="shrink-0 rounded-full bg-[var(--app-accent)] px-3 py-1 text-xs font-medium text-white"
+                  >
+                    Connect
+                  </button>
+                </div>
+              ) : null}
+              {drafting ? (
+                <DraftAgentView
+                  draft={draft}
+                  workspaceName={workspaceName}
+                  onChange={setDraft}
+                  onSend={(text) => void sendDraft(text)}
+                  onOpenSidebar={() => setSidebarOpen(true)}
+                />
+              ) : (
+                <ChatView
+                  workspaceId={workspaceId}
+                  agent={selected}
+                  agents={agents}
+                  effort={selected.profile?.effort ?? defaultEffort}
+                  defaultEffort={defaultEffort}
+                  replyLength={replyLength}
+                  connections={connections}
+                  catalog={catalog}
+                  onOpenAgent={select}
+                  onOpenSidebar={() => setSidebarOpen(true)}
+                />
+              )}
+            </main>
+          </div>
+          {settings ? (
+            <SettingsDialog
+              tab={settings}
+              onTab={setSettings}
+              onClose={() => setSettings(null)}
+              workspaceId={workspaceId}
+              workspaces={workspaces}
+              onSwitchWorkspace={(id) => {
+                setSettings(null);
+                onSwitchWorkspace(id);
+              }}
+              theme={theme}
+              onTheme={setTheme}
+              defaultEffort={defaultEffort}
+              onDefaultEffort={(value) => setPref("defaultEffort", value)}
+              avatarThemes={boot?.config.avatarThemes ?? []}
+              avatarTheme={avatarStyle}
+              avatarSamples={agents.slice(0, 4)}
+              onAvatarTheme={(value) => setPref("avatarTheme", value)}
+              replyLength={replyLength}
+              onReplyLength={(value) => setPref("replyLength", value)}
+              notifications={notifications}
+              onNotifications={(enabled) => {
+                if (enabled && "Notification" in window && Notification.permission === "default") {
+                  void Notification.requestPermission();
+                }
+                setPref("notifications", enabled ? "on" : "off");
+              }}
+              codex={codex}
+              onCodexChanged={refreshCodex}
+              fullAppUrl={boot.config.fullAppUrl}
+              agentName={(id) => agents.find((agent) => agent.id === id)?.name ?? null}
+            />
+          ) : null}
+        </AppComputerProvider>
       </AvatarStyleContext.Provider>
     </AppEventsContext.Provider>
   );

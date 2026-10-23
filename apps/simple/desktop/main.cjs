@@ -433,9 +433,11 @@ function routeWindowOpen(contents, origin) {
         if (!popup.isVisible()) popup.show();
         return;
       }
+      // Sign-in happens in the user's browser. The hidden placeholder stays
+      // open so the page keeps waiting for the backend to confirm the
+      // connection; the page closes it once the attempt settles.
       event.preventDefault();
       openExternalSafely(url);
-      if (!popup.isVisible()) popup.destroy();
     };
     popup.webContents.on("will-navigate", route);
     popup.webContents.on("will-redirect", route);

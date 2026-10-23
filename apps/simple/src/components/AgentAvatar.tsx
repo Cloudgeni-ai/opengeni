@@ -1,7 +1,8 @@
-import { createContext, useContext, useEffect, useState, useSyncExternalStore } from "react";
+import { createContext, useContext, useSyncExternalStore } from "react";
+import { agentIcon } from "../lib/agent-icons";
 import type { AgentProfile } from "../lib/app-api";
-import { avatarMask, readyMask } from "../lib/avatar-mask";
 import { avatarColors, DEFAULT_AVATAR_STYLE } from "../lib/avatar-styles";
+import { AGENT_ICON_COMPONENTS } from "./agent-icon-components";
 
 /** The workspace's avatar style; every avatar reads it, so a switch recolors all at once. */
 export const AvatarStyleContext = createContext(DEFAULT_AVATAR_STYLE);
@@ -17,10 +18,8 @@ export type AvatarSubject = {
 };
 
 /**
- * An agent's face: its glyph filled with the style's colors. Geni wears the
- * Opengeni mark. Until a glyph is painted (or if painting failed), the tile
- * shows the agent's initial in the same colors, so nothing ever jumps from one
- * look to another.
+ * An agent's face: its icon drawn in the style's colors. Geni wears the
+ * Opengeni mark. An agent with no fitting icon shows its initial.
  */
 export function AgentAvatar({
   agent,
@@ -37,14 +36,16 @@ export function AgentAvatar({
   const workspaceStyle = useContext(AvatarStyleContext);
   const dark = useDarkMode();
   const colors = avatarColors(styleId ?? workspaceStyle, agent.id, dark);
-  const profile = agent.profile;
-  const artifactId = profile?.avatarArtifactId ?? null;
-  const isMask = profile?.avatarFormat === "mask";
-  const src = artifactId ? `/app/avatar/${agent.id}?v=${artifactId}` : null;
-  const mask = useMask(isMask ? src : null);
-  const pending = profile?.avatarStatus === "pending";
   const radius = Math.round(size * 0.32);
-  const legacyImage = src && !isMask ? src : null;
+  const iconName =
+    agent.role === "main"
+      ? null
+      : agentIcon({
+          icon: agent.profile?.icon,
+          name: agent.name,
+          description: agent.profile?.description,
+        });
+  const Icon = iconName ? AGENT_ICON_COMPONENTS[iconName] : undefined;
 
   let face: React.ReactNode;
   if (agent.role === "main") {
@@ -53,20 +54,14 @@ export function AgentAvatar({
         <path fill={colors.glyph} d={OPENGENI_MARK} />
       </svg>
     );
-  } else if (mask) {
+  } else if (Icon) {
     face = (
-      <span
-        className="avatar-glyph h-full w-full"
-        style={{
-          backgroundColor: colors.glyph,
-          WebkitMaskImage: `url(${mask})`,
-          maskImage: `url(${mask})`,
-        }}
+      <Icon
+        size={Math.round(size * 0.55)}
+        color={colors.glyph}
+        strokeWidth={size < 28 ? 2.25 : 2}
+        aria-hidden
       />
-    );
-  } else if (legacyImage) {
-    face = (
-      <img src={legacyImage} alt="" className="h-full w-full object-cover" draggable={false} />
     );
   } else {
     face = (
@@ -81,7 +76,7 @@ export function AgentAvatar({
 
   return (
     <div
-      className={`relative flex shrink-0 items-center justify-center overflow-hidden ${pending && !mask && agent.role !== "main" ? "avatar-pending" : ""} ${className}`}
+      className={`relative flex shrink-0 items-center justify-center overflow-hidden ${className}`}
       style={{
         width: size,
         height: size,
@@ -99,23 +94,6 @@ export function AgentAvatar({
 function initial(name: string) {
   const letter = [...name.trim()].find((char) => /\p{L}|\p{N}/u.test(char));
   return (letter ?? "•").toLocaleUpperCase();
-}
-
-function useMask(src: string | null) {
-  const [mask, setMask] = useState<{ src: string; url: string | null } | null>(null);
-  useEffect(() => {
-    if (!src) return;
-    let live = true;
-    void avatarMask(src).then((url) => {
-      if (live) setMask({ src, url });
-    });
-    return () => {
-      live = false;
-    };
-  }, [src]);
-  if (!src) return null;
-  if (mask?.src === src) return mask.url;
-  return readyMask(src) ?? null;
 }
 
 const darkListeners = new Set<() => void>();

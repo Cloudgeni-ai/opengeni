@@ -1,8 +1,6 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { resumeAvatarJobs, startAvatarJob } from "./avatars";
 import {
-  dataDirectory,
   opengeniApiKey,
   opengeniApiUrl,
   opengeniWebUrl,
@@ -13,7 +11,6 @@ import {
   claimBlock,
   getAppliedBlock,
   getPrefs,
-  getProfile,
   listProfiles,
   recordUsage,
   releaseBlock,
@@ -22,13 +19,13 @@ import {
   upsertProfile,
   usageSummary,
 } from "./db";
+import { isAgentIcon } from "../src/lib/agent-icons";
 import { AVATAR_STYLES, DEFAULT_AVATAR_STYLE } from "../src/lib/avatar-styles";
 import {
   api,
   applyProfileUpdate,
   asCaller,
   createAgent,
-  downloadImage,
   DEFAULT_EFFORT,
   EFFORT_LEVELS,
   ensureMainAgent,
@@ -125,7 +122,6 @@ async function bootstrap(workspaceId: string) {
   }
   if (!bootstrapped.has(workspaceId)) {
     bootstrapped.add(workspaceId);
-    resumeAvatarJobs(workspaceId);
     void listAgentSessions(workspaceId)
       .then((sessions) => refreshAgentInstructions(workspaceId, sessions))
       .catch((error) => console.warn("Instruction refresh failed", error));
@@ -166,7 +162,7 @@ async function applyBlock(input: BlockRequest) {
         workspaceId: input.workspaceId,
         role: "agent",
         name,
-        emoji: typeof payload.emoji === "string" ? payload.emoji.slice(0, 16) : null,
+        icon: isAgentIcon(payload.icon) ? payload.icon : null,
         description:
           typeof payload.description === "string" ? payload.description.slice(0, 160) : null,
         instructions:
@@ -176,24 +172,11 @@ async function applyBlock(input: BlockRequest) {
         shared: payload.shared === true,
         idempotencyKey: `simple-app:block:${input.key}`.slice(0, 200),
       });
-      void startAvatarJob(
-        input.workspaceId,
-        session.id,
-        typeof payload.avatarPrompt === "string" ? payload.avatarPrompt.slice(0, 600) : null,
-      );
       const result = { sessionId: session.id, name };
       settleBlock(input.key, "applied", result);
     } else {
       const update = input.payload as ProfileUpdate;
-      const before = getProfile(input.sourceSessionId);
       const profile = await applyProfileUpdate(input.workspaceId, input.sourceSessionId, update);
-      const looksChanged =
-        Boolean(update.avatarPrompt) ||
-        (!before?.avatarArtifactId && before?.avatarStatus !== "pending") ||
-        (update.name && update.name !== before?.name);
-      if (looksChanged) {
-        void startAvatarJob(input.workspaceId, input.sourceSessionId, profile.avatarPrompt);
-      }
       settleBlock(input.key, "applied", {
         sessionId: input.sourceSessionId,
         name: profile.name,
@@ -205,29 +188,6 @@ async function applyBlock(input: BlockRequest) {
     throw new HttpError(502, error instanceof Error ? error.message : String(error));
   }
   return getAppliedBlock(input.key);
-}
-
-const avatarCache = join(dataDirectory, "avatars");
-mkdirSync(avatarCache, { recursive: true });
-
-/** Avatars are immutable artifacts, so each is downloaded once and kept on disk. */
-async function avatar(sessionId: string) {
-  const profile = getProfile(sessionId);
-  if (!profile?.avatarArtifactId) return new Response(null, { status: 404 });
-  const cached = join(avatarCache, `${profile.avatarArtifactId}.png`);
-  if (!existsSync(cached)) {
-    const image = await downloadImage(profile.workspaceId, profile.avatarArtifactId).catch(
-      () => null,
-    );
-    if (!image) return new Response(null, { status: 404 });
-    writeFileSync(cached, image.bytes);
-  }
-  return new Response(Bun.file(cached), {
-    headers: {
-      "content-type": "image/png",
-      "cache-control": "private, max-age=31536000, immutable",
-    },
-  });
 }
 
 async function route(request: Request): Promise<Response> {
@@ -276,7 +236,6 @@ async function route(request: Request): Promise<Response> {
       workspaceId,
       role: "agent",
       name: "New agent",
-      emoji: "🌱",
       description: null,
       blank: true,
       shared: input.shared === true,
@@ -299,35 +258,19 @@ async function route(request: Request): Promise<Response> {
   if (blockMatch && method === "GET") {
     return json(getAppliedBlock(decodeURIComponent(blockMatch[1]!)));
   }
-  if (path === "/app/avatars/retry" && method === "POST") {
-    // A model that can paint just became available (e.g. ChatGPT connected).
-    const input = await body<{ workspaceId: string }>(request);
-    resumeAvatarJobs(requireString(input.workspaceId, "workspaceId"), {
-      retryFailed: true,
-    });
-    return json({ ok: true });
-  }
-  const avatarMatch = /^\/app\/avatar\/([0-9a-f-]{36})$/.exec(path);
-  if (avatarMatch && method === "GET") return await avatar(avatarMatch[1]!);
-
-  const agentMatch = /^\/app\/agents\/([0-9a-f-]{36})\/(profile|avatar|usage)$/.exec(path);
+  const agentMatch = /^\/app\/agents\/([0-9a-f-]{36})\/(profile|usage)$/.exec(path);
   if (agentMatch && method !== "GET") {
     const sessionId = agentMatch[1]!;
     const input = await body<{
       workspaceId: string;
       kind?: string;
       effort?: string | null;
-      emoji?: string | null;
-      hint?: string | null;
+      icon?: string | null;
     }>(request);
     const workspaceId = requireString(input.workspaceId, "workspaceId");
     if (agentMatch[2] === "usage") {
       recordUsage(workspaceId, sessionId, input.kind ?? "open");
       return json({ ok: true });
-    }
-    if (agentMatch[2] === "avatar") {
-      void startAvatarJob(workspaceId, sessionId, input.hint ?? null);
-      return json(upsertProfile(workspaceId, sessionId, { avatarStatus: "pending" }));
     }
     if (input.effort !== undefined && input.effort !== null && !(input.effort in EFFORT_LEVELS)) {
       throw new HttpError(400, "Unknown effort");
@@ -335,7 +278,7 @@ async function route(request: Request): Promise<Response> {
     return json(
       upsertProfile(workspaceId, sessionId, {
         ...(input.effort !== undefined ? { effort: input.effort } : {}),
-        ...(input.emoji !== undefined ? { emoji: input.emoji } : {}),
+        ...(input.icon === null || isAgentIcon(input.icon) ? { icon: input.icon } : {}),
       }),
     );
   }

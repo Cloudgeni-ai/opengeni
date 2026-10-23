@@ -1,12 +1,13 @@
 import { SessionConversation, type TimelineItem } from "@opengeni/react";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
-import { Archive, Gauge, ImagePlus, Menu, MoreHorizontal, Pin, PinOff, X } from "lucide-react";
+import { Archive, Gauge, Menu, MoreHorizontal, Pin, PinOff, Shapes, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Agent } from "../lib/agents";
 import { appApi, client, EFFORT_LABELS, type EffortLevel } from "../lib/app-api";
 import { useAppEvents } from "../lib/app-events";
 import { buildModelContext, type ReplyLength } from "../lib/context";
 import { AgentAvatar } from "./AgentAvatar";
+import { IconPicker } from "./IconPicker";
 import { renderConnectionCard } from "./ConnectionCard";
 import { renderMessageBody } from "./MessageBody";
 
@@ -88,6 +89,7 @@ export function ChatView(props: ChatViewProps) {
   );
 
   const catalog = props.catalog;
+  const fresh = neverTalked(agent);
   const timelineProps = useMemo(
     () => ({
       turnSummary: { rolling: true },
@@ -96,21 +98,16 @@ export function ChatView(props: ChatViewProps) {
           workspaceId,
           sessionId: agent.id,
           catalog,
+          onComputerReady: () => void send("My computer is ready. Go ahead."),
         }),
-      emptyState: <EmptyState agent={agent} onPick={(text) => void send(text)} />,
+      // History streams in after mount; only a chat that never had a turn gets
+      // the welcome, so an existing conversation never flashes it.
+      emptyState: fresh ? <EmptyState agent={agent} onPick={(text) => void send(text)} /> : <div />,
       shouldRenderItem: chatOnly,
       trailingState: agent.working ? <WorkingRow key={agent.id} /> : null,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the empty state only needs identity
-    [
-      agent.id,
-      agent.name,
-      agent.profile?.avatarArtifactId,
-      agent.working,
-      catalog,
-      send,
-      workspaceId,
-    ],
+    [agent.id, agent.name, agent.profile?.icon, agent.working, fresh, catalog, send, workspaceId],
   );
 
   return (
@@ -157,7 +154,16 @@ function Header({
   onChanged,
 }: ChatViewProps & { onChanged: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [picking, setPicking] = useState(false);
   const isMain = agent.role === "main";
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
   const run = (action: () => Promise<unknown>) => {
     setMenuOpen(false);
     void action().then(onChanged, (error) =>
@@ -185,13 +191,21 @@ function Header({
           ) : null}
         </div>
         <p className="truncate text-xs text-[var(--app-muted)]">
-          {agent.description ?? (isMain ? "Your main agent. Ask for anything." : "Personal agent")}
+          {agent.description ??
+            (isMain
+              ? "Your main agent. Ask for anything."
+              : agent.shared
+                ? "Workspace agent"
+                : "Personal agent")}
         </p>
       </div>
       <div className="relative">
         <button
           type="button"
-          onClick={() => setMenuOpen((open) => !open)}
+          onClick={() => {
+            setPicking(false);
+            setMenuOpen((open) => !open);
+          }}
           className="rounded-lg p-1.5 text-[var(--app-muted)] hover:bg-[var(--app-hover)]"
           aria-label="Agent options"
           aria-expanded={menuOpen}
@@ -215,11 +229,21 @@ function Header({
                   }
                 />
               ) : null}
-              <MenuItem
-                icon={<ImagePlus size={15} />}
-                label="New picture"
-                onClick={() => run(() => appApi.regenerateAvatar(workspaceId, agent.id))}
-              />
+              {!isMain ? (
+                <MenuItem
+                  icon={<Shapes size={15} />}
+                  label="Change icon"
+                  onClick={() => setPicking((open) => !open)}
+                />
+              ) : null}
+              {picking && !isMain ? (
+                <IconPicker
+                  current={agent.profile?.icon ?? null}
+                  onPick={(icon) =>
+                    run(() => appApi.updateProfile(workspaceId, agent.id, { icon }))
+                  }
+                />
+              ) : null}
               <div className="px-2.5 pt-2 pb-1 text-[11px] font-semibold tracking-wide text-[var(--app-muted)] uppercase">
                 <Gauge size={12} className="mr-1 inline" /> Thinking
               </div>
@@ -310,6 +334,14 @@ const MAIN_SUGGESTIONS = [
   "Build a small website for a weekend project",
   "Every morning at 8, send me a short news digest",
 ];
+
+function neverTalked(agent: Agent) {
+  const session = agent.session as typeof agent.session & {
+    initialMessage?: string | null;
+    lastInputTokens?: number | null;
+  };
+  return !session.initialMessage && session.activeTurnId == null && session.lastInputTokens == null;
+}
 
 const BLANK_SUGGESTIONS = [
   "A research assistant that digs into topics for me",

@@ -6,7 +6,6 @@ export type Agent = {
   session: Session;
   name: string;
   role: "main" | "agent";
-  emoji: string;
   description: string | null;
   shared: boolean;
   profile: AgentProfile | null;
@@ -76,7 +75,6 @@ export function toAgents(
         session,
         name: role === "main" ? "Geni" : (profile?.name ?? session.title ?? "Agent"),
         role,
-        emoji: profile?.emoji ?? (role === "main" ? "✨" : "🤖"),
         description: profile?.description ?? null,
         shared: metadata.shared === true,
         profile,
@@ -167,12 +165,4 @@ export function relativeTime(iso: string | null) {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
   return `${Math.round(seconds / 86400)}d ago`;
-}
-
-/** Deterministic gradient per agent, for the emoji fallback avatar. */
-export function agentGradient(id: string) {
-  let hash = 0;
-  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-  const hue = Math.abs(hash) % 360;
-  return `linear-gradient(135deg, hsl(${hue} 80% 62%), hsl(${(hue + 50) % 360} 85% 55%))`;
 }

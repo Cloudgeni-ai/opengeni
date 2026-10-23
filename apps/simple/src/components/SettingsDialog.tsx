@@ -1,9 +1,12 @@
+import { OPENGENI_BROWSER_EXTENSION_URL } from "@opengeni/contracts";
 import { SiteDetail, SiteList } from "@opengeni/react/sites";
+import { ThisComputerPanel } from "@opengeni/react/this-computer";
 import type { CodexConnectionStatus, ScheduledTask, Workspace } from "@opengeni/sdk";
-import { ArrowLeft, ExternalLink, Pause, Play, Trash2, X } from "lucide-react";
+import { AppWindow, ArrowLeft, ExternalLink, Monitor, Pause, Play, Trash2, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { client, EFFORT_LABELS, type AvatarThemeOption, type EffortLevel } from "../lib/app-api";
 import type { ReplyLength } from "../lib/context";
+import { useAppComputer } from "../lib/this-computer";
 import { AgentAvatar, type AvatarSubject } from "./AgentAvatar";
 import { CodexConnect } from "./CodexConnect";
 import { ConnectionsSettings } from "./ConnectionsSettings";
@@ -11,6 +14,7 @@ import { ConnectionsSettings } from "./ConnectionsSettings";
 export type SettingsTab =
   | "general"
   | "connections"
+  | "computer"
   | "models"
   | "schedules"
   | "sites"
@@ -21,6 +25,7 @@ export type Theme = "system" | "light" | "dark";
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "general", label: "General" },
   { id: "connections", label: "Connections" },
+  { id: "computer", label: "Computer" },
   { id: "models", label: "Model" },
   { id: "schedules", label: "Schedules" },
   { id: "sites", label: "Sites" },
@@ -109,6 +114,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           {props.tab === "connections" ? (
             <ConnectionsSettings workspaceId={props.workspaceId} />
           ) : null}
+          {props.tab === "computer" ? <ComputerTab /> : null}
           {props.tab === "models" ? (
             <Section
               title="Model"
@@ -129,6 +135,53 @@ export function SettingsDialog(props: SettingsDialogProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ComputerTab() {
+  const app = useAppComputer();
+  return (
+    <Section
+      title="Your computer"
+      hint="Let agents use this Mac when a task needs it: open pages in your Chrome and, if you allow it, see and control the screen. They ask in the chat first."
+    >
+      {app ? (
+        <div className="simple-connections">
+          <ThisComputerPanel
+            computer={app.computer}
+            platform={app.platform}
+            labels={app.labels}
+            onSetup={app.openSetup}
+            icon={<Monitor size={18} />}
+          />
+        </div>
+      ) : (
+        <div className="flex items-center gap-3 rounded-2xl border border-[var(--app-border)] p-4">
+          <Monitor size={18} className="shrink-0 text-[var(--app-muted)]" />
+          <p className="text-sm text-[var(--app-muted)]">
+            Open the Opengeni Mac app to let agents use your computer.
+          </p>
+        </div>
+      )}
+      <div className="mt-4 flex items-start gap-3 rounded-2xl border border-[var(--app-border)] p-4">
+        <AppWindow size={18} className="mt-0.5 shrink-0 text-[var(--app-muted)]" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">Chrome extension (optional)</p>
+          <p className="mt-0.5 text-sm text-[var(--app-muted)]">
+            Lets agents work in the Chrome you already use, signed in to your sites. Without it they
+            use a separate browser window.
+          </p>
+        </div>
+        <a
+          href={OPENGENI_BROWSER_EXTENSION_URL}
+          target="_blank"
+          rel="noreferrer"
+          className="shrink-0 rounded-xl border border-[var(--app-border)] px-3 py-1.5 text-sm hover:bg-[var(--app-hover)]"
+        >
+          Get it
+        </a>
+      </div>
+    </Section>
   );
 }
 
@@ -156,7 +209,7 @@ function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="inline-flex flex-wrap gap-1 rounded-2xl bg-[var(--app-hover)] p-1">
+    <div className="inline-flex shrink-0 gap-1 rounded-2xl bg-[var(--app-hover)] p-1">
       {options.map((option) => (
         <button
           key={option.value}
@@ -231,7 +284,7 @@ function General(props: SettingsDialogProps) {
       </Row>
       <Row
         label="Notifications"
-        hint="Get a notification when an agent replies while this tab is in the background."
+        hint="Get a notification when an agent replies while the app is in the background."
       >
         <Segmented
           value={props.notifications ? "on" : "off"}
