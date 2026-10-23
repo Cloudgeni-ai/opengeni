@@ -180,6 +180,22 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Event sources landed before the Automations UI that manages them. Remove each
+// entry when its browser consumer lands (the equality below enforces it).
+const pendingEventSourceMethods = [
+  "createEventSource",
+  "deleteEventSource",
+  "getEventSource",
+  "listEventDeliveries",
+  "listEventSourceTypes",
+  "listEventSources",
+  "listInboundEvents",
+  "replayEventDelivery",
+  "rotateEventSourceSecret",
+  "sendTestEvent",
+  "updateEventSource",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -247,6 +263,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...pendingEventSourceMethods,
       ].sort(),
     );
   });
