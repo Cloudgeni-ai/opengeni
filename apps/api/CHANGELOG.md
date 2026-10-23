@@ -1,5 +1,43 @@
 # @opengeni/api-router
 
+## 5.0.2
+
+### Minor Changes
+
+- 171cdb7: Organization owners and admins can turn Personal workspaces off under Security & data. Off hides them from the workspace switcher and landing, refuses new chats and schedules there, and routes Slack direct messages to a shared workspace; each person's machines, browsers and vaults keep working from shared workspaces, and existing chats stay reachable.
+
+### Patch Changes
+
+- b872089: Continuing another member's waiting work now also requires that the machine owner can control that chat, the same session authorization every other chat route applies.
+- Updated dependencies [b331283]
+- Updated dependencies [960ae8d]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/runtime@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/core@5.0.0
+  - @opengeni/db@5.0.0
+  - @opengeni/artifact-tool@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/documents@5.0.0
+  - @opengeni/events@5.0.0
+  - @opengeni/github@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/storage@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/vaults-keeper@5.0.0
+  - @opengeni/vaults-onepassword@5.0.0
+  - @opengeni/vaults-protonpass@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
 ## 4.8.0
 
 ### Patch Changes

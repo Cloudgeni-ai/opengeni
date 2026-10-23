@@ -1,5 +1,33 @@
 # @opengeni/runtime
 
+## 5.0.2
+
+### Patch Changes
+
+- b331283: Connected ChatGPT apps (Outlook, SharePoint and the other Codex apps) are available in chats again. ChatGPT's apps server answers the newer protocol probe but returns tool lists in the older format, so every list was rejected and turns silently ran without those apps. Opengeni now connects to it with the older handshake, as it does for its own servers.
+- 960ae8d: `excel_run` is no longer loaded up front in every chat. Agents in chats with no workbook read "here" as an open workbook and probed Excel; in the Excel add-in, each message names the tool, so the agent loads it by exact name.
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/sdk@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/decisions@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
 ## 4.8.0
 
 ### Patch Changes

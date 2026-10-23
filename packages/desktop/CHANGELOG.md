@@ -1,5 +1,19 @@
 # @opengeni/desktop
 
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/agent-host@5.0.0
+
 ## 4.8.0
 
 ### Patch Changes
