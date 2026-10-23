@@ -62,6 +62,9 @@ e2e(
       });
     const supervisors: BrowserSupervisor[] = [];
     try {
+      // The person's own tab: Chromium may list its startup tab only a moment
+      // after it reports its DevTools endpoint.
+      await waitFor(async () => (await bridge.pages()).length > 0);
       const person = (await bridge.pages()).map((page) => page.id);
       const supervisor = await open();
       supervisors.push(supervisor);
