@@ -45,12 +45,14 @@ describe("composer while Opengeni is updating", () => {
         return accepted(input.clientEventId, input.text) as never;
       },
     });
-    const hook = await renderHook(() =>
-      useComposer(SESSION_ID, {
-        client,
-        workspaceId: WORKSPACE_ID,
-        onDeliveryError: (error) => void deliveryErrors.push(error),
-      }),
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          onDeliveryError: (error) => void deliveryErrors.push(error),
+        }),
+      undefined,
     );
     try {
       await flush();
@@ -105,8 +107,9 @@ describe("composer while Opengeni is updating", () => {
         return acceptedId ? [accepted(acceptedId, "Ship it")] : [];
       },
     });
-    const hook = await renderHook(() =>
-      useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
     );
     try {
       await flush();
@@ -137,12 +140,14 @@ describe("composer while Opengeni is updating", () => {
         throw new OpenGeniApiError(503, "", { mutation: false, correlationId: "edge-1" });
       },
     });
-    const hook = await renderHook(() =>
-      useComposer(SESSION_ID, {
-        client,
-        workspaceId: WORKSPACE_ID,
-        onDeliveryError: (error) => void deliveryErrors.push(error),
-      }),
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          onDeliveryError: (error) => void deliveryErrors.push(error),
+        }),
+      undefined,
     );
     try {
       await flush();
@@ -174,8 +179,9 @@ describe("composer while Opengeni is updating", () => {
         );
       },
     });
-    const hook = await renderHook(() =>
-      useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
     );
     try {
       await flush();
@@ -204,8 +210,9 @@ describe("composer while Opengeni is updating", () => {
         return await base.saveComposerDraft(workspaceId, sessionId, request);
       },
     });
-    const hook = await renderHook(() =>
-      useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
     );
     try {
       await flush(10);
