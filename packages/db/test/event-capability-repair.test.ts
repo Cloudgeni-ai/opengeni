@@ -99,11 +99,11 @@ test("recording recovery inventory is owner-only and returns private due-work id
       });
       grants.push(access.workspaceGrants[0]!);
     }
-    const ids = [crypto.randomUUID(), crypto.randomUUID()];
-    for (let index = 0; index < 2; index++) {
+    const ids: [string, string] = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const [index, id] of ids.entries()) {
       const grant = grants[index]!;
       await owned.admin`insert into recordings(id,account_id,workspace_id,owner_subject_id,title,state,capture_ended_at,updated_at)
-        values(${ids[index]},${grant.accountId},${grant.workspaceId},${grant.subjectId},'Private content',${index === 0 ? "processing" : "deleting"},now(),now()-interval '5 minutes')`;
+        values(${id},${grant.accountId},${grant.workspaceId},${grant.subjectId},'Private content',${index === 0 ? "processing" : "deleting"},now(),now()-interval '5 minutes')`;
     }
     const versionId = crypto.randomUUID();
     await owned.admin`insert into recording_transcript_versions(id,account_id,workspace_id,recording_id,version_number,provider_id,model,requested_by_subject_id,created_at)

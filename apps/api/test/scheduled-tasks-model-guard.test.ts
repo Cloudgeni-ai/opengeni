@@ -6,9 +6,9 @@ import { testSettings } from "@opengeni/testing/settings";
 import type { AccessGrant, CreateScheduledTaskRequest } from "@opengeni/contracts";
 import { createValidatedScheduledTask } from "@opengeni/core";
 
-// The organization Personal-workspace gate precedes model validation. Exercise
-// that authority read against PostgreSQL, then refuse any downstream database
-// operation so these cases still prove where model validation stops creation.
+// The model allow-list rejects curated-out models before any database access.
+// Allowed/default models reach the Personal-workspace authority read; permit
+// that real read, then refuse downstream creation work.
 const SENTINEL = "reached-db-past-the-model-guard";
 const settings = testSettings();
 let shared: SharedTestDatabase;
@@ -53,10 +53,12 @@ function payload(model?: string): CreateScheduledTaskRequest {
   };
 }
 
-async function createWith(model?: string): Promise<unknown> {
+async function createWith(model?: string) {
+  let dbAccesses = 0;
   let authorityReadCompleted = false;
   const db = new Proxy(client.db, {
     get(target, key, receiver) {
+      dbAccesses++;
       if (key === "transaction") {
         return async (...args: Parameters<typeof target.transaction>) => {
           if (authorityReadCompleted) throw new Error(SENTINEL);
@@ -69,8 +71,9 @@ async function createWith(model?: string): Promise<unknown> {
       return Reflect.get(target, key, receiver);
     },
   });
+  let thrown: unknown;
   try {
-    return await createValidatedScheduledTask({
+    await createValidatedScheduledTask({
       settings,
       db,
       objectStorage: undefined,
@@ -78,31 +81,26 @@ async function createWith(model?: string): Promise<unknown> {
       payload: payload(model),
       toolsProvided: true,
     });
-  } finally {
-    expect(authorityReadCompleted).toBe(true);
+  } catch (error) {
+    thrown = error;
   }
+  return { thrown, authorityReadCompleted, dbAccesses };
 }
 
 describe("scheduled-task model allow-list guard", () => {
-  test("rejects a curated-out model with 422 after authority read and before downstream db work", async () => {
-    let thrown: unknown;
-    try {
-      await createWith("forbidden-model");
-    } catch (error) {
-      thrown = error;
-    }
+  test("rejects a curated-out model with 422 before any database access", async () => {
+    const { thrown, authorityReadCompleted, dbAccesses } = await createWith("forbidden-model");
+    expect(authorityReadCompleted).toBe(false);
+    expect(dbAccesses).toBe(0);
     expect(thrown).toBeInstanceOf(HTTPException);
     expect((thrown as HTTPException).status).toBe(422);
     expect((thrown as HTTPException).message).toBe("model is not available: forbidden-model");
   });
 
   test("an allowed model passes the guard (fails only later, at the db)", async () => {
-    let thrown: unknown;
-    try {
-      await createWith("gpt-5.6-sol");
-    } catch (error) {
-      thrown = error;
-    }
+    const { thrown, authorityReadCompleted, dbAccesses } = await createWith("gpt-5.6-sol");
+    expect(authorityReadCompleted).toBe(true);
+    expect(dbAccesses).toBeGreaterThan(0);
     // The allowed model is NOT the thing that fails: we got past the guard and
     // hit the stubbed db sentinel instead of an HTTPException model rejection.
     expect(thrown).not.toBeInstanceOf(HTTPException);
@@ -110,12 +108,9 @@ describe("scheduled-task model allow-list guard", () => {
   });
 
   test("an omitted model passes the guard (inherits the host default downstream)", async () => {
-    let thrown: unknown;
-    try {
-      await createWith(undefined);
-    } catch (error) {
-      thrown = error;
-    }
+    const { thrown, authorityReadCompleted, dbAccesses } = await createWith(undefined);
+    expect(authorityReadCompleted).toBe(true);
+    expect(dbAccesses).toBeGreaterThan(0);
     expect(thrown).not.toBeInstanceOf(HTTPException);
     expect((thrown as Error).message).toBe(SENTINEL);
   });
