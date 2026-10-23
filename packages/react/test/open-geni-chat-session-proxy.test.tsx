@@ -3,7 +3,7 @@
 // fake upstream. The relay passes Opengeni's routes through as the resolved
 // user, so a stock control that fails here is a relay defect, not a missing
 // allowlist entry.
-import { afterEach, describe, expect, jest, test } from "bun:test";
+import { afterEach, describe, expect, jest, setDefaultTimeout, test } from "bun:test";
 import {
   OpenGeniClient,
   createSessionProxyHandler,
@@ -13,16 +13,18 @@ import { OpenGeniChat, type OpenGeniChatProps } from "../src/components/open-gen
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom({ clock: "virtual" });
+setDefaultTimeout(30_000);
 
 /**
- * Real-time budget, under bun's 5 s test timeout. The file's clock is virtual:
- * a deadline on it passes in a few instant jumps, before a loaded runner has
- * settled the relay's fetches and digests.
+ * Real-time budget, under the file's 30 s test timeout. The file's clock is
+ * virtual: a deadline on it passes in a few instant jumps, before a loaded
+ * runner has settled the relay's fetches and digests. A loaded CI runner has
+ * taken more than 4 s to render the first composer.
  */
 const realDeadline = (ms: number) => Bun.nanoseconds() + ms * 1_000_000;
 
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
-  const deadline = realDeadline(4_000);
+  const deadline = realDeadline(20_000);
   while (!condition()) {
     if (Bun.nanoseconds() >= deadline) throw new Error(message);
     await flush(10);
