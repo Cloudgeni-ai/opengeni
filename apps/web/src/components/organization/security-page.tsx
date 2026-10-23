@@ -44,7 +44,7 @@ import type {
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats and schedules, admin access for
+   Organization settings > Security & data: Only me chats and schedules, full access for
    agent sessions, how long a removed person's data is kept, and recovery
    (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
@@ -374,7 +374,7 @@ export function PrivateChatsRow({
   );
 }
 
-/* ------------------------------------------------- Admin access for agents */
+/* -------------------------------------------------- Full access for agents */
 
 export function AgentAdminAccessRow({
   client,
@@ -417,12 +417,12 @@ export function AgentAdminAccessRow({
         setAllowed(value.sessionAdminAccessAllowed);
         toast.success(
           next
-            ? "Owners and admins can give their sessions admin access"
-            : "Admin access is off for every session",
+            ? "Members can give their own sessions full access"
+            : "Full access is off for every session",
         );
       } catch (saveError) {
         if (!owns(operation)) return;
-        toast.error("Couldn't change admin access for agents", {
+        toast.error("Couldn't change full access for agents", {
           description: userErrorText(saveError),
         });
       } finally {
@@ -435,7 +435,7 @@ export function AgentAdminAccessRow({
   if (error && allowed === null) {
     return (
       <RowLoadFailure
-        title="Couldn't load the admin access setting."
+        title="Couldn't load the full access setting."
         error={error}
         onRetry={() => void load()}
       />
@@ -446,11 +446,11 @@ export function AgentAdminAccessRow({
   return (
     <SettingRowGroup>
       <SettingRow
-        label="Admin access for agent sessions"
-        description="Lets owners and admins give one of their own sessions admin access. Its agent can then manage what they can across the organization: every workspace's sessions, settings and connections."
+        label="Full access for agent sessions"
+        description="Lets each member give a session they started their own access. Its agent can then do what that person can in the app, and never more: a member's workspaces and settings, or everything an owner or admin manages."
         control={
           <Switch
-            aria-label="Admin access for agent sessions"
+            aria-label="Full access for agent sessions"
             checked={pending ?? allowed}
             pending={pending !== null}
             onCheckedChange={(next) => {
@@ -464,8 +464,8 @@ export function AgentAdminAccessRow({
         open={confirmOff}
         onOpenChange={setConfirmOff}
         size="sm"
-        title="Turn off admin access for agents?"
-        description="Every session that has admin access loses it right away. Turning this on again doesn't give it back."
+        title="Turn off full access for agents?"
+        description="Every session that has full access loses it right away. Turning this on again doesn't give it back."
         submitLabel="Turn off"
         pendingLabel="Turning off…"
         tone="destructive"

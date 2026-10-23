@@ -4,14 +4,17 @@ import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
 /**
- * Admin access for agent sessions (migration 0691). An organization allows it
- * (off by default); an owner or admin then gives one of their sessions admin
- * access for a number of hours or with no time limit, and the agent there can
- * do what that person can manage. Every use goes through
- * {@link resolveSessionAdminAuthority}, which re-checks the allowance, the
- * grant, its time limit and the person's live role.
+ * Full access for agent sessions (migration 0691; stored as "admin access").
+ * An organization allows it (off by default); any member then gives a session
+ * they started themselves their own access for a number of hours or with no
+ * time limit, and the agent there can do what that person can do, never more:
+ * every action it runs is checked against the person's live access. Every use
+ * goes through {@link resolveSessionAdminAuthority}, which re-checks the
+ * allowance, the grant, its time limit and that the person still belongs to
+ * the session's workspace.
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
@@ -29,8 +32,16 @@ export type SessionAdminAccessGrant = {
 /** Raised when the organization does not allow admin access for sessions. */
 export class SessionAdminAccessNotAllowedError extends Error {
   constructor() {
-    super("This organization doesn't allow admin access for agent sessions");
+    super("This organization doesn't allow full access for agent sessions");
     this.name = "SessionAdminAccessNotAllowedError";
+  }
+}
+
+/** Raised when the person no longer belongs to the session's workspace. */
+export class SessionAdminAccessNotWorkspaceMemberError extends Error {
+  constructor() {
+    super("Only someone who can use this workspace can give a session their access");
+    this.name = "SessionAdminAccessNotWorkspaceMemberError";
   }
 }
 
@@ -41,7 +52,7 @@ export class SessionAdminAccessNotAllowedError extends Error {
  */
 export class SessionAdminAccessNotOwnSessionError extends Error {
   constructor() {
-    super("Only a session you started yourself can be given your admin access");
+    super("Only a session you started yourself can be given your access");
     this.name = "SessionAdminAccessNotOwnSessionError";
   }
 }
@@ -71,6 +82,31 @@ async function assertOrganizationAdministrator(
   `);
 }
 
+/**
+ * Whether `subjectId` can give a session in `workspaceId` their access, and
+ * whether a grant they gave still holds: they still belong to the workspace
+ * (live), or they are an active owner or admin of the organization. Runs in
+ * its own savepoint so a refused administrator check never aborts the caller.
+ */
+async function canActInWorkspace(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await scopedDb.transaction(async (nested) => {
+    await setSubjectRlsContext(nested, input.subjectId);
+    if (await subjectHasLiveWorkspaceAuthorityInScope(nested, input)) return true;
+    try {
+      await nested.transaction(async (inner) => {
+        await assertOrganizationAdministrator(inner, input.accountId, input.subjectId);
+      });
+      return true;
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "42501") return false;
+      throw error;
+    }
+  });
+}
+
 function mapGrant(row: typeof schema.sessionAdminAccess.$inferSelect): SessionAdminAccessGrant {
   return {
     sessionId: row.sessionId,
@@ -86,7 +122,7 @@ const grantNotExpired = or(
   gt(schema.sessionAdminAccess.expiresAt, sql`now()`),
 );
 
-/** Whether owners and admins may give sessions admin access. Absent reads as off. */
+/** Whether members may give their own sessions their access. Absent reads as off. */
 export async function getOrganizationAgentAdminAccess(
   db: Database,
   accountId: string,
@@ -160,9 +196,9 @@ export async function getSessionAdminAccess(
 }
 
 /**
- * Give a session admin access as `actorSubjectId`, who must be an active owner
- * or admin, in an organization that allows it, on a session they started
- * themselves, for `durationHours` hours or, when null, with no time limit.
+ * Give a session admin access as `actorSubjectId`, who must belong to the
+ * session's workspace (or be an active owner or admin), in an organization
+ * that allows it, on a session they started themselves, for `durationHours` hours or, when null, with no time limit.
  * Giving it again while it is on sets a new time limit from now; after it
  * ended by itself, it counts as given anew.
  */
@@ -190,7 +226,15 @@ export async function grantSessionAdminAccess(
     db,
     { accountId: input.organizationId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      await assertOrganizationAdministrator(scopedDb, input.organizationId, input.actorSubjectId);
+      if (
+        !(await canActInWorkspace(scopedDb, {
+          accountId: input.organizationId,
+          workspaceId: input.workspaceId,
+          subjectId: input.actorSubjectId,
+        }))
+      ) {
+        throw new SessionAdminAccessNotWorkspaceMemberError();
+      }
       const allowance = await readAllowance(scopedDb, input.organizationId, true);
       if (!allowance.sessionAdminAccessAllowed) throw new SessionAdminAccessNotAllowedError();
       const [own] = await scopedDb
@@ -262,8 +306,8 @@ export async function revokeSessionAdminAccess(
 /**
  * The person whose access this session uses right now, or null. Live on every
  * call: the organization must still allow it, the grant must still exist and
- * be within its time limit, and the person who gave it must still be an
- * active owner or admin.
+ * be within its time limit, and the person who gave it must still belong to
+ * the session's workspace (or be an active owner or admin).
  */
 export async function resolveSessionAdminAuthority(
   db: Database,
@@ -287,13 +331,14 @@ export async function resolveSessionAdminAuthority(
         )
         .limit(1);
       if (!row) return null;
-      try {
-        await scopedDb.transaction(async (nested) => {
-          await assertOrganizationAdministrator(nested, input.accountId, row.grantedBySubjectId);
-        });
-      } catch (error) {
-        if (nestedPostgresSqlState(error) === "42501") return null;
-        throw error;
+      if (
+        !(await canActInWorkspace(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: row.grantedBySubjectId,
+        }))
+      ) {
+        return null;
       }
       return {
         subjectId: row.grantedBySubjectId,
@@ -307,8 +352,8 @@ export async function resolveSessionAdminAuthority(
 /**
  * What a viewer needs to show and change a session's admin access: whether
  * the organization allows it, the grant while it is within its time limit,
- * whether it is in effect right now, and whether the viewer started this
- * session and is an owner or admin themselves.
+ * whether it is in effect right now, whether the viewer started this
+ * session, and whether they are an owner or admin (who may end anyone's).
  */
 export async function getSessionAdminAccessView(
   db: Database,

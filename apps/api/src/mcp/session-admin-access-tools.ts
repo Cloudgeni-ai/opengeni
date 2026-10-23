@@ -10,7 +10,7 @@ import { callOrganizationAction, describeActionResult, searchActions } from "../
 /**
  * How a session with admin access reaches the organization's actions: the
  * same actions as the organization MCP server, run in this process as the
- * owner or admin who gave the session its access.
+ * person who gave the session their access, with exactly what they can do.
  */
 export type SessionAdminAccessDispatch = {
   /** This API's own origin; calls never leave the process. */
@@ -57,7 +57,7 @@ export function registerSessionAdminAccessTools(input: {
   };
   const ended = () =>
     failure(
-      "This session no longer has admin access. An owner or admin can give it again from the session's menu in the app.",
+      "This session no longer has full access. The person who started it can give it again from the session's menu in the app.",
     );
 
   server.registerTool(
@@ -65,7 +65,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Find organization actions",
       description:
-        "This session has admin access: it can do what the person who gave it can manage across the whole organization. Search every workspace action (sessions and chats in every workspace, workspaces, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and settings). Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+        "This session has full access: it can do what the person who gave it can do in the app, and nothing more. Search every action (sessions and chats, workspaces and their settings, people, connections and capabilities, knowledge, files, schedules, models, keys, billing and organization settings); actions beyond that person's own access are refused when called. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
       inputSchema: {
         query: z4
           .string()
@@ -105,7 +105,7 @@ export function registerSessionAdminAccessTools(input: {
     {
       title: "Run an organization action",
       description:
-        "Run one workspace action as the owner or admin who gave this session admin access, with exactly what they can manage right now, in any workspace of the organization. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response. Changes are real: confirm the target first.",
+        "Run one action as the person who gave this session full access, with exactly what they can do right now, in any workspace they can use. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response; 403 means that person can't do it. Changes are real: confirm the target first.",
       inputSchema: {
         id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
         pathParameters: z4
