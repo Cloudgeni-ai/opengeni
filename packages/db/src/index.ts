@@ -64887,6 +64887,9 @@ export async function renewSandboxAgentLink(
           update enrollments e set
             connection_lease_expires_at = greatest(
               case when isfinite(checked.connection_lease_expires_at)
+                -- Match Date's upper bound after its millisecond truncation.
+                and date_trunc('milliseconds', checked.connection_lease_expires_at)
+                  <= '275760-09-13 00:00:00+00'::timestamptz
                 then date_trunc('milliseconds', checked.connection_lease_expires_at)
                 else null end,
               checked.renewed_at + ${input.leaseMs} * interval '1 millisecond'

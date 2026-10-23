@@ -314,9 +314,14 @@ describe("sandbox enrollments", () => {
     const [current] =
       await admin`select connection_lease_expires_at from enrollments where id=${box.id}`;
     expect(current!.connection_lease_expires_at).toEqual(future!.connection_lease_expires_at);
-    // Native SQL also admits infinite timestamps. The former Date comparison
-    // did not preserve those as longer leases; keep renewal finite in that case.
-    for (const expiry of ["infinity", "-infinity"]) {
+    // Native SQL admits infinity and dates beyond Date's upper bound. The former
+    // Date comparison did not preserve these as longer leases.
+    for (const expiry of [
+      "infinity",
+      "-infinity",
+      "280000-01-01 00:00:00+00",
+      "275760-09-13 00:00:00.001+00",
+    ]) {
       await admin`update enrollments set connection_lease_expires_at=${expiry}::text::timestamptz
         where id=${box.id}`;
       expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
@@ -326,6 +331,13 @@ describe("sandbox enrollments", () => {
       expect(finite!.finite).toBe(true);
       expect(Number(finite!.duration_ms)).toBe(LEASE_MS);
     }
+    await admin`update enrollments set connection_lease_expires_at='275760-09-13 00:00:00.000999+00'::timestamptz
+      where id=${box.id}`;
+    expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
+    const [lastDate] =
+      await admin`select connection_lease_expires_at = '275760-09-13 00:00:00+00'::timestamptz as kept
+      from enrollments where id=${box.id}`;
+    expect(lastDate!.kept).toBe(true);
     // A null recorded epoch and a higher offered epoch retain the old semantics.
     await admin`update enrollments set link_epoch=null where id=${box.id}`;
     expect(await renewSandboxAgentLink(db, link)).toEqual({ renewed: true });
